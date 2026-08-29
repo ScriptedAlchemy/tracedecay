@@ -27,6 +27,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
+use crate::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use crate::redundancy::{
     Fingerprint, RedundancyMatchScore, body_token_window, compute_fingerprint, parse_file,
     redundancy_match_score, round4,
@@ -908,6 +909,26 @@ fn redundancy_graph_problem(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-redundancy-evidence-unavailable", false, detail)
 }
 
+/// Re-admit a file through the indexer sanitizer so fingerprint spans and
+/// parse text share one coordinate space.
+fn admitted_redundancy_source(file_path: &str, raw: &str) -> Result<String> {
+    let shape = match file_path.rsplit('.').next() {
+        Some("json" | "toml" | "yaml" | "yml") => CodeSourceShapeV1::StructuredData,
+        _ => CodeSourceShapeV1::CodeOrProse,
+    };
+    let sanitized = sanitize_code_source_bytes(raw.as_bytes(), shape).map_err(|error| {
+        redundancy_graph_problem(&format!(
+            "verified redundancy source `{file_path}` could not be admitted through the code sanitizer: {error}"
+        ))
+    })?;
+    let (bytes, _receipt) = sanitized.into_parts();
+    String::from_utf8(bytes).map_err(|error| {
+        redundancy_graph_problem(&format!(
+            "verified redundancy source `{file_path}` sanitized to non-UTF-8: {error}"
+        ))
+    })
+}
+
 /// Build outputs, vendored code, and worktree mirrors duplicate real sources
 /// byte-for-byte, so their pairs are indistinguishable from true duplicates
 /// at the scoring layer — they have to be excluded during candidate
@@ -981,14 +1002,17 @@ fn compute_fingerprints(
             ));
         };
 
-        // Read the exact source generation attested by the graph. A missing or
-        // changed file is a typed stale-evidence failure, never an empty scan.
+        // Read the on-disk file, then admit it through the same code-source
+        // sanitizer the indexer used. Graph spans are byte ranges in that
+        // sanitized coordinate space; validating them against raw bytes
+        // misreads a length-changing redaction as staleness.
         let abs = project_root.join(&file_path);
-        let source = std::fs::read_to_string(&abs).map_err(|error| {
+        let raw = std::fs::read_to_string(&abs).map_err(|error| {
             redundancy_graph_problem(&format!(
                 "verified redundancy source `{file_path}` is unavailable: {error}"
             ))
         })?;
+        let source = admitted_redundancy_source(&file_path, &raw)?;
 
         let language =
             tracedecay_code_extraction::ts_provider::language(lang_key).map_err(|error| {
@@ -1776,6 +1800,120 @@ mod tests {
         assert_eq!(load.fingerprints.len(), 2);
         assert_eq!(load.fingerprints["alpha-id"].source_hash.len(), 16);
         assert_eq!(load.fingerprints["beta-id"].source_hash.len(), 16);
+    }
+
+    /// The indexer extracts from privacy-sanitized bytes. Credential
+    /// redaction substitutes a different-length placeholder, so recorded
+    /// spans live in sanitized space. `compute_fingerprints` must accept
+    /// those spans against a frozen raw file instead of calling that a
+    /// stale generation.
+    fn line_start_offsets(bytes: &[u8]) -> Vec<u64> {
+        let mut offsets = vec![0u64];
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'\n' {
+                offsets.push(index as u64 + 1);
+            }
+        }
+        offsets
+    }
+
+    fn byte_offset_from_point(offsets: &[u64], len: u64, row: u32, column: u32) -> u64 {
+        let base = offsets.get(row as usize).copied().unwrap_or(len);
+        base.saturating_add(u64::from(column)).min(len)
+    }
+
+    fn indexer_source_span(source: &str, node: &tracedecay_domain::Node) -> SourceSpan {
+        let offsets = line_start_offsets(source.as_bytes());
+        let len = source.len() as u64;
+        let start = if node.attrs_start_line < node.start_line {
+            byte_offset_from_point(&offsets, len, node.attrs_start_line, 0)
+        } else {
+            byte_offset_from_point(&offsets, len, node.start_line, node.start_column)
+        };
+        let end = byte_offset_from_point(&offsets, len, node.end_line, node.end_column);
+        SourceSpan {
+            start_byte: start.min(end),
+            end_byte: start.max(end),
+        }
+    }
+
+    fn after_secret_body() -> &'static str {
+        "fn after_secret(input: i32) -> i32 {\n    let mut total = input;\n    for value in 0..4 {\n        if value % 2 == 0 {\n            total += value;\n        }\n    }\n    total\n}\n"
+    }
+
+    #[test]
+    fn redacted_code_source_span_is_valid_against_the_raw_file() {
+        if tracedecay_code_extraction::ts_provider::language("rust").is_err() {
+            panic!("rust grammar must be available to prove the span-units regression");
+        }
+        let secret = ["sk", "-test-", "1234567890abcdef"].concat();
+        let raw = format!("const TOKEN: &str = \"{secret}\";\n{}", after_secret_body());
+        let sanitized = crate::privacy::sanitize_code_source_bytes(
+            raw.as_bytes(),
+            crate::privacy::CodeSourceShapeV1::CodeOrProse,
+        )
+        .expect("code-source sanitizer");
+        let (sanitized_bytes, _) = sanitized.into_parts();
+        let sanitized_text = std::str::from_utf8(&sanitized_bytes).expect("sanitized UTF-8");
+        assert_ne!(
+            sanitized_text.len(),
+            raw.len(),
+            "fixture must change length so the units mismatch is observable"
+        );
+        assert!(
+            !sanitized_text.contains(&secret),
+            "sanitizer must actually redact the planted credential"
+        );
+
+        let registry = tracedecay_code_extraction::LanguageRegistry::new();
+        let extractor = registry
+            .extractor_for_file("src/token.rs")
+            .expect("rust extractor");
+        let extracted = extractor.extract("src/token.rs", sanitized_text);
+        let function = extracted
+            .nodes
+            .iter()
+            .find(|node| node.name == "after_secret")
+            .expect("sanitized extract must still see the function");
+        let span = indexer_source_span(sanitized_text, function);
+        assert!(
+            span.end_byte > raw.len() as u64,
+            "sanitized-space end {} must exceed raw length {} so HEAD refuses",
+            span.end_byte,
+            raw.len()
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("token.rs"), raw.as_bytes()).unwrap();
+        let mut node = candidate_node("after-secret-id", "after_secret", "src/token.rs", 8);
+        node.source_span = span;
+
+        let load = compute_fingerprints(temp.path(), &[node]).expect(
+            "a frozen raw file must accept the span the indexer recorded on sanitized bytes",
+        );
+        assert_eq!(load.computed_fingerprints, 1);
+        assert_eq!(load.fingerprints["after-secret-id"].source_hash.len(), 16);
+    }
+
+    #[test]
+    fn shortened_raw_file_is_still_typed_stale() {
+        if tracedecay_code_extraction::ts_provider::language("rust").is_err() {
+            panic!("rust grammar must be available to prove genuine staleness still refuses");
+        }
+        let body = after_secret_body();
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("token.rs"), "fn gone() {}\n").unwrap();
+        let mut node = candidate_node("stale-id", "after_secret", "src/token.rs", 8);
+        node.source_span.end_byte = body.len() as u64;
+        let error = compute_fingerprints(temp.path(), &[node]).expect_err("truncated file");
+        assert!(
+            error.to_string().contains("stale against the source file"),
+            "genuine shrinkage must stay a typed stale refusal, got {error}"
+        );
     }
 
     #[test]
