@@ -665,6 +665,16 @@ async fn message_projection(
     provider: &str,
     message_id: &str,
 ) -> ProjectionStoreResult<SessionMessageProjection> {
+    if let Some(projection) = super::apply::derive_projection(observation)?
+        .messages()
+        .find(|projection| {
+            projection.message().provider == provider
+                && projection.message().message_id == message_id
+        })
+        .cloned()
+    {
+        return Ok(projection);
+    }
     derive_projection_with_alias(conn, observation)
         .await?
         .messages()

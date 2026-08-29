@@ -2306,7 +2306,7 @@ mod tests {
     async fn seed_projected_messages(
         runtime: &crate::tests::harness::HostAdmissionTestRuntimeV1,
         count: usize,
-    ) {
+    ) -> Vec<DurableObservationV1> {
         use tracedecay_domain::{
             CanonicalMessageRoleV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
             CanonicalObservationRelationsV1, ObservationSourceCursorV1, ProjectionGenerationId,
@@ -2326,6 +2326,7 @@ mod tests {
             ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
                 .unwrap();
         let mut expected_cursor: Option<ObservationSourceCursorV1> = None;
+        let mut observations = Vec::with_capacity(count);
         for index in 0..count {
             let record_id = format!("record.audit-batch-{index}");
             let record = ObservationId::new(record_id.clone()).unwrap();
@@ -2411,7 +2412,9 @@ mod tests {
                 .await
                 .unwrap();
             expected_cursor = Some(next_cursor);
+            observations.push(observation);
         }
+        observations
     }
 
     /// The audit's message path must stay correct while resolving each chunk's
@@ -2427,7 +2430,7 @@ mod tests {
         let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
             .unwrap();
-        seed_projected_messages(&runtime, OBSERVATIONS).await;
+        let observations = seed_projected_messages(&runtime, OBSERVATIONS).await;
 
         let database = runtime
             .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
@@ -2525,6 +2528,37 @@ mod tests {
         assert!(
             queries < OBSERVATIONS * 10,
             "projection audit issued {queries} queries for {OBSERVATIONS} projected messages"
+        );
+
+        let effect = crate::observation_projection::derive_projection(&observations[0]).unwrap();
+        let projection = effect.message().expect("seeded message projection");
+        let message = projection.message();
+        let requested = BTreeSet::from([(message.provider.clone(), message.message_id.clone())]);
+        let authority =
+            crate::observation_projection::read_output_authorities(&snapshot, &requested)
+                .await
+                .unwrap();
+        let authority = authority
+            .get(&(message.provider.clone(), message.message_id.clone()))
+            .expect("seeded output authority");
+        let verification = CountingSnapshot::new(&snapshot);
+        crate::observation_projection::verify_resolved_output_authority(
+            &verification,
+            authority,
+            None,
+            projection,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            verification.issued("SELECT reason FROM observation_projection_dispositions"),
+            0,
+            "an unaliased retained message must not re-query its disposition"
+        );
+        assert_eq!(
+            verification.issued("FROM observation_projection_aliases"),
+            0,
+            "an unaliased retained message must not re-query its alias"
         );
     }
 
