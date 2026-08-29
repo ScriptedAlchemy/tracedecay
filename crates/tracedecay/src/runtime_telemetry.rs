@@ -10,13 +10,20 @@
 //! sysinfo 0.32 on Linux computes `cpu_usage()` only for
 //! `ProcessesToUpdate::All`; a targeted PID refresh updates utime/stime
 //! but leaves usage at 0. Linux therefore uses the same `/proc/self/stat`
-//! utime+stime authority as semantic evaluation. Callers pay ~200 ms
-//! latency per snapshot.
+//! utime+stime authority as semantic evaluation.
+//!
+//! The delta window is a real ~200 ms wall wait, so it never runs on the
+//! serving path: a process-global background sampler owns the window and
+//! the serving path reads the last completed sample from its cache. The
+//! wire state is typed — `sampled` carries `sampled_at` so staleness is
+//! visible, `not_yet_sampled` covers reads before the first sample
+//! completes, and `sample_failed` carries the sampling error instead of a
+//! fabricated zero snapshot.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -69,8 +76,15 @@ pub enum GenerationCensusSnapshot {
     },
 }
 
-/// Window over which `cpu_percent` is sampled.
+/// Window over which `cpu_percent` is sampled. sysinfo's
+/// `MINIMUM_CPU_UPDATE_INTERVAL` (200 ms) is the floor for a truthful CPU
+/// delta, which is why the window runs on the background sampler instead of
+/// the serving path.
 const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(200);
+
+/// Minimum age of a completed process sample before a read schedules a
+/// background refresh. Reads inside this interval serve the cached sample.
+const PROCESS_SAMPLE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Captured process + database telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,11 +95,32 @@ pub struct RuntimeSnapshot {
     pub tracedecay_version: String,
     /// Host OS short name (`macos`, `linux`, `windows`, …).
     pub host_os: String,
-    pub process: ProcessSnapshot,
+    pub process: ProcessTelemetry,
     pub database: DatabaseSnapshot,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Typed state of the cached process sample as served on the status path.
+///
+/// The serving path never blocks on the ~200 ms CPU delta window: it reads
+/// the last completed background sample. `sampled_at` makes staleness
+/// visible instead of presenting an old sample as fresh.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProcessTelemetry {
+    Sampled {
+        /// When the background sample completed (Unix epoch seconds).
+        sampled_at: u64,
+        #[serde(flatten)]
+        snapshot: ProcessSnapshot,
+    },
+    /// No background sample has completed yet (first request in this
+    /// process schedules one).
+    NotYetSampled,
+    /// The most recent background sample attempt failed.
+    SampleFailed { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessSnapshot {
     pub pid: u32,
     pub rss_bytes: u64,
@@ -218,7 +253,7 @@ pub struct DirtyMarkerSnapshot {
 
 /// Capture a runtime snapshot for the given project.
 ///
-/// Two responsibilities: (a) sample our own process via `sysinfo`,
+/// Two responsibilities: (a) read the cached background process sample,
 /// (b) `stat` the `SQLite` files and ask the connection for its journal
 /// mode. Unavailable pragmas remain optional; failures to identify or stat the
 /// store itself fail the read instead of fabricating a zero-sized database.
@@ -239,18 +274,11 @@ pub(crate) async fn collect_with_integrity_and_generation_census(
     include_integrity: bool,
     generation_census_reader: Option<&GenerationCensusReader>,
 ) -> Result<RuntimeSnapshot> {
-    let process = sample_process()?;
+    let process = process_sampler().read();
     let database =
         collect_database_with_generation_census(cg, include_integrity, generation_census_reader)
             .await?;
-    let captured_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| {
-            TraceDecayError::Io(std::io::Error::other(format!(
-                "runtime telemetry clock precedes Unix epoch: {error}"
-            )))
-        })?
-        .as_secs();
+    let captured_at = unix_epoch_secs()?;
     Ok(RuntimeSnapshot {
         captured_at,
         tracedecay_version: crate::version::build_version().to_owned(),
@@ -264,9 +292,8 @@ pub(crate) async fn collect_with_integrity_and_generation_census(
 /// terminals. Mirrors the structure of `tracedecay status` so it's
 /// familiar to users running the CLI manually.
 pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
-    let p = &snap.process;
+    let process_block = process_text_block(&snap.process);
     let d = &snap.database;
-    let pct_of_system_mem = (p.rss_bytes as f64 / p.system_total_memory_bytes as f64) * 100.0;
     let generation_census = match &d.generation_census {
         GenerationCensusSnapshot::Observed { statistics } if statistics.source_total_bytes > 0 => {
             format!(
@@ -326,12 +353,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
     format!(
         "tracedecay {ver} runtime snapshot ({os})\n\
          ────────────────────────────────────────\n\
-           pid              {pid}\n\
-           rss              {rss}  ({rss_pct:.2}% of system)\n\
-           virtual          {vsz}\n\
-           cpu              {cpu:.1}% (sampled over {win}ms, {ncpu} CPUs)\n\
-           uptime           {up}s\n\
-           system memory    {sysmem}\n\
+         {process_block}\
          \n\
            db file          {db}\n\
            db size          {dbsz}\n\
@@ -354,15 +376,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
         ",
         ver = snap.tracedecay_version,
         os = snap.host_os,
-        pid = p.pid,
-        rss = bytes_human(p.rss_bytes),
-        rss_pct = pct_of_system_mem,
-        vsz = bytes_human(p.virtual_bytes),
-        cpu = p.cpu_percent,
-        win = CPU_SAMPLE_WINDOW.as_millis(),
-        ncpu = p.system_cpu_count,
-        up = p.uptime_secs,
-        sysmem = bytes_human(p.system_total_memory_bytes),
+        process_block = process_block,
         db = d.db_path.display(),
         dbsz = bytes_human(d.db_size_bytes),
         wal = bytes_human(d.wal_size_bytes),
@@ -419,9 +433,173 @@ fn lane_line(lane: &ReaderLaneOccupancy) -> String {
     )
 }
 
+/// The process section of the text report, one line per field, matching the
+/// typed cache state instead of fabricating zeros before the first sample.
+fn process_text_block(process: &ProcessTelemetry) -> String {
+    match process {
+        ProcessTelemetry::Sampled {
+            sampled_at,
+            snapshot: p,
+        } => {
+            let pct_of_system_mem =
+                (p.rss_bytes as f64 / p.system_total_memory_bytes as f64) * 100.0;
+            format!(
+                "pid              {pid}\n\
+                 rss              {rss}  ({rss_pct:.2}% of system)\n\
+                 virtual          {vsz}\n\
+                 cpu              {cpu:.1}% (sampled over {win}ms, {ncpu} CPUs)\n\
+                 sampled at       {sampled_at} (Unix epoch seconds)\n\
+                 uptime           {up}s\n\
+                 system memory    {sysmem}\n",
+                pid = p.pid,
+                rss = bytes_human(p.rss_bytes),
+                rss_pct = pct_of_system_mem,
+                vsz = bytes_human(p.virtual_bytes),
+                cpu = p.cpu_percent,
+                win = CPU_SAMPLE_WINDOW.as_millis(),
+                ncpu = p.system_cpu_count,
+                sampled_at = sampled_at,
+                up = p.uptime_secs,
+                sysmem = bytes_human(p.system_total_memory_bytes),
+            )
+        }
+        ProcessTelemetry::NotYetSampled => {
+            "process          not yet sampled (background sample pending)\n".to_string()
+        }
+        ProcessTelemetry::SampleFailed { error } => {
+            format!("process          sample failed: {error}\n")
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Process sampling
 // ---------------------------------------------------------------------------
+
+fn unix_epoch_secs() -> Result<u64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            TraceDecayError::Io(std::io::Error::other(format!(
+                "runtime telemetry clock precedes Unix epoch: {error}"
+            )))
+        })?
+        .as_secs())
+}
+
+type ProcessSampleFn = Arc<dyn Fn() -> Result<ProcessSnapshot> + Send + Sync>;
+
+/// Last completed background sample attempt plus when it completed, for the
+/// refresh-interval gate.
+struct CompletedProcessSample {
+    completed: Instant,
+    telemetry: ProcessTelemetry,
+}
+
+#[derive(Default)]
+struct ProcessSampleCache {
+    outcome: Option<CompletedProcessSample>,
+    sample_in_flight: bool,
+}
+
+/// Owns the ~200 ms CPU delta window on a background thread and serves the
+/// last completed sample to the status path.
+///
+/// [`ProcessSampler::read`] never waits on sampling: it returns the cached
+/// [`ProcessTelemetry`] and, when no sample is in flight and the cache is
+/// older than the refresh interval (or empty), schedules one background
+/// sample whose result serves later reads. The delta window itself stays at
+/// [`CPU_SAMPLE_WINDOW`] so CPU percentages remain truthful.
+struct ProcessSampler {
+    sample: ProcessSampleFn,
+    refresh_interval: Duration,
+    cache: Arc<Mutex<ProcessSampleCache>>,
+}
+
+/// The cache critical sections only move small values, so a poisoned lock
+/// (a panic on the sampler thread mid-store) leaves consistent data; recover
+/// the guard instead of propagating an untyped panic to the serving path.
+fn lock_cache(cache: &Mutex<ProcessSampleCache>) -> MutexGuard<'_, ProcessSampleCache> {
+    cache.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl ProcessSampler {
+    fn new(sample: ProcessSampleFn, refresh_interval: Duration) -> Self {
+        Self {
+            sample,
+            refresh_interval,
+            cache: Arc::new(Mutex::new(ProcessSampleCache::default())),
+        }
+    }
+
+    /// Read the cached process sample without blocking on the sampler.
+    fn read(&self) -> ProcessTelemetry {
+        let mut cache = lock_cache(&self.cache);
+        let needs_refresh = !cache.sample_in_flight
+            && cache
+                .outcome
+                .as_ref()
+                .is_none_or(|sample| sample.completed.elapsed() >= self.refresh_interval);
+        let telemetry = cache.outcome.as_ref().map_or(
+            ProcessTelemetry::NotYetSampled,
+            |sample| sample.telemetry.clone(),
+        );
+        if needs_refresh {
+            cache.sample_in_flight = true;
+            drop(cache);
+            self.spawn_background_sample();
+        }
+        telemetry
+    }
+
+    fn spawn_background_sample(&self) {
+        let sample = Arc::clone(&self.sample);
+        let cache = Arc::clone(&self.cache);
+        let spawned = std::thread::Builder::new()
+            .name("tracedecay-process-sample".to_string())
+            .spawn(move || {
+                let telemetry = match sample() {
+                    Ok(snapshot) => match unix_epoch_secs() {
+                        Ok(sampled_at) => ProcessTelemetry::Sampled {
+                            sampled_at,
+                            snapshot,
+                        },
+                        Err(error) => ProcessTelemetry::SampleFailed {
+                            error: error.to_string(),
+                        },
+                    },
+                    Err(error) => ProcessTelemetry::SampleFailed {
+                        error: error.to_string(),
+                    },
+                };
+                let mut cache = lock_cache(&cache);
+                cache.outcome = Some(CompletedProcessSample {
+                    completed: Instant::now(),
+                    telemetry,
+                });
+                cache.sample_in_flight = false;
+            });
+        if let Err(error) = spawned {
+            let mut cache = lock_cache(&self.cache);
+            cache.outcome = Some(CompletedProcessSample {
+                completed: Instant::now(),
+                telemetry: ProcessTelemetry::SampleFailed {
+                    error: format!("could not spawn the process sample thread: {error}"),
+                },
+            });
+            cache.sample_in_flight = false;
+        }
+    }
+}
+
+/// Process-global sampler: the sample observes this process as a whole, so
+/// one cache serves every project route in the daemon.
+fn process_sampler() -> &'static ProcessSampler {
+    static SAMPLER: OnceLock<ProcessSampler> = OnceLock::new();
+    SAMPLER.get_or_init(|| {
+        ProcessSampler::new(Arc::new(sample_process), PROCESS_SAMPLE_REFRESH_INTERVAL)
+    })
+}
 
 fn sample_process() -> Result<ProcessSnapshot> {
     sample_process_with_window(CPU_SAMPLE_WINDOW)
@@ -783,7 +961,199 @@ fn bytes_human(n: u64) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+
+    fn test_process_snapshot() -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid: std::process::id(),
+            rss_bytes: 42 * 1024,
+            virtual_bytes: 84 * 1024,
+            cpu_percent: 12.5,
+            uptime_secs: 7,
+            system_cpu_count: 4,
+            system_total_memory_bytes: 8 * 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Poll until the sampler serves a completed background sample.
+    fn wait_for_completed_sample(sampler: &ProcessSampler) -> ProcessTelemetry {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match sampler.read() {
+                ProcessTelemetry::NotYetSampled => {}
+                completed => return completed,
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background process sample never completed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The serving path must not wait on the CPU delta window: the sample
+    /// function blocks on a gate that is only released *after* the reads
+    /// return, so a blocking read would deadlock this test instead of
+    /// passing.
+    #[test]
+    fn read_returns_typed_not_yet_sampled_while_the_sampler_is_blocked() {
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let sampler = ProcessSampler::new(
+            Arc::new(move || {
+                gate.lock()
+                    .unwrap()
+                    .recv()
+                    .map_err(|_| TraceDecayError::Io(std::io::Error::other("gate closed")))?;
+                Ok(test_process_snapshot())
+            }),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);
+        assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);
+
+        release.send(()).unwrap();
+        match wait_for_completed_sample(&sampler) {
+            ProcessTelemetry::Sampled {
+                sampled_at,
+                snapshot,
+            } => {
+                assert!(sampled_at > 0, "sampled_at must be a real timestamp");
+                assert_eq!(snapshot, test_process_snapshot());
+            }
+            other => panic!("expected a completed sample, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_within_the_refresh_interval_serve_the_cached_sample() {
+        let samples = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&samples);
+        let sampler = ProcessSampler::new(
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(test_process_snapshot())
+            }),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);
+        let first = wait_for_completed_sample(&sampler);
+        for _ in 0..5 {
+            assert_eq!(sampler.read(), first);
+        }
+        assert_eq!(
+            samples.load(Ordering::SeqCst),
+            1,
+            "reads inside the refresh interval must not resample"
+        );
+    }
+
+    /// Once the cache is warm, a stale read serves the last sample
+    /// immediately and refreshes in the background — it never regresses to
+    /// blocking or to `NotYetSampled`.
+    #[test]
+    fn stale_reads_serve_the_previous_sample_and_refresh_in_the_background() {
+        let samples = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&samples);
+        let sampler = ProcessSampler::new(
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(test_process_snapshot())
+            }),
+            Duration::ZERO,
+        );
+
+        assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);
+        wait_for_completed_sample(&sampler);
+        assert!(
+            matches!(sampler.read(), ProcessTelemetry::Sampled { .. }),
+            "a warm cache must serve the previous sample on stale reads"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while samples.load(Ordering::SeqCst) < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "stale read never scheduled a background refresh"
+            );
+            let _ = sampler.read();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_failed_sample_is_typed_not_a_fabricated_snapshot() {
+        let sampler = ProcessSampler::new(
+            Arc::new(|| {
+                Err(TraceDecayError::Io(std::io::Error::other(
+                    "process table unreadable",
+                )))
+            }),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);
+        match wait_for_completed_sample(&sampler) {
+            ProcessTelemetry::SampleFailed { error } => {
+                assert!(error.contains("process table unreadable"));
+            }
+            other => panic!("expected a typed sample failure, got {other:?}"),
+        }
+    }
+
+    /// The daemon serializes `process` and `tracedecay status --runtime`
+    /// deserializes the same Rust type; the sampled variant keeps the flat
+    /// field layout existing consumers read.
+    #[test]
+    fn process_telemetry_round_trips_the_cli_runtime_decode() {
+        let states = [
+            ProcessTelemetry::Sampled {
+                sampled_at: 9,
+                snapshot: test_process_snapshot(),
+            },
+            ProcessTelemetry::NotYetSampled,
+            ProcessTelemetry::SampleFailed {
+                error: "sampler unavailable".to_string(),
+            },
+        ];
+        for state in states {
+            let wire = serde_json::to_value(&state).unwrap();
+            let decoded: ProcessTelemetry = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded, state);
+        }
+
+        let wire = serde_json::to_value(ProcessTelemetry::Sampled {
+            sampled_at: 9,
+            snapshot: test_process_snapshot(),
+        })
+        .unwrap();
+        assert_eq!(wire["state"], "sampled");
+        assert_eq!(wire["sampled_at"], 9);
+        assert_eq!(wire["pid"], u64::from(std::process::id()));
+        assert!(wire["rss_bytes"].is_u64());
+    }
+
+    #[test]
+    fn text_report_names_the_pending_and_failed_sample_states() {
+        assert!(
+            process_text_block(&ProcessTelemetry::NotYetSampled).contains("not yet sampled")
+        );
+        assert!(
+            process_text_block(&ProcessTelemetry::SampleFailed {
+                error: "sampler unavailable".to_string(),
+            })
+            .contains("sample failed: sampler unavailable")
+        );
+        let sampled = process_text_block(&ProcessTelemetry::Sampled {
+            sampled_at: 1_700_000_000,
+            snapshot: test_process_snapshot(),
+        });
+        assert!(sampled.contains("sampled at       1700000000"));
+        assert!(sampled.contains("cpu              12.5%"));
+    }
 
     #[test]
     fn runtime_snapshot_deserializes_from_owned_transport_json() {

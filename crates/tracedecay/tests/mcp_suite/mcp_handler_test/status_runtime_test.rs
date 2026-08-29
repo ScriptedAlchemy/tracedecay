@@ -267,7 +267,9 @@ async fn test_status_no_scope_prefix() {
 
 /// `tracedecay_runtime` must surface process + DB telemetry so users hitting
 /// unexpected CPU/RAM can capture a structured snapshot without leaving the
-/// chat session.
+/// chat session. The process sample is served from the background cache, so
+/// the first response may be the typed `not_yet_sampled` state and never a
+/// fabricated zero snapshot.
 #[tokio::test]
 async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -281,7 +283,34 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     assert!(parsed["tracedecay_version"].is_string());
     assert!(parsed["host_os"].is_string());
 
-    let proc = &parsed["process"];
+    match parsed["process"]["state"].as_str() {
+        Some("not_yet_sampled") => {
+            assert!(
+                parsed["process"].get("pid").is_none(),
+                "the not-yet-sampled state must not fabricate process fields"
+            );
+        }
+        Some("sampled") => {}
+        other => panic!("unexpected process sample state before warm-up: {other:?}"),
+    }
+
+    // The handler only reads the sampler cache; poll until the background
+    // sample completes and the sampled payload appears.
+    let proc = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None, None)
+                .await
+                .unwrap();
+            let parsed: serde_json::Value =
+                serde_json::from_str(extract_text(&result.value)).unwrap();
+            if parsed["process"]["state"] == "sampled" {
+                break parsed["process"].clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the background process sample completes and serves later reads");
     assert_eq!(
         proc["pid"].as_u64().unwrap_or(0),
         u64::from(std::process::id()),
@@ -290,6 +319,10 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     assert!(
         proc["rss_bytes"].as_u64().unwrap_or(0) > 0,
         "RSS should be non-zero"
+    );
+    assert!(
+        proc["sampled_at"].as_u64().unwrap_or(0) > 0,
+        "sampled payload must expose its sample timestamp"
     );
     assert!(proc["system_cpu_count"].as_u64().unwrap_or(0) >= 1);
     assert!(proc["system_total_memory_bytes"].as_u64().unwrap_or(0) > 0);
