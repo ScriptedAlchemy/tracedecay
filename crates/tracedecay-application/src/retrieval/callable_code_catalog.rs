@@ -99,8 +99,11 @@ pub fn callable_code_catalog_contribution()
         .into_iter()
         .filter(|kind| canonical_surface_equivalent(*kind).is_none())
     {
-        let operation = reachable_surface_operation(kind)
-            .expect("non-equivalent callable operations have production bindings");
+        let operation = reachable_surface_operation(kind).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "callable code surface operation binding",
+            },
+        )?;
         let (surface_bindings, mut binding_ids) = current_bindings(
             &code_query_capability_id(kind)?,
             operation,
