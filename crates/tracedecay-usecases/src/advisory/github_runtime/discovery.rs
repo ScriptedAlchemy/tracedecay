@@ -10,7 +10,8 @@ use url::Url;
 
 use super::dto::valid_full_git_oid;
 use super::protocol::{
-    GitHubLinkPageScopeV1, link_next_page, rate_limit_checkpoint, retry_after_at,
+    GitHubLinkPageScopeV1, InvalidGitHubLinkContinuationV1, link_next_page, rate_limit_checkpoint,
+    retry_after_at,
 };
 use super::{
     GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
@@ -291,7 +292,12 @@ fn scan_exact_commit_pull_request_v1(
             },
         ) {
             Ok(next_page) => next_page,
-            Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
+            // Same fail-closed choice as releases and review/comment reads: a
+            // rejected Link header taints the exchange, so this page body is
+            // discarded. `link_next_page` traces the rejection.
+            Err(InvalidGitHubLinkContinuationV1) => {
+                return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+            }
         };
         let Ok(body) = response
             .body_mut()
@@ -442,5 +448,29 @@ mod tests {
         let retained = owner.clone();
         drop(owner);
         assert!(retained.remaining().is_none());
+    }
+
+    #[test]
+    fn continuation_accepts_live_github_repositories_numeric_rewrite() {
+        let endpoint = "https://api.github.com/repos/ScriptedAlchemy/tracedecay/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls";
+        let mut headers = ureq::http::HeaderMap::new();
+        headers.insert(
+            "link",
+            "<https://api.github.com/repositories/724712/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls?per_page=100&page=2>; rel=\"next\""
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            link_next_page(
+                &headers,
+                &GitHubLinkPageScopeV1 {
+                    rest_base_uri: "https://api.github.com",
+                    endpoint,
+                    current_page: 1,
+                    page_size: GITHUB_DISCOVERY_PAGE_SIZE_V1,
+                },
+            ),
+            Ok(Some(2))
+        );
     }
 }

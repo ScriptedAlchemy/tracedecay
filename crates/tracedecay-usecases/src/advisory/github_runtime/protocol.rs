@@ -5,9 +5,12 @@
 //! Retry and continuation parsing fail closed. A `Retry-After` delay outside
 //! `0..=24h` is provider noise or a hostile wedge and is discarded. A `Link`
 //! header that does not name exactly the next sequential page of the issuing
-//! endpoint — one rel="next" entry, same https host and path, no credentials
-//! or fragment, only the expected `page`/`per_page` query — is an error, so a
-//! malformed or malicious continuation can never steer a pagination loop.
+//! endpoint — one rel="next" entry, same https host, no credentials or
+//! fragment, only the expected `page`/`per_page` query, and a path that is
+//! either byte-identical to the request path or GitHub's documented
+//! `/repos/{owner}/{repo}` → `/repositories/{numeric id}` rewrite with the
+//! same remainder — is an error, so a malformed or malicious continuation
+//! can never steer a pagination loop.
 
 use tracedecay_application::now_micros;
 use tracedecay_domain::UtcMicros;
@@ -62,14 +65,41 @@ pub(super) struct GitHubLinkPageScopeV1<'a> {
     pub(super) page_size: usize,
 }
 
+/// Typed failure for a `Link` header that exists but is not a valid next page.
+/// Callers map this to their closed unavailable outcome and must not consume
+/// the response body as a successful page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct InvalidGitHubLinkContinuationV1;
+
 /// Parses the `Link` rel="next" continuation for the scoped page request.
-/// `Ok(None)` means the provider offered no continuation; `Err(())` means the
-/// header exists but does not name exactly the next sequential page of the
-/// issuing endpoint, and the read must fail closed.
+/// `Ok(None)` means the provider offered no continuation;
+/// `Err(InvalidGitHubLinkContinuationV1)` means the header exists but does
+/// not name exactly the next sequential page of the issuing endpoint, and the
+/// read must fail closed. The failure is also traced so the discarded 200 is
+/// observable.
 pub(super) fn link_next_page(
     headers: &ureq::http::HeaderMap,
     scope: &GitHubLinkPageScopeV1<'_>,
-) -> Result<Option<u32>, ()> {
+) -> Result<Option<u32>, InvalidGitHubLinkContinuationV1> {
+    match parse_link_next_page(headers, scope) {
+        Ok(next_page) => Ok(next_page),
+        Err(InvalidGitHubLinkContinuationV1) => {
+            tracing::warn!(
+                event = "github_link_next_page_rejected",
+                endpoint = scope.endpoint,
+                current_page = scope.current_page,
+                page_size = scope.page_size,
+                "GitHub Link rel=next failed validation; the received page is discarded and the exchange fails closed"
+            );
+            Err(InvalidGitHubLinkContinuationV1)
+        }
+    }
+}
+
+fn parse_link_next_page(
+    headers: &ureq::http::HeaderMap,
+    scope: &GitHubLinkPageScopeV1<'_>,
+) -> Result<Option<u32>, InvalidGitHubLinkContinuationV1> {
     let Some(link) = header(headers, "link") else {
         return Ok(None);
     };
@@ -80,25 +110,25 @@ pub(super) fn link_next_page(
         return Ok(None);
     };
     if next_entries.next().is_some() {
-        return Err(());
+        return Err(InvalidGitHubLinkContinuationV1);
     }
     let url = next
         .split_once('<')
         .and_then(|(_, value)| value.split_once('>'))
         .map(|(value, _)| value)
         .and_then(|value| Url::parse(value).ok())
-        .ok_or(())?;
-    let base = Url::parse(scope.rest_base_uri).map_err(|_| ())?;
-    let expected = Url::parse(scope.endpoint).map_err(|_| ())?;
+        .ok_or(InvalidGitHubLinkContinuationV1)?;
+    let base = Url::parse(scope.rest_base_uri).map_err(|_| InvalidGitHubLinkContinuationV1)?;
+    let expected = Url::parse(scope.endpoint).map_err(|_| InvalidGitHubLinkContinuationV1)?;
     if url.scheme() != "https"
         || url.host_str() != base.host_str()
         || url.port_or_known_default() != base.port_or_known_default()
-        || url.path() != expected.path()
+        || !github_link_path_matches_request(url.path(), expected.path())
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
     {
-        return Err(());
+        return Err(InvalidGitHubLinkContinuationV1);
     }
     let mut page = None;
     let mut has_page_size = false;
@@ -108,7 +138,7 @@ pub(super) fn link_next_page(
             "per_page" if !has_page_size && value == scope.page_size.to_string() => {
                 has_page_size = true;
             }
-            _ => return Err(()),
+            _ => return Err(InvalidGitHubLinkContinuationV1),
         }
     }
     has_page_size
@@ -116,7 +146,44 @@ pub(super) fn link_next_page(
         .flatten()
         .filter(|page| Some(*page) == scope.current_page.checked_add(1))
         .map(Some)
-        .ok_or(())
+        .ok_or(InvalidGitHubLinkContinuationV1)
+}
+
+/// GitHub REST rewrites `/repos/{owner}/{repo}` to `/repositories/{id}` in
+/// `Link` headers. The numeric id is not rebound here — GitHub does not echo
+/// owner/repo on that form — so only the designator prefix and the remainder
+/// derived from the request path are compared. Suffix matching is not used.
+fn github_link_path_matches_request(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    let Some(expected_remainder) = remainder_after_repos_owner_repo(expected) else {
+        return false;
+    };
+    remainder_after_repositories_numeric_id(actual) == Some(expected_remainder)
+}
+
+fn remainder_after_repos_owner_repo(path: &str) -> Option<&str> {
+    let after_repos = path.strip_prefix("/repos/")?;
+    let (owner, after_owner) = after_repos.split_once('/')?;
+    if owner.is_empty() || after_owner.is_empty() {
+        return None;
+    }
+    Some(
+        after_owner
+            .find('/')
+            .map_or("", |index| &after_owner[index..]),
+    )
+}
+
+fn remainder_after_repositories_numeric_id(path: &str) -> Option<&str> {
+    let after_prefix = path.strip_prefix("/repositories/")?;
+    let id_len = after_prefix.find('/').unwrap_or(after_prefix.len());
+    let id = &after_prefix[..id_len];
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(&after_prefix[id_len..])
 }
 
 #[cfg(test)]
@@ -174,12 +241,18 @@ mod tests {
         );
         assert_eq!(link_next_page(&headers, &scope(ENDPOINT, 1)), Ok(Some(2)));
         // A skipped page is a steered continuation, not a next page.
-        assert_eq!(link_next_page(&headers, &scope(ENDPOINT, 2)), Err(()));
+        assert_eq!(
+            link_next_page(&headers, &scope(ENDPOINT, 2)),
+            Err(InvalidGitHubLinkContinuationV1)
+        );
         let skip = headers_with(
             "link",
             &format!("<{ENDPOINT}?per_page=100&page=3>; rel=\"next\""),
         );
-        assert_eq!(link_next_page(&skip, &scope(ENDPOINT, 1)), Err(()));
+        assert_eq!(
+            link_next_page(&skip, &scope(ENDPOINT, 1)),
+            Err(InvalidGitHubLinkContinuationV1)
+        );
     }
 
     #[test]
@@ -203,7 +276,10 @@ mod tests {
                 "<{ENDPOINT}?per_page=100&page=2>; rel=\"next\", <{ENDPOINT}?per_page=100&page=3>; rel=\"next\""
             ),
         );
-        assert_eq!(link_next_page(&headers, &scope(ENDPOINT, 1)), Err(()));
+        assert_eq!(
+            link_next_page(&headers, &scope(ENDPOINT, 1)),
+            Err(InvalidGitHubLinkContinuationV1)
+        );
     }
 
     #[test]
@@ -220,7 +296,7 @@ mod tests {
             let headers = headers_with("link", hostile);
             assert_eq!(
                 link_next_page(&headers, &scope(ENDPOINT, 1)),
-                Err(()),
+                Err(InvalidGitHubLinkContinuationV1),
                 "hostile continuation must fail closed: {hostile}",
             );
         }
@@ -238,7 +314,7 @@ mod tests {
             let headers = headers_with("link", &hostile);
             assert_eq!(
                 link_next_page(&headers, &scope(ENDPOINT, 1)),
-                Err(()),
+                Err(InvalidGitHubLinkContinuationV1),
                 "unexpected continuation query must fail closed: {hostile}",
             );
         }
@@ -252,5 +328,62 @@ mod tests {
             &format!("<{ENDPOINT}?per_page=100&page=5>; rel=\"next\""),
         );
         assert_eq!(link_next_page(&headers, &scope(&endpoint, 4)), Ok(Some(5)));
+    }
+
+    #[test]
+    fn link_next_page_accepts_github_repositories_numeric_rewrite() {
+        // Live api.github.com Link headers rewrite /repos/{owner}/{repo} to
+        // /repositories/{numeric id} while leaving the collection remainder
+        // byte-identical. 724712 is the live-shaped fixture id.
+        for (endpoint, next_path) in [
+            (
+                "https://api.github.com/repos/owner/repository/releases",
+                "/repositories/724712/releases",
+            ),
+            (
+                "https://api.github.com/repos/owner/repository/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls",
+                "/repositories/724712/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls",
+            ),
+            (
+                "https://api.github.com/repos/owner/repository/pulls/707/reviews?per_page=100&page=1",
+                "/repositories/724712/pulls/707/reviews",
+            ),
+            (
+                "https://api.github.com/repos/owner/repository/pulls/707/comments?per_page=100&page=1",
+                "/repositories/724712/pulls/707/comments",
+            ),
+        ] {
+            let headers = headers_with(
+                "link",
+                &format!("<https://api.github.com{next_path}?per_page=100&page=2>; rel=\"next\""),
+            );
+            assert_eq!(
+                link_next_page(&headers, &scope(endpoint, 1)),
+                Ok(Some(2)),
+                "documented repositories rewrite must be accepted: {endpoint} -> {next_path}",
+            );
+        }
+    }
+
+    #[test]
+    fn link_next_page_rejects_non_numeric_rewrite_and_different_remainder() {
+        for next_path in [
+            "/repositories/tracedecay/releases",
+            "/repositories/724712a/releases",
+            "/repositories//releases",
+            "/repositories/724712/pulls",
+            "/repositories/724712/releases/extra",
+            "/repositories/724712/repos/owner/repository/releases",
+        ] {
+            let headers = headers_with(
+                "link",
+                &format!("<https://api.github.com{next_path}?per_page=100&page=2>; rel=\"next\""),
+            );
+            assert_eq!(
+                link_next_page(&headers, &scope(ENDPOINT, 1)),
+                Err(InvalidGitHubLinkContinuationV1),
+                "rewrite must stay strict: {next_path}",
+            );
+        }
     }
 }

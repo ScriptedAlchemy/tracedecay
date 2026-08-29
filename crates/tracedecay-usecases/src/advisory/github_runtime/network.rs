@@ -20,7 +20,8 @@ use super::dto::{
     RestReviewV1, valid_full_git_oid,
 };
 use super::protocol::{
-    GitHubLinkPageScopeV1, header, link_next_page, rate_limit_checkpoint, retry_after_at,
+    GitHubLinkPageScopeV1, InvalidGitHubLinkContinuationV1, header, link_next_page,
+    rate_limit_checkpoint, retry_after_at,
 };
 use super::{
     GitHubGraphQlReadRequestV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkOutcomeV1,
@@ -1801,7 +1802,11 @@ fn decode_ureq_response(
             let next_page = match link_scope {
                 Some(scope) => match link_next_page(response.headers(), &scope) {
                     Ok(next_page) => next_page,
-                    Err(()) => return HttpResponseV1::Unavailable,
+                    // A tampered or out-of-policy Link header taints the
+                    // exchange. Keep fail-closed: discard the 200 body rather
+                    // than continue from an untrusted cursor. The parser traces
+                    // the rejection so the discarded page is observable.
+                    Err(InvalidGitHubLinkContinuationV1) => return HttpResponseV1::Unavailable,
                 },
                 None => None,
             };
@@ -1979,6 +1984,41 @@ mod pagination_contract_tests {
         assert!(
             page_from_cursor(GitHubReviewCursorV1::new("rest-page:21").ok().as_ref()).is_none()
         );
+    }
+
+    #[test]
+    fn continuation_accepts_live_github_repositories_rewrite_for_reviews_and_comments() {
+        for (endpoint, next_path) in [
+            (
+                "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/707/reviews?per_page=100&page=1",
+                "/repositories/724712/pulls/707/reviews",
+            ),
+            (
+                "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/707/comments?per_page=100&page=1",
+                "/repositories/724712/pulls/707/comments",
+            ),
+        ] {
+            let mut headers = ureq::http::HeaderMap::new();
+            headers.insert(
+                "link",
+                format!("<https://api.github.com{next_path}?per_page=100&page=2>; rel=\"next\"")
+                    .parse()
+                    .unwrap(),
+            );
+            assert_eq!(
+                link_next_page(
+                    &headers,
+                    &GitHubLinkPageScopeV1 {
+                        rest_base_uri: "https://api.github.com",
+                        endpoint,
+                        current_page: 1,
+                        page_size: GITHUB_REVIEW_REST_PAGE_SIZE_V1,
+                    },
+                ),
+                Ok(Some(2)),
+                "live-shaped rewrite must continue {endpoint}",
+            );
+        }
     }
 }
 
