@@ -34,7 +34,10 @@ use crate::store::vector_generations::{
 mod application_status;
 mod publication_failure;
 mod vector_projection_support;
-pub use application_status::application_status_from_projection;
+pub use application_status::{
+    application_status_from_projection, lifecycle_to_runtime_state,
+    prefer_lifecycle_over_generic_unavailable, resolve_semantic_application_status,
+};
 use publication_failure::SemanticPublicationFailureRecorderV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_code_index::projection::expected_request_digest;
@@ -77,9 +80,9 @@ use tracedecay_semantic::{
     SemanticEvaluationQueryFactoryV1, SemanticGenerationPointerV1,
     SemanticModelLifecycleEvaluationPublicationLeaseV1, SemanticModelLifecycleOwnerV1,
     SemanticModelLifecyclePublicationIdentityV1, SemanticModelLifecycleStateV1,
-    SemanticProjectionResumeOutcomeV1, SemanticRuntimeScheduleFailureV1,
-    SemanticRuntimeScheduleStatusV1, measure_semantic_evaluation_projection_cancellation,
-    prepare_semantic_evaluation_projection,
+    SemanticModelLifecycleStatusV1, SemanticProjectionResumeOutcomeV1,
+    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
+    measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
 };
 use vector_projection_support::{
     BatchCommitStateV1, commit_evaluation_prepared_generation, projection_input_bytes,
@@ -413,6 +416,11 @@ impl ProductionSemanticRuntimeV1 {
     ) -> tokio::sync::watch::Receiver<tracedecay_semantic::SemanticLifecycleVerifiedReadyEventV1>
     {
         self.lifecycle.verified_ready_events()
+    }
+
+    /// Process-local lifecycle observation bound to this mounted runtime.
+    pub fn lifecycle_status(&self) -> SemanticModelLifecycleStatusV1 {
+        self.lifecycle.status()
     }
 
     /// Restore a compatible immutable generation after daemon restart.
@@ -3652,11 +3660,15 @@ pub fn project_semantic_application_status(
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> Option<SemanticRuntimeStatusV1> {
     if let Some(runtime) = project_semantic_production_runtime(project_root) {
+        let lifecycle = runtime.lifecycle_status();
         let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
         if let Some(configuration) = configuration {
             backend.bind_configuration(configuration);
         }
-        return Some(backend.application_status());
+        return Some(prefer_lifecycle_over_generic_unavailable(
+            backend.application_status(),
+            &lifecycle,
+        ));
     }
     let handle = project_semantic_handles()
         .lock()

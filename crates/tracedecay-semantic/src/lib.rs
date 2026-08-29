@@ -70,7 +70,7 @@ pub use model_lifecycle::{
     ModelLifecycleErrorV1, SemanticLifecycleVerifiedReadyEventV1,
     SemanticModelLifecycleEvaluationPublicationLeaseV1, SemanticModelLifecycleOwnerV1,
     SemanticModelLifecyclePublicationIdentityV1, SemanticModelLifecycleStateV1,
-    SemanticModelLifecycleStatusV1, apply_config_and_queue_startup,
+    SemanticModelLifecycleStatusV1, SemanticModelRemediationV1, apply_config_and_queue_startup,
     open_local_semantic_evaluation_lifecycle, shared_lifecycle_owner,
 };
 
