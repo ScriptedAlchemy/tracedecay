@@ -169,6 +169,34 @@ fn service_status_reports_connectable_socket() {
 }
 
 #[test]
+fn after_update_restore_heals_stopped_installed_units() {
+    assert_eq!(
+        DaemonServiceState::StoppedEnabled.expected_after_update(),
+        DaemonServiceState::RunningEnabled
+    );
+    assert_eq!(
+        DaemonServiceState::StoppedDisabled.expected_after_update(),
+        DaemonServiceState::RunningEnabled
+    );
+    assert_eq!(
+        DaemonServiceState::RunningEnabled.expected_after_update(),
+        DaemonServiceState::RunningEnabled
+    );
+    assert_eq!(
+        DaemonServiceState::RunningDisabled.expected_after_update(),
+        DaemonServiceState::RunningDisabled
+    );
+    assert_eq!(
+        DaemonServiceState::Missing.expected_after_update(),
+        DaemonServiceState::Missing
+    );
+    assert_eq!(
+        DaemonServiceState::Masked.expected_after_update(),
+        DaemonServiceState::Masked
+    );
+}
+
+#[test]
 fn strict_restoration_requires_readiness_only_for_running_state() {
     assert!(super::restored_service_matches(
         DaemonServiceState::RunningEnabled,
@@ -1163,6 +1191,105 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     assert_eq!(
         std::fs::read_to_string(log).expect("systemctl log"),
         "--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_after_update_starts_a_dead_installed_unit() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let fake_bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let systemctl = fake_bin.join("systemctl");
+    let log = dir.path().join("systemctl.log");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard =
+        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+    let service_path = config_home
+        .join("systemd/user")
+        .join(crate::daemon::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let original_unit =
+        "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n";
+    std::fs::write(&service_path, original_unit).expect("existing service unit");
+
+    super::restore_installed_service_after_update(DaemonServiceState::StoppedDisabled)
+        .expect("heal dead installed service");
+
+    assert_eq!(
+        std::fs::read_to_string(service_path).expect("service unit"),
+        original_unit,
+        "heal must start the existing unit without rewriting it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(log).expect("systemctl log"),
+        "--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_after_update_leaves_masked_and_missing_units_untouched() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let fake_bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let systemctl = fake_bin.join("systemctl");
+    let log = dir.path().join("systemctl.log");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard =
+        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+
+    super::restore_installed_service_after_update(DaemonServiceState::Missing)
+        .expect("missing stays missing");
+    assert!(
+        !log.exists() || std::fs::read_to_string(&log).expect("systemctl log").is_empty(),
+        "missing must not invoke systemctl"
+    );
+
+    let service_path = config_home
+        .join("systemd/user")
+        .join(crate::daemon::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    std::fs::write(&service_path, "[Service]\nExecStart=/old/tracedecay daemon run\n")
+        .expect("masked unit");
+
+    super::restore_installed_service_after_update(DaemonServiceState::Masked)
+        .expect("masked stays masked");
+    assert!(
+        !log.exists() || std::fs::read_to_string(&log).expect("systemctl log").is_empty(),
+        "masked must not invoke systemctl"
     );
 }
 

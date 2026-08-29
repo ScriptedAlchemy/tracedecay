@@ -161,6 +161,15 @@ impl QuiescedDaemonLifecycle {
         self.restore_state(state)
     }
 
+    /// Restores the post-update target rather than the captured snapshot.
+    ///
+    /// See [`DaemonServiceState::expected_after_update`]: installed units that
+    /// were found stopped are started; masked and missing stay as captured.
+    pub fn finish_after_update(self) -> Result<()> {
+        let target = self.previous_state.expected_after_update();
+        self.finish_with_state(target)
+    }
+
     pub fn finish_without_restore(mut self) {
         drop(self.lifecycle_lease.take());
         self.restored = true;
@@ -259,7 +268,7 @@ pub fn with_exclusive_maintenance_window<T>(
         .to_string();
     guard.release_lease_for_executable_replacement();
     let operation_result = action(&token);
-    let restore_result = guard.restore();
+    let restore_result = guard.finish_after_update();
     combine_operation_and_restore(operation, operation_result, restore_result)
 }
 
@@ -270,6 +279,26 @@ impl DaemonServiceState {
 
     fn is_enabled(self) -> bool {
         matches!(self, Self::RunningEnabled | Self::StoppedEnabled)
+    }
+
+    /// State to restore after `tracedecay update` / `upgrade`.
+    ///
+    /// The supervisor snapshot cannot tell "operator stopped this on purpose"
+    /// from "found dead" (`StoppedEnabled` covers both `systemctl --user stop`
+    /// and an OOM-killed unit that hit its start limit). Leaving a dead
+    /// installed unit stopped is the worse failure: every later update
+    /// preserves that deadness. Masked and missing stay untouched — those are
+    /// explicit operator shapes. A unit that was running while disabled keeps
+    /// that enablement; a unit found stopped and disabled is healed, because
+    /// that is the observed outage shape (dead + disabled).
+    pub(crate) const fn expected_after_update(self) -> Self {
+        match self {
+            Self::Missing | Self::Masked => self,
+            Self::RunningDisabled => Self::RunningDisabled,
+            Self::RunningEnabled | Self::StoppedEnabled | Self::StoppedDisabled => {
+                Self::RunningEnabled
+            }
+        }
     }
 }
 
@@ -893,11 +922,22 @@ pub fn verify_installed_service_quiesced_under_lease() -> Result<DaemonServiceSt
     Ok(state)
 }
 
-/// Restores the exact running/disabled state captured before maintenance.
+/// Restores the managed daemon after an update maintenance window.
+///
+/// History (`ef3b3cb0`, later comments) described this as restoring the exact
+/// captured running/disabled snapshot so an operator-stopped daemon stayed
+/// stopped. That snapshot cannot distinguish an explicit stop from a unit
+/// found dead (OOM, start-limit, disabled-by-accident). After-update restore
+/// therefore starts an installed, non-masked unit — see
+/// [`DaemonServiceState::expected_after_update`]. Non-update callers that must
+/// preserve a stopped snapshot use [`QuiescedDaemonLifecycle::finish`] rather
+/// than this function.
+///
 /// Callers hold a shared lifecycle lease, never the exclusive mutation lease.
 #[doc(hidden)]
 #[hotpath::measure(label = "daemon.service.restore")]
 pub fn restore_installed_service_after_update(previous_state: DaemonServiceState) -> Result<()> {
+    let previous_state = previous_state.expected_after_update();
     if !previous_state.is_running() || !cfg!(any(target_os = "linux", target_os = "macos", windows))
     {
         return Ok(());
