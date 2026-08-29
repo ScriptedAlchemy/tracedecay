@@ -1018,9 +1018,15 @@ fn compute_fingerprints(
                 ));
             };
             if start_byte >= end_byte || end_byte > source.len() {
-                return Err(redundancy_graph_problem(
-                    "verified redundancy source span is stale against the source file",
-                ));
+                // Carry the numbers: an out-of-range span is either a stale
+                // generation or a units mismatch between the span the
+                // extractor recorded and the bytes read back here, and those
+                // are indistinguishable without them.
+                return Err(redundancy_graph_problem(&format!(
+                    "verified redundancy source span is stale against the source file: \
+                     `{file_path}` span {start_byte}..{end_byte} over {} bytes",
+                    source.len()
+                )));
             }
             let Some(ts_node) = tree
                 .root_node()

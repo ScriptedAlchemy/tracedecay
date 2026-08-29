@@ -70,8 +70,8 @@ pub const QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1: &str = "score.semantic-dist
 /// Seated hybrid profiles calibrate
 /// [`QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1`]. Production search must
 /// stamp the same identity so a completed semantic batch can enter
-/// composition. A parallel daemon-only spelling is not a second admitted
-/// domain.
+/// composition. A parallel `score.semantic-distance.daemon.v1` spelling is
+/// not a second admitted domain.
 pub const QUERY_SEMANTIC_SCORE_DOMAIN_V1: &str = QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1;
 /// Descending-score bounds for the useful half of canonical cosine distance,
 /// scaled by one billion. They express nonnegative cosine similarity directly
