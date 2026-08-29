@@ -10,6 +10,18 @@ use std::collections::HashSet;
 #[cfg(unix)]
 mod shutdown;
 
+type CachedProjectServerFutureV1<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<Arc<crate::mcp::McpServer>>>> + Send + 'a>,
+>;
+type OpenProjectServerFutureV1<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>, bool)>,
+            > + Send
+            + 'a,
+    >,
+>;
+
 #[cfg(unix)]
 #[derive(Clone, Default)]
 pub(super) struct DaemonEngine {
@@ -423,13 +435,7 @@ impl DaemonEngine {
         &'a self,
         handshake: &'a DaemonHandshake,
         requirement: ProjectServerRequirement,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Option<Arc<crate::mcp::McpServer>>>>
-                + Send
-                + 'a,
-        >,
-    > {
+    ) -> CachedProjectServerFutureV1<'a> {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
         Box::pin(async move {
@@ -700,14 +706,7 @@ impl DaemonEngine {
         &'a self,
         handshake: &'a DaemonHandshake,
         cancellation: &'a CancellationToken,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>, bool)>,
-                > + Send
-                + 'a,
-        >,
-    > {
+    ) -> OpenProjectServerFutureV1<'a> {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
         Box::pin(async move {

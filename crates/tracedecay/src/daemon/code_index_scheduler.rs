@@ -2331,7 +2331,7 @@ enum CodeTextProjectionSlotV1 {
     HeadOpening,
     /// The resumable staging build; each wake advances one bounded slice
     /// under the slot lock.
-    Building(CodeTextArtifactBuildV1),
+    Building(Box<CodeTextArtifactBuildV1>),
 }
 
 impl CodeTextProjectionStateV1 {
@@ -2371,7 +2371,7 @@ impl<'a> TextHeadOpenClaimV1<'a> {
     /// immediately.
     fn install_build(
         &mut self,
-        build: CodeTextArtifactBuildV1,
+        build: Box<CodeTextArtifactBuildV1>,
     ) -> MutexGuard<'a, CodeTextProjectionSlotV1> {
         self.armed = false;
         let mut slot = self.state.lock_slot();
@@ -2403,7 +2403,7 @@ enum TextHeadOpenOutcomeV1 {
     Served,
     /// No published head was servable; the resumable staging build begins
     /// (or resumes) from its durable staging file.
-    Build(CodeTextArtifactBuildV1),
+    Build(Box<CodeTextArtifactBuildV1>),
 }
 
 fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
@@ -3611,7 +3611,7 @@ impl LatestCodeTextGenerationV1 {
             None,
             true,
         )?;
-        Ok(TextHeadOpenOutcomeV1::Build(initialized))
+        Ok(TextHeadOpenOutcomeV1::Build(Box::new(initialized)))
     }
 
     /// The durable-artifact journey: reopen a published head when one exists,
@@ -3945,7 +3945,7 @@ impl LatestCodeTextGenerationV1 {
             source_receipt: _,
             staging_path,
             _build_reservation: build_reservation,
-        } = finished;
+        } = *finished;
         // Close the builder's SQLite connection before content-addressing the
         // finalized staging file.
         drop(builder);

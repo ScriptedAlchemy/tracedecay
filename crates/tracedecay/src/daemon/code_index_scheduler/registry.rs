@@ -1122,37 +1122,6 @@ impl CodeIndexSchedulerRegistryV1 {
             .clone()
     }
 
-    /// Text slot only — no Git open, no freshness ladder, no wake.
-    #[cfg(test)]
-    pub(super) async fn latest_text_serving_for_test(
-        &self,
-        project_root: &Path,
-    ) -> Option<LatestCodeTextGenerationV1> {
-        let project_root = project_root.canonicalize().ok()?;
-        let text = {
-            let mounted = self.mounted.lock().await;
-            Arc::clone(&mounted.get(&project_root)?.text_generation)
-        };
-        text.read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Outstanding worker arrival for one mounted root.
-    #[cfg(test)]
-    pub(super) async fn has_pending_arrival_for_test(&self, project_root: &Path) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
-            return false;
-        };
-        let pending_wake = {
-            let mounted = self.mounted.lock().await;
-            mounted
-                .get(&project_root)
-                .map(|worktree| Arc::clone(&worktree.pending_wake))
-        };
-        pending_wake.is_some_and(|pending_wake| pending_wake.has_pending_arrival())
-    }
-
     #[cfg(test)]
     pub(super) fn install_cold_mount_admission_barrier(&self, project_root: &Path, callers: usize) {
         let project_root = project_root
@@ -3597,7 +3566,9 @@ impl CodeIndexSchedulerRegistryV1 {
             || worktree
                 .query_activation_redundancy
                 .as_ref()
-                .map(|redundancy| redundancy.configuration_revision())
+                .map(
+                    tracedecay_usecases::semantic_runtime::PreparedSemanticRedundancyAuthorityV1::configuration_revision,
+                )
                 != Some(expected_revision)
         {
             return Err(CodeIndexSchedulerErrorV1::Identity(
