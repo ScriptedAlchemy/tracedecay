@@ -9738,11 +9738,24 @@ async fn mount_with_retained_generation_verifies_cadence_promptly() {
     let refreshed = wait_for_generation_change(&registry, fixture.path(), &first_generation).await;
     assert_ne!(refreshed, first_generation);
 
-    let receipt = wait_for_event_to_ready(&registry).await;
-    assert!(
-        matches!(receipt.outcome, CodeIndexCadenceOutcomeV1::Published { .. }),
-        "stale retained generation must publish a refreshed generation"
-    );
+    // Early publish records the Published receipt on the source pass; a
+    // later graph/verify Noop can become `latest`. Wait for a Published
+    // receipt in the set, not only the newest one.
+    let published_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .event_to_ready_receipts()
+            .iter()
+            .any(|receipt| matches!(receipt.outcome, CodeIndexCadenceOutcomeV1::Published { .. }))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= published_deadline,
+            "stale retained generation must publish a refreshed generation"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     registry.shutdown().await;
 }
 
