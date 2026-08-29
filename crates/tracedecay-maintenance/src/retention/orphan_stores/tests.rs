@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use super::quarantine::{QuarantineRecoveryOutcome, recover_existing_store_quarantine};
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_global_db::tests::RegisteredGlobalDbTestRuntime;
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
