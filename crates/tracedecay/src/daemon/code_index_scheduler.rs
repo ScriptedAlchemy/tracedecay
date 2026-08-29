@@ -4293,11 +4293,11 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
     ) -> LatestCompleteCodeIndexV1 {
         let generation_id = generation.manifest().generation_id.clone();
         let mut progress_slot = CodeIndexBuildProgressSlotStateV1::default();
-        let text_progress_owner_epoch = progress_slot.replace_generation(generation_id);
+        let text_progress_owner_epoch = progress_slot.replace_generation(generation_id.clone());
         let metadata = Arc::new(
             VerifiedSealedTextGenerationMetadataV1::from_published_generation(&generation),
         );
-        LatestCompleteCodeIndexV1 {
+        let latest = LatestCompleteCodeIndexV1 {
             generation,
             text: LatestCodeTextGenerationV1 {
                 metadata,
@@ -4328,7 +4328,19 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             },
             record_index: Arc::new(OnceLock::new()),
             graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
+        };
+        if latest
+            .text
+            .text_artifact_store
+            .published_descriptor(&generation_id)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            let control = latest.text_execution_control();
+            let _ = latest.open_published_head_or_begin_build(&control);
         }
+        latest
     }
 }
 
