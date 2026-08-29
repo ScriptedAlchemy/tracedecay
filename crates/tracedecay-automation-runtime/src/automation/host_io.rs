@@ -95,10 +95,11 @@ pub fn uses_default_user_profile(home: &Path, profile_root: &Path) -> bool {
 pub fn export_managed_skills_to_agents(
     home: &Path,
     profile_root: &Path,
-) -> Vec<ManagedSkillExportReport> {
-    EXPORT_TO_AGENTS
-        .get()
-        .map_or_else(Vec::new, |export| export(home, profile_root))
+) -> Result<Vec<ManagedSkillExportReport>> {
+    match EXPORT_TO_AGENTS.get() {
+        Some(export) => Ok(export(home, profile_root)),
+        None => Err(unregistered("export_managed_skills_to_agents")),
+    }
 }
 
 #[hotpath::measure(label = "automation.host_io.export_hosts")]
@@ -106,10 +107,11 @@ pub fn export_managed_skills_to_agent_hosts(
     home: &Path,
     project_root: &Path,
     profile_root: &Path,
-) -> Vec<ManagedSkillExportReport> {
-    EXPORT_TO_AGENT_HOSTS
-        .get()
-        .map_or_else(Vec::new, |export| export(home, project_root, profile_root))
+) -> Result<Vec<ManagedSkillExportReport>> {
+    match EXPORT_TO_AGENT_HOSTS.get() {
+        Some(export) => Ok(export(home, project_root, profile_root)),
+        None => Err(unregistered("export_managed_skills_to_agent_hosts")),
+    }
 }
 
 pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
@@ -138,18 +140,20 @@ pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
 pub fn resolve_on_path(program: &str, path_var: Option<&OsStr>) -> Result<Option<PathBuf>> {
     match RESOLVE_ON_PATH.get() {
         Some(resolve) => resolve(program, path_var),
-        None => Ok(None),
+        None => Err(unregistered("resolve_on_path")),
     }
 }
 
-#[must_use]
-pub fn codex_agent_files() -> &'static [PluginFile] {
-    CODEX_AGENT_FILES.get().map_or(&[], |files| files())
+pub fn codex_agent_files() -> Result<&'static [PluginFile]> {
+    match CODEX_AGENT_FILES.get() {
+        Some(files) => Ok(files()),
+        None => Err(unregistered("codex_agent_files")),
+    }
 }
 
-pub fn with_host_config_write_intents<T>(root: PathBuf, effect: impl FnOnce() -> T) -> T {
+pub fn with_host_config_write_intents<T>(root: PathBuf, effect: impl FnOnce() -> T) -> Result<T> {
     let Some(with_intents) = WITH_WRITE_INTENTS.get() else {
-        return effect();
+        return Err(unregistered("with_host_config_write_intents"));
     };
     let mut effect = Some(effect);
     let mut slot = None;
@@ -159,8 +163,10 @@ pub fn with_host_config_write_intents<T>(root: PathBuf, effect: impl FnOnce() ->
         }
     });
     match slot {
-        Some(value) => value,
-        None => panic!("host I/O write-intent adapter must invoke the effect"),
+        Some(value) => Ok(value),
+        None => Err(TraceDecayError::Config {
+            message: "host-config write surface is unavailable: with_host_config_write_intents adapter did not invoke the effect".to_string(),
+        }),
     }
 }
 

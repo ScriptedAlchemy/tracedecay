@@ -6201,6 +6201,7 @@ dependencies = [
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-automation",
  "tracedecay-automation-runtime",
  "tracedecay-code-index",
  "tracedecay-domain",

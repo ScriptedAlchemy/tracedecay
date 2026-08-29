@@ -22,6 +22,7 @@ tower = "0.5"
 tracing = "0.1"
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
@@ -43,6 +44,7 @@ tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 hotpath = [
     "hotpath/hotpath",
     "tracedecay-agent-hosts/hotpath",
+    "tracedecay-automation/hotpath",
     "tracedecay-automation-runtime/hotpath",
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
@@ -62,6 +64,7 @@ hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-agent-hosts/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
     "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
@@ -81,6 +84,7 @@ hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-agent-hosts/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
     "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",

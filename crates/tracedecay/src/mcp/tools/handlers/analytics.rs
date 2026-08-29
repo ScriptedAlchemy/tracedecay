@@ -181,7 +181,7 @@ fn config_error(message: impl std::fmt::Display) -> TraceDecayError {
 /// Strips a `tracedecay_`/`mcp__tracedecay__` prefix and returns the bucket
 /// name for a tool. Unknown/non-tracedecay tool names bucket as `"other"`.
 fn tool_tier(tool_name: &str) -> &'static str {
-    let normalized = tracedecay_agent_hosts::analytics::normalize_tool_name(tool_name);
+    let normalized = tracedecay_automation::analytics::normalize_tool_name(tool_name);
     let normalized = normalized
         .strip_prefix("tracedecay_")
         .unwrap_or(normalized.as_str());

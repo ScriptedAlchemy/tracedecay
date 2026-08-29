@@ -28,7 +28,7 @@ struct ManagedAgentManifest {
     exported: Vec<ManagedAgentExportEntry>,
 }
 
-fn agents() -> &'static [crate::agents::plugin_bundle::PluginFile] {
+fn agents() -> Result<&'static [crate::agents::plugin_bundle::PluginFile]> {
     crate::agents::plugin_bundle::codex_agent_files()
 }
 
@@ -44,8 +44,9 @@ pub fn install_codex_managed_agents(home: &Path) -> Result<ManagedAgentInstallSu
     fs::create_dir_all(&agents_dir)?;
     remove_stale_managed_agents(&agents_dir)?;
 
-    let mut exported = Vec::with_capacity(agents().len());
-    for agent in agents() {
+    let agents = agents()?;
+    let mut exported = Vec::with_capacity(agents.len());
+    for agent in agents {
         let id = generated_agent_id(agent.relative);
         let path = agents_dir.join(agent.relative);
         safe_write_text_file(&path, agent.contents, None)?;
@@ -101,12 +102,12 @@ fn remove_managed_agent_file(path: &Path) {
     crate::agents::safe_remove_host_file(path).ok();
 }
 
-pub fn managed_agent_label(agent_id: &str) -> Option<&'static str> {
+pub fn managed_agent_label(agent_id: &str) -> Result<Option<&'static str>> {
     let normalized = agent_id.strip_prefix("tracedecay-").unwrap_or(agent_id);
-    agents()
+    Ok(agents()?
         .iter()
         .map(|agent| generated_agent_id(agent.relative))
-        .find(|id| *id == normalized)
+        .find(|id| *id == normalized))
 }
 
 fn agents_dir(home: &Path) -> PathBuf {
@@ -114,7 +115,7 @@ fn agents_dir(home: &Path) -> PathBuf {
 }
 
 fn remove_stale_managed_agents(agents_dir: &Path) -> Result<()> {
-    let keep: BTreeSet<PathBuf> = agents()
+    let keep: BTreeSet<PathBuf> = agents()?
         .iter()
         .map(|agent| agents_dir.join(agent.relative))
         .chain([agents_dir.join(MANIFEST_FILE)])

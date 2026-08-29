@@ -83,6 +83,7 @@ fn interrupted_manifest_atomic_write_keeps_v1_authoritative_and_public_retry_com
     let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
         apply_pending_materialization(&dir, &pending)
     })
+    .expect("host I/O write-intent surface is registered in tests")
     .unwrap_err();
     match error {
         TraceDecayError::Config { message } => {

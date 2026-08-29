@@ -59,8 +59,6 @@ pub(crate) fn register_test_schema_installer() {
 pub mod automation;
 pub mod ports;
 
-pub(crate) mod analytics;
-
 pub(crate) use tracedecay_usecases as application;
 pub(crate) use tracedecay_usecases::request_identity;
 pub(crate) use tracedecay_runtime_core::{

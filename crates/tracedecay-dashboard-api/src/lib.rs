@@ -12,7 +12,6 @@
 //! `/api/capabilities` advertises which current TraceDecay authorities are
 //! mounted for the selected project.
 
-pub use tracedecay_agent_hosts::analytics;
 pub use tracedecay_usecases as application;
 pub use tracedecay_usecases::{git_query, graph, request_identity, user_config};
 pub mod tracedecay;

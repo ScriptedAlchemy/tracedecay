@@ -131,20 +131,23 @@ fn backend_executable_identity(config: &AutomationConfig) -> Option<Value> {
 
 fn codex_executable_identity(spec: &str) -> Value {
     match locate_backend_executable(spec) {
-        Some(path) => opened_executable_identity(spec, &path)
+        Ok(Some(path)) => opened_executable_identity(spec, &path)
             .unwrap_or_else(|| unreadable_executable_identity(spec, Some(path.as_path()))),
-        None => unreadable_executable_identity(spec, None),
+        Ok(None) => unreadable_executable_identity(spec, None),
+        Err(error) => json!({
+            "spec": spec,
+            "state": "host_io_unavailable",
+            "error": error.to_string(),
+        }),
     }
 }
 
-fn locate_backend_executable(spec: &str) -> Option<PathBuf> {
+fn locate_backend_executable(spec: &str) -> Result<Option<PathBuf>> {
     let spec_path = Path::new(spec);
     if spec_path.is_absolute() || spec.contains(std::path::MAIN_SEPARATOR) {
-        return spec_path.is_file().then(|| spec_path.to_path_buf());
+        return Ok(spec_path.is_file().then(|| spec_path.to_path_buf()));
     }
     crate::agents::host_cli::resolve_on_path(spec, std::env::var_os("PATH").as_deref())
-        .ok()
-        .flatten()
 }
 
 fn unreadable_executable_identity(spec: &str, path: Option<&Path>) -> Value {
