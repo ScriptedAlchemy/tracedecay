@@ -120,4 +120,6 @@ pub(crate) use redundancy::{
 pub use retention::SemanticRetainedVectorGenerationsV1;
 
 #[cfg(test)]
+mod process_local_release_tests;
+#[cfg(test)]
 mod tests;

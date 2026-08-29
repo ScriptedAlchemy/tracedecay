@@ -4,15 +4,11 @@
 //! `session_registry` stays here because it stores `RegisteredGlobalDbLeaseV1`
 //! on its public surface, and `tracedecay-global-db` already depends on the
 //! kernel — taking that edge would be a Cargo cycle. It also reaches
-//! `daemon::{authority, code_index_scheduler, profile_identity, transport}`
-//! and `log_daemon_event`. See `tracedecay_runtime_core`'s crate-level doc.
+//! `daemon::{authority, profile_identity, transport}` and `log_daemon_event`.
+//! See `tracedecay_runtime_core`'s crate-level doc.
 
 pub(crate) use tracedecay_runtime_core::store_runtime::*;
 
-pub(crate) mod code_graph_seat;
-pub(crate) use code_graph_seat::{
-    CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
-};
 pub(crate) mod session_registry;
 
 /// Installs the root-owned registered global/session schema installer into the

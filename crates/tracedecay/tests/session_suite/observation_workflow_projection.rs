@@ -13,13 +13,13 @@ use tracedecay_domain::{
     RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite, ProjectionPersistOutcome, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::global_message;
 

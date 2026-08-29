@@ -9,6 +9,7 @@ use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
     ProviderId, SessionId,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::claude::ClaudeSource;
 use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
 use tracedecay_sessions::runtime::codex::CodexSource;
@@ -19,7 +20,6 @@ use tracedecay_sessions::runtime::cursor::{
 use tracedecay_sessions::runtime::source::{TranscriptIngestError, TranscriptSource};
 use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionProvider};
 use tracedecay_store::ObservationReplayRequest;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::claude::write_claude_transcript;
 use crate::cline_like::{vscode_storage_root, write_task};

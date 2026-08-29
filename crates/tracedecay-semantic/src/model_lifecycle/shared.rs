@@ -10,14 +10,23 @@ pub fn shared_lifecycle_owner(lifecycle_root: &Path) -> Option<Arc<SemanticModel
         })
         .clone()
 }
-/// Apply config selection and queue explicitly enabled background acquisition.
-pub fn apply_config_and_queue_startup(
+fn apply_config_selection_to_owner(
+    owner: &SemanticModelLifecycleOwnerV1,
+    selected_model: Option<&str>,
+    auto_download: bool,
+) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
+    owner.select_model(selected_model, auto_download)
+}
+
+/// Apply the configured selection without fetching model bytes.
+///
+/// `auto_download` authorizes a later demand-triggered acquisition; project
+/// open itself only publishes the selected lifecycle state.
+pub fn apply_config_selection(
     lifecycle_root: &Path,
     selected_model: Option<&str>,
     auto_download: bool,
 ) -> Option<SemanticModelLifecycleStatusV1> {
     let owner = shared_lifecycle_owner(lifecycle_root)?;
-    let _ = owner.select_model(selected_model, auto_download);
-    let _ = owner.enqueue_startup_acquisition_if_needed();
-    Some(owner.status())
+    apply_config_selection_to_owner(&owner, selected_model, auto_download).ok()
 }

@@ -1064,7 +1064,7 @@ impl MaintenanceCoordinator {
         profile_root: PathBuf,
         profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
-        code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: crate::config::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
     ) -> Self {
@@ -1125,7 +1125,7 @@ impl MaintenanceCoordinator {
         profile_root: PathBuf,
         profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
-        code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: crate::config::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
         interval: Duration,
@@ -1150,7 +1150,7 @@ impl MaintenanceCoordinator {
         profile_root: &Path,
         profile_database: &tracedecay_global_db::RegisteredGlobalDb,
         administration: &StoreAdministration,
-        code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: &crate::config::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
         continuation: Option<MaintenanceContinuation>,
@@ -2518,5 +2518,40 @@ mod tests {
             classify_cold_store_state(true, true, true),
             MaintenanceStoreOutcomeV1::Cancelled
         );
+    }
+
+    #[test]
+    fn debris_retention_enables_maintenance_without_orphan_gc() {
+        let mut retention = crate::config::RetentionConfig::default();
+        retention.session_lcm.enabled = false;
+        retention.observation.enabled = false;
+        retention.orphan_store_gc_days = None;
+        retention.incident_debris_retention_days = Some(30);
+        retention.compaction = None;
+
+        assert!(super::retention_maintenance_enabled(&retention));
+    }
+
+    #[test]
+    fn soft_budget_alone_never_enables_destructive_maintenance() {
+        let mut retention = crate::config::RetentionConfig::default();
+        retention.session_lcm.enabled = false;
+        retention.observation.enabled = false;
+        retention.orphan_store_gc_days = None;
+        retention.incident_debris_retention_days = None;
+        retention.compaction = None;
+        retention
+            .store_soft_budgets_bytes
+            .insert("sessions.db".to_string(), 1);
+
+        assert!(
+            !super::retention_maintenance_enabled(&retention),
+            "soft budgets are Doctor findings, never a retention trigger"
+        );
+    }
+
+    #[test]
+    fn retention_window_conversion_never_wraps_negative() {
+        assert_eq!(super::retention_window_secs(u64::MAX), i64::MAX);
     }
 }

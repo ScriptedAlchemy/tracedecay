@@ -5,6 +5,7 @@ use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(unix)]
 use tracedecay_agent_hosts::hooks::cursor_pre_compact_via_daemon;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::cursor::{
     CursorSweepSource, CursorTranscriptIngestStats, cursor_project_slug,
     ingest_cursor_transcript_event as ingest_cursor_transcript_event_for_project,
@@ -14,7 +15,6 @@ use tracedecay_sessions::runtime::cursor::{
     try_ingest_cursor_project_sweep_capped as try_ingest_cursor_project_sweep_capped_for_project,
 };
 use tracedecay_sessions::runtime::source::TranscriptIngestResult;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 #[cfg(unix)]
 use crate::common::spawn_tracedecay_daemon;

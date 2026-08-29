@@ -91,9 +91,7 @@ impl<T: crate::handle::SessionTemporalQuery> crate::handle::SessionTemporalQuery
         &self,
         sql: &str,
         params: P,
-    ) -> impl std::future::Future<
-        Output = Result<Rows, tracedecay_runtime_core::db::engine::Error>,
-    > + Send
+    ) -> impl std::future::Future<Output = Result<Rows, tracedecay_runtime_core::db::engine::Error>> + Send
     where
         P: IntoParams + Send,
     {
@@ -109,9 +107,7 @@ impl<T: crate::handle::SessionTemporalExec> crate::handle::SessionTemporalExec
         &self,
         sql: &str,
         params: P,
-    ) -> impl std::future::Future<
-        Output = Result<u64, tracedecay_runtime_core::db::engine::Error>,
-    > + Send
+    ) -> impl std::future::Future<Output = Result<u64, tracedecay_runtime_core::db::engine::Error>> + Send
     where
         P: IntoParams + Send,
     {
@@ -121,9 +117,8 @@ impl<T: crate::handle::SessionTemporalExec> crate::handle::SessionTemporalExec
     fn execute_batch(
         &self,
         sql: &str,
-    ) -> impl std::future::Future<
-        Output = Result<(), tracedecay_runtime_core::db::engine::Error>,
-    > + Send {
+    ) -> impl std::future::Future<Output = Result<(), tracedecay_runtime_core::db::engine::Error>> + Send
+    {
         crate::handle::SessionTemporalExec::execute_batch(self.inner, sql)
     }
 }
@@ -1793,7 +1788,10 @@ async fn multi_batch_refresh_progress_survives_restart_under_guard() {
 /// `session_temporal_observation_effects` requires: its insert guard aborts
 /// unless `(observation_id, observation_sequence, receipt_id)` already names a
 /// committed observation.
-async fn seed_effect_observation(conn: &impl crate::handle::SessionTemporalExec, observation: &DurableObservationV1) -> u64 {
+async fn seed_effect_observation(
+    conn: &impl crate::handle::SessionTemporalExec,
+    observation: &DurableObservationV1,
+) -> u64 {
     let receipt = observation.receipt();
     conn.execute(
         "INSERT INTO sanitization_receipts

@@ -1,7 +1,9 @@
 //! Daemon client admission: shared client deadlines, capacity admission, and
 //! typed saturation rejections.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -109,6 +111,16 @@ pub(crate) struct ParkableConnectionAdmission {
     held: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
 }
 
+impl tracedecay_code_index_runtime::AdmissionParkLeaseV1 for ParkableConnectionAdmission {
+    fn release(&self) -> bool {
+        ParkableConnectionAdmission::release(self)
+    }
+
+    fn reacquire(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(ParkableConnectionAdmission::reacquire(self))
+    }
+}
+
 impl ParkableConnectionAdmission {
     fn new(
         permits: Arc<tokio::sync::Semaphore>,
@@ -155,6 +167,22 @@ impl ParkableConnectionAdmission {
 
 tokio::task_local! {
     static CONNECTION_ADMISSION: Arc<ParkableConnectionAdmission>;
+}
+
+async fn with_dual_connection_admission_scope<F>(
+    lease: Arc<ParkableConnectionAdmission>,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    let runtime_lease: Arc<dyn tracedecay_code_index_runtime::AdmissionParkLeaseV1> = lease.clone();
+    CONNECTION_ADMISSION
+        .scope(
+            lease,
+            tracedecay_code_index_runtime::CONNECTION_ADMISSION.scope(runtime_lease, future),
+        )
+        .await
 }
 
 /// Run `future` without holding a general admission slot across a long park.
@@ -209,7 +237,7 @@ where
     F: std::future::Future,
 {
     match lease {
-        Some(lease) => CONNECTION_ADMISSION.scope(lease, future).await,
+        Some(lease) => with_dual_connection_admission_scope(lease, future).await,
         None => future.await,
     }
 }
@@ -226,12 +254,11 @@ where
 {
     if permit.class == DaemonClientAdmissionClass::General {
         let lease = Arc::clone(&permit.lease);
-        return CONNECTION_ADMISSION
-            .scope(lease, async move {
-                let _permit = permit;
-                future.await
-            })
-            .await;
+        return with_dual_connection_admission_scope(lease, async move {
+            let _permit = permit;
+            future.await
+        })
+        .await;
     }
     let _permit = permit;
     future.await
@@ -483,7 +510,8 @@ pub(crate) fn is_mcp_discovery_method(method: &str) -> bool {
 }
 
 pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
-    if tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(request_line).is_some()
+    if tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(request_line)
+        .is_some()
     {
         return true;
     }

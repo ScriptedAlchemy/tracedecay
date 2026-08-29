@@ -23,12 +23,12 @@ pub(crate) fn shared_lifecycle_owner() -> Option<Arc<SemanticModelLifecycleOwner
     tracedecay_semantic::shared_lifecycle_owner(&default_lifecycle_root()?)
 }
 
-/// Apply config selection and queue explicitly enabled background acquisition.
-pub(crate) fn apply_config_and_queue_startup(
+/// Apply config selection without fetching model bytes.
+pub(crate) fn apply_config_selection(
     selected_model: Option<&str>,
     auto_download: bool,
 ) -> Option<tracedecay_semantic::SemanticModelLifecycleStatusV1> {
-    tracedecay_semantic::apply_config_and_queue_startup(
+    tracedecay_semantic::apply_config_selection(
         &default_lifecycle_root()?,
         selected_model,
         auto_download,

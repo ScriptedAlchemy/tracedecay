@@ -20,7 +20,7 @@ use tracedecay_usecases::code_index::{
 };
 
 use super::project_code_index_ignored_dependency_admission_port;
-use crate::daemon::code_index_scheduler::{
+use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
 };
 

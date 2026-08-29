@@ -8,6 +8,7 @@ use tracedecay_domain::{
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1,
     UtcMicros,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
     SessionRefreshCompletionRequestV1, SessionRefreshDispositionV1, SessionRefreshFailureRequestV1,
@@ -17,7 +18,6 @@ use tracedecay_store::{
     SessionTemporalSnapshotRequestV1,
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 fn session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()

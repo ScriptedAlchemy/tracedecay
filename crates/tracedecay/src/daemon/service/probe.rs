@@ -158,7 +158,8 @@ fn query_daemon_identity_stream(
     });
     let mut preamble = String::new();
     if let Some(auth_token) = auth_token {
-        preamble.push_str(&tracedecay_daemon_protocol::DaemonAuthPreface::new(auth_token).to_line()?);
+        preamble
+            .push_str(&tracedecay_daemon_protocol::DaemonAuthPreface::new(auth_token).to_line()?);
         preamble.push('\n');
     }
     preamble.push_str(&handshake.to_line()?);

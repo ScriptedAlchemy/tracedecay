@@ -1175,7 +1175,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
         Ok(())
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.embedding.open_session")]
     fn open_session(
         &self,
         authority: &AdmittedProjectionArtifactV1,
@@ -1230,7 +1230,7 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
         self.authority.resident_bytes_estimate()
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.embedding.embed_batch")]
     fn embed_batch(
         &mut self,
         batch: &BoundedSanitizedTextBatchV1,

@@ -13,6 +13,9 @@ use tracedecay_application::{
     WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkProductSelectionScopeV1,
     WorkTaskSessionEvidenceV1, WorkTaskSessionHydrationStateV1,
 };
+use tracedecay_code_index_retention::code_index_generations::{
+    DurablePublicationPointerV1, scoped_code_index_store_root,
+};
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationValueV1,
     SEMANTIC_RUNTIME_SETTING_KEY, SettingKey,
@@ -30,9 +33,6 @@ use tracedecay_sdk::operations::{
 use tracedecay_semantic::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1,
     SemanticResourceCeilings,
-};
-use tracedecay_usecases::retention::code_index_generations::{
-    DurablePublicationPointerV1, scoped_code_index_store_root,
 };
 use tracedecay_usecases::semantic_runtime::{
     SemanticFallbackReasonV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,

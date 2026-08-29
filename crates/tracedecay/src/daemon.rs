@@ -17,7 +17,6 @@ use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::server::{
     McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, SERVER_INSTRUCTIONS,
@@ -36,20 +35,21 @@ use scheduler::{
     automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
     run_automation_scheduler_tick, scheduler_task_log_fields,
 };
-use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
-use tracedecay_runtime_core::cancellation::CancellationToken;
-pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
     BrokerListener, BrokerStream, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
     DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome, DaemonInvocationRequest,
     DaemonInvocationResponse, default_loopback_endpoint, parse_daemon_invocation_request,
 };
+pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 #[cfg(unix)]
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
     ensure_private_socket_parent, unix_socket_path_within_limit,
 };
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub use tracedecay_daemon_protocol::SOCKET_ENV;
@@ -146,16 +146,16 @@ mod branch_admin;
 mod broker_stream_transport;
 use broker_stream_transport::BrokerStreamTransport;
 mod callable_code_authorization;
-mod code_index_branch_diff;
-use code_index_branch_diff::code_index_branch_diff_executor;
-mod code_index_executor;
-use code_index_executor::code_index_search_executor;
-pub(crate) mod code_index_task_support;
+use tracedecay_code_index_runtime::code_index_branch_diff::code_index_branch_diff_executor;
+use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
 #[cfg(test)]
-use code_index_executor::{code_index_search_display_binding, mcp_search_request_termination};
+use tracedecay_code_index_runtime::code_index_executor::{
+    code_index_search_display_binding, mcp_search_request_termination,
+};
 #[cfg(test)]
-use code_index_task_support::{code_index_scope_unavailable, code_index_search_hydration_budget};
-pub(crate) mod code_index_scheduler;
+use tracedecay_code_index_runtime::code_index_task_support::{
+    code_index_scope_unavailable, code_index_search_hydration_budget,
+};
 mod connection_serving;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
@@ -206,9 +206,6 @@ pub(crate) use dashboard_configuration_test_runtime::{
 pub(crate) mod query_authority_provider;
 #[cfg(test)]
 pub(crate) mod retained_test_support;
-mod semantic_activation_reconciler;
-mod semantic_evaluation;
-mod semantic_evaluation_shutdown;
 mod shutdown_coordination;
 mod shutdown_orchestration;
 mod store_shutdown;
@@ -221,9 +218,6 @@ pub(crate) use core_lifecycle::*;
 pub use core_logging::*;
 pub use core_proxy::*;
 pub(crate) use shutdown_coordination::ShutdownStatus;
-mod git_transactions;
-#[cfg(unix)]
-mod git_watch;
 mod github_credential_lifecycle;
 mod graph_resolution;
 use graph_resolution::retained_project_server_resolver;
@@ -404,6 +398,20 @@ pub(crate) use service::{installed_service_state, unavailable_daemon_socket_advi
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tracedecay-code-index-runtime/src/code_index_scheduler/ignored_dependencies_tests.rs"]
+#[allow(clippy::expect_used)]
+mod code_index_ignored_dependencies_tests;
+
+#[cfg(test)]
+#[path = "../../tracedecay-code-index-runtime/src/code_index_scheduler/registry/runtime_generation_census_tests.rs"]
+#[allow(clippy::expect_used)]
+mod code_index_runtime_generation_census_tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod code_index_runtime_graph_activation_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

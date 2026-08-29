@@ -25,17 +25,27 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ChunkGenerationBindingV1, ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1,
-    CodeSearchChunkId, CodeSearchChunkV1, CodeSearchDocumentV1, ComponentVersion, ContentDigest,
-    ExtractorRevision, FileOccurrenceId, GenerationSealV1, GrammarRevision, LanguageId,
-    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, ProjectId, RepositoryId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros,
-    ValidatedCodeSnapshotV1, canonical_sha256,
+    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeSearchChunkId,
+    CodeSearchChunkV1, ComponentVersion, ContentDigest, ExtractorRevision, FileOccurrenceId,
+    GenerationSealV1, GrammarRevision, LanguageId, LanguageRegistryRevision, ManifestDigest,
+    PrivacyDomainId, ProjectId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SnapshotFileDispositionV1, UtcMicros, canonical_sha256,
 };
 
 use super::capabilities::expected_seal_digest;
-use super::intake::INTAKE_DIGEST_SEPARATOR;
+use super::intake::{INTAKE_DIGEST_SEPARATOR, ValidatedCodeSnapshotV1};
 use super::languages::LanguageRegistry;
+use crate::chunks::CodeSearchDocumentV1;
+
+/// A chunk-to-generation binding asserted by the index. Every eligible
+/// chunk names exactly one code generation and file occurrence.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct ChunkGenerationBindingV1 {
+    pub chunk_id: CodeSearchChunkId,
+    pub generation_id: CodeGenerationId,
+    pub file_occurrence_id: FileOccurrenceId,
+}
 
 /// Identity of this deterministic generation planner, recorded on every seal.
 pub const GENERATION_PLANNER_ID: &str = "code-index-generation-planner.v1";
@@ -729,11 +739,12 @@ mod tests {
     use super::*;
     use tracedecay_domain::{
         BoundedSanitizedText, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-        CodeSearchEligibilityV1, LanguageDescriptorRevision, PolicyRevisionId,
-        SanitizationReceiptId, SensitivityDecision, SensitivityLevelV1, SourceSpan,
+        LanguageDescriptorRevision, PolicyRevisionId, SanitizationReceiptId, SensitivityDecision,
+        SensitivityLevelV1, SourceSpan,
     };
 
     use crate::capabilities::{BaseCapabilityEmitter, CodeIndexCapabilityEmitter};
+    use crate::chunks::CodeSearchEligibilityV1;
     use crate::languages::StaticLanguageRegistry;
     use tracedecay_domain::{CoverageSummaryV1, LanguageDescriptorV1};
 

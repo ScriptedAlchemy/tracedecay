@@ -8,13 +8,13 @@ use tracedecay_domain::{
     AnchorProvenanceRelationV2, MessageOccurrenceRecordV1, RetrievalGrainV1, SessionId,
     TemporalModeV1,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     ObservationProjectionStore, ObservationStore, SessionGenerationActivationRequestV1,
     SessionRetrievalStore, SessionTemporalProjectionStore, SessionTemporalRetrievalRequestV1,
     SessionTemporalSnapshotRequestV1,
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::temporal_projection::{
     assertion, batch, begin_candidate, generation, occurrence, parent_message_copy,

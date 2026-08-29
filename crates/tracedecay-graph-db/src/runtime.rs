@@ -164,6 +164,7 @@ impl GraphDb {
             FormatState::load(&database)
         )?;
         let quarantined_projections = load_quarantined_projections(&database)?;
+        crate::recovery::collapse_replayed_wal(&database);
         let graph = Arc::new(Self {
             inner: Arc::new(Inner {
                 database: RwLock::new(Some(database)),

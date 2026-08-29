@@ -860,7 +860,7 @@ impl DaemonConfigurationRuntimeRegistrar {
                     grants,
                     semantic_operation: Arc::new(OnceLock::new()),
                     semantic_evaluation_workers: Arc::new(
-                        crate::daemon::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::default(),
+                        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::default(),
                     ),
                 },
             )
@@ -895,7 +895,7 @@ impl DaemonConfigurationRuntimeRegistrar {
         &self,
         project_root: &Path,
         reconciler: Arc<
-            crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
+            tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
         >,
     ) -> Result<(), TraceDecayError> {
         self.service

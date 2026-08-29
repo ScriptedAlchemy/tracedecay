@@ -2,7 +2,7 @@ use std::path::Path;
 
 use super::*;
 
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.lcm.expand", future = true)]
 pub async fn expand(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,

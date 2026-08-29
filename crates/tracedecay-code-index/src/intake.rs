@@ -10,12 +10,33 @@ use std::{collections::BTreeMap, ops::Deref};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    ContentDigest, DomainError, FileOccurrenceId, IntakeRejectionV1, ProjectId, RefId,
-    RepositoryId, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
-    ValidatedCodeFileV1, ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
+    ContentDigest, DomainError, FileOccurrenceId, ManifestDigest, ProjectId, RefId, RepositoryId,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
+    ValidatedCodeFileV1, WorktreeId, canonical_sha256,
 };
 
 use super::languages::LanguageRegistry;
+
+/// A snapshot that passed intake validation: receipt-bound, single-snapshot,
+/// and sanitized. Constructed only by [`CodeIndexIntake::validate`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ValidatedCodeSnapshotV1 {
+    pub snapshot: SanitizedCodeSnapshotV1,
+    pub intake_digest: ManifestDigest,
+    pub validated_at: UtcMicros,
+}
+
+/// Why intake rejected a snapshot. Reject before parsing.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "rejection", content = "detail", rename_all = "snake_case")]
+pub enum IntakeRejectionV1 {
+    MissingReceipt,
+    UnsanitizedInput,
+    StaleSnapshot,
+    MixedSnapshot,
+    IncompatibleSanitizerRevision,
+}
 
 /// The intake validation contract (Plan 25 phase 2). This is the only legal
 /// entry into the indexer: architecture tests construct the indexer through

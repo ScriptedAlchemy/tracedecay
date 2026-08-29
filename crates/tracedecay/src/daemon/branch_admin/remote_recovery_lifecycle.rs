@@ -24,8 +24,9 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     session_temporal_refresh_schedulers: Arc<
         super::super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
     >,
-    git_index_transaction_services:
-        Arc<super::super::git_transactions::DaemonGitIndexTransactionServiceRegistry>,
+    git_index_transaction_services: Arc<
+        tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry,
+    >,
     native_integration_services:
         Arc<crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar>,
     session_sync_service: Arc<super::super::session_sync::DaemonSessionSyncService>,

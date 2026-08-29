@@ -125,9 +125,8 @@ pub use registered::{
     PendingDeliverySourceReceiptV1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
     RegisteredGlobalDbOwnerV1, RegisteredGlobalDbWeakLeaseIssuerV1,
     RegisteredGlobalDbWriteTransaction, RegisteredGlobalDbWriterConnection,
-    RegisteredWorkApplicationServicesV1,
-    RegisteredWorkProductServicesV1, RegisteredWorkflowApplicationServicesV1,
-    WorkAttemptDeliveryCensusReadV1,
+    RegisteredWorkApplicationServicesV1, RegisteredWorkProductServicesV1,
+    RegisteredWorkflowApplicationServicesV1, WorkAttemptDeliveryCensusReadV1,
 };
 pub use registered_analytics::ObservabilityRetentionReceiptV1;
 pub use registered_lcm_privacy::{LcmPrivacyRescanOutcomeV1, LcmPrivacyRescanReceiptV1};

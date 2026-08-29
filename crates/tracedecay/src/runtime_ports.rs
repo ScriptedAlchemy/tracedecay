@@ -36,7 +36,19 @@ pub fn register_runtime_ports() -> Result<()> {
     register_agent_host_ports();
     crate::agents::register_mcp_tool_catalog_ports()?;
     crate::dashboard::register_runtime_ports();
+    tracedecay_code_index_runtime::install_application_catalog_snapshot(
+        compose_application_catalog_snapshot,
+    );
     Ok(())
+}
+
+fn compose_application_catalog_snapshot() -> std::result::Result<
+    tracedecay_tool_catalog::CatalogSnapshotV1,
+    tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
+> {
+    crate::catalog_composition::build_application_catalog_snapshot().map_err(|error| {
+        tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -71,8 +83,8 @@ fn schedule_user_session_review<'a>(
 fn unregistered_admission(
     scope: tracedecay_sessions::host_ports::unregistered_admission::Scope,
 ) -> Box<dyn tracedecay_sessions::admission::HostAdmission> {
+    use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
     use tracedecay_sessions::host_ports::unregistered_admission::Scope;
-    use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 
     let authorities = match scope {
         Scope::Project(project_id) => {

@@ -14,11 +14,11 @@ use tracedecay_domain::{
     CanonicalUnknownStateV1, ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1,
     ProviderUsageModelV1, ProviderUsageScopeV1,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::cursor::{CursorSweepSource, cursor_project_slug};
 use tracedecay_sessions::runtime::cursor_composer::CursorComposerSource;
 use tracedecay_store::ObservationReplayRequest;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{

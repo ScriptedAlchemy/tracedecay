@@ -1,5 +1,5 @@
 use tracedecay_domain::UtcMicros;
-use tracedecay_usecases::host_admission::HostAdmissionStatus;
+use tracedecay_sessions::admission::HostAdmissionStatus;
 
 use super::super::ingest::complete_ingest_admission;
 use super::super::test_support::*;

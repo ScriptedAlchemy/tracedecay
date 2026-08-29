@@ -11,10 +11,7 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 use super::super::query::{PERSIST_OPERATION, generation_i64, storage, storage_message};
 use super::super::rebuild::checkpoint_relation_rebuild_control;
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.rebuild_derived"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.projection.rebuild_derived")]
 pub(super) async fn rebuild_derived_evidence(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -41,8 +38,7 @@ pub(super) async fn rebuild_derived_evidence(
     checkpoint_relation_rebuild_control(control)?;
 
     let occurrences = load_occurrence_refs(conn, batch.session_id(), generation, control).await?;
-    hotpath::gauge!("session_temporal.derived.occurrence_rows")
-        .inc(occurrences.len() as u64);
+    hotpath::gauge!("session_temporal.derived.occurrence_rows").inc(occurrences.len() as u64);
     if occurrences.is_empty() {
         return Ok(());
     }
@@ -51,8 +47,7 @@ pub(super) async fn rebuild_derived_evidence(
     };
     let derived =
         derive_session_evidence_from_occurrences(batch.session_id(), &occurrences, &policy)?;
-    hotpath::gauge!("session_temporal.derived.evidence_records")
-        .inc(derived.len() as u64);
+    hotpath::gauge!("session_temporal.derived.evidence_records").inc(derived.len() as u64);
     for record in derived {
         checkpoint_relation_rebuild_control(control)?;
         hotpath::gauge!("session_temporal.derived.member_rows")

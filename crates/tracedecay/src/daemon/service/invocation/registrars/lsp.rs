@@ -64,7 +64,9 @@ impl DaemonLspOwnerRegistrar {
         scope_grant: CapabilityGrantSnapshot,
         registered_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         database: Database,
-        code_index: Arc<crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1>,
+        code_index: Arc<
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        >,
         runtime: tokio::runtime::Handle,
         diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
         languages: &[String],

@@ -35,10 +35,10 @@ use tracedecay_runtime_core::db::{
     DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
 };
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
 
 mod code_graph;
 mod code_graph_manifest;
@@ -54,7 +54,6 @@ mod terminal_tasks;
 use maintenance::RegisteredSchemaConvergenceMaintenance;
 use retained_hook_tasks::RetainedHookTasks;
 
-pub(crate) use code_graph::RetainedCodeGraphRuntimeV1;
 pub(crate) use profile_memory::open_user_memory_db;
 
 /// Sanity ceiling on concurrently mounted project runtime owners, not a bound

@@ -5,6 +5,7 @@
 //! Unix broker, the portable broker, and the in-process test harness.
 
 use super::*;
+use tracedecay_code_index_runtime::code_index_scheduler;
 
 mod code_index_activation;
 mod runtime;
@@ -463,11 +464,13 @@ async fn production_project_server_inner(
         invocation.code_index_schedulers.clone(),
         code_search_project_id.clone(),
         read_admission_provider.clone(),
+        project_open_owners::DaemonCodeIndexScopeResolverV1,
     );
     let code_index_branch_diff_executor = code_index_branch_diff_executor(
         invocation.code_index_schedulers.clone(),
         code_search_project_id.clone(),
         read_admission_provider,
+        project_open_owners::DaemonCodeIndexScopeResolverV1,
     );
     let dashboard_code_index_freshness_reader =
         project_dashboard_freshness_reader(invocation.code_index_schedulers.clone());
@@ -507,13 +510,14 @@ async fn production_project_server_inner(
     let dashboard_feedback_status_reader = crate::dashboard::feedback_api::feedback_status_reader(
         invocation.feedback_runtime_registrar(),
     );
-    let application_invocation_executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor> =
-        Arc::new(InProcessDaemonInvocationExecutor::new(
-            invocation.clone(),
-            store_administration.clone(),
-            canonical_project_path.to_path_buf(),
-            code_search_scope.clone(),
-        ));
+    let application_invocation_executor: Arc<
+        dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    > = Arc::new(InProcessDaemonInvocationExecutor::new(
+        invocation.clone(),
+        store_administration.clone(),
+        canonical_project_path.to_path_buf(),
+        code_search_scope.clone(),
+    ));
     let transcript_source_home = daemon_transcript_source_home(profile_identity.profile_root());
     let retained_server_resolver = retained_project_server_resolver(store_administration.clone());
     let mut core_context = crate::mcp::server::McpServerConstructionContext::daemon_owned_core(
@@ -682,7 +686,7 @@ async fn production_project_server_inner(
         let semantic_startup_project = canonical_project_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let started = Instant::now();
-            let _ = crate::semantic_code::apply_config_and_queue_startup(
+            let _ = crate::semantic_code::apply_config_selection(
                 semantic_startup_selection.as_deref(),
                 semantic_auto_download_enabled,
             );
@@ -690,7 +694,7 @@ async fn production_project_server_inner(
                 "project_open_phase",
                 &[
                     ("project", semantic_startup_project.display().to_string()),
-                    ("phase", "semantic_startup_configured".to_owned()),
+                    ("phase", "semantic_config_selected".to_owned()),
                     ("elapsed_ms", started.elapsed().as_millis().to_string()),
                 ],
             );

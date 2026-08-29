@@ -516,6 +516,11 @@ fn physical_artifact_pool_does_not_retain_a_dropped_generation() {
     );
 }
 
+/// Physical reuse is keyed by logical path and content digest, not
+/// worktree-local `file_occurrence_id`. Linked worktrees therefore share
+/// parse/chunk artifacts for identical bytes; rematerialize rebinds the
+/// requesting occurrence. Same-occurrence reuse must still seal every
+/// durable byte as a cold rebuild. Distinct bytes must miss.
 #[test]
 fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
@@ -529,6 +534,8 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     let source = source_owner
         .build_and_publish(request("file.physical.target", 1_100_000), &ActiveControl)
         .expect("source generation publishes");
+    assert_eq!(pool.stats().reused, 0);
+    assert_eq!(pool.stats().inserted, 1);
 
     let mut reused_owner = CodeIndexProductionOwnerV1::new(
         config(),
@@ -540,6 +547,11 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     let reused = reused_owner
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
         .expect("physically reused generation publishes");
+    assert_eq!(
+        pool.stats().reused,
+        1,
+        "identical path and content must reuse the source physical artifact"
+    );
 
     let mut cold_owner = CodeIndexProductionOwnerV1::new(
         config(),
@@ -551,6 +563,7 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
         .expect("cold comparison generation publishes");
 
+    let foreign_occurrence = id::<FileOccurrenceId>("file.physical.foreign");
     let mut foreign_owner = CodeIndexProductionOwnerV1::new(
         config(),
         SharedPublicationStore::default(),
@@ -558,15 +571,63 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     )
     .expect("foreign occurrence owner")
     .with_physical_artifact_pool(pool.clone());
-    foreign_owner
+    let foreign = foreign_owner
         .build_and_publish(request("file.physical.foreign", 1_200_000), &ActiveControl)
-        .expect("foreign occurrence generation publishes without unsafe reuse");
-
+        .expect("foreign occurrence rematerializes from the shared artifact");
     assert_eq!(
         pool.stats().reused,
-        1,
-        "only the byte-exact file occurrence may reuse physical artifacts"
+        2,
+        "same path and content must share artifacts across worktree-local occurrence ids"
     );
+    assert_eq!(
+        pool.stats().inserted,
+        1,
+        "occurrence-id-free reuse must not insert a second artifact for the same bytes"
+    );
+    assert!(
+        !foreign.chunks().chunks().is_empty(),
+        "foreign rematerialize must produce chunks"
+    );
+    assert!(
+        foreign
+            .chunks()
+            .chunks()
+            .iter()
+            .all(|chunk| chunk.anchor.file_occurrence_id == foreign_occurrence),
+        "rematerialize must rebind shared chunks onto the requesting occurrence"
+    );
+    assert_ne!(
+        foreign.encode_sealed().expect("foreign generation seals"),
+        reused.encode_sealed().expect("reused generation seals"),
+        "rebound occurrence identity must change the sealed corpus"
+    );
+
+    let changed_source = b"fn changed() -> u32 { 9 }\n";
+    let mut changed = request("file.physical.changed", 1_300_000);
+    changed.snapshot.files[0].content_digest = content_digest(changed_source);
+    changed.snapshot.content_identity = content_digest(changed_source);
+    changed.captured_files[0].sanitized_bytes = Arc::from(changed_source.as_slice());
+    let mut changed_owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("changed-content owner")
+    .with_physical_artifact_pool(pool.clone());
+    changed_owner
+        .build_and_publish(changed, &ActiveControl)
+        .expect("different content publishes without borrowing the prior artifact");
+    assert_eq!(
+        pool.stats().reused,
+        2,
+        "different content digest must not reuse the prior physical artifact"
+    );
+    assert_eq!(
+        pool.stats().inserted,
+        2,
+        "a content miss must insert its own physical artifact"
+    );
+
     assert_eq!(reused.manifest(), cold.manifest(), "manifest mismatch");
     assert_eq!(reused.snapshot(), cold.snapshot(), "snapshot mismatch");
     assert_eq!(reused.chunks(), cold.chunks(), "chunk mismatch");

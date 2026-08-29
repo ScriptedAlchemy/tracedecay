@@ -6,10 +6,9 @@ use std::sync::Arc;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_host_admission::{SharedHostAdmissionBroker, TerminalReason};
 use tracedecay_runtime_core::errors::Result;
-use tracedecay_usecases::host_admission::{
-    HostAdmissionOutcome, HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
-};
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 
 use super::errors::map_host_admission_outcome;
 use super::required_str;

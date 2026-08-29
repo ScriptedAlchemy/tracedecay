@@ -31,7 +31,7 @@ use tracedecay_runtime_core::sqlite_read_snapshot::{
     BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
 };
 
-use tracedecay_usecases::retention::code_index_generations::{
+use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
     GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
     scoped_code_index_store_root,

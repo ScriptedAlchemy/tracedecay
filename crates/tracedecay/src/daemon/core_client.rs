@@ -80,15 +80,6 @@ pub(crate) struct DaemonConnection {
 }
 
 impl DaemonConnection {
-    #[cfg(test)]
-    pub(crate) fn unauthenticated_for_test(endpoint: DaemonEndpoint) -> Self {
-        Self {
-            endpoint,
-            auth_token: None,
-            authority_record: None,
-        }
-    }
-
     pub(crate) fn into_protocol(self) -> tracedecay_daemon_protocol::DaemonConnection {
         let connection =
             tracedecay_daemon_protocol::DaemonConnection::new(self.endpoint, self.auth_token);
@@ -113,7 +104,8 @@ impl DaemonLivenessProbe for AuthorityLivenessProbe {
                 ),
             });
         };
-        if current.epoch != self.record.epoch || current.process_run_id != self.record.process_run_id
+        if current.epoch != self.record.epoch
+            || current.process_run_id != self.record.process_run_id
         {
             return Err(TraceDecayError::Config {
                 message: format!(
@@ -238,7 +230,7 @@ pub(crate) async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    use tracedecay_usecases::host_admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
+    use tracedecay_sessions::admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
 
     // Pin one frame-read future for the whole wait. Liveness polls must not
     // recreate `read_bounded_mcp_line`: that future owns the partial-frame
@@ -254,7 +246,7 @@ where
                         Err(TraceDecayError::Config {
                             message: format!(
                                 "daemon {request_label} response exceeded wire message bound ({})",
-                                tracedecay_usecases::host_admission::WIRE_RECORD_TOO_LARGE
+                                tracedecay_sessions::admission::WIRE_RECORD_TOO_LARGE
                             ),
                         })
                     }
@@ -335,29 +327,6 @@ pub(crate) fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'stati
     } else {
         "The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`."
     }
-}
-
-pub(crate) async fn connect_to_daemon_connection(
-    connection: &DaemonConnection,
-) -> Result<BrokerStream> {
-    connect_to_daemon_connection_within(connection, None).await
-}
-
-pub(crate) async fn connect_to_daemon_connection_within(
-    connection: &DaemonConnection,
-    client_deadline: Option<DaemonClientDeadline>,
-) -> Result<BrokerStream> {
-    let grace = match client_deadline {
-        Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
-        None => DAEMON_RESTART_GRACE,
-    };
-    let (_, stream) = connect_with_restart_grace_resolving(
-        || Ok(connection.clone()),
-        grace,
-        DAEMON_RESTART_POLL_INTERVAL,
-    )
-    .await?;
-    Ok(stream)
 }
 
 pub(crate) async fn connect_to_current_daemon_within(

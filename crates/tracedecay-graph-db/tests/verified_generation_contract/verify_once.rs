@@ -166,19 +166,22 @@ fn a_restart_over_unchanged_bytes_hits_the_marker_and_enumerates_nothing() {
 /// already passed, which is exactly why standing the marker in front of the
 /// replay proof does not give up the defence against bit rot.
 ///
-/// What this test therefore pins is the property that matters: corrupted bytes
-/// are refused, and the stale marker sitting next to them is never believed.
+/// What this test therefore pins is the property that matters: corrupted
+/// authoritative bytes are refused, and the stale marker sitting next to them
+/// is never believed.
 #[test]
 fn a_byte_flip_under_a_stale_marker_is_still_caught() {
     let mut published = publish_one("marker:flipped");
     let container = support::graph_path(published.temp.path());
     assert!(marker_path(published.temp.path()).is_file());
 
-    // Corrupt the container in place, leaving the marker exactly as the clean
-    // close wrote it. The marker is now stale, and must be treated as such.
+    // Corrupt the container magic in place, leaving the marker exactly as the
+    // clean close wrote it. The physical midpoint is not a valid target: the
+    // current format may leave aligned padding there, which is intentionally
+    // outside every section checksum.
     let original = fs::read(&container).unwrap();
     let mut file = fs::OpenOptions::new().write(true).open(&container).unwrap();
-    let offset = (original.len() / 2) as u64;
+    let offset = 0;
     file.seek(SeekFrom::Start(offset)).unwrap();
     file.write_all(&[original[offset as usize] ^ 0xFF]).unwrap();
     file.sync_all().unwrap();

@@ -243,9 +243,7 @@ impl DaemonLspSessionClient {
     }
 }
 
-fn invocation_outcome_error(
-    outcome: crate::contract::DaemonInvocationOutcome,
-) -> InvocationError {
+fn invocation_outcome_error(outcome: crate::contract::DaemonInvocationOutcome) -> InvocationError {
     match outcome {
         crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
             invocation_error_from_problem(&problem)
@@ -258,15 +256,11 @@ fn invocation_outcome_error(
             crate::contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                 InvocationError::Denied
             }
-            crate::contract::DaemonInvocationProblem::ResetRequired => {
-                InvocationError::Unavailable
-            }
+            crate::contract::DaemonInvocationProblem::ResetRequired => InvocationError::Unavailable,
             crate::contract::DaemonInvocationProblem::ApplicationContractViolation => {
                 InvocationError::Unavailable
             }
-            crate::contract::DaemonInvocationProblem::Unavailable => {
-                InvocationError::Unavailable
-            }
+            crate::contract::DaemonInvocationProblem::Unavailable => InvocationError::Unavailable,
         },
         _ => InvocationError::Unavailable,
     }

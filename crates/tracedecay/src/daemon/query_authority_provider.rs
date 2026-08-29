@@ -15,12 +15,12 @@ use tracedecay_domain::{
     configuration::UserProfileId,
 };
 
-use super::code_index_scheduler::query_runtime::{
-    AcceptedQueryEvaluationV1, QueryAuthorityMaterialV1, QueryAuthorityProviderErrorV1,
-    QueryAuthorityProviderV1,
-};
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
+};
+use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::{
+    AcceptedQueryEvaluationV1, QueryAuthorityMaterialV1, QueryAuthorityProviderErrorV1,
+    QueryAuthorityProviderV1,
 };
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_usecases::semantic_runtime::{
@@ -136,7 +136,7 @@ pub(super) struct DaemonProfileQueryAuthorityProviderV1 {
 #[derive(Clone)]
 pub(crate) struct DaemonQueryActivationRegistrarV1 {
     provider: DaemonQueryAuthorityProviderV1,
-    registry: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    registry: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: std::path::PathBuf,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 }
@@ -144,7 +144,7 @@ pub(crate) struct DaemonQueryActivationRegistrarV1 {
 impl DaemonQueryActivationRegistrarV1 {
     pub(crate) fn new(
         provider: DaemonQueryAuthorityProviderV1,
-        registry: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        registry: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: std::path::PathBuf,
         session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Self {
@@ -273,19 +273,29 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                     .map_err(map_update_observer_error)?;
                 let semantic_authority = semantic_enabled
                     .then(|| {
-                        super::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+                        tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                             committed.clone(),
                         )
                     })
                     .transpose()
                     .map_err(|_| RetrievalProfileActivationObserverErrorV1::Rejected)?
                     .map(Arc::new);
+                let prepared_view =
+                    tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                        scope: prepared.scope().clone(),
+                        configuration_revision: prepared.configuration_revision().clone(),
+                        query_authority: Arc::clone(prepared.query_authority()),
+                    };
                 registry
                     .install_committed_query_authorities(
                         &project_root,
                         &scope,
-                        &provider,
-                        prepared,
+                        || {
+                            provider
+                                .commit_prepared_activation(&prepared)
+                                .map_err(|error| error.to_string())
+                        },
+                        prepared_view,
                         semantic_authority,
                         prepared_cache,
                         rollback_semantic_generation.as_ref(),

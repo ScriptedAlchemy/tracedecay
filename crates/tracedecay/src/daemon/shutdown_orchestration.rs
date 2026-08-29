@@ -6,9 +6,6 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 
-use super::semantic_evaluation_shutdown::{
-    SemanticEvaluationShutdownJoinV1, SemanticEvaluationShutdownReceiptV1,
-};
 use super::shutdown_coordination::{
     DrainingGauge, ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
     prepare_shutdown_owner_phases,
@@ -19,17 +16,8 @@ use super::{
     DAEMON_PROJECT_SERVER_DRAIN_DEADLINE, DAEMON_STORE_CLOSE_RESERVE, DAEMON_TASK_ABORT_DEADLINE,
     DaemonLifecycle, core_lifecycle::DaemonShutdownClaim,
 };
+use tracedecay_code_index_runtime::SemanticEvaluationShutdownReceiptV1;
 use tracedecay_runtime_core::errors::Result;
-
-/// Collect one semantic-evaluation shutdown receipt through the typed join
-/// surface. The extracted slice-10 crate produces this receipt; root
-/// orchestration is the collector.
-pub(crate) async fn collect_semantic_evaluation_shutdown(
-    owner: &dyn SemanticEvaluationShutdownJoinV1,
-    deadline: tokio::time::Instant,
-) -> SemanticEvaluationShutdownReceiptV1 {
-    super::semantic_evaluation_shutdown::collect_semantic_evaluation_shutdown(owner, deadline).await
-}
 
 /// Map a collected semantic-evaluation receipt onto the daemon shutdown
 /// status vocabulary. Project-runtime drain still uses `is_clean` for the
@@ -37,7 +25,16 @@ pub(crate) async fn collect_semantic_evaluation_shutdown(
 pub(crate) fn semantic_evaluation_shutdown_status(
     receipt: SemanticEvaluationShutdownReceiptV1,
 ) -> ShutdownStatus {
-    receipt.into()
+    if receipt.remaining_workers > 0 {
+        ShutdownStatus::TimedOut
+    } else if receipt.failed_workers > 0 {
+        ShutdownStatus::Failed(format!(
+            "semantic evaluation workers failed to shut down cleanly: {}",
+            receipt.failed_workers
+        ))
+    } else {
+        ShutdownStatus::Clean
+    }
 }
 
 type ProjectServerShutdownFuture =

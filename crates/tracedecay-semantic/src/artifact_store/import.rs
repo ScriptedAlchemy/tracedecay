@@ -158,7 +158,7 @@ impl ModelArtifactStore {
     ///
     /// Measured per chunk: aggregate demand and exact call counts expose the
     /// lock + fsync + meta-rewrite cost paid for every appended chunk.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.artifact_store.stage_member_chunk")]
     pub fn stage_member_chunk(
         &self,
         session: &mut ImportSession,
@@ -259,7 +259,7 @@ impl ModelArtifactStore {
     /// prior opaque staging handle only after an `InterruptedResumable`
     /// result. Each response must repeat the configured immutable revision,
     /// exact offset, and declared total length.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.artifact_store.import_https")]
     pub fn import_configured_https(
         &self,
         manifest: &ModelArtifactManifestV1,

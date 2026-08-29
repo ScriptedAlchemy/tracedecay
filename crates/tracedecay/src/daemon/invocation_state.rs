@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use serde_json::Value;
+use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
@@ -465,7 +466,7 @@ impl DaemonInvocationState {
                 project_id.clone(),
                 canonical_project_root.clone(),
                 self.code_index_schedulers.clone(),
-                Arc::clone(&graph_runtime),
+                graph_runtime.code_graph_seat_port(),
                 Arc::clone(&graph_publication_database),
             ),
         );
@@ -934,21 +935,22 @@ impl DaemonInvocationState {
                     project_admission,
                     request_cancellation,
                 );
-                let response = tracedecay_daemon_protocol::DaemonInvocationExecutor::invoke_controlled(
-                    &executor,
-                    DaemonInvocationRequest::work_application(
-                        format!("request.multi-root.work.{ordinal}"),
-                        request.as_ref().clone(),
-                        observed_at,
-                        deadline.clone(),
-                        cancellation,
-                    ),
-                    deadline,
-                    control_cancellation,
-                    tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
-                )
-                .await
-                .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+                let response =
+                    tracedecay_daemon_protocol::DaemonInvocationExecutor::invoke_controlled(
+                        &executor,
+                        DaemonInvocationRequest::work_application(
+                            format!("request.multi-root.work.{ordinal}"),
+                            request.as_ref().clone(),
+                            observed_at,
+                            deadline.clone(),
+                            cancellation,
+                        ),
+                        deadline,
+                        control_cancellation,
+                        tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
+                    )
+                    .await
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
                 let service::invocation::DaemonInvocationOutcome::WorkApplication {
                     scope: actual_scope,
                     outcome,

@@ -18,6 +18,9 @@ use tracedecay_domain::{
 use tracedecay_query::code_search;
 
 use super::profile_identity::LocalProfileIdentityAuthorityV1;
+use tracedecay_code_index_runtime::mcp_admission::{
+    CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
+};
 
 pub(crate) const QUERY_MCP_READ_CAPABILITY_V1: &str =
     "capability.application.code-index.search-read";
@@ -60,20 +63,6 @@ pub(crate) enum QueryMcpAdmissionUnavailableV1 {
     Expired,
     #[error("the MCP read grant was revoked")]
     Revoked,
-}
-
-impl QueryMcpAdmissionUnavailableV1 {
-    pub(crate) const fn reason(self) -> &'static str {
-        match self {
-            Self::Unauthenticated => "mcp_route_unauthenticated",
-            Self::InvalidGrant => "mcp_read_grant_invalid",
-            Self::CapabilityMismatch => "mcp_read_capability_mismatch",
-            Self::ScopeMismatch => "mcp_read_scope_mismatch",
-            Self::AuthorizationStale => "mcp_read_authorization_stale",
-            Self::Expired => "mcp_read_grant_expired",
-            Self::Revoked => "mcp_read_grant_revoked",
-        }
-    }
 }
 
 /// Tallies one admission refusal against its exact policy reason. The reason
@@ -218,6 +207,49 @@ fn admit_query_mcp_read_at(
         expires_at,
         route_registered,
     })
+}
+
+impl From<QueryMcpAdmissionUnavailableV1> for CodeIndexMcpAdmissionUnavailableV1 {
+    fn from(value: QueryMcpAdmissionUnavailableV1) -> Self {
+        match value {
+            QueryMcpAdmissionUnavailableV1::Unauthenticated => Self::Unauthenticated,
+            QueryMcpAdmissionUnavailableV1::InvalidGrant => Self::InvalidGrant,
+            QueryMcpAdmissionUnavailableV1::CapabilityMismatch => Self::CapabilityMismatch,
+            QueryMcpAdmissionUnavailableV1::ScopeMismatch => Self::ScopeMismatch,
+            QueryMcpAdmissionUnavailableV1::AuthorizationStale => Self::AuthorizationStale,
+            QueryMcpAdmissionUnavailableV1::Expired => Self::Expired,
+            QueryMcpAdmissionUnavailableV1::Revoked => Self::Revoked,
+        }
+    }
+}
+
+impl CodeIndexMcpReadGrantV1 for QueryMcpReadAdmissionV1 {
+    fn authorize(
+        &self,
+        scope: &ResolvedScope,
+        authority: Option<&code_search::CodeIndexSearchAuthorityV1>,
+    ) -> Result<code_search::CodeIndexSearchAuthorityV1, CodeIndexMcpAdmissionUnavailableV1> {
+        QueryMcpReadAdmissionV1::authorize(self, scope, authority).map_err(Into::into)
+    }
+
+    fn search_authority(&self) -> code_search::CodeIndexSearchAuthorityV1 {
+        QueryMcpReadAdmissionV1::search_authority(self)
+    }
+}
+
+impl CodeIndexMcpReadAdmissionV1 for QueryMcpReadAdmissionProviderV1 {
+    type Grant = QueryMcpReadAdmissionV1;
+
+    fn route_is_registered(&self) -> bool {
+        QueryMcpReadAdmissionProviderV1::route_is_registered(self)
+    }
+
+    fn admit_current(
+        &self,
+        scope: &ResolvedScope,
+    ) -> Result<Self::Grant, CodeIndexMcpAdmissionUnavailableV1> {
+        QueryMcpReadAdmissionProviderV1::admit_current(self, scope).map_err(Into::into)
+    }
 }
 
 impl QueryMcpReadAdmissionV1 {

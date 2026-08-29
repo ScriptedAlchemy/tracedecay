@@ -23,6 +23,7 @@ hotpath = [
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-search-eval/hotpath",
+    "tracedecay-sessions/hotpath",
     "tracedecay-tool-catalog/hotpath",
     "tracedecay-usecases/hotpath",
 ]
@@ -37,6 +38,7 @@ hotpath-alloc = [
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-search-eval/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
     "tracedecay-usecases/hotpath-alloc",
 ]
@@ -51,6 +53,7 @@ hotpath-cpu = [
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-search-eval/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
     "tracedecay-usecases/hotpath-cpu",
 ]
@@ -72,6 +75,7 @@ tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 

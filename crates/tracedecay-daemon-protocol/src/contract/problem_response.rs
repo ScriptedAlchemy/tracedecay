@@ -15,10 +15,7 @@ impl DaemonInvocationResponse {
         }
     }
 
-    pub fn application_problem(
-        request_id: impl Into<String>,
-        problem: ApplicationProblem,
-    ) -> Self {
+    pub fn application_problem(request_id: impl Into<String>, problem: ApplicationProblem) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: DAEMON_INVOCATION_REVISION,

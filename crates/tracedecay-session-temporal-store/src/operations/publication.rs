@@ -20,9 +20,7 @@ use super::{
     generation, load_manifest, logical_identity_digest, receipt_id, sources, summary_projection,
     unixepoch,
 };
-use crate::relations::{
-    SessionRelationProjection, SummaryRelationNode, SummarySourceRef,
-};
+use crate::relations::{SessionRelationProjection, SummaryRelationNode, SummarySourceRef};
 
 pub struct GlobalDbLcmSummaryPublication<'a, E> {
     conn: &'a E,
@@ -142,20 +140,13 @@ async fn append_summary_relation(
         .push(relation_node(publication, &manifest)?);
     crate::relations::validate_projection(projection)
         .map_err(|error| LcmError::Db(error.to_string()))?;
-    crate::relation_receipts::record_relation_receipt(
-        conn,
-        projection,
-        published_at,
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| LcmError::Db(error.to_string()))
+    crate::relation_receipts::record_relation_receipt(conn, projection, published_at)
+        .await
+        .map(|_| ())
+        .map_err(|error| LcmError::Db(error.to_string()))
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.persist.publish_summary"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.persist.publish_summary")]
 pub async fn publish_immutable_summary(
     conn: &impl crate::handle::SessionTemporalExec,
     publication: LcmImmutableSummaryPublication,
@@ -327,10 +318,7 @@ async fn insert_canonical_node(
     Ok(())
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.publication.verify_replay"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.publication.verify_replay")]
 async fn exact_replay_receipt(
     conn: &impl crate::handle::SessionTemporalExec,
     publication: &LcmImmutableSummaryPublication,

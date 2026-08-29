@@ -10,9 +10,9 @@ use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use crate::context::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING,
 };
-use tracedecay_mcp::path_tree::format_compact_path_list;
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
 use crate::types::{EdgeKind, NodeKind};
+use tracedecay_mcp::path_tree::format_compact_path_list;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub(super) const GRAPH_RELATION_READ_LIMIT: usize = 50_000;

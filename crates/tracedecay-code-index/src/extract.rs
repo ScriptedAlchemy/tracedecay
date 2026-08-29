@@ -11,21 +11,83 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use tracedecay_domain::{
-    ExtractionBatchV1, ExtractionCoverageV1, ExtractionFailureV1, ExtractionResult,
-    LanguageDescriptorV1, ManifestDigest, ParseOutcomeV1, SourceSpan, ValidatedCodeFileV1,
-    canonical_sha256,
+    CodeGenerationId, ContentDigest, Edge, ExtractionResult, ExtractorRevision, FileOccurrenceId,
+    GrammarRevision, LanguageDescriptorRevision, LanguageDescriptorV1, LanguageId, ManifestDigest,
+    Node, SourceSpan, UnresolvedRef, ValidatedCodeFileV1, Visibility, canonical_sha256,
 };
 
 use super::{
     intake::{ReceiptBoundCodeFileAuthorityV1, ReceiptBoundCodeFileV1},
     languages::canonical_language_id,
 };
-use tracedecay_domain::{Edge, Node, UnresolvedRef, Visibility};
 
 const PARSER_IMPORT_ROWS_DIGEST_SEPARATOR: &str = "tracedecay.code-index-parser-import-rows.v1";
+
+/// The output of one language extractor for one validated file. Identical
+/// input, registry, and extractor revisions produce stable canonical rows
+/// and digests on every supported host; parse errors and unsupported
+/// constructs are preserved as evidence.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractionBatchV1 {
+    pub generation_id: CodeGenerationId,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub language: LanguageId,
+    pub descriptor_revision: LanguageDescriptorRevision,
+    pub grammar_revision: GrammarRevision,
+    pub extractor_revision: ExtractorRevision,
+    pub content_digest: ContentDigest,
+    pub parse_outcome: ParseOutcomeV1,
+    pub parsed_ranges: Vec<SourceSpan>,
+    pub error_ranges: Vec<SourceSpan>,
+    pub unsupported_ranges: Vec<SourceSpan>,
+    pub coverage: ExtractionCoverageV1,
+    /// Digest of the canonical parser-emitted import rows before file
+    /// occurrence binding. Downstream artifacts compare against this single
+    /// parser authority instead of persisting a self-referential copy.
+    pub parser_import_rows_digest: ManifestDigest,
+    pub rows_digest: ManifestDigest,
+}
+
+/// Parse outcome; bounded traversal or extraction caps propagate as partial.
+/// Extraction never invents successful structure.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "outcome", content = "detail", rename_all = "snake_case")]
+pub enum ParseOutcomeV1 {
+    Complete,
+    Partial { reason: String },
+    TimedOut,
+    Cancelled,
+    Failed { reason: String },
+}
+
+/// Extraction coverage and ambiguity evidence. These are canonical raw
+/// quantifier inputs; no universal quality score is defined here.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractionCoverageV1 {
+    pub parsed_bytes: u64,
+    pub error_bytes: u64,
+    pub unsupported_bytes: u64,
+    pub symbols_extracted: u64,
+    pub relations_extracted: u64,
+    pub ambiguity_count: u64,
+}
+
+/// Why extraction failed (the typed error half of the [`LanguageExtractor`]
+/// port result).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "failure", content = "detail", rename_all = "snake_case")]
+pub enum ExtractionFailureV1 {
+    GrammarUnavailable { language: LanguageId },
+    ParseFailed { detail: String },
+    Cancelled,
+    TimedOut,
+    IncompatibleDescriptor { detail: String },
+}
 
 /// Cancellation checkpoint for extraction (the code-index-local spelling of
 /// the Plan 25 `CancellationToken`). Application adapts its cancellation

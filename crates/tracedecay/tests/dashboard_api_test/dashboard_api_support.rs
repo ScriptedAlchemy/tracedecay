@@ -18,9 +18,9 @@ pub(crate) use tracedecay::tracedecay::TraceDecay;
 pub(crate) use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
 };
+pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) use tracedecay_sessions::runtime::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-pub(crate) use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 pub(crate) fn test_fact_write_control() -> tracedecay_store::FactWriteControl {
     use std::sync::atomic::{AtomicBool, Ordering};

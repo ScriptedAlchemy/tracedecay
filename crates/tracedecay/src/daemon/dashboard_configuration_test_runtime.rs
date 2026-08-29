@@ -15,13 +15,10 @@ use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
-use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use super::service::invocation::{
     DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
 };
 use crate::application_surface::ApplicationSurfaceOperation;
-use tracedecay_daemon_protocol::invocation_now_micros;
-use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 use crate::dashboard::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
@@ -31,6 +28,9 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_application::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationWireRequestV1,
 };
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_daemon_protocol::invocation_now_micros;
+use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const CONFIGURATION_REQUEST_DEADLINE_MICROS: i64 = 15_000_000;
@@ -174,7 +174,9 @@ impl ApplicationInvocationExecutor for DashboardConfigurationRuntimeForTestV1 {
     }
 }
 
-impl tracedecay_daemon_protocol::DaemonInvocationExecutor for DashboardConfigurationRuntimeForTestV1 {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor
+    for DashboardConfigurationRuntimeForTestV1
+{
     fn invoke_controlled(
         &self,
         request: DaemonInvocationRequest,
@@ -190,14 +192,18 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for DashboardConfigura
     > {
         Box::pin(async move {
             if cancellation.is_cancelled() {
-                return Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
-                    stage: tracedecay_application::CancellationStage::BeforeAdmission,
-                });
+                return Err(
+                    tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
+                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                    },
+                );
             }
             if tracedecay_daemon_protocol::deadline_remaining(&deadline).is_none() {
-                return Err(tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
-                    stage: tracedecay_application::CancellationStage::BeforeAdmission,
-                });
+                return Err(
+                    tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
+                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                    },
+                );
             }
             Ok(self
                 .service

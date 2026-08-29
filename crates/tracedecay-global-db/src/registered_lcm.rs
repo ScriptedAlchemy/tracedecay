@@ -19,10 +19,7 @@ use tracedecay_sessions::runtime::{
 };
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
-use super::{
-    RegisteredGlobalDb,
-    registered::RegisteredGlobalDbWriterConnection,
-};
+use super::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriterConnection};
 use tracedecay_session_temporal_store::operations as session_temporal_operations;
 use tracedecay_session_temporal_store::seed_session_relation_projection;
 use tracedecay_session_temporal_store::store::execution_control_graph_cancellation;
@@ -129,11 +126,10 @@ impl RegisteredGlobalDb {
 
     #[hotpath::measure(future = true, label = "global_db.registered.lcm.grep")]
     pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
-        let git_scope_session_ids = tracedecay_session_temporal_store::SessionTemporalAccess::new(
-            self,
-        )
-        .git_scope_session_ids(&request.git_filter)
-            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let git_scope_session_ids =
+            tracedecay_session_temporal_store::SessionTemporalAccess::new(self)
+                .git_scope_session_ids(&request.git_filter)
+                .map_err(|error| LcmError::Db(error.to_string()))?;
         let snapshot = self.lcm_read_snapshot().await?;
         query::grep(
             &snapshot,

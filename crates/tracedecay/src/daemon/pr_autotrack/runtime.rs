@@ -7,8 +7,8 @@ use tokio::time::Instant;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::daemon::branch_admin::StoreAdministration;
-use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::log_daemon_event;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 use super::{
     MAX_NEW_TRACKS_PER_CYCLE, PrCommandControl, PrDiscovery, PrStoreAdministration,

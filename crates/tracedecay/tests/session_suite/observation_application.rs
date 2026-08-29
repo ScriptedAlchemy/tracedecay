@@ -15,12 +15,12 @@ use tracedecay_runtime_core::privacy::{
     PrivacySanitizerError, RecordSanitizerV1, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::observation::{NonDurableFrameReason, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
     ObservationStore, ProjectionPersistOutcome,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 use tracedecay_usecases::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
     CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,

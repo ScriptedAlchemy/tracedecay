@@ -5916,12 +5916,15 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-code-index-retention",
+ "tracedecay-code-index-runtime",
  "tracedecay-daemon-protocol",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-hooks",
+ "tracedecay-host-admission",
  "tracedecay-lsp",
  "tracedecay-maintenance",
  "tracedecay-mcp",
@@ -5935,6 +5938,7 @@ dependencies = [
  "tracedecay-semantic",
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
+ "tracedecay-source-edit",
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
@@ -6193,6 +6197,72 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-code-index-retention"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "fs2",
+ "hotpath",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracedecay-code-index",
+ "tracedecay-domain",
+ "tracedecay-private-fs",
+ "tracedecay-store",
+]
+
+[[package]]
+name = "tracedecay-code-index-runtime"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "filetime",
+ "futures-util",
+ "gix",
+ "hex",
+ "hotpath",
+ "notify",
+ "rayon",
+ "rusqlite",
+ "same-file",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracedecay-application",
+ "tracedecay-code-extraction",
+ "tracedecay-code-index",
+ "tracedecay-code-index-retention",
+ "tracedecay-dashboard-api",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-graph-db",
+ "tracedecay-lsp",
+ "tracedecay-policy",
+ "tracedecay-private-fs",
+ "tracedecay-query",
+ "tracedecay-runtime-core",
+ "tracedecay-search-eval",
+ "tracedecay-semantic",
+ "tracedecay-session-temporal-store",
+ "tracedecay-store",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
+ "tracing",
+ "url",
+ "walkdir",
+]
+
+[[package]]
 name = "tracedecay-daemon-protocol"
 version = "0.1.0"
 dependencies = [
@@ -6213,6 +6283,7 @@ dependencies = [
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-search-eval",
+ "tracedecay-sessions",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
 ]
@@ -6311,6 +6382,7 @@ dependencies = [
  "grafeo-common",
  "grafeo-core",
  "grafeo-engine",
+ "grafeo-storage",
  "hex",
  "hotpath",
  "parking_lot",
@@ -6341,6 +6413,26 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-domain",
  "tracedecay-private-fs",
+]
+
+[[package]]
+name = "tracedecay-host-admission"
+version = "0.1.0"
+dependencies = [
+ "hotpath",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+ "tracedecay-store",
+ "tracedecay-usecases",
+ "tracing",
 ]
 
 [[package]]
@@ -6394,13 +6486,13 @@ dependencies = [
  "tokio",
  "tracedecay-application",
  "tracedecay-automation",
+ "tracedecay-code-index-retention",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
- "tracedecay-usecases",
 ]
 
 [[package]]
@@ -6411,6 +6503,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracedecay-api",
@@ -6664,6 +6757,25 @@ dependencies = [
  "tracedecay-temporal-query",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "tracedecay-source-edit"
+version = "0.1.0"
+dependencies = [
+ "hotpath",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tracedecay-graph-db",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
+ "tracing",
 ]
 
 [[package]]

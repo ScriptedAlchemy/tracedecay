@@ -14,6 +14,10 @@ use super::project_composition::daemon_transcript_source_home;
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 #[cfg(any(test, feature = "test-transport"))]
 use super::*;
+#[cfg(any(test, feature = "test-transport"))]
+use tracedecay_code_index_runtime::code_index_scheduler;
+#[cfg(all(unix, feature = "test-transport"))]
+use tracedecay_code_index_runtime::git_transactions;
 
 /// Captures the daemon's exact native Git transaction precondition for
 /// transport-parity tests. This is not compiled into production builds.

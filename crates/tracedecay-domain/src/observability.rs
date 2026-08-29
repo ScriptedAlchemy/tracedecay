@@ -9,7 +9,6 @@ mod mcp_dispatch;
 mod payload;
 mod product_views;
 mod retrieval;
-mod review_labels;
 mod runtime;
 mod workflow;
 
@@ -30,7 +29,6 @@ pub use product_views::{
     TaskIntelligenceOutcomeObservedV1, TaskOutcomeV1,
 };
 pub use retrieval::*;
-pub use review_labels::*;
 pub use runtime::*;
 pub use workflow::{
     WorkflowLifecycleObservedV1, WorkflowOutcomeObservedV1, WorkflowResourceObservedV1,

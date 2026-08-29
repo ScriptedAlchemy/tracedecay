@@ -38,9 +38,9 @@ use super::{
 use tracedecay_usecases::request_identity::{PreviewIdentityDomain, derive_preview_identity};
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
-use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar;
 use crate::mcp::McpServer;
+use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
@@ -273,7 +273,7 @@ async fn invoke_project_open_source_edit(
         invocation.deadline.clone(),
         invocation.cancellation.context(),
     )?;
-    let effect_control = tracedecay_usecases::edit::SourceEditEffectControlV1::new(
+    let effect_control = tracedecay_source_edit::SourceEditEffectControlV1::new(
         context.deadline().clone(),
         invocation.cancellation.clone(),
     );
@@ -327,7 +327,7 @@ async fn invoke_project_open_source_edit(
         proof: current.proof,
         observed_at,
     };
-    tracedecay_usecases::edit::execute_source_edit_with_control(
+    tracedecay_source_edit::execute_source_edit_with_control(
         &*graph,
         code_graph.as_ref(),
         &operation,
@@ -345,7 +345,7 @@ async fn invoke_project_open_source_edit_reconciliation(
     invocation: crate::mcp::server::SourceEditReconciliationInvocationV1,
 ) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
     let observed_at = now_micros();
-    let effect_control = tracedecay_usecases::edit::SourceEditEffectControlV1::new(
+    let effect_control = tracedecay_source_edit::SourceEditEffectControlV1::new(
         invocation.deadline.clone(),
         invocation.cancellation.clone(),
     );
@@ -379,7 +379,7 @@ async fn invoke_project_open_source_edit_reconciliation(
         proof: current.proof,
         observed_at,
     };
-    tracedecay_usecases::edit::reconcile_source_edit_effect_unknown_with_control(
+    tracedecay_source_edit::reconcile_source_edit_effect_unknown_with_control(
         &*graph,
         request,
         &authorization,
@@ -1311,7 +1311,7 @@ async fn register_semantic_activation_owner(
                         )
                         .await
                 }
-                (Ok(_), None) => Err(crate::daemon::code_index_scheduler::query_runtime::
+                (Ok(_), None) => Err(tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
                     QueryRuntimeMountErrorV1::Mount(
                         "deferred semantic activation has no committed revision".to_owned(),
                     )),
@@ -1323,7 +1323,7 @@ async fn register_semantic_activation_owner(
                         reason = %error,
                         "durable query cursor key is unavailable; project admission continues"
                     );
-                    Err(crate::daemon::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::KeyUnavailable)
+                    Err(tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::KeyUnavailable)
                 }
             }
         } else {
@@ -1341,7 +1341,7 @@ async fn register_semantic_activation_owner(
             );
             if matches!(
                 error,
-                crate::daemon::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
+                tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
             ) {
                 query_authority_upgrade::spawn_deferred_query_authority_mount(
                     server,
@@ -1361,7 +1361,7 @@ async fn register_semantic_activation_owner(
                 );
             }
         }
-        if let Err(error) = crate::daemon::code_index_scheduler::semantic_query_runtime::
+        if let Err(error) = tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::
             mount_current_semantic_query_authority_on_project_open(
                 &invocation.code_index_schedulers,
                 project_root,
@@ -1396,7 +1396,7 @@ async fn register_semantic_activation_owner(
                     );
                     if matches!(
                         error,
-                        crate::daemon::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
+                        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
                     ) {
                         query_authority_upgrade::spawn_deferred_query_authority_mount(
                             server,
@@ -1451,7 +1451,7 @@ async fn register_semantic_activation_owner(
         .configuration_runtime()
         .install_semantic_runtime(Arc::clone(&owner))?;
     let reconciler = Arc::new(
-        crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1::spawn(
+        tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1::spawn(
             owner,
             lifecycle_events,
         ),
@@ -1916,17 +1916,36 @@ fn production_owner_capabilities()
     Ok(capabilities)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DaemonCodeIndexScopeResolverV1;
+
+impl tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeResolverV1
+    for DaemonCodeIndexScopeResolverV1
+{
+    fn resolved_scope_for_project(
+        &self,
+        project_root: &Path,
+        project_id: &ProjectId,
+    ) -> std::result::Result<ResolvedScope, ()> {
+        resolved_scope_for_project(project_root, project_id).map_err(|_| ())
+    }
+}
+
 pub(crate) fn resolved_scope_for_project(
     project_root: &Path,
     project_id: &ProjectId,
 ) -> std::result::Result<ResolvedScope, ApplicationContractError> {
-    let repository_id = crate::daemon::code_index_scheduler::identity::repository_id_for(
-        project_root,
-    )
-    .map_err(|_| ApplicationContractError::Inconsistent {
-        field: "project-open repository id",
-    })?;
-    let worktree_id = crate::daemon::code_index_scheduler::identity::worktree_id_for(project_root)
+    let repository_id =
+        tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
+            project_root,
+        )
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open repository id",
+        })?;
+    let worktree_id =
+        tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
+            project_root,
+        )
         .map_err(|_| ApplicationContractError::Inconsistent {
             field: "project-open worktree id",
         })?;
