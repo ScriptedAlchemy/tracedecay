@@ -485,10 +485,10 @@ tracedecay-sdk = { path = "../tracedecay-sdk", version = "0.1.0" }
 # Test builds opt into the query kernel's `*_for_test` constructors; the
 # feature stays off for production builds.
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0", features = ["test-helpers"] }
-# The dev edge keeps code-index's default grammar profile active so the
-# default and explicit-production feature graphs resolve identically
-# (mirrors code-index's own default-features dev edge on code-extraction).
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", features = ["test-helpers"] }
+# Production already forwards `lite`/`full` through the `production` feature.
+# Keep this edge grammar-free so tests do not also pull `medium` (code-index
+# defaults) and so the test graph matches the CLI lane plus `test-helpers`.
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
