@@ -24,6 +24,7 @@ use crate::recovery::{
 };
 use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
 use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string};
+use crate::sealed_store::SealedStoreInstall;
 use crate::state::{
     EndpointIdentityCache, latest_projection, load_relation, load_relation_by_edge_cached,
     projection_entity_deletion_page_checked, projection_relation_deletion_page_checked,
@@ -277,7 +278,9 @@ impl GraphDb {
             );
             return Ok((commit, expected.clone()));
         }
-        if self.ensure_sealed_generation_store(identity, expected, check)? {
+        if let SealedStoreInstall::Installed { staging_proof } =
+            self.ensure_sealed_generation_store(identity, expected, check)?
+        {
             check()?;
             let physical_namespace = identity.physical_namespace()?;
             let guard = self.read_guard()?;
@@ -293,6 +296,16 @@ impl GraphDb {
                 )
             })?
             .commit;
+            drop(guard);
+            // A sealed *build* enumerated this container's rows and its
+            // reopen digest matched the authority, which is the same proof
+            // the staging close/reopen path files: record it so the close
+            // writes the verify-once marker and the next open of these bytes
+            // skips the full proof. An adopted artifact proved only itself,
+            // so the container earns its marker on its next full proof.
+            if let Some(canonical_bytes) = staging_proof {
+                self.record_proven_generation(identity, expected, canonical_bytes);
+            }
             return Ok((commit, expected.clone()));
         }
         if reopen_fallback {
