@@ -372,6 +372,25 @@ fn verify_host_file_snapshot(path: &Path, expected: &HostFileSnapshot) -> std::i
     }
 }
 
+/// Lock, snapshot, and atomically publish replacement bytes for a host file.
+///
+/// This is the single write authority behind `safe_write_bytes_file` and its
+/// metadata-preserving variant: the snapshot arms the publish-time
+/// foreign-edit refusal and supplies the metadata identity restored onto the
+/// replacement.
+pub(super) fn write_bytes_file_locked(
+    path: &Path,
+    contents: &[u8],
+    backup: Option<&Path>,
+    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
+) -> Result<()> {
+    let _lock = lock_host_file_write(path)?;
+    let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to capture metadata for {}: {error}", path.display()),
+    })?;
+    safe_write_bytes_file_from_snapshot(path, contents, backup, replacement_metadata, &observed)
+}
+
 pub(crate) enum TextFileMutation {
     Unchanged,
     Write(String),
