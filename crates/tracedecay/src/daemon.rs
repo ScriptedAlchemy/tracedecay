@@ -198,6 +198,7 @@ pub(crate) mod query_authority_provider;
 pub(crate) mod retained_test_support;
 mod semantic_activation_reconciler;
 mod semantic_evaluation;
+mod semantic_evaluation_shutdown;
 mod shutdown_coordination;
 mod shutdown_orchestration;
 mod store_shutdown;
@@ -261,7 +262,6 @@ pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
 use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
 pub mod pr_autotrack;
 mod production_harness;
-#[path = "daemon/git_watch/store_maintenance.rs"]
 mod store_maintenance;
 #[cfg(any(test, feature = "test-transport"))]
 pub use production_harness::ProductionProjectCompositionHarnessV1;

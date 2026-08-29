@@ -2102,7 +2102,7 @@ async fn activate_linked_worktree(
             worktree,
             store_root,
             None,
-            graph_runtime,
+            graph_runtime.code_graph_seat_port(),
             project_database,
             crate::daemon::code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                 graph.get_config().native_graph_activation,

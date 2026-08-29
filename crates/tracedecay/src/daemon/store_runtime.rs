@@ -9,6 +9,10 @@
 
 pub(crate) use tracedecay_runtime_core::store_runtime::*;
 
+pub(crate) mod code_graph_seat;
+pub(crate) use code_graph_seat::{
+    CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
+};
 pub(crate) mod session_registry;
 
 /// Installs the root-owned registered global/session schema installer into the

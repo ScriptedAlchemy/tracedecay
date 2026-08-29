@@ -32,6 +32,9 @@ use tracedecay_store::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
+use crate::daemon::store_runtime::{
+    CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
+};
 
 mod memory_runtime;
 pub(super) use memory_runtime::{
@@ -1642,7 +1645,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         reference: Option<RefId>,
         generation_id: CodeGenerationId,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
-        replay_binding: crate::daemon::code_index_scheduler::CodeGraphReplayBindingV1,
+        replay_binding: CodeGraphReplayBindingV1,
         // The generation the code index just decoded to serve queries, when the
         // caller has one. Offering it to the manifest provider is what makes
         // cold activation parse the sealed payload once instead of twice
@@ -1936,6 +1939,89 @@ impl DaemonSessionRuntimeRegistryV1 {
                 return Ok(true);
             }
         }
+    }
+}
+
+impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
+    fn sweep_aborted_read_bundle_temporaries(
+        &self,
+    ) -> std::result::Result<(), tracedecay_graph_db::GraphDbError> {
+        Self::sweep_aborted_read_bundle_temporaries(self)
+    }
+
+    fn authority(
+        &self,
+    ) -> Arc<tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1> {
+        Self::authority(self)
+    }
+
+    fn publish_verified_snapshot(
+        &self,
+        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+        request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<
+        tracedecay_graph_db::VerifiedGraphSnapshot,
+        tracedecay_graph_db::GraphDbError,
+    > {
+        Self::publish_verified_snapshot(self, generation, request_cancelled)
+    }
+
+    fn load_sealed_read_bundle_catalog(
+        &self,
+        request_cancelled: &Arc<AtomicBool>,
+    ) -> std::result::Result<
+        tracedecay_graph_db::SealedReadBundleArtifactStateV1,
+        tracedecay_graph_db::GraphDbError,
+    > {
+        Self::load_sealed_read_bundle_catalog(self, request_cancelled)
+    }
+}
+
+impl CodeGraphSeatRuntimePortV1 for DaemonSessionRuntimeRegistryV1 {
+    fn retain_code_graph_runtime(
+        &self,
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        worktree_id: WorktreeId,
+        reference: Option<RefId>,
+        generation_id: CodeGenerationId,
+        project_database: Arc<tracedecay_runtime_core::db::Database>,
+        replay_binding: CodeGraphReplayBindingV1,
+        decoded_generation: Option<
+            Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
+        >,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Box<dyn CodeGraphSeatLeaseV1 + Send>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let retained = DaemonSessionRuntimeRegistryV1::retain_code_graph_runtime(
+                self,
+                project_id,
+                repository_id,
+                worktree_id,
+                reference,
+                generation_id,
+                project_database,
+                replay_binding,
+                decoded_generation,
+            )
+            .await?;
+            Ok(Box::new(retained) as Box<dyn CodeGraphSeatLeaseV1 + Send>)
+        })
+    }
+}
+
+impl DaemonSessionRuntimeRegistryV1 {
+    /// Coerce this registry to the scheduler-facing seat port.
+    ///
+    /// `Arc::clone` keeps the concrete type; this is the unsized coercion
+    /// `mount_worktree_with_graph_runtime` needs.
+    pub(crate) fn code_graph_seat_port(self: &Arc<Self>) -> Arc<dyn CodeGraphSeatRuntimePortV1> {
+        Arc::clone(self) as Arc<dyn CodeGraphSeatRuntimePortV1>
     }
 }
 
