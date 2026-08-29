@@ -1262,9 +1262,7 @@ mod runtime_configuration_cutover {
         .await
         .expect("open retained project runtime");
         let database = host_runtime
-            .registered_database_arc(
-                tracedecay_sessions::admission::HostAdmissionScope::Project,
-            )
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("bind registered project database");
         crate::config::install_usecase_runtime_configuration_authority()
             .expect("install the root runtime configuration authority");
@@ -1422,9 +1420,7 @@ mod runtime_configuration_cutover {
             .await
             .expect("seed canonical configuration");
         let database = runtime
-            .registered_database_arc(
-                tracedecay_sessions::admission::HostAdmissionScope::Project,
-            )
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("bind registered project database");
         let setting = SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
             .expect("native graph setting key");
@@ -1526,9 +1522,7 @@ mod runtime_configuration_cutover {
         .await
         .expect("open retained project runtime");
         let database = runtime
-            .registered_database_arc(
-                tracedecay_sessions::admission::HostAdmissionScope::Project,
-            )
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("bind registered project database");
         let store =
             tracedecay_global_db::configuration::GlobalDbConfigurationControlStore::new_registered(
@@ -1723,9 +1717,7 @@ mod runtime_configuration_cutover {
         .await
         .expect("open retained project runtime");
         let database = runtime
-            .registered_database_arc(
-                tracedecay_sessions::admission::HostAdmissionScope::Project,
-            )
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("bind registered project database");
         let store =
             tracedecay_global_db::configuration::GlobalDbConfigurationControlStore::new_registered(

@@ -15,6 +15,7 @@ use tracedecay_domain::{
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
     derive_exact_observation_anchor_id,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
@@ -22,7 +23,6 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
-use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_usecases::observation::ObservationCancellation;
 
 use crate::common::isolated_lcm_db_path;

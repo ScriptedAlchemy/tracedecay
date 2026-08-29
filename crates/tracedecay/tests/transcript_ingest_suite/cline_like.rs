@@ -1,12 +1,12 @@
 use tempfile::TempDir;
 use tracedecay_global_db::ParseOffset;
+#[cfg(not(windows))]
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
 use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
 #[cfg(not(windows))]
 use tracedecay_store::ObservationProjectionStore;
-#[cfg(not(windows))]
-use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 #[cfg(not(windows))]

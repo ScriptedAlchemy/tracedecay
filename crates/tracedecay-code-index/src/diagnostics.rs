@@ -13,10 +13,11 @@ use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, ContentDigest, DiagnosticEvidenceClassV1,
     DiagnosticRecordStateV1, FileOccurrenceId, GenerationDiagnosticAttachmentV1,
-    GenerationDiagnosticV1, ManifestDigest, RetrievalAnchorId, UtcMicros, ValidatedCodeSnapshotV1,
+    GenerationDiagnosticV1, ManifestDigest, RetrievalAnchorId, UtcMicros,
 };
 
 use super::capabilities::expected_seal_digest;
+use crate::intake::ValidatedCodeSnapshotV1;
 
 /// Completeness reported by the Plan-35 producer/read boundary.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

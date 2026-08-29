@@ -974,6 +974,7 @@ mod tests {
 
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
+    use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
     use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId};
     use tracedecay_graph_db::{
         GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphNamespace,
@@ -983,7 +984,6 @@ mod tests {
         BrainId, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, StoreShardIdV1,
         UserProfileId,
     };
-    use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 
     use super::{
         DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES,

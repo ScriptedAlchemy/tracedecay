@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::lcm::payload::DeleteOpts;
 use tracedecay_sessions::runtime::lcm::types::{
     LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt,
@@ -15,7 +16,6 @@ use tracedecay_sessions::runtime::lcm::{
     LcmSummaryNodeDraft,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::common::{lcm_payload_message as raw_message, lcm_payload_session as sample_session};
 

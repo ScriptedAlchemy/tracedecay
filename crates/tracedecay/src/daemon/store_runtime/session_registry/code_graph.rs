@@ -175,6 +175,10 @@ struct GraphPublicationProbeV1 {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     commit_started: AtomicBool,
+    /// One warn per probe when the deadline first trips: interruption() is
+    /// polled from hot loops, and `DeadlineExceeded` is a unit error that
+    /// cannot otherwise be attributed to the deadline that armed it.
+    deadline_warned: AtomicBool,
 }
 
 impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
@@ -190,6 +194,13 @@ impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
         if self.request_cancellation.is_cancelled() || self.lifecycle_cancellation.is_cancelled() {
             Some(RuntimeInterruptionV1::Cancelled)
         } else if Instant::now() >= self.deadline_at {
+            if !self.deadline_warned.swap(true, Ordering::AcqRel) {
+                tracing::warn!(
+                    event = "graph_db_deadline_exceeded",
+                    deadline_id = self.deadline.deadline_id.as_str(),
+                    "graph publication probe deadline exceeded"
+                );
+            }
             Some(RuntimeInterruptionV1::DeadlineExceeded)
         } else {
             None
@@ -440,6 +451,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -509,6 +521,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 cancellation: publish_cancellation_identity.clone(),
                 deadline: publish_deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let publish_control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -673,6 +686,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -880,6 +894,7 @@ impl RetainedCodeGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1071,6 +1086,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1122,10 +1138,22 @@ impl RetainedCodeGraphRuntimeV1 {
                     // The idempotent recovery arm: this publication already
                     // owns the verified head (the gate loser after the winner
                     // published, or a re-activation before replay retirement).
-                    // Recovery resolves against the mounted database's
-                    // retained verified-generation lease and never re-reads
-                    // the sealed source at this layer; re-proof depth is the
-                    // graph registry's own recovery contract.
+                    // Prefer the immutable sealed artifact so a cold daemon
+                    // does not mount and reopen the corpus-sized shared staging
+                    // database merely to recover an already-active generation.
+                    // Dependency-bearing or absent sealed artifacts explicitly
+                    // fall back to the ordinary staging recovery path; every
+                    // integrity or control failure remains terminal.
+                    match self.graph_registry.recover_verified_sealed_snapshot(
+                        registration(),
+                        &mut storage,
+                        context,
+                        &prepared.relational_projection,
+                    ) {
+                        Ok(snapshot) => return Ok(snapshot),
+                        Err(GraphDbError::Unavailable { .. }) => {}
+                        Err(error) => return Err(error),
+                    }
                     return self.graph_registry.recover_verified_snapshot(
                         registration(),
                         &mut storage,
@@ -1545,6 +1573,7 @@ impl RetainedCodeGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1823,6 +1852,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1912,6 +1942,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),

@@ -65,7 +65,7 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         projection: &GraphProjectionIdentityV1,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.recover.direct_sealed")?;
         require_projection_binding(&registration, projection)?;
         let head = authority
             .verified_head(projection, context)
@@ -88,7 +88,7 @@ impl GraphDbRegistry {
         }
         let source = crate::generation::checked_decode_replay_source(
             &replay.publication.canonical_replay_source,
-            &|| check_all(&registration, context),
+            &|| check_all(&registration, context, "generation.recover.direct_sealed"),
         )?;
         let GraphGenerationReplaySource::SealedCodeGeneration(source) = source else {
             return Err(GraphDbError::unavailable(
@@ -114,15 +114,16 @@ impl GraphDbRegistry {
             Arc::clone(&registration.authority_lease),
         )?
         .ok_or_else(|| GraphDbError::unavailable("sealed generation store is absent"))?;
-        if identity.dependency_closure_digest(&|| check_all(&registration, context))?
-            != head.dependency_generation_closure_digest
+        if identity.dependency_closure_digest(&|| {
+            check_all(&registration, context, "generation.recover.direct_sealed")
+        })? != head.dependency_generation_closure_digest
         {
             return Err(GraphDbError::Corrupt {
                 message: "sealed generation dependency closure does not match its verified head"
                     .to_owned(),
             });
         }
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.recover.direct_sealed")?;
         let lease = generation_lease(&identity, head, BTreeMap::new());
         Ok(VerifiedGraphSnapshot::new_direct_sealed(database, lease))
     }
@@ -136,7 +137,7 @@ impl GraphDbRegistry {
         generation: &tracedecay_domain::CodeGenerationId,
         sealed_state_digest: &crate::SealedGraphStateDigest,
     ) -> Result<GraphReplayCollectionOutcome, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.publication")?;
         let database = self.resolve(registration.clone())?;
         let mut projections = Vec::new();
         let mut after = None;
@@ -209,7 +210,7 @@ impl GraphDbRegistry {
                     }
                     let source = crate::generation::checked_decode_replay_source(
                         &replay.publication.canonical_replay_source,
-                        &|| check_all(&registration, context),
+                        &|| check_all(&registration, context, "generation.publication"),
                     )?;
                     if let GraphGenerationReplaySource::SealedCodeGeneration(sealed) = &source
                         && &sealed.generation == generation
@@ -257,7 +258,7 @@ impl GraphDbRegistry {
                         })?;
                     let source =
                         crate::generation::checked_decode_replay_source(source_payload, &|| {
-                            check_all(&registration, context)
+                            check_all(&registration, context, "generation.publication")
                         })?;
                     if let GraphGenerationReplaySource::SealedCodeGeneration(sealed) = &source
                         && &sealed.generation == generation
@@ -287,7 +288,7 @@ impl GraphDbRegistry {
         if candidates.is_empty() {
             for (locator, _) in retired_cleanup {
                 database.delete_generation_contents(&locator, &|| {
-                    check_registration_request(&registration)
+                    check_registration_request(&registration, "publication.retired_cleanup")
                 })?;
             }
             return Ok(GraphReplayCollectionOutcome::Absent);
@@ -345,7 +346,7 @@ impl GraphDbRegistry {
                 // may leak derived bytes, but cannot destroy the source of an
                 // active relational replay.
                 if let Err(error) = database.delete_generation_contents(&locator, &|| {
-                    check_registration_request(&registration)
+                    check_registration_request(&registration, "publication.replay_retirement")
                 }) {
                     clear_retiring_fence(&database, &locator)?;
                     return Err(error);
@@ -379,7 +380,7 @@ impl GraphDbRegistry {
         generation: &tracedecay_domain::CodeGenerationId,
         sealed_state_digest: &crate::SealedGraphStateDigest,
     ) -> Result<bool, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.publication")?;
         let mut projection_after = None;
         loop {
             let request = GraphPublicationProjectionPageRequestV1::new(
@@ -420,7 +421,7 @@ impl GraphDbRegistry {
                             })?;
                         let source =
                             crate::generation::checked_decode_replay_source(payload, &|| {
-                                check_all(&registration, context)
+                                check_all(&registration, context, "generation.publication")
                             })?;
                         if let GraphGenerationReplaySource::SealedCodeGeneration(source) = source
                             && &source.generation == generation
@@ -1285,7 +1286,9 @@ mod historical_publication_reuse_tests {
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
-    use tracedecay_domain::{CodeGenerationId, RepositoryId, UtcMicros};
+    use tracedecay_domain::UtcMicros;
+    #[cfg(feature = "graph-sealed-store")]
+    use tracedecay_domain::{CodeGenerationId, RepositoryId};
     use tracedecay_store::runtime::GraphReplayRetirementOutcomeV1;
     use tracedecay_store::{
         BrainId, GraphProjectionIdentityV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
@@ -1314,9 +1317,11 @@ mod historical_publication_reuse_tests {
         GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1, GraphDbRegistration,
         GraphDbRegistry, GraphDbRegistryConfig, GraphEntity, GraphEntityId, GraphGenerationId,
         GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
-        GraphProjectionIdentity, GraphProjectorRevision, GraphProperty, GraphPropertyName,
-        GraphWatermark, SealedCodeGenerationReplay, SealedGraphStateDigest, SourceGeneration,
+        GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphWatermark,
+        SourceGeneration,
     };
+    #[cfg(feature = "graph-sealed-store")]
+    use crate::{GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest};
 
     #[derive(Debug)]
     struct TestCancellation;
@@ -1722,6 +1727,7 @@ mod historical_publication_reuse_tests {
         }
     }
 
+    #[cfg(feature = "graph-sealed-store")]
     #[test]
     fn sealed_snapshot_recovers_without_opening_the_staging_registry() {
         let mut fixture = published_fixture();

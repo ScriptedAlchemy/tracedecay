@@ -18,6 +18,8 @@ use tracedecay_domain::{
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, UtcMicros,
     VectorWatermark, WatermarkDriftV1,
 };
+use tracedecay_host_admission::HostAdmissionFacade;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
@@ -30,8 +32,6 @@ use tracedecay_store::{
 use tracedecay_usecases::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
 };
-use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_host_admission::HostAdmissionFacade;
 use tracedecay_usecases::memory::MemoryApplication;
 
 const GENERATION: u64 = 7;

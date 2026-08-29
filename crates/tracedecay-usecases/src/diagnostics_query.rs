@@ -312,10 +312,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// Reads the clean-generation publication pointer. A completed empty
     /// publication returns `Some(generation)` even when it contains no
     /// findings; no pointer is distinct from a clean result.
-    #[hotpath::measure(
-        label = "usecases.diagnostics_query.current_generation",
-        future = true
-    )]
+    #[hotpath::measure(label = "usecases.diagnostics_query.current_generation", future = true)]
     pub async fn current_generation(&self) -> CurrentDiagnosticGeneration {
         let operation = "diagnostics query current_generation";
         match self.store.current_generation().await {
@@ -364,10 +361,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Current records for one file occurrence inside `generation`, paged in
     /// ascending anchor order.
-    #[hotpath::measure(
-        label = "usecases.diagnostics_query.current_by_file",
-        future = true
-    )]
+    #[hotpath::measure(label = "usecases.diagnostics_query.current_by_file", future = true)]
     pub async fn current_by_file(
         &self,
         generation: &CodeGenerationId,
@@ -412,10 +406,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Stale (superseded or cleared) records for one file occurrence inside
     /// `generation`, paged in ascending anchor order.
-    #[hotpath::measure(
-        label = "usecases.diagnostics_query.stale_by_file",
-        future = true
-    )]
+    #[hotpath::measure(label = "usecases.diagnostics_query.stale_by_file", future = true)]
     pub async fn stale_by_file(
         &self,
         generation: &CodeGenerationId,

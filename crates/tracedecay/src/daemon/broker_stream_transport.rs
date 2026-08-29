@@ -23,9 +23,7 @@ pub(super) struct BrokerStreamTransport {
     // bounded reader owns the partial-frame accumulator so a read dropped by a
     // lost race resumes instead of restarting mid-frame and desynchronizing
     // JSON-RPC framing for the rest of the connection.
-    reader: tracedecay_sessions::admission::BoundedLineReader<
-        tokio::io::BufReader<BrokerReadHalf>,
-    >,
+    reader: tracedecay_sessions::admission::BoundedLineReader<tokio::io::BufReader<BrokerReadHalf>>,
     writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
     active_requests: Arc<
         std::sync::Mutex<HashMap<String, Option<tracedecay_domain::DeliverySettlementAttemptV1>>>,

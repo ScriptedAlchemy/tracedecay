@@ -45,6 +45,8 @@ use tracedecay_domain::{
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::errors::TraceDecayError;
 #[cfg(feature = "test-transport")]
+use tracedecay_sessions::admission::HostAdmissionScope;
+#[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 #[cfg(feature = "test-transport")]
 use tracedecay_store::{
@@ -56,8 +58,6 @@ use tracedecay_store::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_temporal_query::ports::ExecutionControl;
-#[cfg(feature = "test-transport")]
-use tracedecay_sessions::admission::HostAdmissionScope;
 
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 

@@ -233,18 +233,13 @@ impl McpTransport for ChannelTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         match self.rx.recv().await {
             Some(line)
-                if line.len()
-                    > tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES =>
+                if line.len() > tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES =>
             {
                 let prefix = line.as_bytes()[..line
                     .len()
                     .min(tracedecay_sessions::admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                     .to_vec();
-                Err(
-                    tracedecay_sessions::admission::wire_oversized_io_error_with_prefix(
-                        prefix,
-                    ),
-                )
+                Err(tracedecay_sessions::admission::wire_oversized_io_error_with_prefix(prefix))
             }
             other => Ok(other),
         }
@@ -266,18 +261,13 @@ impl McpTransportReader for &mut tokio::sync::mpsc::UnboundedReceiver<String> {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         match self.recv().await {
             Some(line)
-                if line.len()
-                    > tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES =>
+                if line.len() > tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES =>
             {
                 let prefix = line.as_bytes()[..line
                     .len()
                     .min(tracedecay_sessions::admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                     .to_vec();
-                Err(
-                    tracedecay_sessions::admission::wire_oversized_io_error_with_prefix(
-                        prefix,
-                    ),
-                )
+                Err(tracedecay_sessions::admission::wire_oversized_io_error_with_prefix(prefix))
             }
             other => Ok(other),
         }
@@ -316,10 +306,8 @@ pub async fn write_wire_oversized_rejection(
     error: &std::io::Error,
 ) -> std::io::Result<()> {
     use tracedecay_sessions::admission::{
-    HostAdmissionOutcome,
-    WIRE_RECORD_TOO_LARGE,
-    wire_oversized_inspect_prefix,
-};
+        HostAdmissionOutcome, WIRE_RECORD_TOO_LARGE, wire_oversized_inspect_prefix,
+    };
 
     let inspect_prefix = wire_oversized_inspect_prefix(error);
     let (id, code) = match peek_jsonrpc_request_id(inspect_prefix) {
@@ -434,11 +422,12 @@ mod tests {
             transport.read_line().await.unwrap().unwrap().len(),
             tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES
         );
-        let hostile =
-            "x".repeat(tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
+        let hostile = "x".repeat(tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
         tx.send(hostile).unwrap();
         let err = transport.read_line().await.unwrap_err();
-        assert!(tracedecay_sessions::admission::is_wire_oversized_io_error(&err));
+        assert!(tracedecay_sessions::admission::is_wire_oversized_io_error(
+            &err
+        ));
         assert_eq!(
             err.to_string(),
             tracedecay_sessions::admission::WIRE_RECORD_TOO_LARGE
@@ -454,12 +443,9 @@ mod tests {
         use tokio::io::{AsyncRead, BufReader, ReadBuf};
 
         use tracedecay_sessions::admission::{
-    MAX_MCP_JSONRPC_FRAME_BYTES,
-    WIRE_RECORD_TOO_LARGE,
-    line_outcome_to_io,
-    read_bounded_line,
-    wire_oversized_io_error,
-};
+            MAX_MCP_JSONRPC_FRAME_BYTES, WIRE_RECORD_TOO_LARGE, line_outcome_to_io,
+            read_bounded_line, wire_oversized_io_error,
+        };
 
         /// Streams `total` hostile bytes in chunks, then a fixed suffix, without
         /// pre-materializing the full hostile value for the product reader.
@@ -505,7 +491,9 @@ mod tests {
         // dedicated MCP helper's exact production cap is covered in wire tests.
         let first = line_outcome_to_io(read_bounded_line(&mut reader, max).await.unwrap());
         let err = first.unwrap_err();
-        assert!(tracedecay_sessions::admission::is_wire_oversized_io_error(&err));
+        assert!(tracedecay_sessions::admission::is_wire_oversized_io_error(
+            &err
+        ));
         assert_eq!(err.to_string(), WIRE_RECORD_TOO_LARGE);
         assert!(!err.to_string().contains('z'));
 
@@ -535,10 +523,11 @@ mod tests {
     fn replay_transport_rejects_oversized_before_enqueue() {
         let (inner, _tx, _rx) = ChannelTransport::new();
         let mut replay = ReplayTransport::new(inner);
-        let hostile =
-            "y".repeat(tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
+        let hostile = "y".repeat(tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
         let err = replay.push_replay(hostile).unwrap_err();
-        assert!(tracedecay_sessions::admission::is_wire_oversized_io_error(&err));
+        assert!(tracedecay_sessions::admission::is_wire_oversized_io_error(
+            &err
+        ));
         assert!(!err.to_string().contains('y'));
     }
 

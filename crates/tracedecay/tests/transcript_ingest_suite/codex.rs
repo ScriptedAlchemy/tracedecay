@@ -2,8 +2,8 @@ use std::io::Write;
 
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_sessions::runtime::codex::CodexSource;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::runtime::codex::CodexSource;
 
 use crate::restart_atomicity::{open_project_session_db, try_ingest_source};
 

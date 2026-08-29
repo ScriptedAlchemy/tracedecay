@@ -64,9 +64,7 @@ fn read_line_handling_wire_oversized_inner<T: McpTransport + std::marker::Send>(
     Box::pin(async move {
         match transport.read_line().await {
             Ok(line) => Ok(line),
-            Err(error)
-                if tracedecay_sessions::admission::is_wire_oversized_io_error(&error) =>
-            {
+            Err(error) if tracedecay_sessions::admission::is_wire_oversized_io_error(&error) => {
                 let _ =
                     crate::mcp::transport::write_wire_oversized_rejection(transport, &error).await;
                 Ok(None)
@@ -312,8 +310,7 @@ mod wire_bound_tests {
             client.write_all(b"\n").await.expect("exact newline");
 
             let chunk = vec![b'z'; 8192];
-            let mut remaining =
-                tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1;
+            let mut remaining = tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1;
             while remaining > 0 {
                 let n = remaining.min(chunk.len());
                 client

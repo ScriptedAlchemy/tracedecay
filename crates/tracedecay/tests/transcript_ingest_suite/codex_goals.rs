@@ -2,11 +2,11 @@
 //! latest-status surfacing, observation projection, and secret sanitization.
 
 use tempfile::TempDir;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::codex::CodexSource;
 use tracedecay_store::ObservationProjectionStore;
 use tracedecay_store::ObservationReplayRequest;
-use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::codex::{
     write_codex_rollout_with_goal_context, write_codex_rollout_with_structured_events, write_jsonl,
