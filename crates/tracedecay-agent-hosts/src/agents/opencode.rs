@@ -314,7 +314,8 @@ impl AgentIntegration for OpenCodeIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let prompt_path = opencode_prompt_path(home);
         if !self.has_tracedecay(home) || !prompt_path.exists() {
             return Ok(Vec::new());
@@ -332,7 +333,8 @@ impl AgentIntegration for OpenCodeIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let agents_md = project_root.join("AGENTS.md");
         if !local_config_has_tracedecay(project_root) || !agents_md.exists() {
             return Ok(Vec::new());

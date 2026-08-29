@@ -65,7 +65,8 @@ async fn run_one_host_receipt_review(
 
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let Some(ready) =
-        tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root).await?
+        tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root)
+            .await?
     else {
         return Ok(HostReceiptReviewProgress::Idle);
     };

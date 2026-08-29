@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
+use crate::errors::{Result, TraceDecayError};
 use tracedecay_automation_runtime::automation::skill_targets::{
     SkillInstallTarget, install_managed_skills, profile_root_for_agent_home,
 };
-use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
@@ -485,7 +485,8 @@ impl AgentIntegration for KiroIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         if !self.has_tracedecay(home) {
             return Ok(Vec::new());
         }
@@ -500,7 +501,8 @@ impl AgentIntegration for KiroIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let skill_index_path = project_root.join(".kiro/steering/tracedecay-managed-skills.md");
         if !workspace_mcp_has_tracedecay(project_root) || !skill_index_path.exists() {
             return Ok(Vec::new());

@@ -126,10 +126,9 @@ fn print_automation_run_record(
     println!("status: {}", record.status.as_str());
     println!(
         "task: {}",
-        record
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| tracedecay_automation_runtime::automation::backend::task_key(record.task))
+        record.task_key.as_deref().unwrap_or_else(|| {
+            tracedecay_automation_runtime::automation::backend::task_key(record.task)
+        })
     );
     println!("trigger: {:?}", record.trigger);
     println!("backend: {}", record.backend);

@@ -279,7 +279,8 @@ impl AgentIntegration for KimiIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let agents_md = project_root.join("AGENTS.md");
         if !mcp_config_has_tracedecay(
             &project_root.join(".kimi-code/mcp.json"),

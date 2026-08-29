@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use cap_std::{ambient_authority, fs::Dir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_application::retained_surfaces::AutomationTaskV1;
 use tracedecay_automation_runtime::automation::automatic_facts::{
     MAX_SHIPPED_FACT_PROPOSAL_BYTES, ShippedFactProposalDisposition,
     read_shipped_fact_proposal_bytes,
 };
-use tracedecay_application::retained_surfaces::AutomationTaskV1;
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_tagged_lowercase_hex};
 use tracedecay_private_fs::capability_dir::rename_noreplace;
 use tracedecay_private_fs::framed_log::{

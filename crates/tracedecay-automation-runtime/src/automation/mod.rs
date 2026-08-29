@@ -1,6 +1,5 @@
 pub mod agent_targets;
 mod artifact_feedback;
-pub mod host_io;
 mod artifact_generated_evals;
 mod artifact_optimizer;
 mod artifact_payloads;
@@ -12,6 +11,7 @@ pub mod backend;
 pub mod backend_identity;
 pub mod config;
 pub mod hermes_skill_bridge;
+pub mod host_io;
 pub mod host_receipts;
 mod job_webhook;
 pub mod jobs;

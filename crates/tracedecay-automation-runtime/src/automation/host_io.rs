@@ -42,7 +42,7 @@ type WriteJson = fn(&Path, &Value, Option<&Path>) -> Result<()>;
 type RemoveHostFile = fn(&Path) -> std::io::Result<()>;
 type ResolveOnPath = fn(&str, Option<&OsStr>) -> Result<Option<PathBuf>>;
 type CodexAgentFiles = fn() -> &'static [PluginFile];
-type WithWriteIntents = fn(PathBuf, &mut dyn FnMut()) ;
+type WithWriteIntents = fn(PathBuf, &mut dyn FnMut());
 
 static EXPORT_TO_AGENTS: OnceLock<ExportToAgents> = OnceLock::new();
 static EXPORT_TO_AGENT_HOSTS: OnceLock<ExportToAgentHosts> = OnceLock::new();

@@ -79,7 +79,8 @@ impl AgentIntegration for VibeIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let prompt_path = vibe_prompt_path(home);
         if !self.has_tracedecay(home) || !prompt_path.exists() {
             return Ok(Vec::new());
@@ -97,7 +98,8 @@ impl AgentIntegration for VibeIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let prompt_path = project_root.join(".vibe/prompts/cli.md");
         if !local_config_has_tracedecay(project_root) || !prompt_path.exists() {
             return Ok(Vec::new());

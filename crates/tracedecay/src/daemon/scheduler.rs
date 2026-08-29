@@ -218,7 +218,9 @@ fn scheduler_record_log_fields(
     let task = record
         .task_key
         .as_deref()
-        .unwrap_or_else(|| tracedecay_automation_runtime::automation::backend::task_key(record.task))
+        .unwrap_or_else(|| {
+            tracedecay_automation_runtime::automation::backend::task_key(record.task)
+        })
         .to_string();
     let mut fields = vec![
         ("project", project_path.display().to_string()),
@@ -1855,8 +1857,12 @@ async fn effective_automation_config_for_project(
 pub(super) fn automation_scheduler_configured(
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> bool {
-    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
-    use tracedecay_automation_runtime::automation::scheduler::{AutomationSchedule, parse_schedule};
+    use tracedecay_automation_runtime::automation::config::{
+        AutomationBackend, AutomationHostMode,
+    };
+    use tracedecay_automation_runtime::automation::scheduler::{
+        AutomationSchedule, parse_schedule,
+    };
 
     if !config.enabled
         || config.host_mode == AutomationHostMode::DelegatedHost
@@ -1888,7 +1894,9 @@ async fn automation_scheduler_has_work(
     cg: &crate::tracedecay::TraceDecay,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<bool> {
-    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
+    use tracedecay_automation_runtime::automation::config::{
+        AutomationBackend, AutomationHostMode,
+    };
 
     if automation_scheduler_configured(config) {
         return Ok(true);
@@ -1920,21 +1928,22 @@ async fn run_user_jobs_scheduler_pass(
     first_error: &mut Option<TraceDecayError>,
 ) {
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let jobs = match tracedecay_automation_runtime::automation::jobs::load_jobs(&dashboard_root).await {
-        Ok(jobs) => jobs,
-        Err(e) => {
-            log_daemon_event(
-                "scheduler_user_jobs",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", e.to_string()),
-                ],
-            );
-            first_error.get_or_insert(e);
-            return;
-        }
-    };
+    let jobs =
+        match tracedecay_automation_runtime::automation::jobs::load_jobs(&dashboard_root).await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                log_daemon_event(
+                    "scheduler_user_jobs",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "error".to_string()),
+                        ("error", e.to_string()),
+                    ],
+                );
+                first_error.get_or_insert(e);
+                return;
+            }
+        };
     for job in jobs
         .iter()
         .filter(|job| tracedecay_automation_runtime::automation::jobs::job_is_schedulable(job))

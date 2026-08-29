@@ -377,13 +377,14 @@ async fn stale_scoring_explains_archive_candidates_and_exclusions() {
     )
     .await
     .unwrap();
-    let pinned = tracedecay_automation_runtime::automation::managed_skills::set_managed_skill_pinned(
-        &profile_root,
-        &pinned_skill.metadata.id,
-        true,
-    )
-    .await
-    .unwrap();
+    let pinned =
+        tracedecay_automation_runtime::automation::managed_skills::set_managed_skill_pinned(
+            &profile_root,
+            &pinned_skill.metadata.id,
+            true,
+        )
+        .await
+        .unwrap();
     let user_skill =
         create_managed_skill(&profile_root, draft("user-skill", ManagedSkillSource::User))
             .await

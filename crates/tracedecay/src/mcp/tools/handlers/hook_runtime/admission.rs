@@ -550,7 +550,9 @@ pub(super) fn hook_v2_profile_admit(
         .get("admission")
         .cloned()
         .ok_or_else(|| {
-            tracedecay_automation_runtime::automation::config_error(format!("{action} requires admission"))
+            tracedecay_automation_runtime::automation::config_error(format!(
+                "{action} requires admission"
+            ))
         })
         .and_then(|value| {
             serde_json::from_value::<tracedecay_hooks::ProfileScopedNativeHookAdmissionV1>(value)

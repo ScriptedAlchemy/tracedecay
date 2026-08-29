@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 use tracedecay_automation_runtime::automation::jobs::{
     AutomationJob, JobDelivery, UserJobRunOptions, evaluate_and_record_scheduler_skip,
     job_schedule_decision, job_task_key, load_jobs, run_user_job_with_backend,
@@ -16,7 +17,6 @@ use tracedecay_automation_runtime::automation::jobs::{
 use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedule, cron_is_due, parse_schedule,
 };
-use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 
 fn sample_job(id: &str) -> AutomationJob {
     AutomationJob {

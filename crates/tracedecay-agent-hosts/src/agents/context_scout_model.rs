@@ -8,12 +8,12 @@ use super::context_scout_v2::{
     ContextScoutModelProposalV1, ContextScoutModelReceiptV1, ContextScoutModelRequestV1,
     serialized_token_count,
 };
+use crate::ports::pricing::cost_of_turn;
 use tracedecay_automation_runtime::automation::backend::{
     AgentTaskBackend, AgentTaskContract, AgentTaskError, AgentTaskKind, AgentTaskRequest,
     AgentTaskResponse, CodexAppServerBackend, backend_availability,
 };
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
-use crate::ports::pricing::cost_of_turn;
 
 const CONTEXT_SCOUT_PROMPT_V1: &str = "\
 Select one supplied candidate and return only the JSON object required by the response schema. \

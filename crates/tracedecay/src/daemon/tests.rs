@@ -519,11 +519,15 @@ async fn apply_project_automation_patch_via_surface(
         .await
         .expect("read pinned automation configuration");
     let configured =
-        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(&current.snapshot)
-            .expect("decode pinned automation configuration");
-    let desired =
-        tracedecay_automation_runtime::automation::config::effective_config(&configured, Some(&patch))
-            .expect("apply automation configuration patch");
+        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+            &current.snapshot,
+        )
+        .expect("decode pinned automation configuration");
+    let desired = tracedecay_automation_runtime::automation::config::effective_config(
+        &configured,
+        Some(&patch),
+    )
+    .expect("apply automation configuration patch");
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = super::project_open_owners::resolved_scope_for_project(
         graph.project_root(),

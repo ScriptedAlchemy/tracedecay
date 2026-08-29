@@ -367,8 +367,9 @@ pub(crate) fn managed_skill_test_draft(id: &str, title: &str) -> ManagedSkillDra
         title: title.to_string(),
         summary: format!("{title} summary."),
         category: "maintenance".to_string(),
-        targets: tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(
-        ),
+        targets:
+            tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(
+            ),
         body_markdown: format!("Use {title} before applying repository changes."),
         support_files: vec![
             ManagedSupportFile::new(

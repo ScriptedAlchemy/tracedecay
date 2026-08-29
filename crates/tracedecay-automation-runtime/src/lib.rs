@@ -59,11 +59,11 @@ pub(crate) fn register_test_schema_installer() {
 pub mod automation;
 pub mod ports;
 
-pub(crate) use tracedecay_usecases as application;
-pub(crate) use tracedecay_usecases::request_identity;
 pub(crate) use tracedecay_runtime_core::{
     config, db, errors, memory, privacy, runtime_identity, storage, store, worktree,
 };
+pub(crate) use tracedecay_usecases as application;
+pub(crate) use tracedecay_usecases::request_identity;
 
 /// Kernel-owned timestamp plus the project-runtime port historically reached
 /// as `crate::tracedecay`.
@@ -82,8 +82,7 @@ pub(crate) mod agents {
     pub use crate::automation::host_io::{
         ManagedSkillExportReport, export_managed_skills_to_agent_hosts,
         export_managed_skills_to_agents, home_dir, safe_remove_host_file, safe_write_json_file,
-        safe_write_text_file, uses_default_user_profile,
-        with_host_config_write_intents,
+        safe_write_text_file, uses_default_user_profile, with_host_config_write_intents,
     };
 
     pub(crate) mod host_cli {

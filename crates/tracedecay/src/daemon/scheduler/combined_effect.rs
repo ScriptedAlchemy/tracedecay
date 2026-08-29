@@ -113,7 +113,9 @@ enum DeferredLegTerminal {
 }
 
 fn failed_leg_terminal(
-    record: Option<tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord>,
+    record: Option<
+        tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
+    >,
     error: Option<tracedecay_runtime_core::errors::TraceDecayError>,
     fallback_message: String,
 ) -> DeferredLegTerminal {
@@ -748,12 +750,13 @@ async fn run_execute_pair(
                 );
             }
             let skill_terminal = DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                error: tracedecay_automation_runtime::automation::AutomationRunError::PartialEffect {
-                    run_id,
-                    committed_receipt: Box::new(committed_receipt),
-                    ledger_record: ledger_record.map(Box::new),
-                    detail,
-                },
+                error:
+                    tracedecay_automation_runtime::automation::AutomationRunError::PartialEffect {
+                        run_id,
+                        committed_receipt: Box::new(committed_receipt),
+                        ledger_record: ledger_record.map(Box::new),
+                        detail,
+                    },
             }));
             (
                 DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
@@ -1030,6 +1033,9 @@ mod tests {
 
     use fs2::FileExt;
     use tempfile::TempDir;
+    use tracedecay_application::{
+        CancellationSignal, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
+    };
     use tracedecay_automation_runtime::automation::AutomationRunControl;
     use tracedecay_automation_runtime::automation::backend::{
         AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
@@ -1043,9 +1049,6 @@ mod tests {
         AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
         CombinedReviewAutomationOptions, RetainedAutomationSettlementDisposition,
         run_skill_writer_with_backend_and_retrieval,
-    };
-    use tracedecay_application::{
-        CancellationSignal, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     };
     use tracedecay_domain::{
         AutomationTerminalV1, ManifestDigest, ObservabilityPayloadV1, ProjectId, RunId, SessionId,

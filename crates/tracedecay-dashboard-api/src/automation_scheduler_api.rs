@@ -193,7 +193,9 @@ fn scheduler_status_label(config: &AutomationConfig, paused: bool) -> &'static s
     {
         return "delegated_host";
     }
-    if config.backend == tracedecay_automation_runtime::automation::config::AutomationBackend::Disabled {
+    if config.backend
+        == tracedecay_automation_runtime::automation::config::AutomationBackend::Disabled
+    {
         return "backend_disabled";
     }
     "configured"
@@ -204,7 +206,9 @@ fn scheduler_status_label(config: &AutomationConfig, paused: bool) -> &'static s
 mod tests {
     use super::*;
     use tracedecay_automation_runtime::automation::backend::AgentTaskFailureClass;
-    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationTaskConfig};
+    use tracedecay_automation_runtime::automation::config::{
+        AutomationBackend, AutomationTaskConfig,
+    };
     use tracedecay_automation_runtime::automation::run_ledger::{
         AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path,
     };

@@ -124,7 +124,8 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
     let record = tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord {
         schema_version: 2,
         run_id: "run-123".to_string(),
-        trigger: tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Scheduler,
+        trigger:
+            tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Scheduler,
         task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
         task_key: Some("memory_curator".to_string()),
         backend: "codex_app_server".to_string(),

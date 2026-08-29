@@ -1,6 +1,5 @@
 //! Canonical admitted problem mapping for automation runs.
 
-use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationRunRequestV1};
 use tracedecay_application::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemEnvelope,
@@ -8,6 +7,7 @@ use tracedecay_application::{
     ProblemOwningLayer, RequestAdmission, RequestContext, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_automation::backend::AgentTaskFailureClass;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 
 use super::{AutomationSettledProblem, contract_error};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
@@ -210,7 +210,6 @@ fn zero_effect_terminal(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
     use tracedecay_application::{
         ApplicationExecutionFailureClassV1, ApplicationProblemKind, ApplicationUnavailableClassV1,
         CancellationContext, CancellationSignal, CancellationStage, CapabilityGrantId,
@@ -218,6 +217,7 @@ mod tests {
         ResolvedScope,
     };
     use tracedecay_automation::backend::AgentTaskFailureClass;
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
     use tracedecay_domain::{
         ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
     };

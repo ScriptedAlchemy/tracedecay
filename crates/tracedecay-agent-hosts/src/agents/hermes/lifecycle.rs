@@ -10,7 +10,10 @@ use crate::errors::Result;
 
 pub(super) fn activate_deployed_plugin_registration(ctx: &InstallContext) -> Result<()> {
     let deployed_plugin_dir = ctx.home.join(".hermes/plugins/tracedecay");
-    let profile_root = tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
+    let profile_root =
+        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
+            &ctx.home,
+        );
     for profile_plugin_dir in super::profile_plugin_dirs(&ctx.home) {
         super::activate_deployed_plugin_profile(
             &deployed_plugin_dir,

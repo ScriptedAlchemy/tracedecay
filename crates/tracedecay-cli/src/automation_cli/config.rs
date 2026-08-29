@@ -23,7 +23,9 @@ pub(crate) async fn notify_project_automation_scheduler(
 pub(super) async fn handle_automation_config_command(
     action: AutomationConfigAction,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfigPatch};
+    use tracedecay_automation_runtime::automation::config::{
+        AutomationBackend, AutomationConfigPatch,
+    };
 
     let path = match &action {
         AutomationConfigAction::Get { path, .. }
@@ -172,8 +174,10 @@ pub(crate) async fn apply_project_automation_patch(
 > {
     let resolved = crate::commands::resolve_project_scope(project_path.to_path_buf()).await?;
     let current = load_canonical_automation_config(&resolved.project_path).await?;
-    let effective =
-        tracedecay_automation_runtime::automation::config::effective_config(&current, Some(&patch))?;
+    let effective = tracedecay_automation_runtime::automation::config::effective_config(
+        &current,
+        Some(&patch),
+    )?;
     if effective != current {
         let expected_revision =
             crate::commands::current_configuration_revision(&resolved.project_path).await?;
@@ -260,7 +264,8 @@ fn print_automation_config(
     json: bool,
     explain: bool,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let availability = tracedecay_automation_runtime::automation::backend::backend_availability(effective);
+    let availability =
+        tracedecay_automation_runtime::automation::backend::backend_availability(effective);
     let trace_decay_backend_calls = effective.enabled
         && effective.backend
             == tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer

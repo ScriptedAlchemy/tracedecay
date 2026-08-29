@@ -226,7 +226,8 @@ async fn continue_projectless_hermes_review(
     let dashboard_root =
         tracedecay_automation_runtime::automation::runner::user_automation_root(profile_root);
     let Some(ready) =
-        tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root).await?
+        tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root)
+            .await?
     else {
         return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
     };

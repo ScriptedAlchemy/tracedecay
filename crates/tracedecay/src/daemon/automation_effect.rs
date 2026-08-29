@@ -6,16 +6,6 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
-use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunStatus, ExactRunPublication, ExactRunPublishOutcome,
-};
-use tracedecay_automation_runtime::automation::runner::{
-    AutomationRunSettlementGuard, CombinedReviewDispatch, RetainedAutomationRun,
-    RetainedAutomationSettlementDisposition, RetainedCombinedReviewRun,
-    RetainedCombinedReviewSettlementGuards, ReusedSchedulerSkip,
-};
-use tracedecay_automation_runtime::automation::{AutomationCommittedReceipt, AutomationRunError};
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
     AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
@@ -28,6 +18,16 @@ use tracedecay_application::{
     retained_surface_application_operation, retained_surface_execution_problem,
     retained_surface_outcome_matches_terminal, retained_surface_problem_matches_terminal,
 };
+use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
+use tracedecay_automation_runtime::automation::run_ledger::{
+    AutomationRunLedgerRecord, AutomationRunStatus, ExactRunPublication, ExactRunPublishOutcome,
+};
+use tracedecay_automation_runtime::automation::runner::{
+    AutomationRunSettlementGuard, CombinedReviewDispatch, RetainedAutomationRun,
+    RetainedAutomationSettlementDisposition, RetainedCombinedReviewRun,
+    RetainedCombinedReviewSettlementGuards, ReusedSchedulerSkip,
+};
+use tracedecay_automation_runtime::automation::{AutomationCommittedReceipt, AutomationRunError};
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
@@ -2079,33 +2079,34 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
     if state.publication.is_none() {
         #[cfg(test)]
         let prepared_write_hook = state.prepared_write_hook.clone();
-        let bound = tracedecay_automation_runtime::automation::run_ledger::bind_staged_run_record_exact(
-            &state.authority.dashboard_root,
-            &state.ledger,
-            |publication| {
-                #[cfg(test)]
-                if let Some(hook) = prepared_write_hook.as_ref() {
-                    hook.before_write(publication)?;
-                }
-                let first = persist_prepared_terminal_blocking(
-                    &state.authority.journal_path,
-                    &state.authority.admission,
-                    &state.terminal,
-                    publication.clone(),
-                );
-                match first {
-                    Ok(()) => Ok(()),
-                    Err(first_error) => replay_exact_binding_after_error_blocking(
+        let bound =
+            tracedecay_automation_runtime::automation::run_ledger::bind_staged_run_record_exact(
+                &state.authority.dashboard_root,
+                &state.ledger,
+                |publication| {
+                    #[cfg(test)]
+                    if let Some(hook) = prepared_write_hook.as_ref() {
+                        hook.before_write(publication)?;
+                    }
+                    let first = persist_prepared_terminal_blocking(
                         &state.authority.journal_path,
                         &state.authority.admission,
                         &state.terminal,
-                        publication,
-                    )?
-                    .map(|_| ())
-                    .ok_or(first_error),
-                }
-            },
-        );
+                        publication.clone(),
+                    );
+                    match first {
+                        Ok(()) => Ok(()),
+                        Err(first_error) => replay_exact_binding_after_error_blocking(
+                            &state.authority.journal_path,
+                            &state.authority.admission,
+                            &state.terminal,
+                            publication,
+                        )?
+                        .map(|_| ())
+                        .ok_or(first_error),
+                    }
+                },
+            );
         match bound {
             Ok((publication, ())) => {
                 state.publication = Some(publication);

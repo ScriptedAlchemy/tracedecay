@@ -58,9 +58,10 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
     .await
     .expect("save paused scheduler control");
 
-    let run_control = tracedecay_automation_runtime::automation::AutomationRunControl::from_interrupted(
-        Arc::new(|| false),
-    );
+    let run_control =
+        tracedecay_automation_runtime::automation::AutomationRunControl::from_interrupted(
+            Arc::new(|| false),
+        );
     Box::pin(super::super::super::run_automation_scheduler_tick(
         &project,
         &cg,

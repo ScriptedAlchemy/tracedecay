@@ -50,7 +50,9 @@ pub(crate) use tracedecay_automation_runtime::automation::runner::{
     CombinedReviewDispatch, MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
     SkillWriterAutomationOptions, run_skill_writer_with_backend_and_retrieval,
 };
-pub(crate) use tracedecay_automation_runtime::automation::{AutomationRunControl, AutomationRunError};
+pub(crate) use tracedecay_automation_runtime::automation::{
+    AutomationRunControl, AutomationRunError,
+};
 pub(crate) use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -299,8 +301,10 @@ pub(crate) async fn run_skill_writer_with_backend(
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
-) -> Result<tracedecay_automation_runtime::automation::runner::SkillWriterAutomationRun, AutomationRunError>
-{
+) -> Result<
+    tracedecay_automation_runtime::automation::runner::SkillWriterAutomationRun,
+    AutomationRunError,
+> {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
     tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
         cg,

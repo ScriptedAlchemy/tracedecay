@@ -79,12 +79,13 @@ async fn fixed_task_schedule_decision(
     activity: tracedecay_automation_runtime::automation::scheduler::SessionActivity,
     now_secs: i64,
 ) -> Result<tracedecay_automation_runtime::automation::scheduler::AutomationScheduleDecision> {
-    let summary = tracedecay_automation_runtime::automation::run_ledger::load_run_ledger_task_summary(
-        dashboard_root,
-        task,
-        tracedecay_automation_runtime::automation::backend::task_key(task),
-    )
-    .await?;
+    let summary =
+        tracedecay_automation_runtime::automation::run_ledger::load_run_ledger_task_summary(
+            dashboard_root,
+            task,
+            tracedecay_automation_runtime::automation::backend::task_key(task),
+        )
+        .await?;
     Ok(
         tracedecay_automation_runtime::automation::scheduler::schedule_decision(
             config,
@@ -355,10 +356,11 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
         .store_administration
         .registered_project_session_database(project_path, cg.store_layout())
         .await?;
-    let schedule_activity = tracedecay_automation_runtime::automation::scheduler::load_session_activity(
-        session_database.as_ref(),
-    )
-    .await;
+    let schedule_activity =
+        tracedecay_automation_runtime::automation::scheduler::load_session_activity(
+            session_database.as_ref(),
+        )
+        .await;
     let schedule_now_secs = tracedecay_application::now_micros().0.div_euclid(1_000_000);
     let memory_curator_decision = fixed_task_schedule_decision(
         &cg.store_layout().dashboard_root,
@@ -733,8 +735,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use tracedecay_automation_runtime::automation::AutomationRunControl;
     use tracedecay_application::{CancellationSignal, Deadline};
+    use tracedecay_automation_runtime::automation::AutomationRunControl;
     use tracedecay_domain::UtcMicros;
 
     use super::{

@@ -709,9 +709,11 @@ async fn run_production_hook_cycle(
     if scout_configuration.configuration_digest() != &execution.configuration_digest {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
-    let Ok(model_config) = tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-        &pinned_configuration.snapshot,
-    ) else {
+    let Ok(model_config) =
+        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+            &pinned_configuration.snapshot,
+        )
+    else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     if install_project_open_context_scout_configuration(
@@ -1182,9 +1184,10 @@ async fn register_production_advisory_owner(
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open Context Scout configuration is unavailable".to_owned(),
         })?;
-    let model_config = tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-        &configuration.snapshot,
-    )?;
+    let model_config =
+        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+            &configuration.snapshot,
+        )?;
     install_project_open_context_scout_configuration(
         scout_owner.as_ref(),
         scout_configuration,

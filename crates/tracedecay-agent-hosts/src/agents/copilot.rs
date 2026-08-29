@@ -163,7 +163,8 @@ impl AgentIntegration for CopilotIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         if !self.has_tracedecay(home) {
             return Ok(Vec::new());
         }
@@ -189,7 +190,8 @@ impl AgentIntegration for CopilotIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let instructions = project_root.join(".github/copilot-instructions.md");
         if !workspace_mcp_has_tracedecay(project_root) || !instructions.exists() {
             return Ok(Vec::new());

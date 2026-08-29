@@ -559,8 +559,10 @@ fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
 
     let cursor_files = tracedecay::agents::plugin_bundle::cursor_files();
     let temp = tempfile::tempdir().unwrap();
-    tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(temp.path())
-        .unwrap();
+    tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
+        temp.path(),
+    )
+    .unwrap();
     for agent in EXPECTED_AGENTS {
         let stem = agent.trim_end_matches(".md");
         let claude_path = root.join("plugin/agents").join(agent);

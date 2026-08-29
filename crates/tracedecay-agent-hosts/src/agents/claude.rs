@@ -203,7 +203,8 @@ impl AgentIntegration for ClaudeIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let claude_md_path = home.join(".claude").join("CLAUDE.md");
         if !self.has_tracedecay(home) || !claude_md_path.exists() {
             return Ok(Vec::new());
@@ -221,7 +222,8 @@ impl AgentIntegration for ClaudeIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let claude_md_path = project_root.join(".claude").join("CLAUDE.md");
         // Only refresh a project that is actually tracedecay-managed. A project
         // qualifies when its local `.mcp.json` declares the tracedecay server

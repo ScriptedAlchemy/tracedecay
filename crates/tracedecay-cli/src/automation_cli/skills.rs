@@ -134,7 +134,9 @@ fn deploy_skills_to_current_project(
         }
     })?;
     let project_root =
-        tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(&current);
+        tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(
+            &current,
+        );
     Ok(
         tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project(
             profile_root,
@@ -143,7 +145,9 @@ fn deploy_skills_to_current_project(
     )
 }
 
-fn print_managed_skill(skill: &tracedecay_automation_runtime::automation::managed_skills::ManagedSkill) {
+fn print_managed_skill(
+    skill: &tracedecay_automation_runtime::automation::managed_skills::ManagedSkill,
+) {
     println!("id: {}", skill.metadata.id);
     println!("title: {}", skill.metadata.title);
     println!("summary: {}", skill.metadata.summary);

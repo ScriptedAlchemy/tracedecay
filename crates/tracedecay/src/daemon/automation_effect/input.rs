@@ -1,11 +1,11 @@
 //! Canonical automation request projection.
 
-use tracedecay_automation_runtime::automation::runner::{
-    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-};
 use tracedecay_application::retained_surfaces::{
     AutomationRunRequestV1, AutomationTaskRequestV1, LcmGrepSortV1, LcmRoleV1, LcmSearchScopeV1,
     MemoryCuratorRunInputV1, SessionReflectorRunInputV1, SkillWriterRunInputV1, UserJobRunInputV1,
+};
+use tracedecay_automation_runtime::automation::runner::{
+    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
 };
 use tracedecay_domain::{RunId, UtcMicros};
 

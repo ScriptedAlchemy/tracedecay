@@ -643,9 +643,7 @@ fn native_message_ids_distinguish_delimiter_ambiguous_structural_tuples() {
         "ignored",
     );
     assert_ne!(left, right);
-    assert!(
-        left.starts_with("kiro.message-id.v2.") && right.starts_with("kiro.message-id.v2.")
-    );
+    assert!(left.starts_with("kiro.message-id.v2.") && right.starts_with("kiro.message-id.v2."));
     assert_eq!(
         left,
         stable_message_id(

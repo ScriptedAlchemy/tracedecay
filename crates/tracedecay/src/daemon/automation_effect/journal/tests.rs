@@ -2,8 +2,6 @@ use super::*;
 
 use serde_json::json;
 use std::collections::BTreeMap;
-use tracedecay_automation_runtime::automation::AutomationCommittedReceipt;
-use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
     AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
@@ -12,6 +10,8 @@ use tracedecay_application::retained_surfaces::{
     RetainedSurfaceResultV1, SessionReflectorRunInputV1, UserJobRunInputV1,
     retained_surface_application_operation, retained_surface_execution_problem,
 };
+use tracedecay_automation_runtime::automation::AutomationCommittedReceipt;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 
 use tracedecay_application::{
     ApplicationOutcome, ApplicationProblemEnvelope, AuthorityReceipt, Deadline, DisclosureClass,
@@ -29,7 +29,9 @@ use crate::daemon::automation_effect::{AutomationSettledTerminal, recovery_index
 
 struct NeverAutomationBackend;
 
-impl tracedecay_automation_runtime::automation::backend::AgentTaskBackend for NeverAutomationBackend {
+impl tracedecay_automation_runtime::automation::backend::AgentTaskBackend
+    for NeverAutomationBackend
+{
     fn run_task(
         &self,
         _request: &tracedecay_automation_runtime::automation::backend::AgentTaskRequest,

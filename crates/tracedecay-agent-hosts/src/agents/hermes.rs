@@ -94,7 +94,10 @@ impl AgentIntegration for HermesIntegration {
         home: &Path,
     ) -> Result<Vec<PathBuf>> {
         let mut paths = self.host_registration_paths(home);
-        let profile_root = tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
+        let profile_root =
+            tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
+                home,
+            );
         for plugin_dir in profile_plugin_dirs(home) {
             paths.extend(managed_skill_overlay_paths(&profile_root, &plugin_dir)?);
         }
@@ -118,7 +121,8 @@ impl AgentIntegration for HermesIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let mut exports = Vec::new();
         for plugin_dir in detected_plugin_dirs(home) {
             exports.push(tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
@@ -157,7 +161,8 @@ fn hermes_registration_state(
     if !dashboard_wrapper::matches_policy(&default_plugin, dashboard_enabled) {
         return State::Repairable;
     }
-    let profile_root = tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
+    let profile_root =
+        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
     for plugin_dir in plugin_dirs {
         let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
             return State::Corrupt;
