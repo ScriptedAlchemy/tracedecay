@@ -762,14 +762,17 @@ pub(in crate::daemon::service) struct RegisteredConfigurationRuntime {
     pub(super) actor: ActorId,
     pub(super) grants: DaemonConfigurationGrantAuthority,
     pub(super) semantic_operation: Arc<OnceLock<Arc<ProductionSemanticConfigurationOperationV1>>>,
-    pub(super) semantic_evaluation_workers:
-        Arc<tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1>,
+    pub(super) semantic_evaluation_workers: Arc<
+        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1,
+    >,
 }
 
 impl RegisteredConfigurationRuntime {
     pub(in crate::daemon::service) fn semantic_evaluation_workers(
         &self,
-    ) -> &Arc<tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1> {
+    ) -> &Arc<
+        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1,
+    > {
         &self.semantic_evaluation_workers
     }
 }

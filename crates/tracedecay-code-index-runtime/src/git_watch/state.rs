@@ -12,7 +12,9 @@ use tokio::time::Instant;
 
 use super::DirtySet;
 use super::health::ProjectHealth;
-use crate::ports::{GitWatchMaintenanceWakeV1 as MaintenanceCoordinator, GitWatchSyncConfigV1 as SyncConfig};
+use crate::ports::{
+    GitWatchMaintenanceWakeV1 as MaintenanceCoordinator, GitWatchSyncConfigV1 as SyncConfig,
+};
 use tracedecay_usecases::context::CancellationToken;
 
 pub enum WorktreeRegistration {

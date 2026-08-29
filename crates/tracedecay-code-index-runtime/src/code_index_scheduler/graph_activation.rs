@@ -11,10 +11,10 @@ use super::{
     CodeIndexPublicationStoreErrorV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
     DaemonCodeIndexPublicationStoreV1, DurablePublicationPointerV1, LatestCompleteCodeIndexV1,
 };
-use crate::code_index::graph_projection::CodeGraphProjectionStore;
 use crate::code_graph_seat::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
+use crate::code_index::graph_projection::CodeGraphProjectionStore;
 
 /// Test-only injected retryable activation failures, keyed by worktree id.
 /// The worktree id is unique per test fixture, while generation ids are
@@ -78,9 +78,7 @@ impl Drop for InjectedActivationGateV1 {
 }
 
 #[cfg(test)]
-pub fn install_injected_activation_gate(
-    worktree_id: &WorktreeId,
-) -> InjectedActivationGateV1 {
+pub fn install_injected_activation_gate(worktree_id: &WorktreeId) -> InjectedActivationGateV1 {
     let state = Arc::new(InjectedActivationGateStateV1 {
         started: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),

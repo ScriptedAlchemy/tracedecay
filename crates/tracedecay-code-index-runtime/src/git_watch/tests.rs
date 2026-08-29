@@ -108,7 +108,6 @@ fn timed_out_identity_discovery_retries_instead_of_degrading_forever() {
     ));
 }
 
-
 #[test]
 fn dirty_set_coalesces_and_takes_once() {
     let mut set = DirtySet::default();

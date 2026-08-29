@@ -144,8 +144,7 @@ use graph_control::{CallableGraphExecutionControl, current_utc_micros, graph_bud
 /// generation is resolved through the three-tier freshness ladder to the latest
 /// complete compatible generation (NEXT.md clause 8). Any other value is an
 /// explicit caller pin that is served generation-bound and read-only.
-pub const UNPINNED_LATEST_GENERATION_SENTINEL: &str =
-    "code-generation:unpinned-latest.v1";
+pub const UNPINNED_LATEST_GENERATION_SENTINEL: &str = "code-generation:unpinned-latest.v1";
 
 /// Construct the reserved unpinned-latest [`CodeGenerationId`] sentinel a caller
 /// passes when it wants the freshness-resolved latest complete generation
@@ -1035,11 +1034,7 @@ impl GenerationRecordIndexV1 {
 
     /// Ascending positions of the edges incident to `symbol` in the requested
     /// direction, preserving the order a full edge scan would have produced.
-    pub fn incident_edge_positions(
-        &self,
-        symbol: &SymbolOccurrenceId,
-        reverse: bool,
-    ) -> &[usize] {
+    pub fn incident_edge_positions(&self, symbol: &SymbolOccurrenceId, reverse: bool) -> &[usize] {
         let adjacency = if reverse {
             self.edges_to.get(symbol)
         } else {

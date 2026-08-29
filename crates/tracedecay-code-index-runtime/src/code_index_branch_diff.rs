@@ -305,10 +305,9 @@ where
         let execution_admission = Arc::clone(&execution_admission);
         Box::pin(hotpath::future!(
             async move {
-                let scope = match scope_resolver.resolved_scope_for_project(
-                    &request.project_root,
-                    &project_id,
-                ) {
+                let scope = match scope_resolver
+                    .resolved_scope_for_project(&request.project_root, &project_id)
+                {
                     Ok(scope) => scope,
                     Err(_) => {
                         return unavailable(
@@ -584,10 +583,9 @@ where
                     total_changes,
                     page.next_cursor,
                 );
-                let terminal_scope = match scope_resolver.resolved_scope_for_project(
-                    &request.project_root,
-                    &project_id,
-                ) {
+                let terminal_scope = match scope_resolver
+                    .resolved_scope_for_project(&request.project_root, &project_id)
+                {
                     Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
                     _ => {
                         return unavailable(

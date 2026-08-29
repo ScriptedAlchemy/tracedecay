@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 
-use tracedecay_code_index_runtime::SemanticEvaluationShutdownReceiptV1;
 use super::shutdown_coordination::{
     DrainingGauge, ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
     prepare_shutdown_owner_phases,
@@ -17,6 +16,7 @@ use super::{
     DAEMON_PROJECT_SERVER_DRAIN_DEADLINE, DAEMON_STORE_CLOSE_RESERVE, DAEMON_TASK_ABORT_DEADLINE,
     DaemonLifecycle, core_lifecycle::DaemonShutdownClaim,
 };
+use tracedecay_code_index_runtime::SemanticEvaluationShutdownReceiptV1;
 use tracedecay_runtime_core::errors::Result;
 
 /// Map a collected semantic-evaluation receipt onto the daemon shutdown

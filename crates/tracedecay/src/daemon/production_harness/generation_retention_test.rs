@@ -300,10 +300,11 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     let newer_vector_generation =
         publish_vector_generation(schedulers, &canonical_root, &latest).await;
     assert_ne!(newer_vector_generation, vector_generation);
-    let code_store_root = tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
-        &graph.store_layout().data_root.join("code-index-v1"),
-        &canonical_root,
-    );
+    let code_store_root =
+        tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
+            &graph.store_layout().data_root.join("code-index-v1"),
+            &canonical_root,
+        );
     let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
     let plan = prepare_next_code_generation_retention_cancellable(
         &code_store_root,

@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use crate::branch::BranchAdminAction;
 use crate::config::RetentionConfig;
-use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 
 use super::branch_admin::StoreAdministration;

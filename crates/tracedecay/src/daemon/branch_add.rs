@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
+use super::{DaemonHandshake, StoreAdministration};
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexSchedulerRegistryV1, ServingGenerationInstallationOutcomeV1,
     ServingGenerationRollbackOutcomeV1,
 };
-use super::{DaemonHandshake, StoreAdministration};
 
 const BRANCH_ADD_TOOL_NAME: &str = "tracedecay_admin_branch_add";
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";

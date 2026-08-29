@@ -291,9 +291,7 @@ pub fn repository_id_for(project_root: &Path) -> Result<RepositoryId, IdentityEr
     repository_id_for_common_dir(&common)
 }
 
-pub fn repository_id_for_common_dir(
-    common_dir: &Path,
-) -> Result<RepositoryId, IdentityErrorV1> {
+pub fn repository_id_for_common_dir(common_dir: &Path) -> Result<RepositoryId, IdentityErrorV1> {
     let digest = super::sha256_hex(common_dir.to_string_lossy().as_bytes());
     RepositoryId::new(format!("repository.daemon.{digest}"))
         .map_err(|error| IdentityErrorV1::Domain(error.to_string()))

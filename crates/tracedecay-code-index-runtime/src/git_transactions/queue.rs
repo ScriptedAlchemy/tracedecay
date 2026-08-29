@@ -188,9 +188,7 @@ impl RepositoryMutationQueue {
     }
 
     #[cfg(test)]
-    pub fn retained_gate_count_for_test(
-        &self,
-    ) -> Result<usize, RepositoryMutationQueueError> {
+    pub fn retained_gate_count_for_test(&self) -> Result<usize, RepositoryMutationQueueError> {
         self.gates
             .lock()
             .map(|gates| gates.len())

@@ -2,8 +2,8 @@ use tempfile::TempDir;
 
 use super::journey_test_support::git;
 use super::*;
-use tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1;
 use crate::daemon::project_composition::ProductionProjectComposition;
+use tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1;
 
 async fn open_project_composition(
     harness: &ProductionProjectCompositionHarnessV1,

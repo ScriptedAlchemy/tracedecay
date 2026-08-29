@@ -16,10 +16,9 @@ fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> String {
 }
 
 fn escape_field(value: &str) -> String {
-    if value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':'))
-    {
+    if value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')
+    }) {
         return value.to_owned();
     }
     let mut escaped = String::new();

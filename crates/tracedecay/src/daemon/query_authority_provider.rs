@@ -15,12 +15,12 @@ use tracedecay_domain::{
     configuration::UserProfileId,
 };
 
+use crate::config::retrieval::{
+    AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
+};
 use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::{
     AcceptedQueryEvaluationV1, QueryAuthorityMaterialV1, QueryAuthorityProviderErrorV1,
     QueryAuthorityProviderV1,
-};
-use crate::config::retrieval::{
-    AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
 };
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_usecases::semantic_runtime::{

@@ -89,12 +89,12 @@ use crate::application_surface::{
     GitReadSurfaceRequest,
 };
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
+use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
+use tracedecay_application::ConfigurationWireRequestV1;
 use tracedecay_code_index_runtime::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
     capture_exact_snapshot,
 };
-use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
-use tracedecay_application::ConfigurationWireRequestV1;
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,
@@ -277,7 +277,8 @@ fn retained_request_admission_problem(admission: RequestAdmission) -> Option<App
 
 #[derive(Clone)]
 pub(crate) struct DaemonInvocationService {
-    code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    code_index_schedulers:
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     lsp_admission_open: Arc<Mutex<bool>>,
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
     lsp_lease_tasks: Arc<LspLeaseTaskRegistry>,
@@ -320,7 +321,9 @@ pub(crate) struct DaemonInvocationService {
 impl Default for DaemonInvocationService {
     fn default() -> Self {
         Self::with_code_index_schedulers(
-            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
+                1,
+            ),
         )
     }
 }

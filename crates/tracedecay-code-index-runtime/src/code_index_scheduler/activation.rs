@@ -27,8 +27,7 @@ pub type CodeIndexActivationMountFutureV1 =
     Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'static>>;
 pub type CodeIndexActivationMountV1 =
     Arc<dyn Fn() -> CodeIndexActivationMountFutureV1 + Send + Sync + 'static>;
-pub type CodeIndexActivationHintFutureV1 =
-    Pin<Box<dyn Future<Output = bool> + Send + 'static>>;
+pub type CodeIndexActivationHintFutureV1 = Pin<Box<dyn Future<Output = bool> + Send + 'static>>;
 pub type CodeIndexActivationHintSinkV1 =
     Arc<dyn Fn(CodeIndexActivationHookBatchV1) -> CodeIndexActivationHintFutureV1 + Send + Sync>;
 
@@ -285,11 +284,7 @@ impl CodeIndexActivationV1 {
         label = "daemon.code_index.activation.notify_hook_paths",
         future = true
     )]
-    pub async fn notify_hook_paths(
-        &self,
-        project_root: &Path,
-        rel_paths: Vec<String>,
-    ) -> bool {
+    pub async fn notify_hook_paths(&self, project_root: &Path, rel_paths: Vec<String>) -> bool {
         if rel_paths.is_empty() || !self.route_is_live() || !self.accepts_root(project_root) {
             return false;
         }

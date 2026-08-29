@@ -39,8 +39,8 @@ use tracedecay_usecases::request_identity::{PreviewIdentityDomain, derive_previe
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
 use crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar;
-use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use crate::mcp::McpServer;
+use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
@@ -1935,13 +1935,17 @@ pub(crate) fn resolved_scope_for_project(
     project_root: &Path,
     project_id: &ProjectId,
 ) -> std::result::Result<ResolvedScope, ApplicationContractError> {
-    let repository_id = tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
-        project_root,
-    )
-    .map_err(|_| ApplicationContractError::Inconsistent {
-        field: "project-open repository id",
-    })?;
-    let worktree_id = tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(project_root)
+    let repository_id =
+        tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
+            project_root,
+        )
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open repository id",
+        })?;
+    let worktree_id =
+        tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
+            project_root,
+        )
         .map_err(|_| ApplicationContractError::Inconsistent {
             field: "project-open worktree id",
         })?;

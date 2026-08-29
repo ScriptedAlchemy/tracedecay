@@ -176,8 +176,7 @@ async fn with_dual_connection_admission_scope<F>(
 where
     F: Future,
 {
-    let runtime_lease: Arc<dyn tracedecay_code_index_runtime::AdmissionParkLeaseV1> =
-        lease.clone();
+    let runtime_lease: Arc<dyn tracedecay_code_index_runtime::AdmissionParkLeaseV1> = lease.clone();
     CONNECTION_ADMISSION
         .scope(
             lease,
@@ -238,9 +237,7 @@ where
     F: std::future::Future,
 {
     match lease {
-        Some(lease) => {
-            with_dual_connection_admission_scope(lease, future).await
-        }
+        Some(lease) => with_dual_connection_admission_scope(lease, future).await,
         None => future.await,
     }
 }

@@ -525,7 +525,8 @@ struct ProjectOpenScoutProducerV1 {
     feedback_runtime: Arc<FeedbackRuntime>,
     project_root: std::path::PathBuf,
     scope: tracedecay_application::ResolvedScope,
-    code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    code_index_schedulers:
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
     requester: tracedecay_domain::ActorId,

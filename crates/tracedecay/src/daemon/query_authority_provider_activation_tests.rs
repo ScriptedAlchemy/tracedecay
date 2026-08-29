@@ -24,7 +24,8 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         crate::daemon::project_open_owners::resolved_scope_for_project(project.path(), &project_id)
             .expect("resolved scope");
     let store = TempDir::new().expect("store root");
-    let registry = tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    let registry =
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
     registry
         .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
         .await
@@ -536,7 +537,8 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
         crate::daemon::project_open_owners::resolved_scope_for_project(project.path(), &project_id)
             .expect("resolved scope");
     let store = TempDir::new().expect("store root");
-    let registry = tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    let registry =
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
     registry
         .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
         .await

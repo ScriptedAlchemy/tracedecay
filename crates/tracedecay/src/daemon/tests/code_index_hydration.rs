@@ -14,8 +14,10 @@ use tracedecay_domain::{
     VectorWatermark, WorktreeId,
 };
 
-use tracedecay_code_index_runtime::code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1};
 use super::super::{code_index_search_display_binding, code_index_search_hydration_budget};
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
+};
 use tracedecay_query::code_search::CodeIndexSearchDisplayV1;
 use tracedecay_query::retrieval::hydrate::{
     CanonicalLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,

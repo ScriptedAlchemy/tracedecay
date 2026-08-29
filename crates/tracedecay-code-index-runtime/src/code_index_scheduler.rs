@@ -172,10 +172,7 @@ static CODE_INDEX_GENERATION_DECODES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hotpath")]
 static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
 
-pub fn scoped_code_index_store_root(
-    store_root: &Path,
-    canonical_project_root: &Path,
-) -> PathBuf {
+pub fn scoped_code_index_store_root(store_root: &Path, canonical_project_root: &Path) -> PathBuf {
     tracedecay_code_index_retention::code_index_generations::scoped_code_index_store_root(
         store_root,
         canonical_project_root,
@@ -5210,9 +5207,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// This authenticates the complete sealed content address and only decodes
     /// its bounded manifest/snapshot header. Graph, record-index, attribution,
     /// and semantic owners retain the full-generation decode path.
-    pub fn servable_retained_text_generation(
-        &mut self,
-    ) -> Option<LatestCodeTextGenerationV1> {
+    pub fn servable_retained_text_generation(&mut self) -> Option<LatestCodeTextGenerationV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return None;
         }
@@ -5375,9 +5370,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// closure instead, which is what `install_reconcile_fault_for_test`
     /// promises to count.
     #[cfg(test)]
-    pub fn arrive_reconcile_fault_for_test(
-        &self,
-    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+    pub fn arrive_reconcile_fault_for_test(&self) -> Result<(), CodeIndexSchedulerErrorV1> {
         if let Some(fault) = self.reconcile_fault.clone() {
             fault.arrive()?;
         }
@@ -6594,7 +6587,5 @@ pub use ignored_dependencies::{
 };
 pub use registry::CodeIndexSchedulerRegistryV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
-pub use registry::{
-    ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
-};
+pub use registry::{ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1};
 pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;

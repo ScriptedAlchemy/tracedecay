@@ -49,9 +49,7 @@ pub use owner::{
     DaemonProjectGitIndexTransactionService,
 };
 pub use queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
-pub use recovery::{
-    GitIndexRecoveryCoordinator, GitIndexRecoveryError, GitIndexRecoveryExecutor,
-};
+pub use recovery::{GitIndexRecoveryCoordinator, GitIndexRecoveryError, GitIndexRecoveryExecutor};
 pub use registry::GitIndexTransactionStoreRegistry;
 pub use service::{
     CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionPort, GitIndexNativeExecutor,

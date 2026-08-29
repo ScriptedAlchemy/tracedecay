@@ -178,11 +178,7 @@ impl ServingSwapOutcomeV1 {
     /// arm exists because activation of a large generation outlives the
     /// checkout it sealed from, and refusing that seat left the graph route
     /// serving nothing at all rather than serving something stale.
-    pub const fn decide(
-        publication_matches: bool,
-        serving_is_seated: bool,
-        replace: bool,
-    ) -> Self {
+    pub const fn decide(publication_matches: bool, serving_is_seated: bool, replace: bool) -> Self {
         if !publication_matches {
             if serving_is_seated {
                 // Something already serves; a superseded generation must not
@@ -2137,9 +2133,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Latest completed event-to-ready receipt for this registry, if any.
     #[cfg(test)]
-    pub fn latest_event_to_ready_receipt(
-        &self,
-    ) -> Option<CodeIndexEventToReadyReceiptV1> {
+    pub fn latest_event_to_ready_receipt(&self) -> Option<CodeIndexEventToReadyReceiptV1> {
         self.cadence_telemetry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3912,9 +3906,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Complete bounded snapshot of roots protected by a live mounted
     /// scheduler lease. Scope retention folds this into its revision-bound
     /// proof; returning every profile mount is deliberately conservative.
-    pub async fn scope_retention_mounted_roots(
-        &self,
-    ) -> Result<BTreeSet<PathBuf>, &'static str> {
+    pub async fn scope_retention_mounted_roots(&self) -> Result<BTreeSet<PathBuf>, &'static str> {
         let mounted = self.mounted.lock().await;
         if mounted.len() > self.max_worktrees {
             return Err("mounted_root_inventory_exceeds_bound");
@@ -4059,10 +4051,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// project. Daemon authorities that must retain this scope's code-graph
     /// runtime (semantic vectors, generation retention) resolve through this
     /// read instead of re-deriving repository/worktree identity themselves.
-    pub async fn serving_code_scope(
-        &self,
-        project_root: &Path,
-    ) -> Option<CodeIndexServingScopeV1> {
+    pub async fn serving_code_scope(&self, project_root: &Path) -> Option<CodeIndexServingScopeV1> {
         let project_root = project_root.canonicalize().ok()?;
         let (repository_id, worktree_id, shutting_down, serving) = {
             let mounted = self.mounted.lock().await;

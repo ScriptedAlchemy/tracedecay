@@ -282,9 +282,7 @@ impl CodeIndexCadenceTelemetryV1 {
     }
 
     #[cfg(test)]
-    pub fn receipts(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &CodeIndexEventToReadyReceiptV1> {
+    pub fn receipts(&self) -> impl ExactSizeIterator<Item = &CodeIndexEventToReadyReceiptV1> {
         self.receipts.iter()
     }
 

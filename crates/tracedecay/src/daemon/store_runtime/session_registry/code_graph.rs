@@ -46,11 +46,11 @@ mod sealed_publication_tests;
 mod seals;
 mod semantic_vector;
 mod semantic_vector_runtime;
-use semantic_vector_runtime::DaemonVerifiedSemanticVectorGraphRuntimeV1;
 use seals::{
     finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
     sealed_digest_from_generation_file, stage_project_graph_replay_unlink,
 };
+use semantic_vector_runtime::DaemonVerifiedSemanticVectorGraphRuntimeV1;
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -2037,8 +2037,7 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
     fn into_semantic_vector_runtime(
         self: Box<Self>,
         scope: tracedecay_usecases::semantic_runtime::SemanticVectorGraphScopeV1,
-    ) -> Arc<dyn tracedecay_usecases::semantic_runtime::VerifiedSemanticVectorGraphRuntimeV1>
-    {
+    ) -> Arc<dyn tracedecay_usecases::semantic_runtime::VerifiedSemanticVectorGraphRuntimeV1> {
         let (source_scope, binding) = {
             let (scope, binding) =
                 RetainedCodeGraphRuntimeV1::semantic_vector_staging_binding(self.as_ref());

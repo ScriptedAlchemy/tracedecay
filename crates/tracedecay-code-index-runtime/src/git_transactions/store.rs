@@ -143,9 +143,7 @@ struct PreviewGcTestObserver {
 
 impl DaemonGitIndexTransactionStore {
     #[hotpath::measure(label = "daemon.git.tx.store_open")]
-    pub fn open(
-        database: RegisteredGlobalDbLeaseV1,
-    ) -> GitIndexTransactionStoreResult<Self> {
+    pub fn open(database: RegisteredGlobalDbLeaseV1) -> GitIndexTransactionStoreResult<Self> {
         Self::open_actor(ActorDatabase::Registered {
             database,
             #[cfg(test)]

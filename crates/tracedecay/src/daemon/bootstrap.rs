@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 #[cfg(unix)]
-use tracedecay_code_index_runtime::{git_watch, GitWatchMaintenanceWakeV1};
+use tracedecay_code_index_runtime::{GitWatchMaintenanceWakeV1, git_watch};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::*;
 

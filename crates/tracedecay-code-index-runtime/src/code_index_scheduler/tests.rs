@@ -32,13 +32,13 @@ use tracedecay_domain::{
 };
 
 #[cfg(feature = "semantic-fastembed")]
-use tracedecay_global_db::configuration::semantic::SemanticResourceCeilings;
-#[cfg(feature = "semantic-fastembed")]
 use crate::semantic_code::{
     CatalogedFastEmbedModelV1, DaemonSemanticRuntimeHandleV1, FastEmbedModelCatalogV1,
     ModelLifecycleErrorV1, ModelMemberSourceV1, SemanticModelLifecycleOwnerV1,
     production_fastembed_catalog,
 };
+#[cfg(feature = "semantic-fastembed")]
+use tracedecay_global_db::configuration::semantic::SemanticResourceCeilings;
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_graph_db::NeverCancelled;
 #[cfg(feature = "semantic-fastembed")]

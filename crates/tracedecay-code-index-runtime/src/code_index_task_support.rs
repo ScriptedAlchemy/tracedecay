@@ -26,8 +26,7 @@ pub fn code_index_search_unavailable(
     code_index_search_unavailable_for_generation(None, reason, semantic_reason)
 }
 
-pub fn code_index_scope_unavailable()
--> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
+pub fn code_index_scope_unavailable() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     code_index_search_unavailable(
         tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
         "scope_unavailable",

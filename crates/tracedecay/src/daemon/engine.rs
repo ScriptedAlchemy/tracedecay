@@ -7,7 +7,7 @@
 use super::*;
 use std::collections::HashSet;
 #[cfg(unix)]
-use tracedecay_code_index_runtime::{git_watch, GitWatchSyncConfigV1};
+use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
 
 #[cfg(unix)]
 fn git_watch_sync_config(config: &crate::config::SyncConfig) -> GitWatchSyncConfigV1 {

@@ -104,10 +104,7 @@ impl OverflowRoster {
     /// Entries whose backstop interval has elapsed; each taken entry's next
     /// due instant is advanced before it is returned so a slow pass never
     /// double-schedules.
-    pub fn take_due(
-        &mut self,
-        now: Instant,
-    ) -> Vec<(PathBuf, GitRepositoryIdentity, SyncConfig)> {
+    pub fn take_due(&mut self, now: Instant) -> Vec<(PathBuf, GitRepositoryIdentity, SyncConfig)> {
         let mut due = Vec::new();
         for (root, entry) in &mut self.entries {
             if now < entry.due {
@@ -132,11 +129,7 @@ impl GitWatcher {
     /// Retains a capacity-refused repository on the bounded overflow roster,
     /// logging the typed outcome. Saturation is truthful: the repository gets
     /// no coverage until the next handshake.
-    pub fn cover_capacity_overflow(
-        &self,
-        identity: GitRepositoryIdentity,
-        config: SyncConfig,
-    ) {
+    pub fn cover_capacity_overflow(&self, identity: GitRepositoryIdentity, config: SyncConfig) {
         let root = identity.worktree_root.clone();
         let admission = self
             .inner

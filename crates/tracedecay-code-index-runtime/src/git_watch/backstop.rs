@@ -18,10 +18,7 @@ use super::{GitWatcher, WatchState, log_daemon_event, request_freshness_for_repo
 /// Gating coverage on a stale heartbeat left healthy-watcher projects with no
 /// freshness floor at all; live profiles were observed hours stale while every
 /// mechanism reported healthy.
-pub const fn coverage_action(
-    watcher_stale: bool,
-    interval_elapsed: bool,
-) -> Option<&'static str> {
+pub const fn coverage_action(watcher_stale: bool, interval_elapsed: bool) -> Option<&'static str> {
     match (interval_elapsed, watcher_stale) {
         (false, _) => None,
         (true, true) => Some("backstop_watcher_stale"),

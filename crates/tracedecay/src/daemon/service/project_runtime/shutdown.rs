@@ -304,12 +304,11 @@ async fn shut_down_semantic(
             reconciler.cancel_and_join().await;
         }
         if let Some(configuration) = runtime.configuration.as_ref() {
-            let receipt =
-                tracedecay_code_index_runtime::collect_semantic_evaluation_shutdown(
-                    configuration.semantic_evaluation_workers().as_ref(),
-                    deadline,
-                )
-                .await;
+            let receipt = tracedecay_code_index_runtime::collect_semantic_evaluation_shutdown(
+                configuration.semantic_evaluation_workers().as_ref(),
+                deadline,
+            )
+            .await;
             clean &=
                 crate::daemon::shutdown_orchestration::semantic_evaluation_shutdown_status(receipt)
                     .is_clean();

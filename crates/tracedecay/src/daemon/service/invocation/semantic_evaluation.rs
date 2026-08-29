@@ -628,7 +628,9 @@ mod tests {
         };
 
         assert_eq!(
-            tracedecay_code_index_runtime::semantic_evaluation::semantic_publication_generation(&state),
+            tracedecay_code_index_runtime::semantic_evaluation::semantic_publication_generation(
+                &state
+            ),
             Err(SemanticActivationCoordinationErrorV1::Unavailable)
         );
     }

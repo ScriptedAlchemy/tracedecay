@@ -23,8 +23,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
 use tracedecay_graph_db::{
-    GraphDbError, GraphGenerationDependency, SealedGraphStateDigest, SealedReadBundleArtifactStateV1,
-    VerifiedGraphSnapshot,
+    GraphDbError, GraphGenerationDependency, SealedGraphStateDigest,
+    SealedReadBundleArtifactStateV1, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::Result;

@@ -950,10 +950,11 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 );
                 (registered_census.ok(), unregistered)
             };
-            let code_index_store_root = tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
-                &layout.data_root.join("code-index-v1"),
-                &project_root,
-            );
+            let code_index_store_root =
+                tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
+                    &layout.data_root.join("code-index-v1"),
+                    &project_root,
+                );
             let advisory_feedback_read = async {
                 let current_generation = schedulers
                     .latest_complete_ready(&project_root)

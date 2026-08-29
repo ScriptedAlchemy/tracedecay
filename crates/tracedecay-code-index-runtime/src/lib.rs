@@ -59,9 +59,9 @@ pub mod mcp_admission;
 pub(crate) mod ports;
 pub(crate) mod runtime_telemetry;
 pub mod semantic_activation_reconciler;
+pub(crate) mod semantic_code;
 pub mod semantic_evaluation;
 pub mod semantic_evaluation_shutdown;
-pub(crate) mod semantic_code;
 
 /// Historical `crate::code_index` / `crate::query` paths from the root move.
 pub(crate) use tracedecay_code_index as code_index;
@@ -79,8 +79,7 @@ pub use code_index_scheduler::CodeIndexSchedulerRegistryV1;
 pub use ports::{
     AdmissionParkLeaseV1, ApplicationCatalogSnapshotErrorV1, ApplicationCatalogSnapshotFn,
     CONNECTION_ADMISSION, GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1,
-    PreparedQueryActivationViewV1,
-    install_application_catalog_snapshot, park_admission,
+    PreparedQueryActivationViewV1, install_application_catalog_snapshot, park_admission,
 };
 pub use semantic_evaluation_shutdown::{
     SemanticEvaluationShutdownJoinV1, SemanticEvaluationShutdownReceiptV1,

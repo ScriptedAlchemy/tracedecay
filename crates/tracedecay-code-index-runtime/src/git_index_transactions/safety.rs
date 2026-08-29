@@ -73,15 +73,11 @@ impl FixedGitIndexRunner {
         canonical_sha256(&manifest).map_err(Into::into)
     }
 
-    pub fn untracked_name_digest(
-        &self,
-    ) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
+    pub fn untracked_name_digest(&self) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
         self.other_name_digest(false)
     }
 
-    pub fn ignored_name_digest(
-        &self,
-    ) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
+    pub fn ignored_name_digest(&self) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
         self.other_name_digest(true)
     }
 
@@ -110,9 +106,7 @@ impl FixedGitIndexRunner {
         canonical_sha256(&output.stdout).map_err(Into::into)
     }
 
-    pub fn filesystem_capabilities_digest(
-        &self,
-    ) -> Result<ManifestDigest, NativeGitIndexError> {
+    pub fn filesystem_capabilities_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let output = self.run_git_output(&[
             "config",
             "--null",

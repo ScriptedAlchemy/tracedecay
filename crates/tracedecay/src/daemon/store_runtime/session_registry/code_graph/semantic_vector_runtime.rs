@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use tracedecay_graph_db::{GraphDbError, GraphWriteBatch, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot};
+use tracedecay_graph_db::{
+    GraphDbError, GraphWriteBatch, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+};
 use tracedecay_store::{
     GraphPublicationKeyV1, GraphVerifiedHeadV1, SemanticVectorPublishedGenerationKey,
     SemanticVectorPublishedGenerationLookup, SemanticVectorStageBatchReceipt,
@@ -302,4 +304,3 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for DaemonVerifiedSemanticVectorGraphR
         )
     }
 }
-

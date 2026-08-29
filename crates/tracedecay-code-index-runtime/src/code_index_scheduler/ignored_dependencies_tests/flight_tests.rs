@@ -268,10 +268,11 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
         .recv_timeout(Duration::from_secs(5))
         .expect("follower joins the existing flight");
 
-    let scoped_store = tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
-        store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
-    );
+    let scoped_store =
+        tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
+            store.path(),
+            &fixture.path().canonicalize().expect("canonical fixture"),
+        );
     let pointer_path = scoped_store.join("active-code-generation-v1.json");
     let pointer_bytes = std::fs::read(&pointer_path).expect("read active pointer");
     std::fs::write(&pointer_path, b"{").expect("corrupt active pointer");

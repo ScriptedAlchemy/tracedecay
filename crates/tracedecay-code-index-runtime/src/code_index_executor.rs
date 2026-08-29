@@ -493,7 +493,8 @@ impl<A: CodeIndexMcpReadAdmissionV1> tracedecay_query::retrieval::semantic::Sema
     }
 }
 
-impl<A: CodeIndexMcpReadAdmissionV1> tracedecay_query::retrieval::hydrate::HydrationExecutionControlV1
+impl<A: CodeIndexMcpReadAdmissionV1>
+    tracedecay_query::retrieval::hydrate::HydrationExecutionControlV1
     for McpSemanticExecutionControlV1<A>
 {
     fn elapsed_micros(&self) -> u64 {
@@ -526,10 +527,9 @@ where
         let execution_admission = Arc::clone(&execution_admission);
         Box::pin(hotpath::future!(
             async move {
-                let scope = match scope_resolver.resolved_scope_for_project(
-                    &request.project_root,
-                    &project_id,
-                ) {
+                let scope = match scope_resolver
+                    .resolved_scope_for_project(&request.project_root, &project_id)
+                {
                     Ok(scope) => scope,
                     Err(_) => return code_index_scope_unavailable(),
                 };
@@ -548,9 +548,9 @@ where
                     // new grant for the new ref while the route-constructed authority
                     // still names the open-time revision. This authority is daemon
                     // state, not client input; rebind to the grant just issued.
-                    Err(
-                        CodeIndexMcpAdmissionUnavailableV1::AuthorizationStale,
-                    ) => admission.search_authority(),
+                    Err(CodeIndexMcpAdmissionUnavailableV1::AuthorizationStale) => {
+                        admission.search_authority()
+                    }
                     Err(error) => {
                         return code_index_search_unavailable(
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
@@ -886,19 +886,17 @@ where
                 ) {
                     return outcome;
                 }
-                let terminal_scope = match scope_resolver.resolved_scope_for_project(
-                    &project_root,
-                    &project_id,
-                ) {
-                    Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
-                    _ => {
-                        return code_index_search_unavailable_for_generation(
+                let terminal_scope =
+                    match scope_resolver.resolved_scope_for_project(&project_root, &project_id) {
+                        Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
+                        _ => {
+                            return code_index_search_unavailable_for_generation(
                             Some(executed.query.generation.as_str().to_owned()),
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             "scope_changed_before_publication",
                         );
-                    }
-                };
+                        }
+                    };
                 let terminal_admission = match admission_provider.admit_current(&terminal_scope) {
                     Ok(admission) => admission,
                     Err(error) => {
@@ -989,10 +987,9 @@ where
                      _candidate: &tracedecay_domain::RankedCandidate| {
                         use tracedecay_query::retrieval::hydrate::HydrationAuthorizationV1;
 
-                        let Ok(current_scope) = scope_resolver.resolved_scope_for_project(
-                            &project_root,
-                            &project_id,
-                        ) else {
+                        let Ok(current_scope) =
+                            scope_resolver.resolved_scope_for_project(&project_root, &project_id)
+                        else {
                             return HydrationAuthorizationV1::Denied;
                         };
                         if current_scope != terminal_scope
@@ -1176,21 +1173,19 @@ where
                         "route_revoked_before_publication",
                     );
                 }
-                let publication_scope = match scope_resolver.resolved_scope_for_project(
-                    &project_root,
-                    &project_id,
-                ) {
-                    Ok(publication_scope) if publication_scope == terminal_scope => {
-                        publication_scope
-                    }
-                    _ => {
-                        return code_index_search_unavailable_for_generation(
+                let publication_scope =
+                    match scope_resolver.resolved_scope_for_project(&project_root, &project_id) {
+                        Ok(publication_scope) if publication_scope == terminal_scope => {
+                            publication_scope
+                        }
+                        _ => {
+                            return code_index_search_unavailable_for_generation(
                             Some(executed.query.generation.as_str().to_owned()),
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             "scope_changed_during_publication",
                         );
-                    }
-                };
+                        }
+                    };
                 let publication_admission =
                     match admission_provider.admit_current(&publication_scope) {
                         Ok(admission) => admission,

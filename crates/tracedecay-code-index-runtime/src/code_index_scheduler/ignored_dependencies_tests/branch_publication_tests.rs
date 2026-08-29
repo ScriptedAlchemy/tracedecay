@@ -3,10 +3,10 @@ use std::sync::atomic::Ordering;
 
 use tracedecay_domain::{CodeGenerationId, GitOidV1, RefId};
 
+use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler::branch_generations::{
     BranchGenerationPairV1, BranchGenerationReadControlV1,
 };
-use super::*;
 
 struct BranchRevision {
     reference: RefId,

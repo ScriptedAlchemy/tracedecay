@@ -173,11 +173,15 @@ impl DaemonSessionRetrievalRoot {
 
         let project_key = ProjectId::new(context.project.project_id.clone()).ok()?;
         let repository_id =
-            tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(cg.project_root())
-                .ok()?;
+            tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
+                cg.project_root(),
+            )
+            .ok()?;
         let worktree_id =
-            tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(cg.project_root())
-                .ok()?;
+            tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
+                cg.project_root(),
+            )
+            .ok()?;
         let identity = ResolvedSessionIdentity::for_project(
             ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).ok()?,
             project_key,
@@ -212,10 +216,14 @@ impl DaemonSessionRetrievalRoot {
             SessionRootId::new("root.project.test")
                 .unwrap_or_else(|error| panic!("test root identity: {error}")),
             ResolvedGitRoute::new(
-                tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(&project_root)
-                    .unwrap_or_else(|error| panic!("test repository identity: {error}")),
-                tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(&project_root)
-                    .unwrap_or_else(|error| panic!("test worktree identity: {error}")),
+                tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
+                    &project_root,
+                )
+                .unwrap_or_else(|error| panic!("test repository identity: {error}")),
+                tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
+                    &project_root,
+                )
+                .unwrap_or_else(|error| panic!("test worktree identity: {error}")),
                 BranchId::new(
                     crate::branch::current_branch(&project_root)
                         .unwrap_or_else(|| "detached".to_owned()),

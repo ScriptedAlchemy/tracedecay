@@ -49,8 +49,10 @@ use tracedecay_runtime_core::git_discovery::{
     GitDiscoveryUnknown, GitRepositoryIdentityOutcome, discover_repository_identity,
 };
 
-use crate::ports::{GitWatchMaintenanceWakeV1 as MaintenanceCoordinator, GitWatchSyncConfigV1 as SyncConfig};
 pub(crate) use crate::logging::log_daemon_event;
+use crate::ports::{
+    GitWatchMaintenanceWakeV1 as MaintenanceCoordinator, GitWatchSyncConfigV1 as SyncConfig,
+};
 
 pub type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
 
