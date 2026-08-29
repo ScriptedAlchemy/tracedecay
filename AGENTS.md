@@ -67,7 +67,8 @@ compiles.
 - `dashboard/app-dist/` is gitignored build output but required by `build.rs`;
   a fresh checkout/worktree must build the dashboard (or seed the directory)
   before Rust compiles. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` only skips a
-  stale rebuild.
+  stale rebuild. Create linked worktrees with `scripts/agent-worktree.sh` so
+  `app-dist` and `node_modules` are seeded from the primary checkout.
 - This machine shares one compile cache (kache, keyed on
   profile × features × RUSTFLAGS × source); the `kache cargo -- <args>`
   front-end above keeps that key stable, which is why bare `cargo` is
@@ -78,7 +79,12 @@ compiles.
   default features (add `test-helpers` only when the suite requires it), plain
   `--no-default-features` for lean lib iteration, `--all-features` for the
   handoff gate, and the fixed hotpath profiling combos — rather than toggling
-  individual features (e.g. `semantic-fastembed`) per task.
+  individual features (e.g. `semantic-fastembed`) per task. Pick one lane and
+  one `CARGO_TARGET_DIR` for the task; never alternate feature sets mid-task.
+- Start long cargo runs in the background and check back in minutes, not
+  10–30s polls. Never run `--workspace` suites mid-task — those are handoff
+  gates only. Never re-run tests that are known-red under another active
+  lane; cite the owner instead.
 
 ## Conventions
 
