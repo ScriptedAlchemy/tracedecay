@@ -22,7 +22,7 @@
 //! A raw row is *projection-durable* when a summary node's lineage covers it —
 //! i.e. its `store_id` appears as a `raw_message` source in
 //! `lcm_summary_sources` (see
-//! `global_db::session_temporal::operations::summary_projection`, which persists
+//! `tracedecay_session_temporal_store::operations::summary_projection`, which persists
 //! `LcmSourceRef::RawMessage { store_id }` as `('raw_message', store_id)`).
 //! Only projection-durable rows are ever acted on. Rows with no summary lineage
 //! are live, un-projected evidence and are **never** touched — this is the
@@ -440,7 +440,7 @@ pub async fn run_session_retention_authorized(
 type RetentionAuthorization<'a> = dyn Fn(&str) -> Result<(), LcmError> + Send + Sync + 'a;
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.lcm.retention", future = true)]
 async fn run_session_retention_inner(
     store: RetentionStore<'_>,
     storage_root: &Path,

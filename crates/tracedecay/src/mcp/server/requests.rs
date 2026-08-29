@@ -899,7 +899,9 @@ impl McpServer {
                     })
                     .await
                     .ok()
-                    .map(|client| client as &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor),
+                    .map(|client| {
+                        client as &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor
+                    }),
             }
         } else {
             None

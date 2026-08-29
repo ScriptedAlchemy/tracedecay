@@ -719,7 +719,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         self.acquire(request, probe, ACQUISITION_POLL_QUANTUM)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "rusqlite_runtime.reader.acquire_lane")]
     fn acquire_lane<F>(
         &self,
         admission: LaneAdmission,

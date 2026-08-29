@@ -5,9 +5,7 @@
 //! replay transports plus the split read/write halves stay with this crate
 //! because they apply host-admission frame bounds and target tokio I/O types.
 
-pub use crate::jsonrpc::{
-    ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport,
-};
+pub use crate::jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 /// Read half of a transport whose input and output can be driven concurrently.
 pub trait McpTransportReader {

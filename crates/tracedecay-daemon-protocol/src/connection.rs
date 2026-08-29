@@ -163,7 +163,12 @@ pub fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
 }
 
 pub async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Result<BrokerStream> {
-    connect_with_restart_grace(connection, DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL).await
+    connect_with_restart_grace(
+        connection,
+        DAEMON_RESTART_GRACE,
+        DAEMON_RESTART_POLL_INTERVAL,
+    )
+    .await
 }
 
 #[hotpath::measure(label = "daemon_protocol.client.connect", future = true)]

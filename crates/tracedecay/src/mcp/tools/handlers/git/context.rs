@@ -639,11 +639,9 @@ impl PrContextControls {
                 "PR context was cancelled",
             ));
         }
-        if self
-            .deadline
-            .as_ref()
-            .is_some_and(|deadline| tracedecay_daemon_protocol::deadline_remaining(deadline).is_none())
-        {
+        if self.deadline.as_ref().is_some_and(|deadline| {
+            tracedecay_daemon_protocol::deadline_remaining(deadline).is_none()
+        }) {
             return Err(TraceDecayError::project_route(
                 "tool_dispatch_deadline_exceeded",
                 true,

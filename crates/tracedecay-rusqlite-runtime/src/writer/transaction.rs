@@ -72,7 +72,7 @@ pub(super) struct WriterReporting<'reporting> {
     pub(super) watermark_publisher: &'reporting CommittedWatermarkPublisher,
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "rusqlite_runtime.writer.transaction_batch")]
 pub(super) fn process_batch(
     connection: &mut Connection,
     binding: &StoreRuntimeBindingV1,

@@ -28,12 +28,6 @@ pub use catalog_discovery::{
     get_catalog_filtered_tool_definitions_with_warming_budget,
 };
 // Phase 2 removes these composition-root re-exports once callers import mcp directly.
-pub use tracedecay_mcp::{
-    ToolRegistryMode, ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available,
-    context_description, explore_call_budget, format_capable_tool_names, get_tool_definitions,
-    get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
-    internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,
-};
 pub(crate) use handlers::hook_runtime::structured_hook_error_data;
 pub(crate) use handlers::retained_catalog::{
     execute_profile_retained_mcp_tool, retained_mcp_operation,
@@ -51,6 +45,12 @@ pub(crate) use handlers::{
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,
     handle_tool_call_with_registry_options,
+};
+pub use tracedecay_mcp::{
+    ToolRegistryMode, ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available,
+    context_description, explore_call_budget, format_capable_tool_names, get_tool_definitions,
+    get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
+    internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,
 };
 
 /// Explicit owner for advertised tools awaiting typed application contracts.
@@ -89,4 +89,3 @@ impl LegacyToolCompatibilityOwner {
         }
     }
 }
-

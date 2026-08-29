@@ -33,7 +33,7 @@ use super::{AutomationRunLedgerRecord, latest_terminal_job_record};
 /// The schedule *decision* below deliberately still uses a freshly loaded
 /// summary: a newer view can only make the decision more correct. Only the
 /// scan anchor is pinned to the occurrence snapshot.
-#[hotpath::measure(label = "automation_job_scheduler_gate")]
+#[hotpath::measure(label = "automation.scheduler.job_gate", future = true)]
 pub async fn evaluate_and_record_scheduler_skip(
     dashboard_root: &Path,
     config: &AutomationConfig,

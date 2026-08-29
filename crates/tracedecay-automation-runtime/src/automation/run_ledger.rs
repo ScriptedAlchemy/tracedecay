@@ -248,7 +248,7 @@ pub fn run_artifact_path(
         .join(format!("{}.json", kind.as_str())))
 }
 
-#[hotpath::measure(label = "automation_run_artifact_write")]
+#[hotpath::measure(label = "automation.run_artifact.write", future = true)]
 pub async fn write_run_artifact(
     dashboard_root: &Path,
     run_id: &str,
@@ -297,6 +297,7 @@ pub(crate) fn prepare_run_artifact(
     Ok((artifact, bytes))
 }
 
+#[hotpath::measure(label = "automation.run_artifact.read", future = true)]
 pub async fn read_run_artifact_payload(
     dashboard_root: &Path,
     run_id: &str,
@@ -336,7 +337,7 @@ pub async fn find_run_record(
     find_run_record_exact_bounded(dashboard_root, run_id).await
 }
 
-#[hotpath::measure(label = "automation_run_ledger_append")]
+#[hotpath::measure(label = "automation.run_ledger.append", future = true)]
 pub async fn append_run_record(
     dashboard_root: &Path,
     record: &AutomationRunLedgerRecord,
@@ -795,7 +796,7 @@ pub(super) fn sync_run_ledger_file_and_parent(path: &Path, file: &std::fs::File)
 /// The ledger is append-only and grows without bound, so rows are located from
 /// the tail using fixed-size scan buffers. Full JSON records are decoded only
 /// after their bounded identity projection passes the filter and dedup checks.
-#[hotpath::measure(label = "automation_run_ledger_load")]
+#[hotpath::measure(label = "automation.run_ledger.load", future = true)]
 pub async fn load_run_records(
     dashboard_root: &Path,
     limit: usize,
@@ -939,7 +940,7 @@ pub async fn load_run_records_for_task_key(
 /// exclusive ledger lock is held. Scheduler ticks and dashboard status requests
 /// therefore rescan the ledger only after it actually changed; see
 /// `RUN_LEDGER_SUMMARY_MEMO` for the append-only invariant this relies on.
-#[hotpath::measure(label = "automation_run_ledger_task_summary")]
+#[hotpath::measure(label = "automation.run_ledger.task_summary", future = true)]
 pub async fn load_run_ledger_task_summary(
     dashboard_root: &Path,
     task: AgentTaskKind,
