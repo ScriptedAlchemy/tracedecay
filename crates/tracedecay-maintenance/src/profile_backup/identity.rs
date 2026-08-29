@@ -8,22 +8,11 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{BrainId, UserProfileId};
-use tracedecay_runtime_core::db::DatabaseAuthority;
-use tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME;
+use tracedecay_runtime_core::storage::{
+    PROFILE_IDENTITY_FILENAME, PROFILE_IDENTITY_RECORD_NAME, read_existing_profile_identity_record,
+};
 
 use super::{ProfileBackupEntry, ProfileBackupError, checked_join};
-
-const PROFILE_IDENTITY_SCHEMA_VERSION: u32 = 1;
-const PROFILE_IDENTITY_RECORD_NAME: &str = "profile identity record";
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct ProfileIdentityRecordV1 {
-    schema_version: u32,
-    brain_id: BrainId,
-    profile_id: UserProfileId,
-}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -40,85 +29,35 @@ pub(super) fn read_required_profile_identity(
     profile_root: &Path,
     corrupt_material: bool,
 ) -> Result<(String, String), ProfileBackupError> {
-    read_persisted_profile_identity(profile_root).map_err(|error| {
-        if corrupt_material {
-            ProfileBackupError::corrupt(error)
-        } else {
-            ProfileBackupError::invalid(error)
-        }
-    })
-}
-
-fn read_persisted_profile_identity(profile_root: &Path) -> Result<(String, String), String> {
     let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!(
-                "required {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing",
-                path.display()
+    let record = match read_existing_profile_identity_record(&path) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return Err(classify_identity_error(
+                corrupt_material,
+                format!(
+                    "required {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing",
+                    path.display()
+                ),
             ));
         }
-        Err(error) => {
-            return Err(format!(
-                "failed to inspect {PROFILE_IDENTITY_RECORD_NAME} '{}': {error}",
-                path.display()
-            ));
-        }
+        Err(error) => return Err(classify_identity_error(corrupt_material, error.to_string())),
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(format!(
-            "{PROFILE_IDENTITY_RECORD_NAME} '{}' must be a private regular file",
-            path.display()
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o600 {
-            return Err(format!(
-                "{PROFILE_IDENTITY_RECORD_NAME} '{}' must have permissions 0600",
-                path.display()
-            ));
-        }
-    }
-    let encoded = DatabaseAuthority::read_record_strict(&path, PROFILE_IDENTITY_RECORD_NAME)
-        .map_err(|error| {
-            format!(
-                "profile identity of '{}' is not the exact final shape: {error}",
-                profile_root.display()
-            )
-        })?
-        .ok_or_else(|| {
-            format!(
-                "required {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing",
-                path.display()
-            )
-        })?;
-    let record = serde_json::from_str::<ProfileIdentityRecordV1>(&encoded).map_err(|error| {
-        format!(
-            "invalid {PROFILE_IDENTITY_RECORD_NAME} '{}': {error}",
-            path.display()
-        )
-    })?;
-    if record.schema_version != PROFILE_IDENTITY_SCHEMA_VERSION {
-        return Err(format!(
-            "unsupported {PROFILE_IDENTITY_RECORD_NAME} schema_version={} in '{}'",
-            record.schema_version,
-            path.display()
-        ));
-    }
-    record
-        .brain_id
-        .validate()
-        .map_err(|error| format!("invalid brain_id in {PROFILE_IDENTITY_RECORD_NAME}: {error}"))?;
-    record.profile_id.validate().map_err(|error| {
-        format!("invalid profile_id in {PROFILE_IDENTITY_RECORD_NAME}: {error}")
-    })?;
     Ok((
         record.brain_id.as_str().to_owned(),
         record.profile_id.as_str().to_owned(),
     ))
+}
+
+fn classify_identity_error(
+    corrupt_material: bool,
+    message: impl Into<String>,
+) -> ProfileBackupError {
+    if corrupt_material {
+        ProfileBackupError::corrupt(message)
+    } else {
+        ProfileBackupError::invalid(message)
+    }
 }
 
 /// Collects the durable identity of every project store named by `entries`,
