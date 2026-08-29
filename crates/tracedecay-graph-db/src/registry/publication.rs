@@ -12,6 +12,7 @@ use tracedecay_store::runtime::{
     MAX_GRAPH_PUBLICATION_PROJECTION_PAGE_RECORDS_V1, MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
 };
 
+use super::path::canonical_graph_database_file;
 use super::publication_support::{
     RegisteredGraphDbOperationV1, check_all, clear_retiring_fence, collect_closure,
     dependency_key_for_binding, locator_from_dependency, locator_from_key, map_publication_error,
@@ -46,6 +47,86 @@ struct GraphPublishModeV1 {
 }
 
 impl GraphDbRegistry {
+    /// Recovers a dependency-free verified code graph directly from its
+    /// sealed derived store and the exact relational head/replay authority.
+    ///
+    /// This path never resolves or registers the shared mutable staging
+    /// database. Any absent, foreign, corrupt, dependency-bearing, or
+    /// non-code replay fails closed so the caller can take the ordinary
+    /// staging recovery path explicitly.
+    #[hotpath::measure(
+        label = "graph_db.generation.recover.direct_sealed",
+        impl_type = "GraphDbRegistry"
+    )]
+    pub fn recover_verified_sealed_snapshot(
+        &self,
+        registration: GraphDbRegistration,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        projection: &GraphProjectionIdentityV1,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        check_all(&registration, context)?;
+        require_projection_binding(&registration, projection)?;
+        let head = authority
+            .verified_head(projection, context)
+            .map_err(map_publication_error)?
+            .ok_or_else(|| {
+                GraphDbError::unavailable("graph projection has no relational verified head")
+            })?;
+        let replay = authority
+            .replay(&head.key, context)
+            .map_err(map_publication_error)?;
+        let replay = require_active_replay_evidence(
+            replay,
+            "verified graph head has no durable active replay",
+        )?;
+        require_head_replay(&head, &replay)?;
+        if !replay.publication.direct_dependency_generations.is_empty() {
+            return Err(GraphDbError::unavailable(
+                "dependency-bearing graph generation requires staging recovery",
+            ));
+        }
+        let source = crate::generation::checked_decode_replay_source(
+            &replay.publication.canonical_replay_source,
+            &|| check_all(&registration, context),
+        )?;
+        let GraphGenerationReplaySource::SealedCodeGeneration(source) = source else {
+            return Err(GraphDbError::unavailable(
+                "graph replay has no sealed code-generation source",
+            ));
+        };
+        source
+            .repository
+            .validate()
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        source
+            .generation
+            .validate()
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+
+        let locator = locator_from_key(&head.key)?;
+        let database_path = canonical_graph_database_file(registration.canonical_path())?;
+        let (database, identity) = crate::sealed_store::open_direct_sealed_generation(
+            &database_path,
+            locator.projection,
+            locator.generation,
+            &head.recovered_digest,
+            Arc::clone(&registration.authority_lease),
+        )?
+        .ok_or_else(|| GraphDbError::unavailable("sealed generation store is absent"))?;
+        if identity.dependency_closure_digest(&|| check_all(&registration, context))?
+            != head.dependency_generation_closure_digest
+        {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed generation dependency closure does not match its verified head"
+                    .to_owned(),
+            });
+        }
+        check_all(&registration, context)?;
+        let lease = generation_lease(&identity, head, BTreeMap::new());
+        Ok(VerifiedGraphSnapshot::new_direct_sealed(database, lease))
+    }
+
     #[hotpath::measure(label = "graph_db.replay_pool.retire", impl_type = "GraphDbRegistry")]
     pub fn retire_one_code_generation_replay(
         &self,
@@ -1204,7 +1285,7 @@ mod historical_publication_reuse_tests {
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
-    use tracedecay_domain::UtcMicros;
+    use tracedecay_domain::{CodeGenerationId, RepositoryId, UtcMicros};
     use tracedecay_store::runtime::GraphReplayRetirementOutcomeV1;
     use tracedecay_store::{
         BrainId, GraphProjectionIdentityV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
@@ -1230,11 +1311,11 @@ mod historical_publication_reuse_tests {
         reset_sealed_copy_proofs, sealed_copy_proofs,
     };
     use crate::{
-        GraphCancellation, GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry,
-        GraphDbRegistryConfig, GraphEntity, GraphEntityId, GraphGenerationId,
+        GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1, GraphDbRegistration,
+        GraphDbRegistry, GraphDbRegistryConfig, GraphEntity, GraphEntityId, GraphGenerationId,
         GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
-        GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphWatermark,
-        SourceGeneration,
+        GraphProjectionIdentity, GraphProjectorRevision, GraphProperty, GraphPropertyName,
+        GraphWatermark, SealedCodeGenerationReplay, SealedGraphStateDigest, SourceGeneration,
     };
 
     #[derive(Debug)]
@@ -1639,6 +1720,122 @@ mod historical_publication_reuse_tests {
             generation,
             projection,
         }
+    }
+
+    #[test]
+    fn sealed_snapshot_recovers_without_opening_the_staging_registry() {
+        let mut fixture = published_fixture();
+        // Replace the fixture's inline replay with the production code-graph
+        // replay shape. The sealed store was built from this exact manifest,
+        // so its recovered digest and physical namespace stay unchanged while
+        // the relational source now proves the direct-sealed route is the one
+        // exercised below.
+        let manifest = test_manifest(fixture.projection.clone());
+        let replay = manifest
+            .relational_sealed_replay(
+                fixture.binding.shard_id.clone(),
+                GraphIdempotencyKey::new("publish:reuse-g1").unwrap(),
+                GraphPublicationInputDigestV1::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                None,
+                SealedCodeGenerationReplay {
+                    repository: RepositoryId::new("repository.publication-reuse").unwrap(),
+                    generation: CodeGenerationId::new("code-generation.publication-reuse").unwrap(),
+                    sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+                        "sha256:{}",
+                        "b".repeat(64)
+                    ))
+                    .unwrap(),
+                    projector_revision: GraphProjectorRevision::try_from(
+                        "code-graph-projector.publication-reuse".to_owned(),
+                    )
+                    .unwrap(),
+                },
+                &|| Ok(()),
+            )
+            .unwrap();
+        let record = GraphPublicationReplayRecordV1::new(fixture.head.sequence, replay).unwrap();
+        fixture.key = record.publication.key.clone();
+        fixture.head =
+            GraphVerifiedHeadV1::from_replay(&record, fixture.head.recovered_digest.clone())
+                .unwrap();
+        fixture
+            .authority
+            .records
+            .insert(fixture.key.clone(), record);
+        fixture
+            .authority
+            .heads
+            .insert(fixture.key.projection.clone(), fixture.head.clone());
+        assert!(
+            fixture
+                .registry
+                .close(&registration(fixture.binding.clone(), &fixture.root))
+                .unwrap(),
+            "the publishing runtime must close before cold direct recovery"
+        );
+        let unopened = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        let registration = registration(fixture.binding.clone(), &fixture.root);
+
+        assert!(
+            !unopened
+                .shard_is_registered(&fixture.binding.shard_id)
+                .unwrap()
+        );
+        let snapshot = unopened
+            .recover_verified_sealed_snapshot(
+                registration,
+                &mut fixture.authority,
+                &context,
+                &fixture.key.projection,
+            )
+            .expect("the sealed artifact should recover without staging registration");
+
+        assert_eq!(snapshot.verified_head(), &fixture.head);
+        assert_eq!(snapshot.generation(), &fixture.generation);
+        assert!(snapshot.serves_from_sealed_store());
+        assert!(
+            snapshot
+                .entity(
+                    &crate::GraphEntityRef::new(
+                        fixture.projection.clone(),
+                        crate::GraphEntityId::new("entity:reuse").unwrap(),
+                    ),
+                    Arc::new(TestCancellation),
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !unopened
+                .shard_is_registered(&fixture.binding.shard_id)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn direct_sealed_recovery_refuses_an_inline_replay() {
+        let mut fixture = published_fixture();
+        let unopened = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+
+        assert!(matches!(
+            unopened.recover_verified_sealed_snapshot(
+                registration(fixture.binding.clone(), &fixture.root),
+                &mut fixture.authority,
+                &context,
+                &fixture.key.projection,
+            ),
+            Err(GraphDbError::Unavailable { message })
+                if message == "graph replay has no sealed code-generation source"
+        ));
+        assert!(
+            !unopened
+                .shard_is_registered(&fixture.binding.shard_id)
+                .unwrap()
+        );
     }
 
     /// The recover-after-publish idempotent arm: republishing the exact

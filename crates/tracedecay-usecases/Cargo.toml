@@ -37,6 +37,7 @@ hotpath = [
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
+    "tracedecay-session-temporal-store/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
@@ -62,6 +63,7 @@ hotpath-alloc = [
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
@@ -87,6 +89,7 @@ hotpath-cpu = [
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
@@ -103,7 +106,7 @@ semantic-gpu-cuda = ["tracedecay-semantic/semantic-gpu-cuda"]
 # enabling in-process transports. Forwards to tracedecay-sessions so the
 # re-exported wire test helpers (read_bounded_line, line_outcome_to_io) resolve
 # when this crate is built standalone with the feature.
-test-helpers = ["tracedecay-graph-db/test-helpers", "tracedecay-sessions/test-helpers"]
+test-helpers = ["tracedecay-graph-db/test-helpers", "tracedecay-session-temporal-store/test-helpers", "tracedecay-sessions/test-helpers"]
 # Mirrors the root crate's `test-transport`: enables the in-process transport
 # seams used by integration harnesses.
 test-transport = [
@@ -156,6 +159,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }

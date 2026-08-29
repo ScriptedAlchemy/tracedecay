@@ -577,9 +577,7 @@ impl DaemonInvocationClient {
     ) -> tracedecay_runtime_core::errors::Result<()> {
         let request = match (outcome, reason) {
             (tracedecay_domain::DeliverySettlementOutcomeV1::Delivered, None) => {
-                crate::contract::DaemonInvocationDeliveryAckRequest::delivered(
-                    target_request_id,
-                )
+                crate::contract::DaemonInvocationDeliveryAckRequest::delivered(target_request_id)
             }
             (tracedecay_domain::DeliverySettlementOutcomeV1::Dropped, Some(reason)) => {
                 crate::contract::DaemonInvocationDeliveryAckRequest::dropped(
@@ -855,8 +853,7 @@ impl DaemonInvocationClient {
         let (_reader, mut writer) = stream.into_split();
         crate::connection::write_daemon_preamble(&mut writer, &self.connection, &self.handshake)
             .await?;
-        let request =
-            crate::contract::DaemonInvocationCancellationRequest::new(target_request_id);
+        let request = crate::contract::DaemonInvocationCancellationRequest::new(target_request_id);
         writer
             .write_all(serde_json::to_string(&request)?.as_bytes())
             .await?;
@@ -938,11 +935,10 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                 ApplicationRequest::Surface { binding, payload } => {
                     let (_binding_id, surface, operation, result_contract, _page) =
                         binding.into_parts();
-                    let operation =
-                        crate::surface::ApplicationSurfaceOperation::from_tool_name(
-                            operation.as_str(),
-                        )
-                        .ok_or(InvocationError::InvalidRequest)?;
+                    let operation = crate::surface::ApplicationSurfaceOperation::from_tool_name(
+                        operation.as_str(),
+                    )
+                    .ok_or(InvocationError::InvalidRequest)?;
                     let observed_at = invocation_now_micros();
                     let cancellation_context = cancellation.context();
                     let scope = match target {
@@ -963,7 +959,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                         crate::surface::ApplicationSurfaceOperation::ConfigurationGet
                         | crate::surface::ApplicationSurfaceOperation::ConfigurationSet
                         | crate::surface::ApplicationSurfaceOperation::ConfigurationUnset
-                        |                         crate::surface::ApplicationSurfaceOperation::ConfigurationBatch => {
+                        | crate::surface::ApplicationSurfaceOperation::ConfigurationBatch => {
                             let request =
                                 configuration_request_from_surface_payload(operation, payload)?;
                             crate::contract::DaemonInvocationRequest::configuration(

@@ -189,7 +189,10 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for StaticDaemonRespon
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+        '_,
+        tracedecay_runtime_core::errors::Result<()>,
+    > {
         Box::pin(async { Ok(()) })
     }
 }
@@ -520,11 +523,12 @@ async fn registered_http_serializes_the_exact_valid_partial_effect_receipt() {
         unreachable!("fixture is a partial effect");
     };
     let expected_receipt = serde_json::to_value(committed_receipt).expect("receipt JSON");
-    let response = tracedecay_daemon_protocol::DaemonInvocationResponse::retained_application_problem(
-        request_id.as_str(),
-        scope,
-        problem,
-    );
+    let response =
+        tracedecay_daemon_protocol::DaemonInvocationResponse::retained_application_problem(
+            request_id.as_str(),
+            scope,
+            problem,
+        );
 
     let response =
         invoke_retained_http_with_response(operation, request_id.clone(), response).await;

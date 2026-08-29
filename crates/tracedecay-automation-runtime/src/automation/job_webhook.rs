@@ -21,6 +21,7 @@ pub(crate) enum WebhookPostError {
     Indeterminate,
 }
 
+#[hotpath::measure(label = "automation.job_webhook.post")]
 pub(crate) fn post_json_url(
     raw_url: &str,
     payload: &Value,
