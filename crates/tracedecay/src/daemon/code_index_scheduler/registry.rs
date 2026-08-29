@@ -2332,32 +2332,53 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
         serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+        shutting_down: Arc<AtomicBool>,
         project_id: ProjectId,
         semantic_schedule: Option<
             tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        // Reconcile holds this mutex; wait in the blocking pool so remount
-        // never parks a runtime worker or admission for other lanes.
+        // Reconcile and tests may hold this mutex. `lock()` would park remount
+        // behind that holder and lose the retiring identity: retirement now
+        // cancels the worker via try_lock, drains, and leaves remount seeing
+        // only "owner changed". Poll try_lock and abort as soon as the owner
+        // is shutting down so remount observes "retired while … waited".
         let incumbent = Arc::clone(&scheduler);
         tokio::task::spawn_blocking(move || {
-            let mut scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if scheduler.project_id() != &project_id {
-                return Err(CodeIndexSchedulerErrorV1::Identity(
-                    "mounted worktree belongs to a different project identity".to_owned(),
-                ));
+            loop {
+                if shutting_down.load(Ordering::Acquire) {
+                    return Err(CodeIndexSchedulerErrorV1::Identity(
+                        "code-index scheduler owner was retired while semantic schedule update waited; remount must retry"
+                            .to_owned(),
+                    ));
+                }
+                let mut scheduler = match scheduler.try_lock() {
+                    Ok(guard) => guard,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                };
+                if scheduler.project_id() != &project_id {
+                    return Err(CodeIndexSchedulerErrorV1::Identity(
+                        "mounted worktree belongs to a different project identity".to_owned(),
+                    ));
+                }
+                scheduler.replace_semantic_schedule_hook(semantic_schedule);
+                if let Some(latest) = serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    let _ = scheduler.schedule_semantic_generation(latest.generation_handle());
+                }
+                // A replaced hook must not leave the worker parked: the next
+                // reconcile (including an edit that raced the remount) needs a
+                // wake even when this pass already finished text.
+                scheduler.wake.notify_one();
+                return Ok(());
             }
-            scheduler.replace_semantic_schedule_hook(semantic_schedule);
-            if let Some(latest) = serving_generation
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-            {
-                let _ = scheduler.schedule_semantic_generation(latest.generation_handle());
-            }
-            Ok(())
         })
         .await
         .map_err(|_error| {
@@ -2421,6 +2442,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .update_policy(graph_activation.policy());
                 let scheduler = Arc::clone(&existing.scheduler);
                 let serving_generation = Arc::clone(&existing.serving_generation);
+                let shutting_down = Arc::clone(&existing.shutting_down);
                 drop(mounted);
                 drop(retiring);
                 #[cfg(test)]
@@ -2429,6 +2451,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     &project_root,
                     scheduler,
                     serving_generation,
+                    shutting_down,
                     project_id,
                     semantic_schedule,
                 )
@@ -2560,6 +2583,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .update_policy(graph_activation.policy());
             let scheduler = Arc::clone(&existing.scheduler);
             let serving_generation = Arc::clone(&existing.serving_generation);
+            let shutting_down = Arc::clone(&existing.shutting_down);
             drop(mounted);
             drop(retiring);
             #[cfg(test)]
@@ -2568,6 +2592,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 &project_root,
                 scheduler,
                 serving_generation,
+                shutting_down,
                 worker_project_id,
                 semantic_schedule,
             )
