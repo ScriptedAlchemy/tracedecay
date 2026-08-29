@@ -415,14 +415,19 @@ fn find_existing_ordinary_run(
     let mut newest_completion = None;
     let mut status_spans: [Option<std::ops::Range<u64>>; 5] = std::array::from_fn(|_| None);
     while let Some(span) = rows.next_span().map_err(run_ledger_scan_io_error)? {
-        let Some(projection) = exact_lookup::scan_jsonl_row(file, path, span.clone())
-            .map_err(run_ledger_scan_io_error)?
+        let Some(projection) =
+            (match exact_lookup::scan_jsonl_row_projection(file, path, span.clone()) {
+                Ok(projection) => projection,
+                Err(_) => continue,
+            })
         else {
             continue;
         };
         if projection.run_id != candidate.run_id {
             continue;
         }
+        exact_lookup::validate_ledger_row_semantics(&projection)
+            .map_err(run_ledger_scan_io_error)?;
         let projection_task_key = projection
             .task_key
             .as_deref()
@@ -1481,7 +1486,7 @@ fn read_any_run_records_page(
     let mut malformed_row_count: usize = 0;
     let mut has_more = false;
     while let Some(line) = lines.next_span()? {
-        let projection = match exact_lookup::scan_jsonl_row(file, path, line) {
+        let projection = match exact_lookup::scan_jsonl_row_projection(file, path, line) {
             Ok(Some(projection)) => projection,
             Ok(None) => continue,
             Err(error) => {
@@ -1494,6 +1499,7 @@ fn read_any_run_records_page(
                 continue;
             }
         };
+        exact_lookup::validate_ledger_row_semantics(&projection)?;
         if selected_run_ids.contains(projection.run_id.as_str()) {
             continue;
         }
