@@ -6335,6 +6335,7 @@ dependencies = [
  "grafeo-common",
  "grafeo-core",
  "grafeo-engine",
+ "grafeo-storage",
  "hex",
  "hotpath",
  "parking_lot",
