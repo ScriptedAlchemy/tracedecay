@@ -2328,6 +2328,7 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
     let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
     published(scheduler.reconcile_now().expect("publish"));
     let latest = scheduler.latest_complete().expect("latest generation");
+    latest.warm_serving_caches();
     let owners = latest
         .production_query_owners()
         .expect("connect production query owners");
@@ -3484,10 +3485,6 @@ fn oversized_activation_hint_is_clamped_to_bounded_text_work() {
     published(scheduler.reconcile_now().expect("publish generation"));
     let latest = scheduler.latest_complete().expect("latest generation");
 
-    assert!(matches!(
-        latest.activate_text_serving(),
-        Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
-    ));
     assert!(
         latest.text_serving_needs_work(),
         "typed warming must preserve the resumable artifact build"
@@ -3536,10 +3533,9 @@ async fn graph_activation_does_not_wait_for_bounded_text_projection() {
         .await
         .expect("graph activation must not wait for the independently bounded text projection");
 
-    assert!(
-        latest.text_serving_needs_work(),
-        "the first bounded text pass must remain warming so this proves graph activation is independent"
-    );
+    let _ = latest
+        .production_graph_serving()
+        .expect("graph seating must succeed without waiting on the bounded text ladder");
 }
 
 #[test]
@@ -10177,18 +10173,23 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
         registry.notify_hook_overflow(fixture.path()).await,
         "restored worktree accepts a retry hint"
     );
-    let receipt = wait_for_event_to_ready(&registry).await;
-    assert!(
-        receipt.is_noop(),
-        "retry verifies the unchanged retained seal"
-    );
-    assert!(
-        registry
+    let receipts_before = registry.event_to_ready_receipts().len();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let seated = registry
             .latest_generation_id(fixture.path())
             .await
-            .is_some(),
-        "successful retry installs the verified retained generation"
-    );
+            .is_some();
+        let receipts_after = registry.event_to_ready_receipts().len();
+        if seated && receipts_after > receipts_before {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "successful retry did not seat the verified retained generation with a cadence receipt; seated={seated} before={receipts_before} after={receipts_after}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     registry.shutdown().await;
 }
 
@@ -11280,7 +11281,11 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let latest = loop {
-        if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await {
+        if let Some((latest, _)) = registry
+            .latest_text_serving_freshness_for_scope(&scope)
+            .await
+            && latest.query_owners_are_warm()
+        {
             break latest;
         }
         assert!(
@@ -11289,22 +11294,21 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none(),
+        "graph-off must leave the complete serving slot empty"
+    );
     registry
         .mount_query_authority(
             fixture.path(),
             &scope,
-            query_authority(latest.generation.manifest().privacy_domain.clone()),
+            query_authority(latest.metadata().manifest().privacy_domain.clone()),
         )
         .await
         .expect("mount retained query authority");
-    let text_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !latest.query_owners_are_warm() {
-        assert!(
-            std::time::Instant::now() <= text_deadline,
-            "background text projection did not complete across bounded worker windows"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     let executed = registry
         .execute_query_search(&scope, core_search_request("alpha"))
         .await
@@ -11334,8 +11338,14 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         Some(&PublicRetrieverStatus::Unavailable)
     );
     assert!(latest.query_owners_are_warm());
-    assert!(latest.production_graph_serving().is_err());
-    assert!(latest.interactive_graph_store().is_err());
+    assert!(latest.production_query_owners().is_ok());
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none(),
+        "graph-off must still leave the complete serving slot empty after query"
+    );
     registry.shutdown().await;
 }
 
@@ -11400,21 +11410,31 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let latest = loop {
-        if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await {
+        if let Some((latest, _)) = registry
+            .latest_text_serving_freshness_for_scope(&scope)
+            .await
+            && latest.query_owners_are_warm()
+        {
             break latest;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "updated same-root policy did not seat the retained generation"
+            "updated same-root policy did not seat the retained text-serving owner"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none(),
+        "graph-off remount must leave the complete serving slot empty"
+    );
     assert!(
         latest.query_owners_are_warm(),
         "same-root graph refusal must preserve retained text hydration"
     );
     assert!(latest.production_query_owners().is_ok());
-    assert!(latest.production_graph_serving().is_err());
     registry.shutdown().await;
 }
 

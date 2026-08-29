@@ -2847,6 +2847,25 @@ impl CodeIndexSchedulerRegistryV1 {
                         "graph seating skipped this pass; the sealed generation stays unseated"
                     );
                 }
+                if !prepare_graph {
+                    let serving_empty = worker_serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_none();
+                    let text_empty = worker_text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_none();
+                    // A warming terminal source outcome with nothing seated is
+                    // not done: restore the arrival so the next pass can finish
+                    // text instead of sleeping until an unrelated hint. Failed
+                    // source outcomes already restore in the error arm; waking
+                    // those here would spin while Git is unavailable.
+                    if serving_empty && text_empty && matches!(&source_result, Ok(Ok(_))) {
+                        Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
+                        worker_wake.notify_one();
+                    }
+                }
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
                         let graph_scheduler = Arc::clone(&worker_scheduler);
