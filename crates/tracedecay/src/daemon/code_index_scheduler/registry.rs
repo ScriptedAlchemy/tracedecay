@@ -2840,6 +2840,15 @@ impl CodeIndexSchedulerRegistryV1 {
                         // hooking them individually would under- or double-count.
                         #[cfg(test)]
                         scheduler.arrive_reconcile_fault_for_test()?;
+                        // A prior pass may have built the successor and lost
+                        // only the durable write. Republish before choosing a
+                        // reconcile branch: graph-off with no text owner goes
+                        // to reconcile_now and would otherwise extract again.
+                        if let Some(outcome) =
+                            scheduler.republish_unpublished_retained_generation()?
+                        {
+                            return Ok(outcome);
+                        }
                         if let Some(metadata) = retained_text_metadata {
                             match scheduler.reconcile_retained_text_generation(&metadata) {
                                 Ok(Some(outcome)) => Ok(outcome),
