@@ -112,7 +112,7 @@ pub use configuration::{
     SettingSummary, configuration_executable_binding_registry,
     configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
     configuration_surface_operation, configuration_surface_request_schema,
-    configuration_surface_result_schema,
+    configuration_surface_result_schema, configuration_wire_request_from_invocation_payload,
 };
 pub use configuration_wire::{ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1};
 pub use context::{

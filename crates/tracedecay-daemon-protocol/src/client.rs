@@ -463,15 +463,6 @@ impl DaemonInvocationClient {
         }
     }
 
-    /// Authenticated client for the current process. Callers that can read
-    /// daemon authority must pass the already-resolved connection.
-    pub fn for_connection(
-        connection: crate::connection::DaemonConnection,
-        handshake: crate::handshake::DaemonHandshake,
-    ) -> Self {
-        Self::new(connection, handshake)
-    }
-
     #[cfg(test)]
     pub fn for_connection_for_test(
         connection: crate::connection::DaemonConnection,
@@ -900,6 +891,31 @@ impl DaemonInvocationExecutor for DaemonInvocationClient {
     }
 }
 
+/// Decode the envelope-stripped configuration body selected by `operation`.
+///
+/// This is the socket-client dispatch arm: producers strip the tagged
+/// `ConfigurationWireRequestV1` envelope before admission, so the client
+/// deserializes the inner request and wraps the operation-selected variant.
+fn configuration_request_from_surface_payload(
+    operation: crate::surface::ApplicationSurfaceOperation,
+    payload: serde_json::Value,
+) -> Result<tracedecay_application::ConfigurationWireRequestV1, InvocationError> {
+    tracedecay_application::configuration_wire_request_from_invocation_payload(
+        operation.as_str(),
+        payload,
+    )
+    .map_err(|_| InvocationError::InvalidRequest)
+}
+
+fn feedback_handle_from_surface_payload(
+    payload: serde_json::Value,
+) -> Result<tracedecay_application::feedback::FeedbackHandleRequestV1, InvocationError> {
+    let request: tracedecay_application::feedback::FeedbackHandleRequestV1 =
+        serde_json::from_value(payload).map_err(|_| InvocationError::InvalidRequest)?;
+    tracedecay_application::feedback::FeedbackHandleRequestV1::new(request.request_handle)
+        .map_err(|_| InvocationError::InvalidRequest)
+}
+
 impl ApplicationInvocationExecutor for DaemonInvocationClient {
     fn invoke(
         &self,
@@ -937,9 +953,9 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                         crate::surface::ApplicationSurfaceOperation::ConfigurationGet
                         | crate::surface::ApplicationSurfaceOperation::ConfigurationSet
                         | crate::surface::ApplicationSurfaceOperation::ConfigurationUnset
-                        | crate::surface::ApplicationSurfaceOperation::ConfigurationBatch => {
-                            let request = serde_json::from_value(payload)
-                                .map_err(|_| InvocationError::InvalidRequest)?;
+                        |                         crate::surface::ApplicationSurfaceOperation::ConfigurationBatch => {
+                            let request =
+                                configuration_request_from_surface_payload(operation, payload)?;
                             crate::contract::DaemonInvocationRequest::configuration(
                                 request_id.as_str(),
                                 operation,
@@ -951,9 +967,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                             .with_resolved_scope(scope)
                         }
                         crate::surface::ApplicationSurfaceOperation::FeedbackGet => {
-                            let request: tracedecay_application::feedback::FeedbackHandleRequestV1 =
-                                serde_json::from_value(payload)
-                                    .map_err(|_| InvocationError::InvalidRequest)?;
+                            let request = feedback_handle_from_surface_payload(payload)?;
                             crate::contract::DaemonInvocationRequest::feedback(
                                 request_id.as_str(),
                                 operation,
@@ -1318,12 +1332,14 @@ mod tests {
         DaemonInvocationError, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
         SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
         SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
-        application_response, semantic_evaluation_application_problem,
+        application_response, configuration_request_from_surface_payload,
+        feedback_handle_from_surface_payload, semantic_evaluation_application_problem,
         semantic_qualification_application_problem,
     };
+    use crate::surface::ApplicationSurfaceOperation;
     use tracedecay_application::{
-        ApplicationProblem, ApplicationProblemKind, CancellationStage, InvocationError, RequestId,
-        ResultContractRef,
+        ApplicationProblem, ApplicationProblemKind, CancellationStage, ConfigurationWireRequestV1,
+        InvocationError, RequestId, ResultContractRef,
     };
     use tracedecay_tool_catalog::SchemaId;
 
@@ -1502,5 +1518,60 @@ mod tests {
         };
 
         assert_eq!(result.qualification_bytes, vec![0x51, 0x55, 0x41, 0x4c]);
+    }
+
+    #[test]
+    fn configuration_dispatch_accepts_envelope_stripped_get_and_set_payloads() {
+        let get = configuration_request_from_surface_payload(
+            ApplicationSurfaceOperation::ConfigurationGet,
+            serde_json::json!({"key": "mcp.tool_timings"}),
+        )
+        .expect("stripped get payload");
+        assert!(matches!(
+            get,
+            ConfigurationWireRequestV1::Get(request) if request.key.as_str() == "mcp.tool_timings"
+        ));
+
+        let set = configuration_request_from_surface_payload(
+            ApplicationSurfaceOperation::ConfigurationSet,
+            serde_json::json!({
+                "layer": {"kind": "default"},
+                "key": "mcp.tool_timings",
+                "value": {"kind": "boolean", "value": true},
+                "expected_revision": "revision.test-configuration-set",
+                "idempotency_key": "configuration.idempotency.test-set"
+            }),
+        )
+        .expect("stripped set payload");
+        assert!(matches!(set, ConfigurationWireRequestV1::Set(_)));
+    }
+
+    #[test]
+    fn configuration_dispatch_rejects_the_tagged_envelope() {
+        assert!(matches!(
+            configuration_request_from_surface_payload(
+                ApplicationSurfaceOperation::ConfigurationGet,
+                serde_json::json!({
+                    "operation": "get",
+                    "request": {"key": "mcp.tool_timings"}
+                }),
+            ),
+            Err(InvocationError::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn feedback_get_dispatch_validates_handles_client_side() {
+        let accepted = feedback_handle_from_surface_payload(serde_json::json!({
+            "request_handle": "feedback.handle.v1"
+        }))
+        .expect("valid handle");
+        assert_eq!(accepted.request_handle, "feedback.handle.v1");
+        assert_eq!(
+            feedback_handle_from_surface_payload(serde_json::json!({
+                "request_handle": " leading"
+            })),
+            Err(InvocationError::InvalidRequest)
+        );
     }
 }

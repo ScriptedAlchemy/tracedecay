@@ -6161,7 +6161,6 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-domain",
- "tracedecay-jsonrpc",
  "tracedecay-lsp",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",

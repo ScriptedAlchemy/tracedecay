@@ -663,7 +663,7 @@ mod tests {
         let requested = test_endpoint(&profile);
         let mut authority = DaemonAuthority::acquire(&profile, &requested, "test").unwrap();
         let auth_token = authority.auth_token().to_string();
-        let concrete = DaemonEndpoint::parse("tcp://127.0.0.1:43123").unwrap();
+        let concrete = "tcp://127.0.0.1:43123".parse::<DaemonEndpoint>().unwrap();
 
         authority.publish_endpoint(&concrete).unwrap();
 

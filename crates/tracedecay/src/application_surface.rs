@@ -45,6 +45,7 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
     ApplicationResult, CancellationContext, CancellationSignal, CancellationStage,
     ConfigurationWireRequestV1, Deadline, HealthReadRequest, LegalAction,
+    configuration_wire_request_from_invocation_payload,
     ObservatoryReadRequestV1, OperationTermination, PageRequest, ProblemOwningLayer,
     RequestContext, RequestId, ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic,
     SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
@@ -2595,58 +2596,23 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::ObservatoryRead => serde_json::from_value(value)
             .map(ApplicationSurfaceRequest::ObservatoryRead)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationList => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::List)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationExplain => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Explain)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationGet => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Get)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationSet => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Set)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationUnset => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Unset)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationBatch => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Batch)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationWriteCredential => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::WriteCredential)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationObservedState => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::ObservedState)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationProtectedPreview => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::ProtectedPreview)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationProtectedApply => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::ProtectedApply)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationRollbackPreview => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::RollbackPreview)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationRollbackApply => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::RollbackApply)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationAudit => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Audit)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationList
+        | ApplicationSurfaceOperation::ConfigurationExplain
+        | ApplicationSurfaceOperation::ConfigurationGet
+        | ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationUnset
+        | ApplicationSurfaceOperation::ConfigurationBatch
+        | ApplicationSurfaceOperation::ConfigurationWriteCredential
+        | ApplicationSurfaceOperation::ConfigurationObservedState
+        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        | ApplicationSurfaceOperation::ConfigurationProtectedApply
+        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        | ApplicationSurfaceOperation::ConfigurationRollbackApply
+        | ApplicationSurfaceOperation::ConfigurationAudit => {
+            configuration_wire_request_from_invocation_payload(operation.as_str(), value)
+                .map(ApplicationSurfaceRequest::Configuration)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
         ApplicationSurfaceOperation::ContextScoutStatus => serde_json::from_value(value)
             .map(ContextScoutSurfaceRequest::Status)
             .map(ApplicationSurfaceRequest::ContextScout)

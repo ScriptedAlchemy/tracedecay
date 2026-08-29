@@ -316,10 +316,6 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                             operation.as_str(),
                         )
                         .ok_or(tracedecay_application::InvocationError::InvalidRequest)?;
-                    let typed = crate::application_surface::parse_application_surface_request(
-                        operation, payload,
-                    )
-                    .map_err(|_| tracedecay_application::InvocationError::InvalidRequest)?;
                     let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
                     let cancellation_context = cancellation.context();
                     let scope = match target {
@@ -336,38 +332,53 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                     } else {
                         tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly
                     };
-                    let request = match (operation, typed) {
-                        (
-                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
-                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                    let request = match operation {
+                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
+                        | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
+                        | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
+                        | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch => {
+                            let request = tracedecay_application::configuration_wire_request_from_invocation_payload(
+                                operation.as_str(),
+                                payload,
+                            )
+                            .map_err(|_| {
+                                tracedecay_application::InvocationError::InvalidRequest
+                            })?;
+                            DaemonInvocationRequest::configuration(
+                                request_id.as_str(),
+                                operation,
                                 request,
-                            ),
-                        ) => DaemonInvocationRequest::configuration(
-                            request_id.as_str(),
-                            operation,
-                            request,
-                            observed_at,
-                            deadline.clone(),
-                            cancellation_context,
-                        )
-                        .with_resolved_scope(scope),
-                        (
-                            crate::application_surface::ApplicationSurfaceOperation::FeedbackGet,
-                            crate::application_surface::ApplicationSurfaceRequest::Feedback(
+                                observed_at,
+                                deadline.clone(),
+                                cancellation_context,
+                            )
+                            .with_resolved_scope(scope)
+                        }
+                        crate::application_surface::ApplicationSurfaceOperation::FeedbackGet => {
+                            let typed = crate::application_surface::parse_application_surface_request(
+                                operation, payload,
+                            )
+                            .map_err(|_| {
+                                tracedecay_application::InvocationError::InvalidRequest
+                            })?;
+                            let crate::application_surface::ApplicationSurfaceRequest::Feedback(
                                 request,
-                            ),
-                        ) => DaemonInvocationRequest::feedback(
-                            request_id.as_str(),
-                            operation,
-                            request.request_handle,
-                            observed_at,
-                            deadline.clone(),
-                            cancellation_context,
-                        )
-                        .with_resolved_scope(scope),
+                            ) = typed
+                            else {
+                                return Err(
+                                    tracedecay_application::InvocationError::InvalidRequest,
+                                );
+                            };
+                            DaemonInvocationRequest::feedback(
+                                request_id.as_str(),
+                                operation,
+                                request.request_handle,
+                                observed_at,
+                                deadline.clone(),
+                                cancellation_context,
+                            )
+                            .with_resolved_scope(scope)
+                        }
                         _ => {
                             return Err(
                                 tracedecay_application::InvocationError::InvalidRequest,

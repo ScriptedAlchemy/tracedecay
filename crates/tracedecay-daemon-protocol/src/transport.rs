@@ -44,10 +44,6 @@ impl DaemonEndpoint {
         }
         Ok(Self::Loopback(address))
     }
-
-    pub fn parse(value: &str) -> Result<Self> {
-        value.parse()
-    }
 }
 
 impl FromStr for DaemonEndpoint {
@@ -420,6 +416,11 @@ impl BrokerListener {
     }
 }
 
+/// Contract-level default daemon endpoint constructor.
+///
+/// Dependents (the composition root and their tests) use this as the shared
+/// loopback bind address (`127.0.0.1:0`) rather than reconstructing the same
+/// [`DaemonEndpoint`] locally.
 pub fn default_loopback_endpoint() -> DaemonEndpoint {
     DaemonEndpoint::Loopback(SocketAddr::new(
         IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
@@ -434,9 +435,9 @@ mod tests {
 
     #[test]
     fn loopback_endpoint_round_trips_and_rejects_remote_addresses() {
-        let endpoint = DaemonEndpoint::parse("tcp://127.0.0.1:43123").unwrap();
+        let endpoint = "tcp://127.0.0.1:43123".parse::<DaemonEndpoint>().unwrap();
         assert_eq!(endpoint.to_string(), "tcp://127.0.0.1:43123");
-        assert!(DaemonEndpoint::parse("tcp://192.0.2.1:43123").is_err());
+        assert!("tcp://192.0.2.1:43123".parse::<DaemonEndpoint>().is_err());
     }
 
     #[test]

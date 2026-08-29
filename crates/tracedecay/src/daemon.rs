@@ -52,7 +52,7 @@ pub(crate) use tracedecay_daemon_protocol::{
 };
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
-pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
+pub use tracedecay_daemon_protocol::SOCKET_ENV;
 pub(crate) const DAEMON_SHUTDOWN_METHOD: &str = "tracedecay/daemon/shutdown";
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
     "is warming in the background; retry the same tool shortly";
