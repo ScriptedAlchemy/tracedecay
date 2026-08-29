@@ -89,3 +89,42 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
         )]
     );
 }
+
+#[tokio::test]
+async fn session_sync_recovery_reads_only_nonterminal_journals() {
+    let harness = RegisteredGlobalDbHarness::open("session-sync-recovery-journals").await;
+    for (key, value) in [
+        ("session-sync.v1.complete-a", r#"{"status":"complete"}"#),
+        ("session-sync.v1.invalid", "{"),
+        ("session-sync.v1.queued", r#"{"status":"queued"}"#),
+        ("session-sync.v1.complete-b", r#"{"status":"complete"}"#),
+        ("session-sync.v1.running", r#"{"status":"running"}"#),
+    ] {
+        assert!(
+            harness
+                .registered
+                .insert_session_sync_journal(key, value)
+                .await
+                .unwrap()
+        );
+    }
+
+    assert_eq!(
+        harness
+            .registered
+            .list_incomplete_session_sync_journal_page("session-sync.v1.", None)
+            .await
+            .unwrap(),
+        vec![
+            ("session-sync.v1.invalid".to_owned(), "{".to_owned()),
+            (
+                "session-sync.v1.queued".to_owned(),
+                r#"{"status":"queued"}"#.to_owned(),
+            ),
+            (
+                "session-sync.v1.running".to_owned(),
+                r#"{"status":"running"}"#.to_owned(),
+            ),
+        ]
+    );
+}
