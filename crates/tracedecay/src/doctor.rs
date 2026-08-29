@@ -16,7 +16,7 @@ use crate::application_surface::{
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
     resolve_application_surface_dispatch,
 };
-use crate::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use crate::display::format_token_count;
 use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -324,7 +324,7 @@ fn doctor_result(
 
 #[hotpath::measure(label = "doctor.daemon_status", future = true)]
 async fn daemon_project_status(project_path: &Path) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
-    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+    let handshake = crate::daemon::handshake_for_current_client(
         Some(project_path.to_path_buf()),
         None,
         false,
@@ -644,13 +644,13 @@ async fn configured_upload_enabled(project_path: &Path) -> tracedecay_runtime_co
                 message: format!("could not create Doctor configuration request: {error}"),
             }
         })?;
-    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+    let handshake = crate::daemon::handshake_for_current_client(
         Some(project_path.to_path_buf()),
         None,
         false,
         false,
     )?;
-    let client = DaemonInvocationClient::for_current(handshake)?;
+    let client = crate::daemon::invocation_client_for_current(handshake)?;
     let dispatched = resolve_application_surface_dispatch(
         BindingSurface::Cli,
         operation,

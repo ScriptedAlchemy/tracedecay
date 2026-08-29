@@ -2,10 +2,12 @@
 //! one-shot JSON-RPC tool calls against the daemon.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
+use tracedecay_daemon_protocol::DaemonLivenessProbe;
 
 #[cfg(unix)]
 use super::unavailable_error;
@@ -86,6 +88,52 @@ impl DaemonConnection {
             authority_record: None,
         }
     }
+
+    pub(crate) fn into_protocol(self) -> tracedecay_daemon_protocol::DaemonConnection {
+        let connection =
+            tracedecay_daemon_protocol::DaemonConnection::new(self.endpoint, self.auth_token);
+        match self.authority_record {
+            Some(record) => connection.with_liveness(Arc::new(AuthorityLivenessProbe { record })),
+            None => connection,
+        }
+    }
+}
+
+struct AuthorityLivenessProbe {
+    record: authority::DaemonAuthorityRecord,
+}
+
+impl DaemonLivenessProbe for AuthorityLivenessProbe {
+    fn ensure_live(&self, request_label: &str) -> Result<()> {
+        let current = authority::current_record(&self.record.profile_root)?;
+        let Some(current) = current else {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon authority disappeared while request '{request_label}' was awaiting a response; the request was already sent and was not retried"
+                ),
+            });
+        };
+        if current.epoch != self.record.epoch || current.process_run_id != self.record.process_run_id
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon restarted while request '{request_label}' was awaiting a response (expected epoch {}, current epoch {}); the request was already sent and was not retried",
+                    self.record.epoch, current.epoch
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Authenticated invocation client for this process's current daemon authority.
+pub fn invocation_client_for_current(
+    handshake: tracedecay_daemon_protocol::DaemonHandshake,
+) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
+    Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        current_daemon_connection()?.into_protocol(),
+        handshake,
+    ))
 }
 
 pub(crate) fn current_daemon_connection() -> Result<DaemonConnection> {

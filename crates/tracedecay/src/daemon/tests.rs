@@ -551,7 +551,7 @@ async fn apply_project_automation_patch_via_surface(
         .expect("configuration capability")
         .deadline()
         .maximum_millis();
-    let observed_at = crate::daemon_client::invocation_now_micros();
+    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
     let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
@@ -603,7 +603,7 @@ async fn apply_project_automation_patch_via_surface(
             tracedecay_application::PageRequest::first(10).expect("surface page"),
             Some(deadline),
             cancellation,
-            crate::daemon_client::RequestedOutputFormat::Json,
+            tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
     crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))

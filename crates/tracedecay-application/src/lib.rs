@@ -89,6 +89,7 @@ pub mod workflow_runtime;
 pub mod workflow_synthesis;
 
 mod error;
+pub mod surface_contracts;
 mod surface_binding;
 
 pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
@@ -310,6 +311,14 @@ pub use source_edit::{
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };
 pub use source_edit_rollback::{SourceEditRollbackRequestV1, source_edit_rollback_operation};
+pub use surface_contracts::{
+    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCallersSurfaceRequest,
+    CodeCalleesSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
+    CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
+    NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
+};
 pub use storage::{
     CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,

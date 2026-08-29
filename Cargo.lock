@@ -5915,6 +5915,7 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-daemon-protocol",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -6082,6 +6083,7 @@ dependencies = [
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-hooks",
@@ -6140,6 +6142,31 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tree-sitter",
+]
+
+[[package]]
+name = "tracedecay-daemon-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "hotpath",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracedecay-agent-hosts",
+ "tracedecay-api",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tracedecay-jsonrpc",
+ "tracedecay-lsp",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-search-eval",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
 ]
 
 [[package]]

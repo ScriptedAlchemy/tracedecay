@@ -262,9 +262,9 @@ pub struct ToolCallRegistryOptions<'a> {
     pub diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor:
-        Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
+        Option<&'a dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     pub dashboard_application_invocation_executor:
-        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+        Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
     pub(crate) daemon_invocation_service: Option<&'a crate::daemon::DaemonInvocationService>,
     pub(crate) dashboard_delivery_settlement_authority:
         Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,

@@ -16,7 +16,7 @@ use tracedecay_runtime_core::path_safety::{
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::profile_identity::LocalProfileIdentityAuthorityV1;
-use super::transport::DaemonEndpoint;
+use tracedecay_daemon_protocol::DaemonEndpoint;
 
 #[cfg(windows)]
 mod windows_acl;
@@ -507,7 +507,7 @@ mod tests {
 
     #[cfg(not(unix))]
     fn test_endpoint(_profile: &Path) -> DaemonEndpoint {
-        super::super::transport::default_loopback_endpoint()
+        tracedecay_daemon_protocol::default_loopback_endpoint()
     }
 
     #[test]

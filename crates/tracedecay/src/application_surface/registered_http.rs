@@ -1,6 +1,6 @@
 use tracedecay_application::{ApplicationProblem, RequestId, SafeDiagnostic};
 
-use crate::daemon_client::DaemonInvocationError;
+use tracedecay_daemon_protocol::DaemonInvocationError;
 
 pub(crate) trait RegisteredHttpOperation: Copy {
     fn operation_id(self) -> String;
@@ -27,8 +27,8 @@ pub(crate) trait RegisteredHttpOperation: Copy {
 pub(super) fn validated_daemon_outcome<O>(
     operation: O,
     request_id: &RequestId,
-    response: Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError>,
-) -> Result<crate::daemon_contract::DaemonInvocationOutcome, ApplicationProblem>
+    response: Result<tracedecay_daemon_protocol::DaemonInvocationResponse, DaemonInvocationError>,
+) -> Result<tracedecay_daemon_protocol::DaemonInvocationOutcome, ApplicationProblem>
 where
     O: RegisteredHttpOperation,
 {
@@ -36,15 +36,15 @@ where
     let family = operation.display_family();
     match response {
         Ok(response)
-            if response.protocol == crate::daemon_contract::DAEMON_INVOCATION_PROTOCOL
-                && response.revision == crate::daemon_contract::DAEMON_INVOCATION_REVISION
+            if response.protocol == tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL
+                && response.revision == tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION
                 && response.request_id == request_id.as_str() =>
         {
             let problem_is_bound = match &response.outcome {
-                crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } => {
                     operation.application_problem_is_bound(request_id, None, problem)
                 }
-                crate::daemon_contract::DaemonInvocationOutcome::RetainedApplicationProblem {
+                tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplicationProblem {
                     scope,
                     problem,
                 } => operation.application_problem_is_bound(request_id, Some(scope), problem),

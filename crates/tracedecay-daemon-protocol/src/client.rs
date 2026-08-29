@@ -309,7 +309,7 @@ pub enum DaemonInvocationError {
 }
 
 impl DaemonInvocationError {
-    pub(crate) fn into_application_problem(self) -> ApplicationProblem {
+    pub fn into_application_problem(self) -> ApplicationProblem {
         match self {
             Self::Cancelled { stage } => ApplicationProblem::Cancelled {
                 stage,
@@ -338,18 +338,18 @@ pub type DaemonInvocationExecutorFuture<'a, T> = Pin<Box<dyn Future<Output = T> 
 /// idempotency remains owned by each operation payload and is never reminted
 /// by this transport boundary.
 ///
-/// The port is stated purely in terms of `crate::daemon_contract`, so
+/// The port is stated purely in terms of the daemon invocation contract, so
 /// implementing or calling it does not drag in the daemon's service internals.
 pub trait DaemonInvocationExecutor: ApplicationInvocationExecutor + Send + Sync {
     fn invoke_controlled(
         &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
+        request: crate::contract::DaemonInvocationRequest,
         deadline: Deadline,
         cancellation: CancellationSignal,
         policy: InvocationCancellationPolicy,
     ) -> DaemonInvocationExecutorFuture<
         '_,
-        Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError>,
+        Result<crate::contract::DaemonInvocationResponse, DaemonInvocationError>,
     >;
 
     fn observe_feedback(
@@ -367,8 +367,8 @@ pub trait DaemonInvocationExecutor: ApplicationInvocationExecutor + Send + Sync 
 /// arbitrary daemon method or reconstruct a Git/feedback application request.
 #[derive(Clone)]
 pub struct DaemonInvocationClient {
-    connection: crate::daemon::DaemonConnection,
-    handshake: crate::daemon::DaemonHandshake,
+    connection: crate::connection::DaemonConnection,
+    handshake: crate::handshake::DaemonHandshake,
     state: Arc<AsyncMutex<Option<DaemonInvocationConnection>>>,
     activity: Arc<DaemonInvocationClientActivity>,
 }
@@ -433,8 +433,8 @@ impl Drop for DaemonInvocationClientActivityGuard {
 }
 
 struct DaemonInvocationConnection {
-    reader: BufReader<ReadHalf<crate::daemon::transport::BrokerStream>>,
-    writer: WriteHalf<crate::daemon::transport::BrokerStream>,
+    reader: BufReader<ReadHalf<crate::transport::BrokerStream>>,
+    writer: WriteHalf<crate::transport::BrokerStream>,
 }
 
 /// Client-owned dispatch ceiling for native `FastEmbed` current+10x evaluation.
@@ -451,19 +451,31 @@ pub const SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS: i64 = 900_000_000;
 pub const SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS: i64 = 1_800_000_000;
 
 impl DaemonInvocationClient {
-    pub fn for_current(handshake: crate::daemon::DaemonHandshake) -> tracedecay_runtime_core::errors::Result<Self> {
-        Ok(Self {
-            connection: crate::daemon::current_daemon_connection()?,
+    pub fn new(
+        connection: crate::connection::DaemonConnection,
+        handshake: crate::handshake::DaemonHandshake,
+    ) -> Self {
+        Self {
+            connection,
             handshake,
             state: Arc::new(AsyncMutex::new(None)),
             activity: Arc::new(DaemonInvocationClientActivity::default()),
-        })
+        }
+    }
+
+    /// Authenticated client for the current process. Callers that can read
+    /// daemon authority must pass the already-resolved connection.
+    pub fn for_connection(
+        connection: crate::connection::DaemonConnection,
+        handshake: crate::handshake::DaemonHandshake,
+    ) -> Self {
+        Self::new(connection, handshake)
     }
 
     #[cfg(test)]
-    pub(crate) fn for_connection_for_test(
-        connection: crate::daemon::DaemonConnection,
-        handshake: crate::daemon::DaemonHandshake,
+    pub fn for_connection_for_test(
+        connection: crate::connection::DaemonConnection,
+        handshake: crate::handshake::DaemonHandshake,
     ) -> Self {
         Self {
             connection,
@@ -474,10 +486,10 @@ impl DaemonInvocationClient {
     }
 
     #[hotpath::measure(label = "daemon.invocation.client", future = true)]
-    pub(crate) async fn invoke(
+    pub async fn invoke(
         &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
-    ) -> tracedecay_runtime_core::errors::Result<crate::daemon_contract::DaemonInvocationResponse> {
+        request: crate::contract::DaemonInvocationRequest,
+    ) -> tracedecay_runtime_core::errors::Result<crate::contract::DaemonInvocationResponse> {
         let request_id = request.request_id.clone();
         let request_label = request.operation().as_str();
         let queued = self.activity.queued();
@@ -489,13 +501,13 @@ impl DaemonInvocationClient {
         let _in_flight = queued.into_in_flight();
         if state.is_none() {
             let stream = hotpath::future!(
-                crate::daemon::connect_to_daemon_connection(&self.connection),
+                crate::connection::connect_to_daemon_connection(&self.connection),
                 label = "daemon.invocation.client.connect"
             )
             .await?;
             let (reader, mut writer) = stream.into_split();
             hotpath::future!(
-                crate::daemon::write_daemon_preamble(
+                crate::connection::write_daemon_preamble(
                     &mut writer,
                     &self.connection,
                     &self.handshake
@@ -529,11 +541,11 @@ impl DaemonInvocationClient {
             .await?;
 
             let Some(line) = hotpath::future!(
-                crate::daemon::next_daemon_response_line(
+                crate::connection::next_daemon_response_line(
                     &mut connection.reader,
                     &self.connection,
                     request_label,
-                    crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+                    crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
                 ),
                 label = "daemon.invocation.client.response.wait"
             )
@@ -546,7 +558,7 @@ impl DaemonInvocationClient {
                 });
             };
             hotpath::gauge!("daemon.invocation.client.response.bytes").set(line.len() as f64);
-            let response: crate::daemon_contract::DaemonInvocationResponse =
+            let response: crate::contract::DaemonInvocationResponse =
                 hotpath::measure_block!(
                     "daemon.invocation.client.response.decode",
                     serde_json::from_str(&line)
@@ -554,8 +566,8 @@ impl DaemonInvocationClient {
                 .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "daemon returned an invalid invocation response".to_owned(),
                 })?;
-            if response.protocol != crate::daemon_contract::DAEMON_INVOCATION_PROTOCOL
-                || response.revision != crate::daemon_contract::DAEMON_INVOCATION_REVISION
+            if response.protocol != crate::contract::DAEMON_INVOCATION_PROTOCOL
+                || response.revision != crate::contract::DAEMON_INVOCATION_REVISION
                 || response.request_id != request_id
             {
                 return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -571,7 +583,7 @@ impl DaemonInvocationClient {
         result
     }
 
-    pub(crate) async fn acknowledge_work_delivery(
+    pub async fn acknowledge_work_delivery(
         &self,
         target_request_id: &str,
         outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
@@ -579,12 +591,12 @@ impl DaemonInvocationClient {
     ) -> tracedecay_runtime_core::errors::Result<()> {
         let request = match (outcome, reason) {
             (tracedecay_domain::DeliverySettlementOutcomeV1::Delivered, None) => {
-                crate::daemon_contract::DaemonInvocationDeliveryAckRequest::delivered(
+                crate::contract::DaemonInvocationDeliveryAckRequest::delivered(
                     target_request_id,
                 )
             }
             (tracedecay_domain::DeliverySettlementOutcomeV1::Dropped, Some(reason)) => {
-                crate::daemon_contract::DaemonInvocationDeliveryAckRequest::dropped(
+                crate::contract::DaemonInvocationDeliveryAckRequest::dropped(
                     target_request_id,
                     reason,
                 )
@@ -622,11 +634,11 @@ impl DaemonInvocationClient {
             connection.writer.write_all(b"\n").await?;
             connection.writer.flush().await?;
 
-            let Some(line) = crate::daemon::next_daemon_response_line(
+            let Some(line) = crate::connection::next_daemon_response_line(
                 &mut connection.reader,
                 &self.connection,
                 "invocation_delivery_ack",
-                crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+                crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
             )
             .await?
             else {
@@ -635,7 +647,7 @@ impl DaemonInvocationClient {
                         .to_owned(),
                 });
             };
-            let response: crate::daemon_contract::DaemonInvocationDeliveryAckResponse =
+            let response: crate::contract::DaemonInvocationDeliveryAckResponse =
                 serde_json::from_str(&line).map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "daemon returned an invalid Work delivery acknowledgement response"
                         .to_owned(),
@@ -674,7 +686,7 @@ impl DaemonInvocationClient {
             })?;
         let response = self
             .invoke(
-                crate::daemon_contract::DaemonInvocationRequest::feedback_observation(
+                crate::contract::DaemonInvocationRequest::feedback_observation(
                     request_id.as_str(),
                     subject_digest,
                     observed_at,
@@ -684,7 +696,7 @@ impl DaemonInvocationClient {
             .await?;
         if matches!(
             response.outcome,
-            crate::daemon_contract::DaemonInvocationOutcome::ObservationAccepted
+            crate::contract::DaemonInvocationOutcome::ObservationAccepted
         ) {
             Ok(())
         } else {
@@ -739,7 +751,7 @@ impl DaemonInvocationClient {
         })?;
         let response = self
             .invoke(
-                crate::daemon_contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
+                crate::contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
                     request_id.as_str(),
                     evaluated_profile_id.to_owned(),
                     observed_at,
@@ -749,7 +761,7 @@ impl DaemonInvocationClient {
             )
             .await?;
         match response.outcome {
-            crate::daemon_contract::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
+            crate::contract::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
                 scope,
                 profile_digest,
                 report_digest,
@@ -764,12 +776,12 @@ impl DaemonInvocationClient {
                 source_generation: source_generation.as_str().to_owned(),
                 snapshot_digest: snapshot_digest.as_str().to_owned(),
             }),
-            crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+            crate::contract::DaemonInvocationOutcome::Problem { problem } => {
                 Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!("semantic evaluation publication rejected: {problem:?}"),
                 })
             }
-            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+            crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
                 Err(semantic_evaluation_application_problem(problem))
             }
             _ => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -804,7 +816,7 @@ impl DaemonInvocationClient {
         })?;
         let response = self
             .invoke_controlled(
-                crate::daemon_contract::DaemonInvocationRequest::semantic_qualify(
+                crate::contract::DaemonInvocationRequest::semantic_qualify(
                     request_id.as_str(),
                     evaluated_profile_id.to_owned(),
                     observed_at,
@@ -820,15 +832,15 @@ impl DaemonInvocationClient {
                 semantic_qualification_application_problem(error.into_application_problem())
             })?;
         match response.outcome {
-            crate::daemon_contract::DaemonInvocationOutcome::SemanticEvaluatedProfileQualified {
+            crate::contract::DaemonInvocationOutcome::SemanticEvaluatedProfileQualified {
                 qualification,
             } => Ok(SemanticEvaluationQualificationResultV1 {
                 qualification_bytes: qualification.into_bytes(),
             }),
-            crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+            crate::contract::DaemonInvocationOutcome::Problem { problem } => {
                 Err(semantic_qualification_daemon_problem(problem))
             }
-            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+            crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
                 Err(semantic_qualification_application_problem(problem))
             }
             _ => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -838,12 +850,12 @@ impl DaemonInvocationClient {
     }
 
     async fn cancel_invocation(&self, target_request_id: &str) -> tracedecay_runtime_core::errors::Result<()> {
-        let stream = crate::daemon::connect_to_daemon_connection(&self.connection).await?;
+        let stream = crate::connection::connect_to_daemon_connection(&self.connection).await?;
         let (_reader, mut writer) = stream.into_split();
-        crate::daemon::write_daemon_preamble(&mut writer, &self.connection, &self.handshake)
+        crate::connection::write_daemon_preamble(&mut writer, &self.connection, &self.handshake)
             .await?;
         let request =
-            crate::daemon_contract::DaemonInvocationCancellationRequest::new(target_request_id);
+            crate::contract::DaemonInvocationCancellationRequest::new(target_request_id);
         writer
             .write_all(serde_json::to_string(&request)?.as_bytes())
             .await?;
@@ -856,13 +868,13 @@ impl DaemonInvocationClient {
 impl DaemonInvocationExecutor for DaemonInvocationClient {
     fn invoke_controlled(
         &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
+        request: crate::contract::DaemonInvocationRequest,
         deadline: Deadline,
         cancellation: CancellationSignal,
         policy: InvocationCancellationPolicy,
     ) -> DaemonInvocationExecutorFuture<
         '_,
-        Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError>,
+        Result<crate::contract::DaemonInvocationResponse, DaemonInvocationError>,
     > {
         Box::pin(DaemonInvocationClient::invoke_controlled(
             self,
@@ -901,14 +913,10 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                     let (_binding_id, surface, operation, result_contract, _page) =
                         binding.into_parts();
                     let operation =
-                        crate::application_surface::ApplicationSurfaceOperation::from_tool_name(
+                        crate::surface::ApplicationSurfaceOperation::from_tool_name(
                             operation.as_str(),
                         )
                         .ok_or(InvocationError::InvalidRequest)?;
-                    let typed = crate::application_surface::parse_application_surface_request(
-                        operation, payload,
-                    )
-                    .map_err(|_| InvocationError::InvalidRequest)?;
                     let observed_at = invocation_now_micros();
                     let cancellation_context = cancellation.context();
                     let scope = match target {
@@ -917,46 +925,45 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                     };
                     let policy = if matches!(
                         operation,
-                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch
+                        crate::surface::ApplicationSurfaceOperation::ConfigurationSet
+                            | crate::surface::ApplicationSurfaceOperation::ConfigurationUnset
+                            | crate::surface::ApplicationSurfaceOperation::ConfigurationBatch
                     ) {
                         InvocationCancellationPolicy::AuthoritativeEffect
                     } else {
                         InvocationCancellationPolicy::ReadOnly
                     };
-                    let request = match (operation, typed) {
-                        (
-                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
-                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                    let request = match operation {
+                        crate::surface::ApplicationSurfaceOperation::ConfigurationGet
+                        | crate::surface::ApplicationSurfaceOperation::ConfigurationSet
+                        | crate::surface::ApplicationSurfaceOperation::ConfigurationUnset
+                        | crate::surface::ApplicationSurfaceOperation::ConfigurationBatch => {
+                            let request = serde_json::from_value(payload)
+                                .map_err(|_| InvocationError::InvalidRequest)?;
+                            crate::contract::DaemonInvocationRequest::configuration(
+                                request_id.as_str(),
+                                operation,
                                 request,
-                            ),
-                        ) => crate::daemon_contract::DaemonInvocationRequest::configuration(
-                            request_id.as_str(),
-                            operation,
-                            request,
-                            observed_at,
-                            deadline.clone(),
-                            cancellation_context,
-                        )
-                        .with_resolved_scope(scope),
-                        (
-                            crate::application_surface::ApplicationSurfaceOperation::FeedbackGet,
-                            crate::application_surface::ApplicationSurfaceRequest::Feedback(
-                                request,
-                            ),
-                        ) => crate::daemon_contract::DaemonInvocationRequest::feedback(
-                            request_id.as_str(),
-                            operation,
-                            request.request_handle,
-                            observed_at,
-                            deadline.clone(),
-                            cancellation_context,
-                        )
-                        .with_resolved_scope(scope),
+                                observed_at,
+                                deadline.clone(),
+                                cancellation_context,
+                            )
+                            .with_resolved_scope(scope)
+                        }
+                        crate::surface::ApplicationSurfaceOperation::FeedbackGet => {
+                            let request: tracedecay_application::feedback::FeedbackHandleRequestV1 =
+                                serde_json::from_value(payload)
+                                    .map_err(|_| InvocationError::InvalidRequest)?;
+                            crate::contract::DaemonInvocationRequest::feedback(
+                                request_id.as_str(),
+                                operation,
+                                request.request_handle,
+                                observed_at,
+                                deadline.clone(),
+                                cancellation_context,
+                            )
+                            .with_resolved_scope(scope)
+                        }
                         _ => return Err(InvocationError::InvalidRequest),
                     }
                     .with_delivery_route(application_delivery_route(surface));
@@ -993,7 +1000,7 @@ pub fn invocation_now_micros() -> UtcMicros {
     tracedecay_application::clock::now_micros()
 }
 
-pub(crate) fn application_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
+pub fn application_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
     match surface {
         BindingSurface::Cli => FeedbackDeliveryRouteV1::Cli,
         BindingSurface::Mcp => FeedbackDeliveryRouteV1::Mcp,
@@ -1002,7 +1009,7 @@ pub(crate) fn application_delivery_route(surface: BindingSurface) -> FeedbackDel
     }
 }
 
-pub(crate) fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
+pub fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
     match error {
         DaemonInvocationError::Cancelled { .. } => InvocationError::Cancelled,
         DaemonInvocationError::TimedOut { .. } => InvocationError::DeadlineExceeded,
@@ -1010,13 +1017,13 @@ pub(crate) fn map_invocation_error(error: DaemonInvocationError) -> InvocationEr
     }
 }
 
-pub(crate) fn application_response(
+pub fn application_response(
     request_id: RequestId,
     result_contract: tracedecay_application::ResultContractRef,
-    outcome: crate::daemon_contract::DaemonInvocationOutcome,
+    outcome: crate::contract::DaemonInvocationOutcome,
 ) -> Result<ApplicationResponse, InvocationError> {
     let envelope = match outcome {
-        crate::daemon_contract::DaemonInvocationOutcome::Feedback { scope, result } => {
+        crate::contract::DaemonInvocationOutcome::Feedback { scope, result } => {
             ApplicationEnvelope::evidence(
                 result_contract,
                 request_id,
@@ -1024,7 +1031,7 @@ pub(crate) fn application_response(
                 result.into_application(),
             )
         }
-        crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
+        crate::contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
             ApplicationEnvelope {
                 contract: result_contract,
                 request_id,
@@ -1032,23 +1039,23 @@ pub(crate) fn application_response(
                 outcome,
             }
         }
-        crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+        crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
             // The daemon already resolved this invocation to a typed problem
             // (e.g. `configuration.conflict`); carry it whole so surface
             // adapters republish that diagnostic instead of refabricating a
             // generic one.
             return Err(InvocationError::Problem(Box::new(problem)));
         }
-        crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+        crate::contract::DaemonInvocationOutcome::Problem { problem } => {
             return Err(match problem {
-                crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
-                | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
+                crate::contract::DaemonInvocationProblem::InvalidRequest
+                | crate::contract::DaemonInvocationProblem::UnsupportedRevision => {
                     InvocationError::InvalidRequest
                 }
-                crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                crate::contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     InvocationError::Denied
                 }
-                crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+                crate::contract::DaemonInvocationProblem::ResetRequired => {
                     InvocationError::Problem(Box::new(ApplicationProblem::reset_required(
                         SafeDiagnostic {
                             code: "daemon.reset_required".to_owned(),
@@ -1057,10 +1064,10 @@ pub(crate) fn application_response(
                         },
                     )))
                 }
-                crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation => {
+                crate::contract::DaemonInvocationProblem::ApplicationContractViolation => {
                     InvocationError::Unavailable
                 }
-                crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
+                crate::contract::DaemonInvocationProblem::Unavailable => {
                     InvocationError::Unavailable
                 }
             });
@@ -1161,30 +1168,30 @@ fn semantic_evaluation_application_problem(
 }
 
 fn semantic_qualification_daemon_problem(
-    problem: crate::daemon_contract::DaemonInvocationProblem,
+    problem: crate::contract::DaemonInvocationProblem,
 ) -> tracedecay_runtime_core::errors::TraceDecayError {
     match problem {
-        crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
-        | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
+        crate::contract::DaemonInvocationProblem::InvalidRequest
+        | crate::contract::DaemonInvocationProblem::UnsupportedRevision => {
             tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("semantic qualification rejected: {problem:?}"),
             }
         }
-        crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+        crate::contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             tracedecay_runtime_core::errors::TraceDecayError::project_route(
                 "semantic_qualification_denied",
                 false,
                 "Semantic qualification was not found or not authorized",
             )
         }
-        crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+        crate::contract::DaemonInvocationProblem::ResetRequired => {
             tracedecay_runtime_core::errors::TraceDecayError::reset_required(
                 "semantic qualification",
                 "the semantic qualification authority requires reset",
             )
         }
-        crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation
-        | crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
+        crate::contract::DaemonInvocationProblem::ApplicationContractViolation
+        | crate::contract::DaemonInvocationProblem::Unavailable => {
             tracedecay_runtime_core::errors::TraceDecayError::project_route(
                 "semantic_qualification_unavailable",
                 false,
@@ -1269,7 +1276,7 @@ pub struct SemanticEvaluationPublicationResultV1 {
     pub project_id: String,
     pub profile_digest: String,
     pub report_digest: String,
-    pub report: crate::search_eval::DirectEvaluationReportV1,
+    pub report: tracedecay_search_eval::DirectEvaluationReportV1,
     pub source_generation: String,
     pub snapshot_digest: String,
 }
@@ -1279,7 +1286,7 @@ pub struct SemanticEvaluationQualificationResultV1 {
     pub qualification_bytes: Vec<u8>,
 }
 
-pub(crate) fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
+pub fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
     let now = current_system_micros().map_or(i64::MAX, |now| now.0);
     let remaining = deadline.expires_at.0.checked_sub(now)?;
     (remaining > 0).then(|| Duration::from_micros(remaining as u64))
@@ -1296,7 +1303,7 @@ fn current_system_micros() -> Option<UtcMicros> {
 mod lsp_session;
 pub use lsp_session::DaemonLspSessionClient;
 
-pub(crate) async fn wait_for_cancellation(cancellation: CancellationSignal) {
+pub async fn wait_for_cancellation(cancellation: CancellationSignal) {
     cancellation.cancelled().await;
 }
 
@@ -1353,8 +1360,8 @@ mod tests {
                 1,
             )
             .expect("contract"),
-            crate::daemon_contract::DaemonInvocationOutcome::Problem {
-                problem: crate::daemon_contract::DaemonInvocationProblem::ResetRequired,
+            crate::contract::DaemonInvocationOutcome::Problem {
+                problem: crate::contract::DaemonInvocationProblem::ResetRequired,
             },
         )
         .expect_err("reset-required must not become a successful response");
@@ -1449,14 +1456,14 @@ mod tests {
             project_id: "project-1".to_owned(),
             profile_digest: format!("sha256:{}", "1".repeat(64)),
             report_digest: format!("sha256:{}", "2".repeat(64)),
-            report: crate::search_eval::DirectEvaluationReportV1 {
+            report: tracedecay_search_eval::DirectEvaluationReportV1 {
                 command: "compare".to_owned(),
-                status: crate::search_eval::DirectEvaluationStatusV1::Pass,
+                status: tracedecay_search_eval::DirectEvaluationStatusV1::Pass,
                 workload_digest: format!("sha256:{}", "3".repeat(64)),
                 corpus_digest: format!("sha256:{}", "4".repeat(64)),
                 fixture_source_repository_commit: "fixture-commit".to_owned(),
                 fixture_source_repository_tree: "fixture-tree".to_owned(),
-                execution_contract: crate::search_eval::EvaluationExecutionContractV1 {
+                execution_contract: tracedecay_search_eval::EvaluationExecutionContractV1 {
                     exact_file_count: 0,
                     exact_corpus_bytes: 0,
                     exact_eligible_chunks_current: 0,
@@ -1468,7 +1475,7 @@ mod tests {
                     runtime_revision: "runtime.serialization-test.v1".to_owned(),
                     cache_state: "empty".to_owned(),
                     concurrency:
-                        crate::search_eval::candidate_output::EvaluationConcurrencyContractV1 {
+                        tracedecay_search_eval::candidate_output::EvaluationConcurrencyContractV1 {
                             query_workers: 1,
                             projection_workers: 1,
                             query_execution: "serial".to_owned(),

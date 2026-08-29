@@ -150,7 +150,7 @@ fn query_daemon_identity_stream(
     deadline: std::time::Instant,
 ) -> Result<(Option<String>, Option<String>)> {
     const REQUEST_ID: i64 = 1;
-    let handshake = super::super::DaemonHandshake::for_current_client(None, None, false, false)?;
+    let handshake = crate::daemon::handshake_for_current_client(None, None, false, false)?;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": REQUEST_ID,
@@ -158,7 +158,7 @@ fn query_daemon_identity_stream(
     });
     let mut preamble = String::new();
     if let Some(auth_token) = auth_token {
-        preamble.push_str(&super::super::transport::DaemonAuthPreface::new(auth_token).to_line()?);
+        preamble.push_str(&tracedecay_daemon_protocol::DaemonAuthPreface::new(auth_token).to_line()?);
         preamble.push('\n');
     }
     preamble.push_str(&handshake.to_line()?);
@@ -226,13 +226,13 @@ fn request_daemon_shutdown_stream(
     deadline: std::time::Instant,
 ) -> Result<DaemonShutdownRequest> {
     const REQUEST_ID: i64 = 2;
-    let handshake = super::super::DaemonHandshake::for_current_client(None, None, false, false)?;
+    let handshake = crate::daemon::handshake_for_current_client(None, None, false, false)?;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": REQUEST_ID,
         "method": super::super::DAEMON_SHUTDOWN_METHOD,
     });
-    let preface = super::super::transport::DaemonAuthPreface::new(auth_token).to_line()?;
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(auth_token).to_line()?;
     let handshake = handshake.to_line()?;
     let request = request.to_string();
     let preamble = format!("{preface}\n{handshake}\n{request}\n");
@@ -391,7 +391,7 @@ fn current_loopback_authority(
             message: "TraceDecay daemon authority record names a different profile".to_string(),
         });
     }
-    let super::super::transport::DaemonEndpoint::Loopback(address) = record.endpoint;
+    let tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) = record.endpoint;
     if !address.ip().is_loopback() {
         return Err(TraceDecayError::Config {
             message: format!("daemon authority endpoint '{address}' is not loopback"),

@@ -9,13 +9,13 @@ use super::{
 
 impl DaemonInvocationClient {
     #[hotpath::measure(label = "daemon.client.invoke_controlled", future = true)]
-    pub(crate) async fn invoke_controlled(
+    pub async fn invoke_controlled(
         &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
+        request: crate::contract::DaemonInvocationRequest,
         deadline: Deadline,
         cancellation: CancellationSignal,
         policy: InvocationCancellationPolicy,
-    ) -> Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError> {
+    ) -> Result<crate::contract::DaemonInvocationResponse, DaemonInvocationError> {
         if cancellation.is_cancelled() {
             return Err(DaemonInvocationError::Cancelled {
                 stage: CancellationStage::BeforeAdmission,
@@ -66,16 +66,16 @@ impl DaemonInvocationClient {
                         // grace: the effect may have committed, so a
                         // retry-inviting `Unavailable` would be untruthful.
                         match tokio::time::timeout(
-                            crate::daemon::DAEMON_TOOL_RESPONSE_GRACE,
+                            crate::connection::DAEMON_TOOL_RESPONSE_GRACE,
                             &mut invocation,
                         )
                         .await
                         {
                             Ok(Ok(response)) => Ok(response),
                             Ok(Err(_)) | Err(_) => Ok(
-                                crate::daemon_contract::DaemonInvocationResponse::problem(
+                                crate::contract::DaemonInvocationResponse::problem(
                                     target_request_id,
-                                    crate::daemon_contract::DaemonInvocationProblem::ResetRequired,
+                                    crate::contract::DaemonInvocationProblem::ResetRequired,
                                 ),
                             ),
                         }
@@ -84,10 +84,10 @@ impl DaemonInvocationClient {
             };
             let indeterminate_effect = matches!(
                 &outcome,
-                Ok(crate::daemon_contract::DaemonInvocationResponse {
+                Ok(crate::contract::DaemonInvocationResponse {
                     outcome:
-                        crate::daemon_contract::DaemonInvocationOutcome::Problem {
-                            problem: crate::daemon_contract::DaemonInvocationProblem::ResetRequired,
+                        crate::contract::DaemonInvocationOutcome::Problem {
+                            problem: crate::contract::DaemonInvocationProblem::ResetRequired,
                         },
                     ..
                 })

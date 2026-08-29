@@ -43,6 +43,7 @@ hotpath = [
     "tracedecay-agent-hosts/hotpath",
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
+    "tracedecay-daemon-protocol/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-host-integration/hotpath",
@@ -61,6 +62,7 @@ hotpath-alloc = [
     "tracedecay-agent-hosts/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
+    "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-host-integration/hotpath-alloc",
@@ -79,6 +81,7 @@ hotpath-cpu = [
     "tracedecay-agent-hosts/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
+    "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-host-integration/hotpath-cpu",
@@ -164,6 +167,7 @@ tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-featur
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }

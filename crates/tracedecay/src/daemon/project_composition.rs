@@ -507,7 +507,7 @@ async fn production_project_server_inner(
     let dashboard_feedback_status_reader = crate::dashboard::feedback_api::feedback_status_reader(
         invocation.feedback_runtime_registrar(),
     );
-    let application_invocation_executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor> =
+    let application_invocation_executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor> =
         Arc::new(InProcessDaemonInvocationExecutor::new(
             invocation.clone(),
             store_administration.clone(),

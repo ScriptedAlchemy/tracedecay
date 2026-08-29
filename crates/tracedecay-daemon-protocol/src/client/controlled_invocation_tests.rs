@@ -4,8 +4,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::{DaemonInvocationClient, InvocationCancellationPolicy};
 use crate::client_identity::DaemonClientIdentity;
-use crate::daemon::{DaemonConnection, DaemonHandshake};
-use crate::daemon_contract::{
+use crate::connection::DaemonConnection;
+use crate::handshake::DaemonHandshake;
+use crate::contract::{
     CanonicalQualificationBlob, DaemonInvocationOutcome, DaemonInvocationPayload,
     DaemonInvocationProblem, DaemonInvocationRequest, DaemonInvocationResponse,
     parse_daemon_invocation_cancellation_request,
@@ -31,7 +32,7 @@ fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationR
     let observed_at = now_micros();
     DaemonInvocationRequest::feedback(
         request_id,
-        crate::application_surface::ApplicationSurfaceOperation::FeedbackList,
+        crate::surface::ApplicationSurfaceOperation::FeedbackList,
         "feedback.remote-controlled-settlement".to_owned(),
         observed_at,
         deadline,
@@ -40,7 +41,7 @@ fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationR
 }
 
 fn invocation_client(
-    endpoint: crate::daemon::transport::DaemonEndpoint,
+    endpoint: crate::transport::DaemonEndpoint,
     instance_id: &str,
 ) -> DaemonInvocationClient {
     let profile = tempfile::tempdir().expect("profile");
@@ -61,7 +62,7 @@ fn invocation_client(
             client_instance_id: instance_id.to_owned(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
-            moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+            moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
         },
     )
 }
@@ -80,7 +81,7 @@ fn client_activity(client: &DaemonInvocationClient) -> (usize, usize) {
 }
 
 async fn write_unavailable_response(
-    writer: &mut tokio::io::WriteHalf<crate::daemon::transport::BrokerStream>,
+    writer: &mut tokio::io::WriteHalf<crate::transport::BrokerStream>,
     request_id: &str,
 ) {
     let response =
@@ -104,8 +105,8 @@ async fn write_unavailable_response(
 async fn concurrent_invocations_report_queue_and_settle_activity() {
     const FIRST_ID: &str = "request.concurrent-first";
     const SECOND_ID: &str = "request.concurrent-second";
-    let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
-        &crate::daemon::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = crate::transport::BrokerListener::bind(
+        &crate::transport::default_loopback_endpoint(),
     )
     .await
     .expect("bind invocation listener");
@@ -195,8 +196,8 @@ async fn controlled_client(
     tokio::sync::oneshot::Receiver<()>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
-        &crate::daemon::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = crate::transport::BrokerListener::bind(
+        &crate::transport::default_loopback_endpoint(),
     )
     .await
     .expect("bind invocation listener");
@@ -272,7 +273,7 @@ async fn controlled_client(
         client_instance_id: format!("client.{request_id}"),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
     };
     (
         DaemonInvocationClient::for_connection_for_test(
@@ -292,8 +293,8 @@ async fn reset_then_reconnect_client(
     tokio::sync::oneshot::Receiver<()>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
-        &crate::daemon::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = crate::transport::BrokerListener::bind(
+        &crate::transport::default_loopback_endpoint(),
     )
     .await
     .expect("bind invocation listener");
@@ -383,7 +384,7 @@ async fn reset_then_reconnect_client(
         client_instance_id: "client.remote-effect-reconnect".to_owned(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
     };
     (
         DaemonInvocationClient::for_connection_for_test(
@@ -409,8 +410,8 @@ async fn unsettled_client(
     tokio::sync::oneshot::Receiver<()>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
-        &crate::daemon::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = crate::transport::BrokerListener::bind(
+        &crate::transport::default_loopback_endpoint(),
     )
     .await
     .expect("bind invocation listener");
@@ -476,7 +477,7 @@ async fn unsettled_client(
         client_instance_id: format!("client.{request_id}"),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
     };
     (
         DaemonInvocationClient::for_connection_for_test(
@@ -572,7 +573,7 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
     // grace only while every task is idle on loopback I/O that will never
     // arrive, so the join is virtual instead of a real 30s wait.
     let response = tokio::time::timeout(
-        crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
+        crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
             invocation_request(REQUEST_ID, deadline.clone()),
             deadline,
@@ -606,7 +607,7 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     // The paused clock virtualizes the full response grace; see the
     // no-settlement test above.
     let response = tokio::time::timeout(
-        crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
+        crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
             invocation_request(REQUEST_ID, deadline.clone()),
             deadline,
@@ -671,8 +672,8 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
 async fn semantic_qualification_uses_daemon_owned_profile_deadline_and_canonical_bytes() {
     const DEADLINE_MICROS: i64 = 5_000_000;
     const CANCELLATION_ID: &str = "cancel.semantic-qualification.success";
-    let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
-        &crate::daemon::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = crate::transport::BrokerListener::bind(
+        &crate::transport::default_loopback_endpoint(),
     )
     .await
     .expect("bind invocation listener");
@@ -752,7 +753,7 @@ async fn semantic_qualification_uses_daemon_owned_profile_deadline_and_canonical
             client_instance_id: "client.semantic-qualification-success".to_owned(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
-            moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+            moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
         },
     );
     let cancellation = CancellationSignal::active(CANCELLATION_ID).expect("cancellation");
@@ -769,8 +770,8 @@ async fn semantic_qualification_uses_daemon_owned_profile_deadline_and_canonical
 #[tokio::test]
 async fn semantic_qualification_cancellation_controls_the_same_payload_request() {
     const CANCELLATION_ID: &str = "cancel.semantic-qualification.control";
-    let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
-        &crate::daemon::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = crate::transport::BrokerListener::bind(
+        &crate::transport::default_loopback_endpoint(),
     )
     .await
     .expect("bind invocation listener");
@@ -836,7 +837,7 @@ async fn semantic_qualification_cancellation_controls_the_same_payload_request()
             client_instance_id: "client.semantic-qualification-cancel".to_owned(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
-            moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+            moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
         },
     );
     let cancellation = CancellationSignal::active(CANCELLATION_ID).expect("cancellation");

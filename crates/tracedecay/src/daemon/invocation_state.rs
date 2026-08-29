@@ -915,7 +915,7 @@ impl DaemonInvocationState {
                     project_admission,
                     request_cancellation,
                 );
-                let response = crate::daemon_client::DaemonInvocationExecutor::invoke_controlled(
+                let response = tracedecay_daemon_protocol::DaemonInvocationExecutor::invoke_controlled(
                     &executor,
                     DaemonInvocationRequest::work_application(
                         format!("request.multi-root.work.{ordinal}"),
@@ -926,7 +926,7 @@ impl DaemonInvocationState {
                     ),
                     deadline,
                     control_cancellation,
-                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+                    tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
                 )
                 .await
                 .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;

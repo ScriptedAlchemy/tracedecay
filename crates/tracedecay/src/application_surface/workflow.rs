@@ -15,8 +15,8 @@ use tracedecay_application::{
 use tracedecay_tool_catalog::RouteExposureV1;
 
 use super::{ApplicationSurfaceAdapterError, invoke_registered_http};
-use crate::daemon_client::DaemonInvocationExecutor;
-use crate::daemon_contract::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
+use tracedecay_daemon_protocol::DaemonInvocationExecutor;
+use tracedecay_daemon_protocol::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
 
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
@@ -323,7 +323,7 @@ async fn invoke<T>(
     controls: tracedecay_api::HttpApplicationControls,
     request: WorkflowApplicationInvocation,
     select: fn(
-        crate::daemon_contract::DaemonInvocationOutcome,
+        tracedecay_daemon_protocol::DaemonInvocationOutcome,
     ) -> Option<(
         tracedecay_application::ResolvedScope,
         tracedecay_application::ApplicationOutcome<T>,
@@ -332,10 +332,10 @@ async fn invoke<T>(
 where
     T: serde::Serialize,
 {
-    let invocation = crate::daemon_contract::DaemonInvocationRequest::workflow_application(
+    let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::workflow_application(
         request_id.as_str(),
         request,
-        crate::daemon_client::invocation_now_micros(),
+        tracedecay_daemon_protocol::invocation_now_micros(),
         controls.deadline.clone(),
         controls.cancellation.context(),
     );
@@ -351,13 +351,13 @@ where
 macro_rules! workflow_selector {
     ($name:ident, $variant:ident, $output:ty) => {
         fn $name(
-            outcome: crate::daemon_contract::DaemonInvocationOutcome,
+            outcome: tracedecay_daemon_protocol::DaemonInvocationOutcome,
         ) -> Option<(
             tracedecay_application::ResolvedScope,
             tracedecay_application::ApplicationOutcome<$output>,
         )> {
             match outcome {
-                crate::daemon_contract::DaemonInvocationOutcome::WorkflowApplication {
+                tracedecay_daemon_protocol::DaemonInvocationOutcome::WorkflowApplication {
                     scope,
                     outcome: WorkflowApplicationOutcome::$variant(outcome),
                 } => Some((scope, outcome)),

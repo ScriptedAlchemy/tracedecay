@@ -17,7 +17,6 @@ use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
-use crate::client_identity::DaemonClientIdentity;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::server::{
@@ -39,7 +38,18 @@ use scheduler::{
 };
 use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
+pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
+#[allow(unused_imports)]
+pub(crate) use tracedecay_daemon_protocol::{
+    BrokerListener, BrokerStream, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
+    DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome, DaemonInvocationRequest,
+    DaemonInvocationResponse, default_loopback_endpoint, parse_daemon_invocation_request,
+};
+#[cfg(unix)]
+#[allow(unused_imports)]
+pub(crate) use tracedecay_daemon_protocol::{
+    ensure_private_socket_parent, unix_socket_path_within_limit,
+};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
@@ -369,17 +379,6 @@ use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };
 
-pub(crate) mod transport;
-#[cfg(all(unix, test))]
-pub(crate) use crate::daemon_contract::{DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION};
-/// The wire contract now lives in `crate::daemon_contract`, outside this module
-/// tree. Daemon-internal call sites keep naming it through `crate::daemon::` so
-/// the move stayed mechanical; new callers should depend on the contract module
-/// directly rather than widening this re-export.
-pub(crate) use crate::daemon_contract::{
-    DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationResponse,
-    parse_daemon_invocation_request,
-};
 pub use bootstrap::{RemoteBrainTlsConfig, run_foreground};
 pub(crate) use service::invocation::{
     DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,

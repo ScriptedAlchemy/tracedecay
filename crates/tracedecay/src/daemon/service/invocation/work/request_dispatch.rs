@@ -7,7 +7,7 @@ use tracedecay_application::{CancellationContext, Deadline};
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::CapabilityId;
 
-use crate::daemon_contract::{
+use tracedecay_daemon_protocol::{
     DaemonInvocationProblem, DaemonInvocationResponse, WorkApplicationInvocationV1,
     WorkApplicationOutcomeV1,
 };

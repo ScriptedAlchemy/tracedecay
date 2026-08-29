@@ -2617,8 +2617,8 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     ));
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lifecycle = DaemonLifecycle::default();
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -2670,11 +2670,11 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         let endpoint = endpoint.clone();
         let handshake = handshake.clone();
         async move {
-            let stream = super::super::transport::BrokerStream::connect(&endpoint)
+            let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
                 .await
                 .expect("connect client");
             let (reader, mut writer) = stream.into_split();
-            let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+            let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
                 .to_line()
                 .expect("auth preface");
             writer.write_all(preface.as_bytes()).await.expect("preface");

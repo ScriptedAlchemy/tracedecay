@@ -1,8 +1,6 @@
 use std::fmt;
 use std::future::Future;
-#[cfg(any(not(unix), test))]
-use std::net::IpAddr;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
@@ -19,6 +17,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub const AUTH_PREFACE_PROTOCOL: &str = "tracedecay-daemon-v1";
+
+/// Env var naming the daemon socket path override.
+pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
@@ -44,7 +45,6 @@ impl DaemonEndpoint {
         Ok(Self::Loopback(address))
     }
 
-    #[cfg(test)]
     pub fn parse(value: &str) -> Result<Self> {
         value.parse()
     }
@@ -141,13 +141,13 @@ pub enum BrokerStream {
 /// probes. The generic `tokio::io::split` halves intentionally hide it behind
 /// a mutex and cannot report the distinction between RDHUP (request-half
 /// close) and HUP (full peer close).
-pub(super) enum BrokerReadHalf {
+pub enum BrokerReadHalf {
     #[cfg(unix)]
     Unix(tokio::net::unix::OwnedReadHalf),
     Tcp(tokio::net::tcp::OwnedReadHalf),
 }
 
-pub(super) enum BrokerWriteHalf {
+pub enum BrokerWriteHalf {
     #[cfg(unix)]
     Unix(tokio::net::unix::OwnedWriteHalf),
     Tcp(tokio::net::tcp::OwnedWriteHalf),
@@ -173,7 +173,7 @@ impl BrokerStream {
         tokio::io::split(self)
     }
 
-    pub(super) fn into_owned_split(self) -> (BrokerReadHalf, BrokerWriteHalf) {
+    pub fn into_owned_split(self) -> (BrokerReadHalf, BrokerWriteHalf) {
         match self {
             #[cfg(unix)]
             Self::Unix(stream) => {
@@ -236,7 +236,7 @@ impl BrokerWriteHalf {
     /// Poll the native writable-readiness future once without waiting while a
     /// caller holds the shared writer mutex. A pending readiness registration
     /// is retried by the caller on its next bounded polling interval.
-    pub(super) async fn peer_write_readiness_now(
+    pub async fn peer_write_readiness_now(
         &self,
     ) -> Option<std::io::Result<tokio::io::Ready>> {
         let mut readiness = Box::pin(self.peer_write_readiness());
@@ -247,7 +247,7 @@ impl BrokerWriteHalf {
         .await
     }
 
-    pub(super) async fn peer_write_readiness(&self) -> std::io::Result<tokio::io::Ready> {
+    pub async fn peer_write_readiness(&self) -> std::io::Result<tokio::io::Ready> {
         match self {
             #[cfg(unix)]
             Self::Unix(writer) => writer.ready(tokio::io::Interest::WRITABLE).await,
@@ -255,7 +255,7 @@ impl BrokerWriteHalf {
         }
     }
 
-    pub(super) fn consume_write_readiness(&self) -> std::io::Result<()> {
+    pub fn consume_write_readiness(&self) -> std::io::Result<()> {
         match self {
             #[cfg(unix)]
             Self::Unix(writer) => writer.try_write(&[]).map(|_| ()),
@@ -324,7 +324,7 @@ const DAEMON_SOCKET_MODE: u32 = 0o600;
 /// the BSDs and 108 on Linux; a longer path fails the syscall itself, so it
 /// must be refused (or re-derived) before it reaches the kernel.
 #[cfg(unix)]
-pub(crate) const MAX_UNIX_SOCKET_PATH_BYTES: usize =
+pub const MAX_UNIX_SOCKET_PATH_BYTES: usize =
     if cfg!(any(target_os = "linux", target_os = "android")) {
         107
     } else {
@@ -332,14 +332,14 @@ pub(crate) const MAX_UNIX_SOCKET_PATH_BYTES: usize =
     };
 
 #[cfg(unix)]
-pub(crate) fn unix_socket_path_within_limit(path: &Path) -> bool {
+pub fn unix_socket_path_within_limit(path: &Path) -> bool {
     path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES
 }
 
 /// Refuse to publish a socket through a symlink or a directory that is not
 /// owned privately by the current user.
 #[cfg(unix)]
-pub(super) fn ensure_private_socket_parent(path: &Path) -> Result<()> {
+pub fn ensure_private_socket_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -393,7 +393,7 @@ impl BrokerListener {
                     return Err(config_error(format!(
                         "daemon socket path '{}' exceeds this platform's Unix socket path limit ({MAX_UNIX_SOCKET_PATH_BYTES} bytes); set {} to a shorter path",
                         path.display(),
-                        crate::daemon::SOCKET_ENV,
+                        crate::transport::SOCKET_ENV,
                     )));
                 }
                 ensure_private_socket_parent(path)?;
@@ -420,7 +420,6 @@ impl BrokerListener {
     }
 }
 
-#[cfg(any(not(unix), test))]
 pub fn default_loopback_endpoint() -> DaemonEndpoint {
     DaemonEndpoint::Loopback(SocketAddr::new(
         IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
@@ -530,7 +529,7 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("Unix socket path limit"), "{message}");
         assert!(
-            message.contains(crate::daemon::SOCKET_ENV),
+            message.contains(crate::transport::SOCKET_ENV),
             "the refusal must name the override remedy: {message}"
         );
     }

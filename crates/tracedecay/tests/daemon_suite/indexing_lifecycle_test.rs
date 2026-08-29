@@ -687,7 +687,7 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
     let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
-    let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
+    let handshake = tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
         .expect("production daemon handshake");
 
     let baseline = wait_for_terminal_generation(
@@ -810,7 +810,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     });
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
-    let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
+    let handshake = tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
         .expect("production daemon handshake");
 
     let initial = wait_for_terminal_generation(

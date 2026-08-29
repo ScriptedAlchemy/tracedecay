@@ -13,7 +13,7 @@ use tokio::time::{Duration, timeout};
 pub use tracedecay_hooks::core_events::*;
 
 use super::{
-    BrokerStream, DaemonHandshake, JsonRpcRequest, current_daemon_connection, write_daemon_preamble,
+    BrokerStream, JsonRpcRequest, current_daemon_connection, write_daemon_preamble,
 };
 #[cfg(unix)]
 use super::{SOCKET_ENV, connection_for_socket_path};
@@ -59,7 +59,7 @@ async fn notify_hook_event_to_connection(
     connection: super::DaemonConnection,
 ) -> HookEventNotifyOutcomeV1 {
     let Ok(handshake) =
-        DaemonHandshake::for_current_client(Some(project_path.to_path_buf()), None, false, false)
+        crate::daemon::handshake_for_current_client(Some(project_path.to_path_buf()), None, false, false)
     else {
         return HookEventNotifyOutcomeV1::Malformed;
     };

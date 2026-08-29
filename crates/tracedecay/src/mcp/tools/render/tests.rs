@@ -1,5 +1,5 @@
 use super::*;
-use crate::daemon_client::RequestedOutputFormat;
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use crate::mcp::response_handles::{
     ResponseHandleLookup, lock_response_handle_store, retrieve_response_handle,
 };

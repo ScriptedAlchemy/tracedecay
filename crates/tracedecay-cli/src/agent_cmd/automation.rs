@@ -94,11 +94,11 @@ pub(super) async fn broker_codex_daemon_automation_project<I, IFut, R, T>(
     complete: R,
 ) -> tracedecay_runtime_core::errors::Result<T>
 where
-    I: FnOnce(tracedecay::daemon::DaemonHandshake) -> IFut,
+    I: FnOnce(tracedecay_daemon_protocol::DaemonHandshake) -> IFut,
     IFut: std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>,
     R: FnOnce(&Path) -> tracedecay_runtime_core::errors::Result<T>,
 {
-    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+    let handshake = tracedecay::daemon::handshake_for_current_client(
         Some(project_path.to_path_buf()),
         None,
         false,

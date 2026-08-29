@@ -3,9 +3,8 @@
 use tracedecay_application::{CancellationContext, Deadline};
 use tracedecay_domain::UtcMicros;
 
-use crate::application_surface::{
-    GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
-};
+use crate::surface::GitReadSurfaceRequest;
+use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
 
 use super::{
@@ -14,9 +13,9 @@ use super::{
 };
 
 impl DaemonInvocationRequest {
-    pub(crate) fn git_read(
+    pub fn git_read(
         request_id: impl Into<String>,
-        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        surface_operation: crate::surface::ApplicationSurfaceOperation,
         request: GitReadSurfaceRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
@@ -37,7 +36,7 @@ impl DaemonInvocationRequest {
         }
     }
 
-    pub(crate) fn git_preview(
+    pub fn git_preview(
         request_id: impl Into<String>,
         request: GitPreviewSurfaceRequest,
         observed_at: UtcMicros,
@@ -58,7 +57,7 @@ impl DaemonInvocationRequest {
         }
     }
 
-    pub(crate) fn git_apply(
+    pub fn git_apply(
         request_id: impl Into<String>,
         request: GitApplySurfaceRequest,
         observed_at: UtcMicros,
@@ -81,7 +80,7 @@ impl DaemonInvocationRequest {
 
     /// Expands one admitted durable GitHub stack signal with daemon-minted
     /// actor, scope, and capability-grant authority.
-    pub(crate) fn github_stack_signal_expand(
+    pub fn github_stack_signal_expand(
         request_id: impl Into<String>,
         request: GitHubStackSignalExpandSurfaceRequest,
         observed_at: UtcMicros,

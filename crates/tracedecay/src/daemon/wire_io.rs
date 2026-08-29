@@ -90,7 +90,7 @@ mod wire_bound_tests {
     use tracedecay_jsonrpc::McpTransport;
     use tracedecay_usecases::host_admission::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
-    use super::transport::{BrokerListener, BrokerStream, default_loopback_endpoint};
+    use tracedecay_daemon_protocol::{BrokerListener, BrokerStream, default_loopback_endpoint};
 
     #[tokio::test]
     async fn broker_transport_streams_hostile_frame_and_typed_rejection_has_no_payload() {

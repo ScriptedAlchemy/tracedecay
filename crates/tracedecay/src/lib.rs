@@ -70,8 +70,6 @@ pub use tracedecay_query as query;
 pub mod config;
 pub mod context;
 pub mod daemon;
-pub mod daemon_client;
-pub mod daemon_contract;
 pub mod dashboard;
 pub mod diagnostics;
 pub(crate) use diagnostics::lsp::semantic::production_semantic_authorities;

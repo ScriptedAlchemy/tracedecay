@@ -29,11 +29,10 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
 use tracedecay_tool_catalog::OperationId;
 
-use crate::daemon::DaemonHandshake;
-use crate::daemon_client::{
+use tracedecay_daemon_protocol::{
     DaemonInvocationClient, InvocationCancellationPolicy, invocation_now_micros,
 };
-use crate::daemon_contract::{
+use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
     WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
 };
@@ -388,8 +387,8 @@ pub async fn invoke_work_cli_with_delivery(
         deadline.clone(),
         cancellation.context(),
     );
-    let handshake = DaemonHandshake::for_current_client(Some(project_root), None, false, false)?;
-    let client = DaemonInvocationClient::for_current(handshake)?;
+    let handshake = crate::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
+    let client = crate::daemon::invocation_client_for_current(handshake)?;
     let response = match client
         .invoke_controlled(
             request,
@@ -666,7 +665,7 @@ mod tests {
     #[test]
     fn daemon_work_reset_remains_a_typed_cli_problem() {
         use super::daemon_application_problem;
-        use crate::daemon_contract::DaemonInvocationProblem;
+        use tracedecay_daemon_protocol::DaemonInvocationProblem;
         use tracedecay_application::ApplicationProblem;
 
         let problem = daemon_application_problem(DaemonInvocationProblem::ResetRequired);

@@ -12,7 +12,7 @@ use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1};
 use tracedecay_tool_catalog::UseCaseId;
 use tracedecay_usecases::observability::BoundedObservabilityProducerV1;
 
-use crate::daemon_contract::{DaemonInvocationResponse, WorkApplicationOutcomeV1};
+use tracedecay_daemon_protocol::{DaemonInvocationResponse, WorkApplicationOutcomeV1};
 use tracedecay_global_db::RegisteredWorkApplicationServicesV1;
 
 use super::super::work_attempt_exec::{WorkAttemptProcessRegistryV1, spawn_attempt_execution};

@@ -11,7 +11,7 @@
 use super::project_open_admission::ProjectOpenWaitOutcome;
 use super::*;
 #[cfg(any(not(unix), test))]
-use crate::daemon_contract::DaemonInvocationProblem;
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
 use service::invocation::semantic_evaluation::SemanticInvocationControlV1;
 use std::future::Future;
 use tracedecay_runtime_core::cancellation::CancellationToken;

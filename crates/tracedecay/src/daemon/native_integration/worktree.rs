@@ -549,7 +549,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
             return Ok(WorktreeInventoryOutcomeV1::Unavailable);
         }
         let roots = self.scope_roots(&request.target, scope_set)?;
-        let observed_at = crate::daemon_client::invocation_now_micros();
+        let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
         let mut entries = Vec::with_capacity(roots.len());
         for root in roots {
             if cancellation.is_cancelled() {
@@ -629,7 +629,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         let inspection = self.observe_target(
             &request.target,
             scope_set,
-            crate::daemon_client::invocation_now_micros(),
+            tracedecay_daemon_protocol::invocation_now_micros(),
             false,
         )?;
         Ok(match inspection.presence {
@@ -649,7 +649,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         if cancellation.is_cancelled() {
             return Ok(WorktreeConfirmationOutcomeV1::Unavailable);
         }
-        let confirmed_at = crate::daemon_client::invocation_now_micros();
+        let confirmed_at = tracedecay_daemon_protocol::invocation_now_micros();
         let inspection = self.observe_target(&request.target, scope_set, confirmed_at, false)?;
         if inspection.presence == WorktreePresenceV1::Foreign {
             return Ok(WorktreeConfirmationOutcomeV1::Denied);

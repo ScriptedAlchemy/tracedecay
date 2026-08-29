@@ -346,8 +346,8 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn portable_production_route_selects_rmcp_after_initialize() {
     let fixture = rmcp_route_fixture("portable-rmcp-production-route").await;
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("portable route listener");
@@ -367,11 +367,11 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
         ))
         .await
     });
-    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
         .await
         .expect("connect portable client");
     let (reader, mut writer) = stream.into_split();
-    let preface = super::super::transport::DaemonAuthPreface::new(AUTH_TOKEN)
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(AUTH_TOKEN)
         .to_line()
         .expect("portable auth preface");
     writer
@@ -392,8 +392,8 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
     let response_lifecycle = fixture.server.project_server_response_lifecycle();
     let response_gate = Arc::clone(response_lifecycle.response_gate());
     let gate = response_gate.write().await;
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("portable legacy route listener");
@@ -413,12 +413,12 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
         ))
         .await
     });
-    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
         .await
         .expect("connect portable legacy client");
     let (reader, mut writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(reader);
-    let preface = super::super::transport::DaemonAuthPreface::new(AUTH_TOKEN)
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(AUTH_TOKEN)
         .to_line()
         .expect("portable legacy auth preface");
     writer
@@ -521,23 +521,23 @@ impl tracedecay_application::ApplicationInvocationExecutor for ControlledCancell
 }
 
 #[cfg(unix)]
-impl crate::daemon_client::DaemonInvocationExecutor for ControlledCancellationExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ControlledCancellationExecutor {
     fn invoke_controlled(
         &self,
         _request: super::super::DaemonInvocationRequest,
         _deadline: tracedecay_application::Deadline,
         cancellation: tracedecay_application::CancellationSignal,
-        _policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
             super::super::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
         Box::pin(async move {
             self.await_cancellation(cancellation).await;
-            Err(crate::daemon_client::DaemonInvocationError::Cancelled {
+            Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
                 stage: tracedecay_application::CancellationStage::DuringRead,
             })
         })
@@ -548,7 +548,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for ControlledCancellationEx
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { panic!("controlled RMCP fixture does not observe feedback") })
     }
 }
