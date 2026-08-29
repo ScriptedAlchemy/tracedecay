@@ -176,7 +176,7 @@ impl AgentIntegration for CodexIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
         let mut plugin_dirs = codex_plugin_cached_install_dirs(home);
         if codex_plugin_manifest_path(home).exists() {
             plugin_dirs.push(codex_plugin_install_dir(home));
@@ -184,9 +184,9 @@ impl AgentIntegration for CodexIntegration {
         let mut exports = Vec::new();
         let mut errors = Vec::new();
         for dir in plugin_dirs {
-            match crate::automation::skill_targets::install_managed_skills(
+            match tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::Codex,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
                 &dir,
             ) {
                 Ok(summary) => exports.push(summary),
@@ -205,7 +205,7 @@ impl AgentIntegration for CodexIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
         let repo_dir = codex_repo_plugin_install_dir(project_root);
         if !repo_dir.join(".codex-plugin/plugin.json").exists()
             || !codex_plugin_dir_is_tracedecay(&repo_dir)
@@ -213,9 +213,9 @@ impl AgentIntegration for CodexIntegration {
             return Ok(Vec::new());
         }
         Ok(vec![
-            crate::automation::skill_targets::install_managed_skills(
+            tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::Codex,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
                 &repo_dir,
             )?,
         ])
@@ -621,17 +621,17 @@ fn codex_project_registration_paths(home: &Path, project_path: &Path) -> Result<
         }
     }
 
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
-    let active_skills = crate::automation::skill_targets::load_active_managed_skills_for_target(
+    let profile_root = tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
+    let active_skills = tracedecay_automation_runtime::automation::skill_targets::load_active_managed_skills_for_target(
         &profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
     )?;
     let overlay_root = install_dir.join("skills/agent-managed");
     if !active_skills.is_empty() {
         paths.push(overlay_root.join(".tracedecay-managed-skills.json"));
     }
     for skill in active_skills {
-        crate::automation::managed_skills::validate_managed_support_files(&skill.support_files)?;
+        tracedecay_automation_runtime::automation::managed_skills::validate_managed_support_files(&skill.support_files)?;
         let package_dir = overlay_root.join(&skill.metadata.id);
         paths.push(package_dir.join("SKILL.md"));
         paths.extend(
@@ -722,15 +722,15 @@ pub fn export_codex_plugin_artifact(
     profile_root: &Path,
     output: &Path,
     tracedecay_bin: &str,
-) -> Result<crate::automation::skill_targets::SkillInstallSummary> {
+) -> Result<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary> {
     write_codex_plugin_bundle_base(
         output,
         tracedecay_bin,
         CodexBundlePolicy::for_scope(InstallScope::Global),
     )?;
-    crate::automation::skill_targets::export_native_skill_overlay(
+    tracedecay_automation_runtime::automation::skill_targets::export_native_skill_overlay(
         profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
         output,
     )
 }
@@ -753,12 +753,12 @@ fn write_codex_plugin_bundle_base(
 fn install_codex_managed_skill_overlay(
     profile_home: &Path,
     install_dir: &Path,
-) -> Result<crate::automation::skill_targets::SkillInstallSummary> {
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+) -> Result<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary> {
+    let profile_root = tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(profile_home);
     super::retired_memory_digest::remove_state(&profile_root)?;
-    crate::automation::skill_targets::install_managed_skills(
+    tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
         &profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
         install_dir,
     )
 }
@@ -1498,10 +1498,10 @@ fn codex_loaded_cache_matches_rendered_bundle(
     if source != cache || expected.is_some_and(|expected| source != expected) {
         return Ok(false);
     }
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
-    let overlay = crate::automation::skill_targets::rendered_native_skill_overlay_files(
+    let profile_root = tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
+    let overlay = tracedecay_automation_runtime::automation::skill_targets::rendered_native_skill_overlay_files(
         &profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
         &source_root,
     )
     .map_err(|_| ())?;

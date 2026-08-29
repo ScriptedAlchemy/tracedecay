@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tracedecay_agent_hosts::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_application::{CancellationSignal, Deadline, now_micros};
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};

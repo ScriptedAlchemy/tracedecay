@@ -31,36 +31,41 @@ pub fn backend_availability(config: &AutomationConfig) -> AgentBackendAvailabili
         AutomationBackend::CodexAppServer => {
             let summary_config = CodexAppServerSummaryConfig::from_env();
             let executable = summary_config.codex_bin.clone();
-            if executable_is_resolvable(&executable) {
-                AgentBackendAvailability {
+            match executable_resolution(&executable) {
+                Ok(true) => AgentBackendAvailability {
                     backend: AutomationBackend::CodexAppServer,
                     available: true,
                     executable: Some(executable),
                     reason: None,
-                }
-            } else {
-                AgentBackendAvailability {
+                },
+                Ok(false) => AgentBackendAvailability {
                     backend: AutomationBackend::CodexAppServer,
                     available: false,
                     executable: Some(executable.clone()),
                     reason: Some(format!(
                         "codex app-server backend executable '{executable}' was not found"
                     )),
-                }
+                },
+                Err(error) => AgentBackendAvailability {
+                    backend: AutomationBackend::CodexAppServer,
+                    available: false,
+                    executable: Some(executable),
+                    reason: Some(error.to_string()),
+                },
             }
         }
     }
 }
 
-fn executable_is_resolvable(bin: &str) -> bool {
+fn executable_resolution(bin: &str) -> Result<bool> {
     let path = Path::new(bin);
     if path.components().count() > 1 {
-        return path.is_file();
+        return Ok(path.is_file());
     }
-    crate::agents::host_cli::resolve_on_path(bin, std::env::var_os("PATH").as_deref())
-        .ok()
-        .flatten()
-        .is_some()
+    Ok(
+        crate::agents::host_cli::resolve_on_path(bin, std::env::var_os("PATH").as_deref())?
+            .is_some(),
+    )
 }
 
 pub async fn run_agent_task_with_retry(

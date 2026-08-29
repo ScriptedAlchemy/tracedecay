@@ -5,6 +5,7 @@ members = [
     "crates/tracedecay-api",
     "crates/tracedecay-application",
     "crates/tracedecay-automation",
+    "crates/tracedecay-automation-runtime",
     "crates/tracedecay-capture",
     "crates/tracedecay-cli",
     "crates/tracedecay-code-extraction",

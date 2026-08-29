@@ -407,7 +407,7 @@ fn activity_from_row(
 fn activity_tool_names(row: &SessionActivityRow) -> Result<Vec<String>, HintOutcomePortError> {
     let mut tools = Vec::new();
     if let Some(names) = &row.tool_names {
-        tools.extend(tracedecay_agent_hosts::analytics::split_tool_names(names));
+        tools.extend(tracedecay_automation::analytics::split_tool_names(names));
     }
     if let Some(metadata) = &row.metadata_json {
         let value = serde_json::from_str::<Value>(metadata).map_err(|error| {

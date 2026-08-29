@@ -11,7 +11,7 @@ async fn retained_skill_writer_preserves_retrieval_and_defers_ledger_publication
     let _global_db = isolate_global_db(&cg);
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
     let backend = SkillJsonBackend::new(json!({"skills": []}));
-    let retained = tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+    let retained = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
         &cg,
         &enabled_skill_writer_config(),
         &test_configuration_revision(),
@@ -102,7 +102,7 @@ async fn skill_writer_fails_closed_on_denied_temporal_evidence() {
     let retrieval = RejectedAutomationSessionRetrieval::new("session_evidence_denied");
 
     let run =
-        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
             &cg,
             &enabled_skill_writer_config(),
             &test_configuration_revision(),
@@ -220,7 +220,7 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
     );
 
     let run =
-        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
             &cg,
             &config,
             &test_configuration_revision(),
@@ -526,7 +526,7 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
         )
     );
 
-    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay_automation_runtime::automation::managed_skills::load_managed_skill(
         &profile_root,
         "automation-run-review",
     )
@@ -534,11 +534,11 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
     .unwrap();
     assert_eq!(
         skill.metadata.state,
-        tracedecay_agent_hosts::automation::managed_skills::ManagedSkillState::Active
+        tracedecay_automation_runtime::automation::managed_skills::ManagedSkillState::Active
     );
     assert_eq!(
         skill.metadata.provenance.source,
-        tracedecay_agent_hosts::automation::managed_skills::ManagedSkillSource::AutomationRun
+        tracedecay_automation_runtime::automation::managed_skills::ManagedSkillSource::AutomationRun
     );
     assert_eq!(
         skill.metadata.provenance.run_id.as_deref(),
@@ -547,8 +547,8 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
     assert_eq!(
         skill.metadata.targets,
         vec![
-            tracedecay_agent_hosts::automation::managed_skills::SkillInstallTarget::Codex,
-            tracedecay_agent_hosts::automation::managed_skills::SkillInstallTarget::OpenCode,
+            tracedecay_automation_runtime::automation::managed_skills::SkillInstallTarget::Codex,
+            tracedecay_automation_runtime::automation::managed_skills::SkillInstallTarget::OpenCode,
         ]
     );
     assert!(
@@ -628,7 +628,7 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
             summary: "Review self-improvement automation runs.".to_string(),
             category: "workflow".to_string(),
             targets:
-                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
+                tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "Check the run ledger before applying changes.".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
@@ -745,7 +745,7 @@ async fn skill_writer_runner_activates_validated_skills() {
             summary: "Review self-improvement automation runs.".to_string(),
             category: "workflow".to_string(),
             targets:
-                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
+                tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "Check the run ledger before applying changes.".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
@@ -872,7 +872,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
             summary: "Review self-improvement automation runs.".to_string(),
             category: "workflow".to_string(),
             targets:
-                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
+                tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "Check the run ledger before applying changes.".to_string(),
             support_files: vec![
                 ManagedSupportFile::new("references/old.md", b"old checklist".to_vec()).unwrap(),
@@ -895,7 +895,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
             summary: "User-authored workflow.".to_string(),
             category: "workflow".to_string(),
             targets:
-                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
+                tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "Keep this user-authored content unchanged.".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
@@ -1037,8 +1037,8 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     assert_eq!(
         skill.metadata.targets,
         vec![
-            tracedecay_agent_hosts::automation::managed_skills::SkillInstallTarget::Claude,
-            tracedecay_agent_hosts::automation::managed_skills::SkillInstallTarget::Kimi,
+            tracedecay_automation_runtime::automation::managed_skills::SkillInstallTarget::Claude,
+            tracedecay_automation_runtime::automation::managed_skills::SkillInstallTarget::Kimi,
         ]
     );
     let skill_dir = profile_root.join("agent_managed/skills/automation-run-review");

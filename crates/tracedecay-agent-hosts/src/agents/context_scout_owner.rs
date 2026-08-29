@@ -26,7 +26,7 @@ use super::context_scout_v2::{
     ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
     ContextScoutWorkV1, ProjectContextScoutDurableStoreV1,
 };
-use crate::automation::config::AutomationConfig;
+use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use crate::db::Database;
 
 const STARTUP_RECOVERY_LIMIT: usize = 32;

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tracedecay_agent_hosts::ports::project_runtime::{ProjectRuntime, RuntimeFuture};
+use tracedecay_automation_runtime::ports::project_runtime::{ProjectRuntime, RuntimeFuture};
 use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
     RenameSymbolBindingV1,

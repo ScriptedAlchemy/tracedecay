@@ -2,8 +2,8 @@ use super::*;
 
 use serde_json::json;
 use std::collections::BTreeMap;
-use tracedecay_agent_hosts::automation::AutomationCommittedReceipt;
-use tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord;
+use tracedecay_automation_runtime::automation::AutomationCommittedReceipt;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
     AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
@@ -29,13 +29,13 @@ use crate::daemon::automation_effect::{AutomationSettledTerminal, recovery_index
 
 struct NeverAutomationBackend;
 
-impl tracedecay_agent_hosts::automation::backend::AgentTaskBackend for NeverAutomationBackend {
+impl tracedecay_automation_runtime::automation::backend::AgentTaskBackend for NeverAutomationBackend {
     fn run_task(
         &self,
-        _request: &tracedecay_agent_hosts::automation::backend::AgentTaskRequest,
+        _request: &tracedecay_automation_runtime::automation::backend::AgentTaskRequest,
     ) -> std::result::Result<
-        tracedecay_agent_hosts::automation::backend::AgentTaskResponse,
-        tracedecay_agent_hosts::automation::backend::AgentTaskError,
+        tracedecay_automation_runtime::automation::backend::AgentTaskResponse,
+        tracedecay_automation_runtime::automation::backend::AgentTaskError,
     > {
         panic!("disabled retained automation must not invoke its backend")
     }
@@ -405,8 +405,8 @@ async fn retained_disabled_user_job(
     run_id: &str,
     job_id: &str,
 ) -> (
-    tracedecay_agent_hosts::automation::jobs::UserJobAutomationRun,
-    tracedecay_agent_hosts::automation::runner::AutomationRunSettlementGuard,
+    tracedecay_automation_runtime::automation::jobs::UserJobAutomationRun,
+    tracedecay_automation_runtime::automation::runner::AutomationRunSettlementGuard,
 ) {
     let retained = retained_disabled_user_job_run(dashboard_root, run_id, job_id).await;
     let (result, guard) = retained.into_parts();
@@ -417,13 +417,13 @@ async fn retained_disabled_user_job_run(
     dashboard_root: &std::path::Path,
     run_id: &str,
     job_id: &str,
-) -> tracedecay_agent_hosts::automation::runner::RetainedAutomationRun<
-    tracedecay_agent_hosts::automation::jobs::UserJobAutomationRun,
+) -> tracedecay_automation_runtime::automation::runner::RetainedAutomationRun<
+    tracedecay_automation_runtime::automation::jobs::UserJobAutomationRun,
 > {
-    use tracedecay_agent_hosts::automation::config::{
+    use tracedecay_automation_runtime::automation::config::{
         AutomationBackend, AutomationConfig, AutomationHostMode,
     };
-    use tracedecay_agent_hosts::automation::jobs::{
+    use tracedecay_automation_runtime::automation::jobs::{
         AutomationJob, JobDelivery, UserJobRunOptions,
         run_user_job_with_backend_for_retained_settlement,
     };
@@ -490,7 +490,7 @@ async fn retained_recovery_project(
 }
 
 async fn task_lock_is_denied(dashboard_root: &std::path::Path, job_id: &str) -> bool {
-    tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
+    tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
         dashboard_root,
         &format!("user_job_{job_id}"),
         None,
@@ -503,9 +503,9 @@ async fn task_lock_is_denied(dashboard_root: &std::path::Path, job_id: &str) -> 
 
 async fn fixed_task_lock_is_denied(
     dashboard_root: &std::path::Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
 ) -> bool {
-    tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire(
+    tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
         dashboard_root,
         task,
         None,
@@ -518,14 +518,14 @@ async fn fixed_task_lock_is_denied(
 
 async fn retained_repeated_memory_curator(
     cg: &crate::tracedecay::TraceDecay,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     configuration_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
     run_id: &str,
 ) -> (
-    tracedecay_agent_hosts::automation::runner::ReusedSchedulerSkip,
-    tracedecay_agent_hosts::automation::runner::AutomationRunSettlementGuard,
+    tracedecay_automation_runtime::automation::runner::ReusedSchedulerSkip,
+    tracedecay_automation_runtime::automation::runner::AutomationRunSettlementGuard,
 ) {
-    use tracedecay_agent_hosts::automation::runner::RetainedAutomationSettlementDisposition;
+    use tracedecay_automation_runtime::automation::runner::RetainedAutomationSettlementDisposition;
 
     let retained =
         retained_repeated_memory_curator_run(cg, config, configuration_revision, run_id).await;
@@ -542,16 +542,16 @@ async fn retained_repeated_memory_curator(
 
 async fn retained_repeated_memory_curator_run(
     cg: &crate::tracedecay::TraceDecay,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     configuration_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
     run_id: &str,
-) -> tracedecay_agent_hosts::automation::runner::RetainedAutomationRun<
-    tracedecay_agent_hosts::automation::runner::MemoryCuratorAutomationRun,
+) -> tracedecay_automation_runtime::automation::runner::RetainedAutomationRun<
+    tracedecay_automation_runtime::automation::runner::MemoryCuratorAutomationRun,
 > {
     use std::sync::Arc;
-    use tracedecay_agent_hosts::automation::AutomationRunControl;
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
-    use tracedecay_agent_hosts::automation::runner::{
+    use tracedecay_automation_runtime::automation::AutomationRunControl;
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+    use tracedecay_automation_runtime::automation::runner::{
         MemoryCuratorAutomationOptions, run_memory_curator_with_backend_for_retained_settlement,
     };
 
@@ -1318,7 +1318,7 @@ async fn visible_terminal_replace_error_after_exact_publish_retains_cleanup_auth
     };
     let terminal = AutomationSettledTerminal::Problem(admission.recovery_problem().clone());
     let (publication, ()) =
-        tracedecay_agent_hosts::automation::run_ledger::bind_staged_run_record_exact(
+        tracedecay_automation_runtime::automation::run_ledger::bind_staged_run_record_exact(
             dashboard_root,
             &expected_record,
             |publication| {
@@ -1332,13 +1332,13 @@ async fn visible_terminal_replace_error_after_exact_publish_retains_cleanup_auth
         )
         .expect("stage and prepare exact terminal");
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact_blocking(
             dashboard_root,
             run_id,
             &publication,
         )
         .expect("publish exact row"),
-        tracedecay_agent_hosts::automation::run_ledger::ExactRunPublishOutcome::Published
+        tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::Published
     );
     assert_eq!(exact_spool_file_count(dashboard_root), 1);
 
@@ -1450,7 +1450,7 @@ async fn visible_terminal_replace_error_after_exact_publish_retains_cleanup_auth
         .expect("exact terminal retry"),
         terminal
     );
-    tracedecay_agent_hosts::automation::run_ledger::discard_staged_run_record_exact_blocking(
+    tracedecay_automation_runtime::automation::run_ledger::discard_staged_run_record_exact_blocking(
         dashboard_root,
         run_id,
         &publication,
@@ -1920,7 +1920,7 @@ async fn direct_recover_retires_spool_staged_before_prepared_binding() {
         "completed_at": "2"
     }))
     .expect("ledger record");
-    tracedecay_agent_hosts::automation::run_ledger::bind_staged_run_record_exact(
+    tracedecay_automation_runtime::automation::run_ledger::bind_staged_run_record_exact(
         temp.path(),
         &ledger,
         |_| Ok(()),
@@ -2107,23 +2107,23 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     .await;
     drop(anchor_guard);
     let (anchor_publication, _) =
-        tracedecay_agent_hosts::automation::run_ledger::bind_staged_run_record_exact(
+        tracedecay_automation_runtime::automation::run_ledger::bind_staged_run_record_exact(
             &dashboard_root,
             &anchor.ledger_record,
             |publication| Ok(publication.clone()),
         )
         .expect("stage exact anchor ledger row");
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact(
+        tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
             &dashboard_root,
             &anchor.ledger_record.run_id,
             &anchor_publication,
         )
         .await
         .expect("publish exact anchor ledger row"),
-        tracedecay_agent_hosts::automation::run_ledger::ExactRunPublishOutcome::Published
+        tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::Published
     );
-    tracedecay_agent_hosts::automation::run_ledger::discard_staged_run_record_exact(
+    tracedecay_automation_runtime::automation::run_ledger::discard_staged_run_record_exact(
         &dashboard_root,
         &anchor.ledger_record.run_id,
         &anchor_publication,
@@ -2152,7 +2152,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
 
     let sidecar_path = terminal_sidecar_path(&journal_path).expect("terminal sidecar path");
     let ledger_path =
-        tracedecay_agent_hosts::automation::run_ledger::run_ledger_path(&dashboard_root);
+        tracedecay_automation_runtime::automation::run_ledger::run_ledger_path(&dashboard_root);
     let journal_bytes = std::fs::read(&journal_path).expect("terminal journal bytes");
     let sidecar_bytes = std::fs::read(&sidecar_path).expect("terminal sidecar bytes");
     let ledger_bytes = std::fs::read(&ledger_path).expect("anchor ledger bytes");
@@ -2402,7 +2402,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
         Some(terminal.clone())
     );
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             &dashboard_root,
             &anchor.ledger_record.run_id,
         )
@@ -2976,7 +2976,7 @@ async fn project_open_truncates_unique_spool_partial_with_empty_pending_index() 
     drop(guard);
     let expected_record = run.ledger_record;
     let (publication, _) =
-        tracedecay_agent_hosts::automation::run_ledger::bind_staged_run_record_exact(
+        tracedecay_automation_runtime::automation::run_ledger::bind_staged_run_record_exact(
             dashboard_root,
             &expected_record,
             |publication| Ok(publication.clone()),
@@ -2986,7 +2986,7 @@ async fn project_open_truncates_unique_spool_partial_with_empty_pending_index() 
     assert_eq!(spool_files.len(), 1);
     let spool = std::fs::read(&spool_files[0]).expect("exact spool payload");
     let ledger_path =
-        tracedecay_agent_hosts::automation::run_ledger::run_ledger_path(dashboard_root);
+        tracedecay_automation_runtime::automation::run_ledger::run_ledger_path(dashboard_root);
     std::fs::write(&ledger_path, &spool[..spool.len() / 2]).expect("owned partial ledger tail");
     let intent_path = dashboard_root.join("automation_runs.jsonl.append-intent");
     std::fs::write(&intent_path, b"corrupt-partial-intent").expect("corrupt append intent");
@@ -3010,17 +3010,17 @@ async fn project_open_truncates_unique_spool_partial_with_empty_pending_index() 
     assert_eq!(exact_spool_file_count(dashboard_root), 1);
 
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact(
+        tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
             dashboard_root,
             run_id,
             &publication,
         )
         .await
         .expect("publish repaired exact row"),
-        tracedecay_agent_hosts::automation::run_ledger::ExactRunPublishOutcome::Published
+        tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::Published
     );
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             run_id,
         )
@@ -3157,13 +3157,13 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     use fs2::FileExt;
     use std::sync::Arc;
     use std::time::Duration;
-    use tracedecay_agent_hosts::automation::AutomationRunControl;
-    use tracedecay_agent_hosts::automation::backend::{AgentTaskKind, task_key};
-    use tracedecay_agent_hosts::automation::config::{
+    use tracedecay_automation_runtime::automation::AutomationRunControl;
+    use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
+    use tracedecay_automation_runtime::automation::config::{
         AutomationBackend, AutomationConfig, AutomationHostMode,
     };
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
-    use tracedecay_agent_hosts::automation::runner::{
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+    use tracedecay_automation_runtime::automation::runner::{
         MemoryCuratorAutomationOptions, RetainedAutomationSettlementDisposition,
         run_memory_curator_with_backend_for_retained_settlement,
     };
@@ -3245,10 +3245,10 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         .expect("settle exact prior scheduler skip");
 
     let ledger_path =
-        tracedecay_agent_hosts::automation::run_ledger::run_ledger_path(dashboard_root);
+        tracedecay_automation_runtime::automation::run_ledger::run_ledger_path(dashboard_root);
     let prior_ledger_bytes = std::fs::read(&ledger_path).expect("prior exact ledger bytes");
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             prior_run_id,
         )
@@ -3397,7 +3397,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     );
     assert!(current_journal.exists());
     assert!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             current_run_id,
         )
@@ -3435,7 +3435,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         "reusing a scheduler skip must not append a current physical row"
     );
     assert!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             current_run_id,
         )
@@ -3444,7 +3444,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     );
     assert_eq!(exact_spool_files(dashboard_root), prior_spool_files);
     assert!(
-        tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire(
+        tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
             dashboard_root,
             AgentTaskKind::MemoryCurator,
             None,
@@ -3571,7 +3571,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     assert!(reserved.prepared().is_none());
     assert_eq!(reserved.admission(), &expected_admission);
     assert!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             run_id,
         )
@@ -3596,7 +3596,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
             .is_some()
     );
     assert!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             run_id,
         )
@@ -3620,7 +3620,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         super::super::RetainedSettlementPhase::Published
     );
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             run_id,
         )
@@ -3646,7 +3646,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let cleanup_admission = expected_admission.clone();
     let cleanup_terminal = prepared_terminal.clone();
     let cleanup_publication = publication.clone();
-    let cleanup_error = tracedecay_agent_hosts::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
+    let cleanup_error = tracedecay_automation_runtime::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
         dashboard_root,
         run_id,
         &publication,
@@ -3692,7 +3692,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     assert!(terminal_journal.is_terminal());
     assert_eq!(terminal_journal.admission(), &expected_admission);
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             run_id,
         )
@@ -3700,7 +3700,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         Some(expected_record.clone())
     );
     let exact_rows = std::fs::read_to_string(
-        tracedecay_agent_hosts::automation::run_ledger::run_ledger_path(dashboard_root),
+        tracedecay_automation_runtime::automation::run_ledger::run_ledger_path(dashboard_root),
     )
     .expect("physical exact run ledger")
     .lines()
@@ -3720,7 +3720,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].path, journal_path);
     assert!(
-        tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
+        tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
             dashboard_root,
             &format!("user_job_{job_id}"),
             None,
@@ -3735,7 +3735,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let terminal_path = terminal_sidecar_path(&journal_path).expect("terminal sidecar path");
     let terminal_before_recovery = std::fs::read(&terminal_path).expect("terminal sidecar bytes");
     let ledger_path =
-        tracedecay_agent_hosts::automation::run_ledger::run_ledger_path(dashboard_root);
+        tracedecay_automation_runtime::automation::run_ledger::run_ledger_path(dashboard_root);
     let ledger_before_recovery = std::fs::read(&ledger_path).expect("exact ledger bytes");
     let recovery = recovery_index::reconcile_reserved_automation_effects_for_project(
         &cg,
@@ -3766,7 +3766,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         ledger_before_recovery
     );
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             run_id,
         )
@@ -3843,7 +3843,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
         tokio::task::yield_now().await;
     }
     assert!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             run_id,
         )
@@ -3854,7 +3854,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
+        if tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
             dashboard_root,
             &format!("user_job_{job_id}"),
             None,
@@ -3963,7 +3963,7 @@ async fn assert_request_waiting_pair_abandoned_cleanly(
     );
     for run_id in &fixture.run_ids {
         assert!(
-            tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+            tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
                 dashboard_root,
                 run_id,
             )
@@ -4151,7 +4151,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
     assert!(task_lock_is_denied(dashboard_root, first_job_id).await);
     assert!(task_lock_is_denied(dashboard_root, second_job_id).await);
     assert!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             first_run_id,
         )
@@ -4184,7 +4184,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         second_expected_record.clone()
     );
     assert_eq!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
             dashboard_root,
             second_run_id,
         )
@@ -4202,7 +4202,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
     drop(second_owned);
     for job_id in [first_job_id, second_job_id] {
         let reacquired =
-            tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
+            tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
                 dashboard_root,
                 &format!("user_job_{job_id}"),
                 None,

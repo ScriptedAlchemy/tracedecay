@@ -1,5 +1,6 @@
 pub mod agent_targets;
 mod artifact_feedback;
+pub mod host_io;
 mod artifact_generated_evals;
 mod artifact_optimizer;
 mod artifact_payloads;

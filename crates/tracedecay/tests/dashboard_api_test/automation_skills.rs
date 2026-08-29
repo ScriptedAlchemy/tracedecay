@@ -73,16 +73,16 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             "run-dashboard-1"
         );
         let profile_root = fixture.host_runtime.profile_root().to_path_buf();
-        let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+        let skill = tracedecay_automation_runtime::automation::managed_skills::load_managed_skill(
             &profile_root,
             "repo-hygiene",
         )
         .await
         .unwrap();
-        tracedecay_agent_hosts::automation::skill_usage::record_skill_usage(
+        tracedecay_automation_runtime::automation::skill_usage::record_skill_usage(
             &profile_root,
             &skill,
-            tracedecay_agent_hosts::automation::skill_usage::SkillUsageAction::Use,
+            tracedecay_automation_runtime::automation::skill_usage::SkillUsageAction::Use,
             "dashboard-test",
             vec!["cursor".to_string(), "codex".to_string()],
             Some("cursor".to_string()),
@@ -143,7 +143,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             .as_str()
             .is_some_and(|detail| detail.contains("already exists")));
         let persisted_after_duplicate =
-            tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+            tracedecay_automation_runtime::automation::managed_skills::load_managed_skill(
                 &profile_root,
                 "repo-hygiene",
             )
@@ -193,7 +193,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             assert_eq!(updated["skill"]["metadata"]["state"], expected_state);
         }
 
-        let persisted = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+        let persisted = tracedecay_automation_runtime::automation::managed_skills::load_managed_skill(
             &profile_root,
             "repo-hygiene",
         )
@@ -201,7 +201,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         .unwrap();
         assert_eq!(
             persisted.metadata.state,
-            tracedecay_agent_hosts::automation::managed_skills::ManagedSkillState::Active
+            tracedecay_automation_runtime::automation::managed_skills::ManagedSkillState::Active
         );
     });
 }
@@ -531,7 +531,7 @@ fn managed_skill_dashboard_api_applies_updates_immediately() {
         let (status, _) = post_json_body(&agent, &skills_url, &draft);
         assert_eq!(status, 200);
 
-        let active = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+        let active = tracedecay_automation_runtime::automation::managed_skills::load_managed_skill(
             &managed_skill_profile_root,
             "repo-hygiene",
         )

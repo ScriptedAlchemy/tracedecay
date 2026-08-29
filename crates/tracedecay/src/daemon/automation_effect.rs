@@ -6,16 +6,16 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_agent_hosts::automation::backend::{AgentTaskKind, task_key};
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
+use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, ExactRunPublication, ExactRunPublishOutcome,
 };
-use tracedecay_agent_hosts::automation::runner::{
+use tracedecay_automation_runtime::automation::runner::{
     AutomationRunSettlementGuard, CombinedReviewDispatch, RetainedAutomationRun,
     RetainedAutomationSettlementDisposition, RetainedCombinedReviewRun,
     RetainedCombinedReviewSettlementGuards, ReusedSchedulerSkip,
 };
-use tracedecay_agent_hosts::automation::{AutomationCommittedReceipt, AutomationRunError};
+use tracedecay_automation_runtime::automation::{AutomationCommittedReceipt, AutomationRunError};
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
     AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
@@ -1363,14 +1363,14 @@ impl AutomationEffectAuthority {
             } => {
                 validate_retirement_binding(&admission, retirement.as_ref())?;
                 if let Some(publication) = publication.as_ref() {
-                    let published = tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact(
+                    let published = tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
                         dashboard_root,
                         admission.request.run_id.as_str(),
                         publication,
                     )
                     .await?;
                     if published
-                        == tracedecay_agent_hosts::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
+                        == tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
                     {
                         return Err(contract_error(
                             "durable automation replay has neither its exact ledger row nor bound spool",
@@ -1380,7 +1380,7 @@ impl AutomationEffectAuthority {
                     let cleanup_admission = admission.clone();
                     let cleanup_terminal = terminal.clone();
                     let cleanup_publication = publication.clone();
-                    tracedecay_agent_hosts::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
+                    tracedecay_automation_runtime::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
                         dashboard_root,
                         admission.request.run_id.as_str(),
                         publication,
@@ -1842,7 +1842,7 @@ impl AutomationEffectAuthority {
             || reused.task_key != expected_task_key
             || prior_task_key != reused.task_key
             || reused.prior_record.trigger
-                != tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Scheduler
+                != tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Scheduler
             || reused.prior_record.status != AutomationRunStatus::Skipped
             || reused.prior_record.error != reused.prior_record.fallback_status
             || reused.prior_record.error.as_deref() != Some(reused.reason.as_str())
@@ -1949,17 +1949,17 @@ impl AutomationEffectAuthority {
     async fn promote_prepared_terminal(
         &self,
         terminal: AutomationSettledTerminal,
-        publication: tracedecay_agent_hosts::automation::run_ledger::ExactRunPublication,
+        publication: tracedecay_automation_runtime::automation::run_ledger::ExactRunPublication,
     ) -> Result<AutomationSettledTerminal> {
         let published =
-            tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact(
+            tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
                 &self.dashboard_root,
                 self.admission.request.run_id.as_str(),
                 &publication,
             )
             .await?;
         if published
-            == tracedecay_agent_hosts::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
+            == tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
         {
             return Err(contract_error(
                 "prepared automation terminal has neither its spool nor exact ledger row",
@@ -1977,7 +1977,7 @@ impl AutomationEffectAuthority {
                 "automation prepared-terminal promotion failed: {error}"
             ))
         })??;
-        tracedecay_agent_hosts::automation::run_ledger::discard_staged_run_record_exact(
+        tracedecay_automation_runtime::automation::run_ledger::discard_staged_run_record_exact(
             &self.dashboard_root,
             self.admission.request.run_id.as_str(),
             &publication,
@@ -2079,7 +2079,7 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
     if state.publication.is_none() {
         #[cfg(test)]
         let prepared_write_hook = state.prepared_write_hook.clone();
-        let bound = tracedecay_agent_hosts::automation::run_ledger::bind_staged_run_record_exact(
+        let bound = tracedecay_automation_runtime::automation::run_ledger::bind_staged_run_record_exact(
             &state.authority.dashboard_root,
             &state.ledger,
             |publication| {
@@ -2134,7 +2134,7 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
         .as_ref()
         .ok_or_else(|| contract_error("prepared settlement lost its exact publication"))?;
     let published = hotpath::measure_block!("daemon.automation.effect.publish", {
-        tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact_blocking(
             &state.authority.dashboard_root,
             state.authority.admission.request.run_id.as_str(),
             publication,
@@ -2175,7 +2175,7 @@ fn classify_bound_settlement(
 fn cleanup_bound_terminal(state: &RetainedBoundSettlement) {
     if let Some(publication) = state.publication.as_ref()
         && let Err(error) =
-            tracedecay_agent_hosts::automation::run_ledger::discard_staged_run_record_exact_blocking(
+            tracedecay_automation_runtime::automation::run_ledger::discard_staged_run_record_exact_blocking(
                 &state.authority.dashboard_root,
                 state.authority.admission.request.run_id.as_str(),
                 publication,
@@ -2441,7 +2441,7 @@ async fn discard_direct_recovery_unbound_spools(
     let cleanup_path = journal_path.to_path_buf();
     let cleanup_admission = admission.clone();
     let outcome =
-        tracedecay_agent_hosts::automation::run_ledger::discard_unbound_staged_run_records_if(
+        tracedecay_automation_runtime::automation::run_ledger::discard_unbound_staged_run_records_if(
             dashboard_root,
             admission.request.run_id.as_str(),
             move || {
@@ -2453,10 +2453,10 @@ async fn discard_direct_recovery_unbound_spools(
         )
         .await?;
     match outcome {
-        tracedecay_agent_hosts::automation::run_ledger::ExactRunUnboundDiscardOutcome::Discarded => {
+        tracedecay_automation_runtime::automation::run_ledger::ExactRunUnboundDiscardOutcome::Discarded => {
             Ok(())
         }
-        tracedecay_agent_hosts::automation::run_ledger::ExactRunUnboundDiscardOutcome::Retained => {
+        tracedecay_automation_runtime::automation::run_ledger::ExactRunUnboundDiscardOutcome::Retained => {
             Err(contract_error(
                 "direct automation recovery changed state before unbound spool cleanup",
             ))

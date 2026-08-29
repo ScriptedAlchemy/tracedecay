@@ -82,7 +82,7 @@ impl AgentIntegration for OpenCodeIntegration {
         super::install_managed_skill_prompt_index(
             &ctx.home,
             &agents_md,
-            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
         )
     }
 
@@ -111,7 +111,7 @@ impl AgentIntegration for OpenCodeIntegration {
         super::remove_managed_skill_prompt_index(
             &ctx.home,
             &agents_md,
-            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
         )?;
         uninstall_prompt_rules(&agents_md)?;
         Ok(())
@@ -265,7 +265,7 @@ impl AgentIntegration for OpenCodeIntegration {
             super::install_managed_skill_prompt_index(
                 &ctx.home,
                 &prompt,
-                crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
             )?;
         }
         mirror_external_opencode_assets(&ctx.home, components)?;
@@ -287,7 +287,7 @@ impl AgentIntegration for OpenCodeIntegration {
             super::remove_managed_skill_prompt_index(
                 &ctx.home,
                 &prompt,
-                crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
             )?;
             uninstall_prompt_rules(&prompt)?;
         }
@@ -314,15 +314,15 @@ impl AgentIntegration for OpenCodeIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
         let prompt_path = opencode_prompt_path(home);
         if !self.has_tracedecay(home) || !prompt_path.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
-            crate::automation::skill_targets::install_managed_skills(
+            tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
                 &prompt_path,
             )?,
         ])
@@ -332,15 +332,15 @@ impl AgentIntegration for OpenCodeIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
         let agents_md = project_root.join("AGENTS.md");
         if !local_config_has_tracedecay(project_root) || !agents_md.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
-            crate::automation::skill_targets::install_managed_skills(
+            tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
                 &agents_md,
             )?,
         ])

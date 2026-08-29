@@ -5912,6 +5912,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation",
+ "tracedecay-automation-runtime",
  "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
@@ -5957,7 +5958,6 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "hotpath",
- "rustls",
  "same-file",
  "serde",
  "serde_json",
@@ -5970,6 +5970,7 @@ dependencies = [
  "toml",
  "tracedecay-application",
  "tracedecay-automation",
+ "tracedecay-automation-runtime",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
@@ -5986,7 +5987,6 @@ dependencies = [
  "tracedecay-usecases",
  "tracing",
  "url",
- "webpki-roots",
  "xattr",
  "yaml-edit",
 ]
@@ -6039,6 +6039,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-automation-runtime"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "fs2",
+ "getrandom 0.2.17",
+ "hex",
+ "hotpath",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "tracedecay-application",
+ "tracedecay-automation",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-graph-db",
+ "tracedecay-hooks",
+ "tracedecay-policy",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
+ "tracing",
+ "url",
+ "webpki-roots",
+]
+
+[[package]]
 name = "tracedecay-capture"
 version = "0.1.0"
 dependencies = [
@@ -6083,6 +6120,7 @@ dependencies = [
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-automation-runtime",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-hooks",
@@ -6163,6 +6201,8 @@ dependencies = [
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-automation",
+ "tracedecay-automation-runtime",
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-global-db",

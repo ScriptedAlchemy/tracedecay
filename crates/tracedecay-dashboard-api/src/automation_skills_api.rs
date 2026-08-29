@@ -11,16 +11,16 @@ use super::{
     DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandV1, DashboardState,
     automation_authority_error_response, exact_automation_authority,
 };
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
     ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, list_managed_skills,
     load_managed_skill, managed_skill_dir, managed_skill_root,
 };
-use tracedecay_agent_hosts::automation::skill_usage::{
+use tracedecay_automation_runtime::automation::skill_usage::{
     skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
     summarize_skill_usage_for,
 };
-use tracedecay_agent_hosts::automation::skill_writer::ManagedSkillDeploymentReceipt;
+use tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploymentReceipt;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -32,7 +32,7 @@ pub struct ManagedSkillCreateRequest {
     summary: String,
     category: String,
     #[serde(
-        default = "tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets"
+        default = "tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets"
     )]
     targets: Vec<SkillInstallTarget>,
     body_markdown: String,

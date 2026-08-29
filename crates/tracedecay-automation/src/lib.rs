@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod analytics;
 pub mod artifact_policy;
 pub mod backend;
 pub mod config;

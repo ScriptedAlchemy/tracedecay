@@ -2,7 +2,7 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
-use tracedecay_agent_hosts::automation::config_error;
+use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};

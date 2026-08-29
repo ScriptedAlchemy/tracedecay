@@ -64,7 +64,7 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         .await
         .expect("fresh host admission spool");
     let automation_root =
-        tracedecay_agent_hosts::automation::runner::user_automation_root(&profile_root);
+        tracedecay_automation_runtime::automation::runner::user_automation_root(&profile_root);
     std::fs::write(&automation_root, "block canonical receipt apply").unwrap();
     let params = serde_json::json!({
         "name": "tracedecay_hook_runtime",
@@ -132,7 +132,7 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     );
     assert_eq!(recovered.pending_count().await, 0);
     assert!(
-        tracedecay_agent_hosts::automation::runner::user_automation_root(&profile_root)
+        tracedecay_automation_runtime::automation::runner::user_automation_root(&profile_root)
             .join("host_receipts.json")
             .is_file()
     );

@@ -9,7 +9,7 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_agent_hosts::automation::run_ledger::ExactRunPublication;
+use tracedecay_automation_runtime::automation::run_ledger::ExactRunPublication;
 use tracedecay_application::{
     CancellationSignal, CapabilityGrantId, DisclosureClass, EffectReceipt, RequestId,
     ResolvedScope,

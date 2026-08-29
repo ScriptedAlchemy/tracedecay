@@ -23,7 +23,7 @@ pub(crate) async fn notify_project_automation_scheduler(
 pub(super) async fn handle_automation_config_command(
     action: AutomationConfigAction,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationConfigPatch};
+    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfigPatch};
 
     let path = match &action {
         AutomationConfigAction::Get { path, .. }
@@ -146,7 +146,7 @@ pub(super) async fn handle_automation_config_command(
 pub(crate) async fn load_canonical_automation_config(
     project_path: &std::path::Path,
 ) -> tracedecay_runtime_core::errors::Result<
-    tracedecay_agent_hosts::automation::config::AutomationConfig,
+    tracedecay_automation_runtime::automation::config::AutomationConfig,
 > {
     match crate::commands::current_project_setting(
         project_path,
@@ -155,7 +155,7 @@ pub(crate) async fn load_canonical_automation_config(
     .await?
     {
         tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(config) => {
-            tracedecay_agent_hosts::automation::config::validate_config(&config)?;
+            tracedecay_automation_runtime::automation::config::validate_config(&config)?;
             Ok(*config)
         }
         _ => Err(config_error(
@@ -166,14 +166,14 @@ pub(crate) async fn load_canonical_automation_config(
 
 pub(crate) async fn apply_project_automation_patch(
     project_path: &std::path::Path,
-    patch: tracedecay_agent_hosts::automation::config::AutomationConfigPatch,
+    patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
 ) -> tracedecay_runtime_core::errors::Result<
-    tracedecay_agent_hosts::automation::config::AutomationConfig,
+    tracedecay_automation_runtime::automation::config::AutomationConfig,
 > {
     let resolved = crate::commands::resolve_project_scope(project_path.to_path_buf()).await?;
     let current = load_canonical_automation_config(&resolved.project_path).await?;
     let effective =
-        tracedecay_agent_hosts::automation::config::effective_config(&current, Some(&patch))?;
+        tracedecay_automation_runtime::automation::config::effective_config(&current, Some(&patch))?;
     if effective != current {
         let expected_revision =
             crate::commands::current_configuration_revision(&resolved.project_path).await?;
@@ -206,10 +206,10 @@ fn automation_task_patch(
     stale_lock_secs: Option<String>,
     task: &str,
 ) -> tracedecay_runtime_core::errors::Result<
-    tracedecay_agent_hosts::automation::config::AutomationTaskPatch,
+    tracedecay_automation_runtime::automation::config::AutomationTaskPatch,
 > {
     Ok(
-        tracedecay_agent_hosts::automation::config::AutomationTaskPatch {
+        tracedecay_automation_runtime::automation::config::AutomationTaskPatch {
             enabled,
             schedule: schedule.map(empty_string_or_none_clears),
             interval_secs: parse_optional_u64(interval_secs, &format!("{task} interval_secs"))?,
@@ -256,16 +256,16 @@ fn parse_optional_u64(
 }
 
 fn print_automation_config(
-    effective: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    effective: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     json: bool,
     explain: bool,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let availability = tracedecay_agent_hosts::automation::backend::backend_availability(effective);
+    let availability = tracedecay_automation_runtime::automation::backend::backend_availability(effective);
     let trace_decay_backend_calls = effective.enabled
         && effective.backend
-            == tracedecay_agent_hosts::automation::config::AutomationBackend::CodexAppServer
+            == tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer
         && effective.host_mode
-            == tracedecay_agent_hosts::automation::config::AutomationHostMode::Standalone;
+            == tracedecay_automation_runtime::automation::config::AutomationHostMode::Standalone;
     let payload = serde_json::json!({
         "source": "daemon_pinned_snapshot",
         "effective": effective,
@@ -273,7 +273,7 @@ fn print_automation_config(
         "explanation": {
             "trace_decay_backend_calls": trace_decay_backend_calls,
             "delegated_host": effective.host_mode
-                == tracedecay_agent_hosts::automation::config::AutomationHostMode::DelegatedHost,
+                == tracedecay_automation_runtime::automation::config::AutomationHostMode::DelegatedHost,
             "automatic_memory_apply": true,
             "automatic_skill_activation": true,
         },
@@ -311,9 +311,9 @@ fn print_automation_config(
 fn parse_automation_backend(
     value: &str,
 ) -> tracedecay_runtime_core::errors::Result<
-    tracedecay_agent_hosts::automation::config::AutomationBackend,
+    tracedecay_automation_runtime::automation::config::AutomationBackend,
 > {
-    use tracedecay_agent_hosts::automation::config::AutomationBackend;
+    use tracedecay_automation_runtime::automation::config::AutomationBackend;
     match value {
         "disabled" => Ok(AutomationBackend::Disabled),
         "codex-app-server" | "codex_app_server" => Ok(AutomationBackend::CodexAppServer),
@@ -326,9 +326,9 @@ fn parse_automation_backend(
 fn parse_automation_host_mode(
     value: &str,
 ) -> tracedecay_runtime_core::errors::Result<
-    tracedecay_agent_hosts::automation::config::AutomationHostMode,
+    tracedecay_automation_runtime::automation::config::AutomationHostMode,
 > {
-    use tracedecay_agent_hosts::automation::config::AutomationHostMode;
+    use tracedecay_automation_runtime::automation::config::AutomationHostMode;
     match value {
         "standalone" => Ok(AutomationHostMode::Standalone),
         "delegated-host" | "delegated_host" => Ok(AutomationHostMode::DelegatedHost),

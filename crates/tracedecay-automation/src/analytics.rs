@@ -5,10 +5,9 @@
 //! and `skill_writer` reports [`ToolFamilySignal`]. The module names no other
 //! subsystem — it is pure classification over `serde_json` values.
 //!
-//! Root wiring: `src/analytics.rs` is
-//! `pub use tracedecay_agent_hosts::analytics::*;`, keeping every
-//! `crate::analytics::…` path resolving for the hook and MCP readers that stay
-//! in the root crate.
+//! Host MCP namespaces are restated here as literals so this contracts leaf
+//! does not depend on `tracedecay-agent-hosts`. They must stay aligned with
+//! `tracedecay_agent_hosts::tool_name::ALL_TOOL_PREFIXES`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -80,9 +79,23 @@ impl UsageCategory {
 }
 
 pub fn normalize_tool_name(raw: &str) -> String {
-    crate::tool_name::strip_tool_prefix(raw.trim())
+    strip_host_tool_prefix(raw.trim())
         .to_ascii_lowercase()
         .replace('-', "_")
+}
+
+/// Same host MCP namespaces as `tracedecay_agent_hosts::tool_name`.
+fn strip_host_tool_prefix(name: &str) -> &str {
+    const PREFIXES: [&str; 4] = [
+        "mcp__plugin_tracedecay_tracedecay__",
+        "mcp__plugin_tracedecay_graph__",
+        "mcp__tracedecay__",
+        "mcp_tracedecay_",
+    ];
+    PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+        .unwrap_or(name)
 }
 
 pub fn is_skill_view_tool(raw: &str) -> bool {
