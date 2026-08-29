@@ -19,7 +19,9 @@ use super::{
     SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
 };
 use crate::retrieval::AuthorizedQueryFallbackV1;
-use crate::retrieval::fusion::{CompositionKernel, CompositionOutputV1, FusionStageInput};
+use crate::retrieval::fusion::{
+    CompositionKernel, CompositionOutputV1, FusionStageError, FusionStageInput,
+};
 use crate::retrieval::rerank::BoundedRerankOutcomeV1;
 
 /// Invalid immutable configuration supplied to the composition authority.
@@ -162,7 +164,8 @@ impl SemanticCompositionExecutionAuthorityV1 {
             &self.diversity,
         ) {
             Ok(composition) => composition,
-            Err(_) => {
+            Err(error) => {
+                observe_semantic_fusion_failure(&error);
                 return semantic_abstention(
                     on_abstention,
                     SemanticAbstentionV1::LaneFailure,
@@ -219,6 +222,36 @@ impl SemanticCompositionExecutionAuthorityV1 {
         let original = composition.ranked_candidates.clone();
         let outcome = executor.execute_rerank(request, policy, &original);
         apply_rerank_outcome(original, outcome, composition)
+    }
+}
+
+fn observe_semantic_fusion_failure(error: &FusionStageError) {
+    hotpath::gauge!("query.lane.semantic.failure.fusion_composition").inc(1_u64);
+    match error {
+        FusionStageError::RequiredLaneUnavailable => {
+            hotpath::gauge!("query.lane.semantic.failure.fusion.required_lane_unavailable")
+                .inc(1_u64);
+        }
+        FusionStageError::MissingOccurrenceEvidence => {
+            hotpath::gauge!("query.lane.semantic.failure.fusion.missing_occurrence_evidence")
+                .inc(1_u64);
+        }
+        FusionStageError::FixedPointOverflow => {
+            hotpath::gauge!("query.lane.semantic.failure.fusion.fixed_point_overflow").inc(1_u64);
+        }
+        FusionStageError::ProfileLaneMismatch => {
+            hotpath::gauge!("query.lane.semantic.failure.fusion.profile_lane_mismatch").inc(1_u64);
+        }
+        FusionStageError::DuplicateLane => {
+            hotpath::gauge!("query.lane.semantic.failure.fusion.duplicate_lane").inc(1_u64);
+        }
+        FusionStageError::InvalidCalibratedFeature => {
+            hotpath::gauge!("query.lane.semantic.failure.fusion.invalid_calibrated_feature")
+                .inc(1_u64);
+        }
+        FusionStageError::Contract(_) => {
+            hotpath::gauge!("query.lane.semantic.failure.fusion.contract").inc(1_u64);
+        }
     }
 }
 

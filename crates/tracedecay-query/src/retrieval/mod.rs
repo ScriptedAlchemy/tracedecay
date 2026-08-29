@@ -65,6 +65,14 @@ pub const QUERY_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
 pub const QUERY_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
 pub const QUERY_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
 pub const QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1: &str = "score.semantic-distance.evaluation.v1";
+/// Score domain stamped on published production semantic candidates.
+///
+/// Seated hybrid profiles calibrate
+/// [`QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1`]. Production search must
+/// stamp the same identity so a completed semantic batch can enter
+/// composition. A parallel `score.semantic-distance.daemon.v1` spelling is
+/// not a second admitted domain.
+pub const QUERY_SEMANTIC_SCORE_DOMAIN_V1: &str = QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1;
 /// Descending-score bounds for the useful half of canonical cosine distance,
 /// scaled by one billion. They express nonnegative cosine similarity directly
 /// in parts per million; zero and negative similarity both calibrate to zero.
