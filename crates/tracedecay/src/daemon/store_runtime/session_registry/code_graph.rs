@@ -1120,10 +1120,22 @@ impl RetainedCodeGraphRuntimeV1 {
                     // The idempotent recovery arm: this publication already
                     // owns the verified head (the gate loser after the winner
                     // published, or a re-activation before replay retirement).
-                    // Recovery resolves against the mounted database's
-                    // retained verified-generation lease and never re-reads
-                    // the sealed source at this layer; re-proof depth is the
-                    // graph registry's own recovery contract.
+                    // Prefer the immutable sealed artifact so a cold daemon
+                    // does not mount and reopen the corpus-sized shared staging
+                    // database merely to recover an already-active generation.
+                    // Dependency-bearing or absent sealed artifacts explicitly
+                    // fall back to the ordinary staging recovery path; every
+                    // integrity or control failure remains terminal.
+                    match self.graph_registry.recover_verified_sealed_snapshot(
+                        registration(),
+                        &mut storage,
+                        context,
+                        &prepared.relational_projection,
+                    ) {
+                        Ok(snapshot) => return Ok(snapshot),
+                        Err(GraphDbError::Unavailable { .. }) => {}
+                        Err(error) => return Err(error),
+                    }
                     return self.graph_registry.recover_verified_snapshot(
                         registration(),
                         &mut storage,

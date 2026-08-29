@@ -554,7 +554,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         )
         .expect("next sealed state digest"),
     };
-    let next_runtime = registry
+    let mut next_runtime = registry
         .retain_code_graph_runtime(
             project_id,
             next.generation().snapshot().repository.clone(),
@@ -588,6 +588,43 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         )
         .expect("next projected generation")
         .as_str()
+    );
+
+    // A cold daemon has the durable relational head and the derived sealed
+    // graph store produced by the successful publication above, but no shared
+    // staging runtime in its new GraphDB registry. Reopening the exact active
+    // publication must use that verified sealed artifact directly and leave
+    // the staging shard unregistered.
+    let next_generation = next_snapshot.generation().clone();
+    let next_head = next_snapshot.verified_head().clone();
+    drop(next_snapshot);
+    registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("close publishing graph runtime before cold recovery");
+    let manifest_provider: Arc<dyn tracedecay_graph_db::GraphGenerationManifestProvider> =
+        next_runtime.graph_manifest_provider.clone();
+    let cold_graph_registry = tracedecay_graph_db::GraphDbRegistry::new_with_manifest_provider(
+        tracedecay_graph_db::GraphDbRegistryConfig { max_open: 1 },
+        manifest_provider,
+    )
+    .expect("cold graph registry");
+    next_runtime.graph_registry = cold_graph_registry.clone();
+    assert!(
+        !cold_graph_registry
+            .shard_is_registered(&next_runtime.authority.binding().shard_id)
+            .expect("cold staging registration state")
+    );
+    let cold_reopened = next_runtime
+        .publish_verified_snapshot(next.generation(), Arc::new(AtomicBool::new(false)))
+        .expect("cold activation must recover from the verified sealed artifact");
+    assert_eq!(cold_reopened.generation(), &next_generation);
+    assert_eq!(cold_reopened.verified_head(), &next_head);
+    assert!(
+        !cold_graph_registry
+            .shard_is_registered(&next_runtime.authority.binding().shard_id)
+            .expect("post-recovery staging registration state"),
+        "direct sealed recovery must not mount the shared staging database"
     );
 }
 
