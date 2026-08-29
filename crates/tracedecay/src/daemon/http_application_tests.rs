@@ -695,7 +695,7 @@ async fn daemon_http_cold_resolution_failure_returns_a_safe_typed_problem() {
     let registry = DaemonHttpApplicationRegistry::default();
     registry
         .install_resolver(|_| async {
-            Err(crate::errors::TraceDecayError::Config {
+            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "sensitive resolver detail must not cross HTTP".to_owned(),
             })
         })
@@ -877,7 +877,7 @@ async fn daemon_http_unavailable_cold_resolution_preserves_curate_request_identi
     let registry = DaemonHttpApplicationRegistry::default();
     registry
         .install_resolver(|_| async {
-            Err(crate::errors::TraceDecayError::Config {
+            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "resolver unavailable".to_owned(),
             })
         })
@@ -994,7 +994,7 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
             let resolver_calls = Arc::clone(&observed_resolver_calls);
             async move {
                 resolver_calls.fetch_add(1, Ordering::Relaxed);
-                std::future::pending::<crate::errors::Result<Option<Router>>>().await
+                std::future::pending::<tracedecay_runtime_core::errors::Result<Option<Router>>>().await
             }
         })
         .expect("install parked project resolver");
@@ -1073,7 +1073,7 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     let daemon_authority =
         super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
         "remote HTTP provisioning",
@@ -1212,7 +1212,7 @@ async fn local_remote_status_reads_the_mounted_runtime() {
     let daemon_authority =
         super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
         "remote HTTP status",

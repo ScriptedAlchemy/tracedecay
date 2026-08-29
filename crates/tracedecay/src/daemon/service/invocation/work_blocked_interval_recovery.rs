@@ -27,7 +27,7 @@ const RECOVERY_PAGE_LIMIT: u32 = 32;
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 
 enum RecoveryFailureV1 {
-    Database(crate::errors::TraceDecayError),
+    Database(tracedecay_runtime_core::errors::TraceDecayError),
     Application(ApplicationProblem),
 }
 
@@ -62,7 +62,7 @@ struct WorkBlockedIntervalObservationRecoveryInnerV1 {
 
 impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
     pub(in crate::daemon::service::invocation) fn mount(
-        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         actor: ActorId,
         grant: CapabilityGrantSnapshot,
         producer: Arc<BoundedObservabilityProducerV1>,
@@ -137,7 +137,7 @@ impl Drop for WorkBlockedIntervalObservationRecoveryInnerV1 {
 }
 
 async fn run_recovery(
-    database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     context: RequestContext,
     producer: Arc<BoundedObservabilityProducerV1>,
     cancellation: CancellationToken,
@@ -237,7 +237,7 @@ async fn run_recovery(
 }
 
 fn read_pending_receipts(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     context: &RequestContext,
 ) -> Result<Vec<WorkBlockedIntervalReceiptV1>, RecoveryFailureV1> {
     let work = database
@@ -249,7 +249,7 @@ fn read_pending_receipts(
 }
 
 fn mark_receipt_durable(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     context: &RequestContext,
     receipt: &WorkBlockedIntervalReceiptV1,
 ) -> Result<(), RecoveryFailureV1> {

@@ -1,4 +1,4 @@
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 use serde_json::{Value, json};
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestError;
 use tracedecay_usecases::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};

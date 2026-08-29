@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
 use tracedecay_domain::ProjectId;
 
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::mcp::tools::{
     SessionRefreshCommand, SessionRefreshCoverageView, SessionRefreshFrontierView,
     SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,

@@ -9,7 +9,7 @@ use crate::mcp::server::McpServerConstructionContext;
 use crate::tracedecay::TraceDecay;
 
 pub(super) fn git(root: &Path, args: &[&str]) {
-    let output = std::process::Command::new(crate::git::git_program())
+    let output = std::process::Command::new(tracedecay_runtime_core::git::git_program())
         .current_dir(root)
         .args(args)
         .output()

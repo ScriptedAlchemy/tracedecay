@@ -11,7 +11,7 @@ async fn observation_store_resolver_uses_repository_marker_after_checkout_move()
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn marker_only() {}\n").unwrap();
     init_repo_with_commit(&project);
-    let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project).unwrap();
     let project_id = "proj_marker_only";
     let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
@@ -35,7 +35,7 @@ async fn observation_store_resolver_uses_repository_marker_after_checkout_move()
         "the moved checkout must not already have a canonical path alias"
     );
     assert_ne!(
-        tracedecay::worktree::git_common_dir(&moved).unwrap(),
+        tracedecay_runtime_core::worktree::git_common_dir(&moved).unwrap(),
         git_common_dir,
         "moving a primary checkout should also move its git common dir"
     );
@@ -64,7 +64,7 @@ async fn observation_store_resolver_rejects_conflicting_path_common_dir_and_mark
     fs::create_dir_all(&marker_owner).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn ambiguous() {}\n").unwrap();
     init_repo_with_commit(&project);
-    let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project).unwrap();
     let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();

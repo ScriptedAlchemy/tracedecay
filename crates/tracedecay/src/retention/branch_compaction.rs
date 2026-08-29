@@ -121,7 +121,7 @@ pub struct BranchCompactionReport {
 /// the one file it was written to stay away from.
 pub fn select_branch_db_candidates(
     tracedecay_dir: &Path,
-    meta: &crate::branch_meta::BranchMeta,
+    meta: &tracedecay_runtime_core::branch_meta::BranchMeta,
     active_db_path: &Path,
 ) -> Vec<BranchDbCandidate> {
     let active_resolved = active_db_path.canonicalize().ok();
@@ -324,7 +324,7 @@ mod tests {
         let mut branches = HashMap::new();
         branches.insert(
             "main".to_string(),
-            crate::branch_meta::BranchEntry {
+            tracedecay_runtime_core::branch_meta::BranchEntry {
                 db_file: crate::config::DB_FILENAME.to_string(),
                 parent: None,
                 created_at: "0".to_string(),
@@ -335,7 +335,7 @@ mod tests {
         );
         branches.insert(
             "feature".to_string(),
-            crate::branch_meta::BranchEntry {
+            tracedecay_runtime_core::branch_meta::BranchEntry {
                 db_file: "branches/feature.db".to_string(),
                 parent: Some("main".to_string()),
                 created_at: "0".to_string(),
@@ -344,7 +344,7 @@ mod tests {
                 graph_source: None,
             },
         );
-        let meta = crate::branch_meta::BranchMeta {
+        let meta = tracedecay_runtime_core::branch_meta::BranchMeta {
             default_branch: "main".to_string(),
             branches,
         };
@@ -515,7 +515,7 @@ mod tests {
         let mut branches = HashMap::new();
         branches.insert(
             "main".to_string(),
-            crate::branch_meta::BranchEntry {
+            tracedecay_runtime_core::branch_meta::BranchEntry {
                 db_file: crate::config::DB_FILENAME.to_string(),
                 parent: None,
                 created_at: "0".to_string(),
@@ -524,7 +524,7 @@ mod tests {
                 graph_source: None,
             },
         );
-        let meta = crate::branch_meta::BranchMeta {
+        let meta = tracedecay_runtime_core::branch_meta::BranchMeta {
             default_branch: "main".to_string(),
             branches,
         };

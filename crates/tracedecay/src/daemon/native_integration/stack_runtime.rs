@@ -33,7 +33,7 @@ use tracedecay_usecases::stack_coordinator::{
     StackSignalV1,
 };
 
-use crate::global_db::{
+use tracedecay_global_db::{
     GitHubStackDeliveryKeyV1, GitHubStackDeliveryRecordV1, GitHubStackDeliveryStateV1,
     GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
     MAX_GITHUB_STACK_DELIVERY_BATCH_V1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,

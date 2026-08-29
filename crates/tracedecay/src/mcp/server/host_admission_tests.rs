@@ -1112,7 +1112,7 @@ async fn failed_admission_does_not_emit_hook_route_analytics() {
     let rows = server
         .host_admission_test_runtime_for_test()
         .expect("host-admission test runtime")
-        .query_profile_analytics_events_for_test(&crate::global_db::AnalyticsEventQuery {
+        .query_profile_analytics_events_for_test(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("daemon_hook".to_string()),
             project_id: None,
             session_id: None,
@@ -1212,7 +1212,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
     );
     assert_eq!(
         routed["session_id"],
-        crate::privacy::protect_sensitive_structural_id(
+        tracedecay_runtime_core::privacy::protect_sensitive_structural_id(
             event["route"]["session_id"].as_str().expect("raw session")
         )
         .unwrap()
@@ -1227,7 +1227,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
         .host_admission_test_runtime_for_test()
         .expect("host-admission test runtime");
     let rows = test_runtime
-        .query_profile_analytics_events_for_test(&crate::global_db::AnalyticsEventQuery {
+        .query_profile_analytics_events_for_test(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("daemon_hook".to_string()),
             project_id: None,
             session_id: None,
@@ -1303,7 +1303,7 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
     let rows = server
         .host_admission_test_runtime_for_test()
         .expect("host-admission test runtime")
-        .query_profile_analytics_events_for_test(&crate::global_db::AnalyticsEventQuery {
+        .query_profile_analytics_events_for_test(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("daemon_hook".to_string()),
             project_id: None,
             session_id: None,
@@ -1377,7 +1377,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
     )
     .await;
     let raw = ["AKIA", "SYNTHETIC", "CANARY", "4"].concat();
-    let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
+    let protected = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&raw).unwrap();
     let session = SessionRecord {
         provider: "hermes".to_string(),
         session_id: protected.clone(),
@@ -1422,7 +1422,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
                 metadata_json: None,
             }),
             &format!("host-admission-test-message:hermes:{protected}"),
-            crate::global_db::ParseOffset::default(),
+            tracedecay_global_db::ParseOffset::default(),
         )
         .await
         .expect("seed protected transcript");
@@ -1486,7 +1486,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
         .await
         .expect("reopen registered host-admission runtime");
     let analytics = reopened
-        .query_profile_analytics_events_for_test(&crate::global_db::AnalyticsEventQuery {
+        .query_profile_analytics_events_for_test(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("daemon_hook".to_string()),
             project_id: None,
             session_id: Some(protected.clone()),

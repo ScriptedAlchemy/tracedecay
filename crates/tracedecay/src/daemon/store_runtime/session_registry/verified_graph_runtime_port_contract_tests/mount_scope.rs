@@ -14,17 +14,17 @@ use tracedecay_usecases::memory::{
 
 use super::{ContractFixture, await_mounted_graph_operation, project_id};
 use crate::daemon::profile_identity;
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 use crate::store::DatabaseFactStore;
 
-async fn publish_foreign_memory_owner(path: &Path, label: &str) -> crate::db::DatabaseOwnerV1 {
-    let authority = crate::db::DatabaseAuthority::acquire_test(path, label)
+async fn publish_foreign_memory_owner(path: &Path, label: &str) -> tracedecay_runtime_core::db::DatabaseOwnerV1 {
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(path, label)
         .expect("foreign memory-owner fixture authority");
-    let fixture = crate::db::Database::publish_registered_test_runtime_with_retirement_control(
+    let fixture = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control(
         path,
         &authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
-        crate::db::TestDatabaseRuntimeScope::Project {
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::Project {
             project_id: project_id(label),
         },
     )
@@ -104,21 +104,21 @@ async fn unbound_profile_memory_denies_graph_operations() {
     )
     .await
     .expect("unbound profile-memory runtime");
-    let profile_database = crate::db::Database::publish_runtime(
+    let profile_database = tracedecay_runtime_core::db::Database::publish_runtime(
         profile_runtime,
-        crate::db::DatabaseAccessMode::ReadWrite,
+        tracedecay_runtime_core::db::DatabaseAccessMode::ReadWrite,
     )
     .await
     .expect("unbound profile-memory database")
     .issue_lease()
     .expect("unbound profile-memory database client");
-    crate::db::migrations::ensure_schema_current(&profile_database)
+    tracedecay_runtime_core::db::migrations::ensure_schema_current(&profile_database)
         .await
         .expect("profile-memory schema");
 
     assert!(matches!(
         profile_database.issue_memory_graph_runtime_operation(),
-        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
+        Err(tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
     ));
 }
 
@@ -183,7 +183,7 @@ async fn cold_read_only_mount_denies_publication_and_degrades_graph_assist_truth
     crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let scope = crate::db::enter_daemon_database_scope(&profile_root, 37, "seed cold read-only")
+    let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 37, "seed cold read-only")
         .expect("seed database scope");
     let registry = super::super::DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
@@ -230,7 +230,7 @@ async fn cold_read_only_mount_denies_publication_and_degrades_graph_assist_truth
     drop((database, registry, scope));
 
     let _restarted_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 38, "cold read-only reopen")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 38, "cold read-only reopen")
             .expect("cold read-only database scope");
     let restarted = super::super::DaemonSessionRuntimeRegistryV1::open(identity)
         .await
@@ -242,7 +242,7 @@ async fn cold_read_only_mount_denies_publication_and_degrades_graph_assist_truth
     assert!(!read_only.is_writable());
     assert!(matches!(
         read_only.issue_memory_graph_runtime_operation(),
-        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
+        Err(tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
     ));
     assert!(read_only.graph_publication_storage().is_err());
 

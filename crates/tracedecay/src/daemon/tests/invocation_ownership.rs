@@ -40,7 +40,7 @@ async fn committed_fixture(
     label: &str,
 ) -> (
     TempDir,
-    crate::db::DaemonDatabaseScope,
+    tracedecay_runtime_core::db::DaemonDatabaseScope,
     DaemonEngine,
     DaemonHandshake,
 ) {

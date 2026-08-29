@@ -3,7 +3,7 @@
 use super::*;
 
 struct RegisteredObservatoryReadPort {
-    database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope_ref: String,
 }
 

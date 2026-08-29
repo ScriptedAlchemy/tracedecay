@@ -202,7 +202,7 @@ fn state_round_trips_and_defaults_when_absent() {
 
 #[tokio::test]
 async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable() {
-    use crate::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
+    use tracedecay_runtime_core::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
 
     let data_root = tempfile::tempdir().unwrap();
     let repo_root = tempfile::tempdir().unwrap(); // not a git repo; git ops no-op
@@ -233,7 +233,7 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
     // is injected into this state-only fixture. Reconciliation must fail closed
     // without deleting its durable state or Git-adjacent artifacts.
     let identity = crate::daemon::profile_identity::load_or_create(data_root.path()).unwrap();
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,
         "pr-autotrack-removal-test",
@@ -423,7 +423,7 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
 
 #[tokio::test]
 async fn partial_discovery_suppresses_removals() {
-    use crate::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
+    use tracedecay_runtime_core::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
 
     let data_root = tempfile::tempdir().unwrap();
     let repo_root = tempfile::tempdir().unwrap();
@@ -1253,7 +1253,7 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
         &["update-ref", &artifacts.tracking_ref, &activation.head_sha],
     );
     assert!(
-        crate::branch_meta::load_branch_meta(&data_root)
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&data_root)
             .is_none_or(|metadata| !metadata.branches.contains_key(branch)),
         "activation alone must not leak sealed branch provenance"
     );
@@ -1278,7 +1278,7 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
         "no scheduler mount leaks"
     );
     assert!(
-        crate::branch_meta::load_branch_meta(&data_root)
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&data_root)
             .is_none_or(|metadata| !metadata.branches.contains_key(branch)),
         "no branch provenance leaks"
     );

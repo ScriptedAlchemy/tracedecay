@@ -16,7 +16,7 @@ use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 use tracedecay_store::FactReadControl;
 
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_usecases::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
 
 use super::{DaemonSessionSyncService, SessionSyncProjectContext, work::SessionSyncInterruption};

@@ -8,7 +8,7 @@ use tracedecay::display::format_bytes;
 pub(crate) async fn handle_profile_storage_action(
     action: ProfileStorageAction,
     assume_yes: bool,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     match action {
         ProfileStorageAction::StorageReport {
             profile_root,
@@ -43,14 +43,14 @@ fn handle_reset_project_store(
     project_root: Option<String>,
     project_id: Option<String>,
     assume_yes: bool,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let profile_root = tracedecay::storage::default_profile_root()?;
     let project_id = match (project_root, project_id) {
         (Some(root), None) => {
             let root = PathBuf::from(root);
             let layout = tracedecay::storage::resolve_layout_for_current_profile(&root)?;
             layout.identity.project_id.ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!(
                         "project root '{}' resolves no authoritative project identity",
                         root.display()
@@ -60,20 +60,20 @@ fn handle_reset_project_store(
         }
         (None, Some(project_id)) => {
             tracedecay::storage::validate_project_id(&project_id).map_err(|message| {
-                tracedecay::errors::TraceDecayError::Config {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!("invalid --project-id: {message}"),
                 }
             })?;
             project_id
         }
         _ => {
-            return Err(tracedecay::errors::TraceDecayError::Config {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "exactly one of --project-root or --project-id is required".to_owned(),
             });
         }
     };
     if !assume_yes {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
                 "resetting the refused project graph store for '{project_id}' deletes its \
                  code graph and project memory facts; sessions re-ingest from the preserved \
@@ -81,11 +81,11 @@ fn handle_reset_project_store(
             ),
         });
     }
-    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,
         "reset-project-store",
     )?;
-    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
         &lifecycle_lease,
         &profile_root,
         "reset-project-store",
@@ -134,7 +134,7 @@ struct ResetGraphDb {
 /// per tracked branch under `branches/`. Session archives and transcripts
 /// share the store directory but are never graph databases, so they are never
 /// candidates. Ordering is deterministic (root first, branches sorted).
-fn project_store_graph_db_paths(data_root: &Path) -> tracedecay::errors::Result<Vec<PathBuf>> {
+fn project_store_graph_db_paths(data_root: &Path) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
     let mut candidates = Vec::new();
     let root_db = data_root.join(tracedecay::config::db_filename(data_root));
     if root_db.is_file() {
@@ -143,7 +143,7 @@ fn project_store_graph_db_paths(data_root: &Path) -> tracedecay::errors::Result<
     let branches_dir = data_root.join("branches");
     if branches_dir.is_dir() {
         let entries = std::fs::read_dir(&branches_dir).map_err(|error| {
-            tracedecay::errors::TraceDecayError::Config {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!(
                     "could not enumerate branch graph databases under {}: {error}",
                     branches_dir.display()
@@ -152,7 +152,7 @@ fn project_store_graph_db_paths(data_root: &Path) -> tracedecay::errors::Result<
         })?;
         let mut branch_dbs = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            let entry = entry.map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!(
                     "could not enumerate branch graph databases under {}: {error}",
                     branches_dir.display()
@@ -172,10 +172,10 @@ fn project_store_graph_db_paths(data_root: &Path) -> tracedecay::errors::Result<
 /// Reads the SQLite `user_version` of one graph database after the same
 /// fail-closed header verification the daemon's refusal performs. A file that
 /// is not a SQLite database is a typed error, never a deletion candidate.
-fn verified_graph_db_schema_version(graph_db_path: &Path) -> tracedecay::errors::Result<i64> {
+fn verified_graph_db_schema_version(graph_db_path: &Path) -> tracedecay_runtime_core::errors::Result<i64> {
     let has_header =
         tracedecay::storage::has_sqlite_database_header(graph_db_path).map_err(|error| {
-            tracedecay::errors::TraceDecayError::Config {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!(
                     "could not verify the store header at {}: {error}",
                     graph_db_path.display()
@@ -183,7 +183,7 @@ fn verified_graph_db_schema_version(graph_db_path: &Path) -> tracedecay::errors:
             }
         })?;
     if !has_header {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
                 "{} is not a SQLite database; the scoped reset covers only stores refused \
                  for an incompatible schema version",
@@ -195,13 +195,13 @@ fn verified_graph_db_schema_version(graph_db_path: &Path) -> tracedecay::errors:
         graph_db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
-    .map_err(|error| tracedecay::errors::TraceDecayError::Database {
+    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
         operation: "open project graph store for reset verification".to_string(),
         message: error.to_string(),
     })?;
     connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|error| tracedecay::errors::TraceDecayError::Database {
+        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
             operation: "read project graph store schema version".to_string(),
             message: error.to_string(),
         })
@@ -218,11 +218,11 @@ fn verified_graph_db_schema_version(graph_db_path: &Path) -> tracedecay::errors:
 fn reset_refused_project_graph_store(
     profile_root: &Path,
     project_id: &str,
-) -> tracedecay::errors::Result<ResetProjectGraphStoreOutcome> {
+) -> tracedecay_runtime_core::errors::Result<ResetProjectGraphStoreOutcome> {
     let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
     let candidates = project_store_graph_db_paths(&data_root)?;
     if candidates.is_empty() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
                 "no project graph store exists at {}; nothing to reset",
                 data_root
@@ -231,7 +231,7 @@ fn reset_refused_project_graph_store(
             ),
         });
     }
-    let canonical_schema_version = tracedecay::db::migrations::SCHEMA_VERSION;
+    let canonical_schema_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
     let mut refused = Vec::new();
     for graph_db_path in candidates {
         let previous_schema_version = verified_graph_db_schema_version(&graph_db_path)?;
@@ -243,7 +243,7 @@ fn reset_refused_project_graph_store(
         }
     }
     if refused.is_empty() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
                 "every graph database in the project store at {} is already at the \
                  canonical schema v{canonical_schema_version}; nothing is refused and \
@@ -265,7 +265,7 @@ fn reset_refused_project_graph_store(
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
+                    return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: format!("failed to remove {}: {error}", path.display()),
                     });
                 }
@@ -288,9 +288,9 @@ fn handle_reset_authority(
     authority: String,
     db: Option<String>,
     assume_yes: bool,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     if authority != tracedecay_global_db::observation::OBSERVATION_AUTHORITY {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
                 "no scoped reset exists for authority '{authority}'; the only \
                  scoped-resettable authority is '{}'",
@@ -299,7 +299,7 @@ fn handle_reset_authority(
         });
     }
     if !assume_yes {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
                 "resetting the '{authority}' authority drops its refused tables and \
                  clears their recoverable derivations; re-run with --yes to confirm"
@@ -307,11 +307,11 @@ fn handle_reset_authority(
         });
     }
     let profile_root = tracedecay::storage::default_profile_root()?;
-    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,
         "reset-authority",
     )?;
-    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
         &lifecycle_lease,
         &profile_root,
         "reset-authority",
@@ -321,7 +321,7 @@ fn handle_reset_authority(
         None => tracedecay_sessions::runtime::user_sessions_db_path(&profile_root),
     };
     if !db_path.is_file() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
                 "no sessions store exists at {}; nothing to reset",
                 db_path.display()
@@ -329,7 +329,7 @@ fn handle_reset_authority(
         });
     }
     let mut connection = rusqlite::Connection::open(&db_path).map_err(|error| {
-        tracedecay::errors::TraceDecayError::Database {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
             operation: "open sessions store for authority reset".to_string(),
             message: error.to_string(),
         }
@@ -357,7 +357,7 @@ fn handle_reset_authority(
 async fn brokered_storage_report(
     project_id: Option<&str>,
     project_root: Option<&Path>,
-) -> tracedecay::errors::Result<tracedecay::retention::storage_report::StorageReport> {
+) -> tracedecay_runtime_core::errors::Result<tracedecay::retention::storage_report::StorageReport> {
     const PAGE_LIMIT: usize = 8;
     const MAX_PAGES: usize = 4096;
 
@@ -382,7 +382,7 @@ async fn brokered_storage_report(
         );
         let value = tokio::time::timeout(Duration::from_secs(10), request)
             .await
-            .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+            .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "daemon storage report authority timed out after 10 seconds".to_string(),
             })??;
         let page: tracedecay::retention::storage_report::StorageReport =
@@ -395,7 +395,7 @@ async fn brokered_storage_report(
         }
         cursor = report.coverage.next_cursor.clone();
         if cursor.is_none() {
-            return Err(tracedecay::errors::TraceDecayError::Config {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "partial daemon storage report omitted its continuation cursor".to_owned(),
             });
         }
@@ -435,7 +435,7 @@ async fn handle_storage_report(
     project_id: Option<String>,
     project_root: Option<String>,
     json: bool,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let default_profile_root = tracedecay::storage::default_profile_root()?;
     let profile_root = match profile_root {
         Some(path) => PathBuf::from(path),
@@ -579,16 +579,16 @@ async fn handle_storage_report(
     Ok(())
 }
 
-fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay::errors::Result<()> {
+fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay_runtime_core::errors::Result<()> {
     let profile_root = tracedecay::storage::default_profile_root()?;
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("system clock is before Unix epoch: {error}"),
         })?
         .as_secs()
         .try_into()
-        .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+        .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "system clock exceeds supported backup timestamp range".to_owned(),
         })?;
     let backup = tracedecay::daemon::with_quiesced_installed_service(
@@ -601,7 +601,7 @@ fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay::
                 created_at,
                 lifecycle,
             )
-            .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: error.to_string(),
             })
         },
@@ -616,12 +616,12 @@ fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay::
 fn handle_rehearse_profile_backup(
     backup: String,
     restore: String,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let manifest = tracedecay::profile_backup::rehearse_complete_profile_backup(
         Path::new(&backup),
         Path::new(&restore),
     )
-    .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: error.to_string(),
     })?;
     println!(
@@ -705,7 +705,7 @@ mod reset_project_store_tests {
         let canonical_branch_db = data_root.join("branches").join("main.db");
         write_graph_db_with_user_version(
             &canonical_branch_db,
-            tracedecay::db::migrations::SCHEMA_VERSION,
+            tracedecay_runtime_core::db::migrations::SCHEMA_VERSION,
         );
         let sessions_path = data_root.join("sessions.db");
         std::fs::write(&sessions_path, b"session archive").unwrap();
@@ -752,7 +752,7 @@ mod reset_project_store_tests {
         let root_db = write_store_with_user_version(
             &profile_root,
             "proj_branch_only",
-            tracedecay::db::migrations::SCHEMA_VERSION,
+            tracedecay_runtime_core::db::migrations::SCHEMA_VERSION,
         );
         let data_root = root_db.parent().unwrap().to_path_buf();
         let refused_branch_db = data_root.join("branches").join("develop.db");
@@ -800,7 +800,7 @@ mod reset_project_store_tests {
         let db_path = write_store_with_user_version(
             &profile_root,
             "proj_canonical",
-            tracedecay::db::migrations::SCHEMA_VERSION,
+            tracedecay_runtime_core::db::migrations::SCHEMA_VERSION,
         );
 
         let error = reset_refused_project_graph_store(&profile_root, "proj_canonical").unwrap_err();

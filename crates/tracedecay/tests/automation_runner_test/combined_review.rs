@@ -865,7 +865,7 @@ async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fail
     assert!(
         matches!(
             &failure.error,
-            tracedecay::errors::TraceDecayError::Automation(_)
+            tracedecay_runtime_core::errors::TraceDecayError::Automation(_)
         ),
         "backend failure must retain its typed automation error: {}",
         failure.error

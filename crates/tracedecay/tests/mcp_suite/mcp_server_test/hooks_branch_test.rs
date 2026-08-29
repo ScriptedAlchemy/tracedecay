@@ -363,7 +363,7 @@ async fn linked_worktree_hook_route_reaches_target_across_client_sockets() {
         ],
     );
     assert!(
-        tracedecay::worktree::git_common_dir(&target_project).is_some(),
+        tracedecay_runtime_core::worktree::git_common_dir(&target_project).is_some(),
         "the linked-worktree fixture needs a resolvable git common dir"
     );
     let server = projects.server();

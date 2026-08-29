@@ -11,7 +11,7 @@ use std::path::Path;
 use same_file::Handle;
 use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::types::*;
 
 use super::super::TraceDecay;
@@ -208,7 +208,7 @@ impl TraceDecay {
                     diff: None,
                     message: format!(
                         "replacement '{}' matches 0 times, must match exactly once",
-                        crate::text::utf8_prefix_at_or_before(old, 20)
+                        tracedecay_runtime_core::text::utf8_prefix_at_or_before(old, 20)
                     ),
                 });
             };
@@ -226,7 +226,7 @@ impl TraceDecay {
                     diff: None,
                     message: format!(
                         "replacement '{}' matches {} times, must match exactly once",
-                        crate::text::utf8_prefix_at_or_before(old, 20),
+                        tracedecay_runtime_core::text::utf8_prefix_at_or_before(old, 20),
                         count
                     ),
                 });
@@ -250,8 +250,8 @@ impl TraceDecay {
                     diff: None,
                     message: format!(
                         "replacements '{}' and '{}' target overlapping ranges; apply them separately",
-                        crate::text::utf8_prefix_at_or_before(prev_old, 20),
-                        crate::text::utf8_prefix_at_or_before(next_old, 20)
+                        tracedecay_runtime_core::text::utf8_prefix_at_or_before(prev_old, 20),
+                        tracedecay_runtime_core::text::utf8_prefix_at_or_before(next_old, 20)
                     ),
                 });
             }
@@ -333,7 +333,7 @@ impl TraceDecay {
             }
             line_num - 1
         } else {
-            let anchor_prefix = crate::text::utf8_prefix_at_or_before(anchor, 100);
+            let anchor_prefix = tracedecay_runtime_core::text::utf8_prefix_at_or_before(anchor, 100);
             let matching_lines: Vec<usize> = lines
                 .iter()
                 .enumerate()

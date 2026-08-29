@@ -18,7 +18,7 @@ use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -572,7 +572,7 @@ fn replace_archive_file(temporary: &Path, destination: &Path) -> std::io::Result
         drop(temporary_file);
     }
 
-    crate::db::DatabaseAuthority::replace_file_atomically(
+    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
         temporary,
         destination,
         "shipped proposal retirement archive",

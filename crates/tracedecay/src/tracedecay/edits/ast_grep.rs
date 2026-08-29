@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::types::AstGrepResult;
 
 use super::super::TraceDecay;

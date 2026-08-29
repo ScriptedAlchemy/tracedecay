@@ -936,7 +936,7 @@ fn accepted_attempts(graph: &Value, identity: &Value) -> bool {
 /// exactly the remedy the coverage disclosure points a no-Git caller at.
 fn repository_selection(fixture: &ProductionDaemon) -> Value {
     let common_dir =
-        tracedecay::worktree::git_common_dir(&fixture.project).expect("Git common directory");
+        tracedecay_runtime_core::worktree::git_common_dir(&fixture.project).expect("Git common directory");
     let repository_id = format!(
         "repository.daemon.{}",
         hex::encode(Sha256::digest(common_dir.to_string_lossy().as_bytes()))

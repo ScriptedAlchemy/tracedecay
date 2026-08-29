@@ -107,7 +107,7 @@ pub(crate) async fn handle_constructors(
 
             'outer: for path in &scan_paths {
                 let abs = scan_root.join(path);
-                let Ok(source) = crate::sync::read_source_file(&abs) else {
+                let Ok(source) = tracedecay_runtime_core::sync::read_source_file(&abs) else {
                     continue;
                 };
 

@@ -9,7 +9,7 @@ use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
 use crate::daemon::store_writer_gate::WriterAdmissionGuard;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     brain_id: BrainId,
@@ -160,7 +160,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
     pub(in crate::daemon) async fn quiesce(
         &self,
         project_id: &ProjectId,
-        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<RemoteRecoveryProjectQuiescenceV1> {
         let shard = &database.binding().shard_id;
         if shard.brain_id != self.brain_id
@@ -341,7 +341,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
 }
 
 pub(super) async fn project_roots(
-    database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+    database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     project_servers: &tokio::sync::Mutex<DatabaseOwnerRegistry>,
     profile_root: &Path,
     project_id: &str,

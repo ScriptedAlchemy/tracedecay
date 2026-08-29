@@ -2,8 +2,8 @@
 
 use serde_json::Value;
 
-use crate::errors::Result;
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::errors::Result;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolCallRegistryOptions;

@@ -220,7 +220,7 @@ async fn remote_operational_read_observes_mounted_authorities_and_fails_typed_wh
     let daemon_authority =
         super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
         "remote operational read",
@@ -324,7 +324,7 @@ async fn mounted_node_populates_exact_prebody_credential_route_and_shutdown_canc
     let daemon_authority =
         super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
         "remote credential registry",

@@ -171,15 +171,15 @@ pub fn runtime_health_read(signal: &DaemonRuntimeHealthSignalV1) -> RuntimeHealt
 /// acquired read snapshot of the registered profile authority.
 ///
 /// This is the same pass the `tracedecay_runtime` producers run
-/// ([`crate::global_db::schema_stages::validate_observation_authority_connection`]):
+/// ([`tracedecay_global_db::schema_stages::validate_observation_authority_connection`]):
 /// read-only, so Doctor observes the invariant without owning any repair of it.
 /// `true` means the audit ran and every invariant held; `false` means it ran and
 /// an invariant failed. "Could not run" is not representable here — the caller
 /// owns that distinction.
 async fn observation_authority_audit_passed(
-    snapshot: &impl crate::db::engine::QueryExecutor,
+    snapshot: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
 ) -> bool {
-    crate::global_db::schema_stages::validate_observation_authority_connection(snapshot)
+    tracedecay_global_db::schema_stages::validate_observation_authority_connection(snapshot)
         .await
         .is_ok()
 }
@@ -193,7 +193,7 @@ async fn observation_authority_audit_passed(
 /// because the registered authority would not yield a read snapshot. A not-run
 /// audit weakens runtime coverage to partial rather than claiming health.
 async fn observation_authority_audit_ok(
-    registry: &crate::global_db::RegisteredGlobalDb,
+    registry: &tracedecay_global_db::RegisteredGlobalDb,
 ) -> Option<bool> {
     match registry.read_snapshot().await {
         Ok(snapshot) => Some(observation_authority_audit_passed(&snapshot).await),
@@ -581,20 +581,20 @@ pub fn observability_read_from_model(
 /// silently partial healthy claim.
 #[must_use]
 pub fn ingest_refusal_read_from_censuses(
-    censuses: &[crate::global_db::observation::ObservationRefusalCensusV1],
+    censuses: &[tracedecay_global_db::observation::ObservationRefusalCensusV1],
 ) -> IngestRefusalCensusReadV1 {
     let mut merged: std::collections::BTreeMap<(String, String), u64> =
         std::collections::BTreeMap::new();
     for census in censuses {
         match census {
-            crate::global_db::observation::ObservationRefusalCensusV1::Observed { refusals } => {
+            tracedecay_global_db::observation::ObservationRefusalCensusV1::Observed { refusals } => {
                 for refusal in refusals {
                     let key = (refusal.provider.clone(), refusal.reason.clone());
                     let entry = merged.entry(key).or_insert(0);
                     *entry = entry.saturating_add(refusal.count);
                 }
             }
-            crate::global_db::observation::ObservationRefusalCensusV1::Unavailable => {
+            tracedecay_global_db::observation::ObservationRefusalCensusV1::Unavailable => {
                 return IngestRefusalCensusReadV1::Unknown;
             }
         }
@@ -693,7 +693,7 @@ fn orphan_store_findings_from_census(
 /// classification-only mode (no collection).
 #[hotpath::measure(label = "daemon.doctor.unregistered_stores", future = true)]
 pub async fn collect_unregistered_store_findings(
-    global_db: &crate::global_db::RegisteredGlobalDb,
+    global_db: &tracedecay_global_db::RegisteredGlobalDb,
     profile_root: &Path,
     retention_secs: i64,
     now: i64,
@@ -951,7 +951,7 @@ fn incident_debris_findings_from_census(
 /// zero-byte records when a configured window has no eligible rows.
 #[hotpath::measure(label = "daemon.doctor.retention_backlog", future = true)]
 pub async fn collect_retention_backlog_findings(
-    profile_sessions: &crate::global_db::RegisteredGlobalDb,
+    profile_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     retention: &crate::config::RetentionConfig,
     observed_at_secs: i64,
 ) -> DoctorStorageFamilyReadV1 {
@@ -1308,10 +1308,10 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,
     layout: crate::storage::StoreLayout,
-    graph: crate::db::Database,
-    registry: crate::global_db::RegisteredGlobalDbLeaseV1,
-    profile_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
-    project_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
+    graph: tracedecay_runtime_core::db::Database,
+    registry: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    profile_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
     remote_operational: RemoteOperationalReadProviderV1,
@@ -1508,12 +1508,12 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 .await;
             let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
             let temporal_ok = match temporal.status() {
-                crate::global_db::session_temporal::SessionTemporalHealthStatus::Complete => {
+                tracedecay_global_db::session_temporal::SessionTemporalHealthStatus::Complete => {
                     Some(temporal.findings().is_empty())
                 }
-                crate::global_db::session_temporal::SessionTemporalHealthStatus::Partial
-                | crate::global_db::session_temporal::SessionTemporalHealthStatus::Unavailable
-                | crate::global_db::session_temporal::SessionTemporalHealthStatus::Locked => None,
+                tracedecay_global_db::session_temporal::SessionTemporalHealthStatus::Partial
+                | tracedecay_global_db::session_temporal::SessionTemporalHealthStatus::Unavailable
+                | tracedecay_global_db::session_temporal::SessionTemporalHealthStatus::Locked => None,
             };
             let (orphan, incident_debris) = registered_census.as_deref().map_or(
                 (
@@ -1549,7 +1549,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 Err(_) => HostIntegrationReadV1::Unknown,
             };
             let inputs = DoctorKernelInputsV1 {
-                configuration: configuration_read_from_pin::<crate::errors::TraceDecayError>(
+                configuration: configuration_read_from_pin::<tracedecay_runtime_core::errors::TraceDecayError>(
                     &pinned,
                 ),
                 runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {

@@ -16,7 +16,7 @@ use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
     WorkflowApplicationOutcome,
 };
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 use super::super::current_micros;
 use super::{RegisteredWorkRuntime, work_command_effect, work_effect, work_evidence_packet};
@@ -346,7 +346,7 @@ fn workflow_effect_operation(operation_key: &str) -> Option<WorkflowEffectOperat
 
 pub(super) fn workflow_storage_problem(error: &TraceDecayError) -> DaemonInvocationProblem {
     match error {
-        crate::errors::TraceDecayError::ResetRequired { authority, .. }
+        tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { authority, .. }
             if authority == "workflow" =>
         {
             DaemonInvocationProblem::ResetRequired

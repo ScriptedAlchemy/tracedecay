@@ -33,7 +33,7 @@ async fn register(
     project_id: ProjectId,
 ) -> (
     crate::host_admission::HostAdmissionTestRuntimeV1,
-    crate::global_db::RegisteredGlobalDbLeaseV1,
+    tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     UserProfileId,
 ) {
     let project_root = root.path().join(project_id.as_str());
@@ -103,7 +103,7 @@ async fn shutdown_releases_registered_project_database_contexts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
     struct RetainedSessionLease {
-        _databases: [crate::global_db::RegisteredGlobalDbLeaseV1; 2],
+        _databases: [tracedecay_global_db::RegisteredGlobalDbLeaseV1; 2],
         released: Arc<AtomicBool>,
     }
 

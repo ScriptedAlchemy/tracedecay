@@ -11,7 +11,7 @@ use tracedecay_application::{
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{StoreShardScopeV1, VerifiedStoreLocatorV1};
 
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::{
     ActiveSessionImport, DaemonSessionSyncConfig, DaemonSessionSyncService,
@@ -111,7 +111,7 @@ impl DaemonSessionSyncService {
         &self,
         context: &Arc<SessionSyncProjectContext>,
         project_sessions: &RegisteredGlobalDbLeaseV1,
-    ) -> crate::errors::Result<bool> {
+    ) -> tracedecay_runtime_core::errors::Result<bool> {
         let scope = SessionSyncScopeV1::new(context.project_id.clone(), context.profile_id.clone());
         let prefix = journal_prefix(&scope);
         let journals = context
@@ -272,7 +272,7 @@ impl DaemonSessionSyncService {
     pub(crate) async fn register_project(
         &self,
         config: DaemonSessionSyncConfig,
-    ) -> crate::errors::Result<()> {
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         let scope = SessionSyncScopeV1::new(config.project_id.clone(), config.profile_id.clone());
         let project_gate = self.project_gate(&scope);
         let project = project_gate.lock().await;
@@ -367,10 +367,10 @@ impl DaemonSessionSyncService {
         context: &Arc<SessionSyncProjectContext>,
         project_sessions: &RegisteredGlobalDbLeaseV1,
         scope: SessionSyncScopeV1,
-    ) -> crate::errors::Result<()> {
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         let stable = format!(
             "session-sync.startup.{}.{}",
-            crate::runtime_identity::process_run_id(),
+            tracedecay_runtime_core::runtime_identity::process_run_id(),
             scope.project_id().as_str()
         );
         let operation_id = RequestId::new(stable.clone()).map_err(contract_error)?;
@@ -413,7 +413,7 @@ impl DaemonSessionSyncService {
     /// ingest, never to unmount indexing.
     pub(super) fn classify_startup_import_outcome(
         outcome: SessionSyncOutcomeV1,
-    ) -> crate::errors::Result<()> {
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         match outcome {
             SessionSyncOutcomeV1::Accepted(_)
             | SessionSyncOutcomeV1::Joined(_)

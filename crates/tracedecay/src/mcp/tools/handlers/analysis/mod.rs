@@ -56,7 +56,7 @@ use tracedecay_lsp::analyzer::broker::{
     enclosing_node_for_line,
 };
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
 
@@ -77,7 +77,7 @@ fn path_is_rust(path: &str) -> bool {
 }
 
 fn path_matches_optional_scope(path: &str, scope_prefix: Option<&str>) -> bool {
-    crate::path_scope::path_matches_scope(path, scope_prefix)
+    tracedecay_runtime_core::path_scope::path_matches_scope(path, scope_prefix)
 }
 
 const ANALYSIS_SYMBOL_BUDGET: usize = 500_000;

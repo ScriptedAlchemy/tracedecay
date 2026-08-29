@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 use crate::mcp::response_handles::RESPONSE_RETRIEVE_TOOL;
 use crate::mcp::tools::ToolResult;
 use crate::mcp::transport::{ErrorCode, JsonRpcResponse};

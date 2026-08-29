@@ -14,7 +14,7 @@ pub(super) fn doctor_graph_schema_state(actual: i64) -> DoctorGraphSchemaState {
         // settled; they are refused at open but diagnosed distinctly from
         // stores no supported binary ever produced.
         24..=26 => DoctorGraphSchemaState::PreviousV2Candidate,
-        actual if actual == i64::from(crate::db::migrations::SCHEMA_VERSION) => {
+        actual if actual == i64::from(tracedecay_runtime_core::db::migrations::SCHEMA_VERSION) => {
             DoctorGraphSchemaState::Current
         }
         _ => DoctorGraphSchemaState::Unsupported,

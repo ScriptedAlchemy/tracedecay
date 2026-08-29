@@ -9,7 +9,7 @@ use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
 use crate::daemon::automation_effect::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
 };
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 use super::branch_admin::MaintenanceReaperKind;
@@ -1413,7 +1413,7 @@ fn global_table_retention_config(
 /// housekeeping, so failures are logged and never abort a scheduler tick.
 async fn maybe_run_global_retention(
     administration: &super::branch_admin::StoreAdministration,
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &crate::config::RetentionConfig,
 ) {
     let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
@@ -1483,8 +1483,8 @@ mod global_retention_tests {
 
     use super::*;
     use crate::daemon::branch_admin::StoreAdministration;
-    use crate::global_db::RegisteredGlobalDb;
-    use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_global_db::RegisteredGlobalDb;
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
     struct ResetGlobalRetentionCadence;
 
@@ -1550,7 +1550,7 @@ mod global_retention_tests {
                     &session,
                     std::slice::from_ref(&message),
                     "global-retention-fixture",
-                    crate::global_db::ParseOffset::default(),
+                    tracedecay_global_db::ParseOffset::default(),
                 )
                 .await,
             "project the registered retention fixture message"

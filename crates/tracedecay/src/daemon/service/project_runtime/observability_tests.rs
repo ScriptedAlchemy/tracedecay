@@ -94,12 +94,12 @@ async fn runtime(
 ) -> (
     tempfile::TempDir,
     ProjectId,
-    crate::global_db::RegisteredGlobalDbLeaseV1,
-    crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime,
+    tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
 ) {
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new(format!("project.{name}")).expect("project id");
-    let runtime = crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
         tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         project.path(),
         project_id.clone(),
@@ -219,7 +219,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.observability-store-alias").expect("project id");
     let registered_runtime =
-        crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
             tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
             project.path(),
             project_id.clone(),
@@ -584,7 +584,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             .expect("restarted stream"),
         &BTreeSet::from([1])
     );
-    let process_prefix = format!("daemon:{}:", crate::runtime_identity::process_run_id());
+    let process_prefix = format!("daemon:{}:", tracedecay_runtime_core::runtime_identity::process_run_id());
     assert!(
         streams
             .keys()
@@ -612,7 +612,7 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
         profile_identity.profile_id().clone(),
     );
     let runtime_a =
-        crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project_for_profile_identity(
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project_for_profile_identity(
             &profile_a,
             project_a.path(),
             project_id.clone(),
@@ -621,7 +621,7 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
         .await
         .expect("profile A runtime");
     let runtime_b =
-        crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project_for_profile_identity(
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project_for_profile_identity(
             &profile_b,
             project_b.path(),
             project_id.clone(),

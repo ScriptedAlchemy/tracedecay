@@ -790,7 +790,7 @@ async fn remote_tls_listener_serves_only_remote_routes_and_isolates_credential_a
     let daemon_authority =
         crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
         "remote TLS authority isolation",
@@ -913,7 +913,7 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     let daemon_authority =
         crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &daemon_endpoint, "test")
             .expect("daemon authority");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
         "remote TLS admission timeout",

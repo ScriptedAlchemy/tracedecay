@@ -46,7 +46,7 @@ pub(super) fn prepare_graph_mutation(
 }
 
 pub(super) fn prepare_duplicate_adjudication(
-    services: &crate::global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     request: tracedecay_application::PrepareWorkDuplicateAdjudicationRequestV1,
     canonical_request_id: &RequestId,
@@ -96,7 +96,7 @@ pub(super) fn prepare_duplicate_adjudication(
 }
 
 fn require_attempt(
-    services: &crate::global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     identity: &tracedecay_domain::WorkAttemptIdentityV1,
 ) -> Result<(), ApplicationProblem> {

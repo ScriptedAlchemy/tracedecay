@@ -23,7 +23,7 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 /// Installs every root-owned runtime port. Idempotent; first call wins.
 ///
@@ -92,7 +92,7 @@ fn register_agent_host_ports() {
 
     ports::codex_app_server::register(run_codex_app_server_prompt);
     ports::session_store::register_canonical_project_key(
-        crate::global_db::RegisteredGlobalDb::canonical_project_key,
+        tracedecay_global_db::RegisteredGlobalDb::canonical_project_key,
     );
     ports::hook_runtime::register_daemon_tool_invoker(daemon_tool_json);
     ports::hook_runtime::register_project_root_resolver(resolve_project_root_with_identity);

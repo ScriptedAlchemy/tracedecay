@@ -33,7 +33,7 @@ pub(in crate::daemon::store_runtime::session_registry) fn inline_graph_publicati
 }
 
 pub(in crate::daemon::store_runtime::session_registry) fn schedule_bound_memory_graph_reconciliation(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
 ) -> Result<()> {
     match schedule_project_memory_graph_reconciliation(database.clone()) {
         ProjectMemoryGraphReconciliationScheduleV1::Scheduled
@@ -119,7 +119,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn retain_memory_graph_runtime(
         &self,
         shard_id: StoreShardIdV1,
-        database: crate::db::DatabaseOwnerV1,
+        database: tracedecay_runtime_core::db::DatabaseOwnerV1,
     ) -> Result<RetainedVerifiedGraphRuntimeV1> {
         Self::retain_memory_graph_runtime_for_task(
             self.identity.clone(),
@@ -142,7 +142,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         graph_lifecycle_cancelled: Arc<AtomicBool>,
         incarnation: tracedecay_store::StoreIncarnationV1,
         shard_id: StoreShardIdV1,
-        database: crate::db::DatabaseOwnerV1,
+        database: tracedecay_runtime_core::db::DatabaseOwnerV1,
         cancellation: tracedecay_usecases::observation::ObservationCancellation,
     ) -> std::result::Result<RetainedVerifiedGraphRuntimeV1, MemoryGraphRuntimeOpenFailureV1> {
         if !matches!(
@@ -199,6 +199,6 @@ impl DaemonSessionRuntimeRegistryV1 {
 }
 
 pub(crate) struct MemoryGraphRuntimeOpenFailureV1 {
-    pub(crate) database: crate::db::DatabaseOwnerV1,
-    pub(crate) error: crate::errors::TraceDecayError,
+    pub(crate) database: tracedecay_runtime_core::db::DatabaseOwnerV1,
+    pub(crate) error: tracedecay_runtime_core::errors::TraceDecayError,
 }

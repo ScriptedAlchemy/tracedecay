@@ -55,7 +55,7 @@ use tracedecay::application_surface::{
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_awaiting_project_open};
 use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
-use tracedecay::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::internal_daemon_tool_definition;
 use tracedecay::mcp::tools::{
     LegacyToolCompatibilityOwner, RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,

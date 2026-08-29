@@ -1604,7 +1604,7 @@ pub(super) fn code_index_store_root(data_root: &Path, project_root: &Path) -> Pa
 
 #[hotpath::measure(label = "daemon.git.maintenance.session_retention", future = true)]
 pub(super) async fn run_session_retention(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &RetentionConfig,
 ) -> bool {
     let now = match now_secs_i64() {
@@ -1665,7 +1665,7 @@ pub(super) async fn run_session_retention(
             .run_observation_retention(
                 None,
                 &config.observation,
-                crate::global_db::observation::retention::RetentionMode::Apply,
+                tracedecay_global_db::observation::retention::RetentionMode::Apply,
                 now,
             )
             .await
@@ -1715,7 +1715,7 @@ pub(super) async fn run_session_retention(
     future = true
 )]
 pub(super) async fn run_observability_analytics_retention(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     store: &'static str,
 ) -> bool {
     let now = match now_secs_i64() {
@@ -1761,7 +1761,7 @@ pub(super) async fn run_observability_analytics_retention(
 }
 
 pub(super) async fn run_global_compaction(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &CompactionThresholdConfig,
 ) -> bool {
     run_compaction(
@@ -1773,7 +1773,7 @@ pub(super) async fn run_global_compaction(
 }
 
 pub(super) async fn run_project_compaction(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     config: &CompactionThresholdConfig,
 ) -> bool {
     run_compaction(
@@ -1785,12 +1785,12 @@ pub(super) async fn run_project_compaction(
 }
 
 enum RetainedCompactionStore<'a> {
-    Registered(&'a crate::global_db::RegisteredGlobalDb),
-    Project(&'a crate::db::Database),
+    Registered(&'a tracedecay_global_db::RegisteredGlobalDb),
+    Project(&'a tracedecay_runtime_core::db::Database),
 }
 
 impl RetainedCompactionStore<'_> {
-    async fn storage_page_counts(&self) -> crate::errors::Result<(u64, u64, u64)> {
+    async fn storage_page_counts(&self) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
         match self {
             Self::Registered(database) => database.storage_page_counts().await,
             Self::Project(database) => database.storage_page_counts().await,
@@ -1800,7 +1800,7 @@ impl RetainedCompactionStore<'_> {
     async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
-    ) -> crate::errors::Result<()> {
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         match self {
             Self::Registered(database) => {
                 database.run_bounded_incremental_compaction(max_pages).await
@@ -1932,7 +1932,7 @@ pub(super) async fn run_branch_compaction(
     config: &CompactionThresholdConfig,
 ) -> bool {
     let layout = cg.store_layout();
-    let Some(meta) = crate::branch_meta::load_branch_meta(&layout.data_root) else {
+    let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root) else {
         return true;
     };
     let active_db_path = layout.graph_db_path.clone();
@@ -2000,14 +2000,14 @@ pub(super) fn branch_compaction_succeeded(
 
 #[cfg(test)]
 mod observability_retention_tests {
-    use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
+    use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 
     use super::*;
 
     #[tokio::test]
     async fn session_maintenance_calls_observability_analytics_retention() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let harness = crate::global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "daemon-observability-retention",
         )
         .await;

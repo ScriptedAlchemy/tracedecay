@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::remote_deletion::{
     RemoteDeletionExecutionError, RemoteDeletionFailureCode, RemoteDeletionPhase,
@@ -168,7 +168,7 @@ impl StoreAdministration {
                     let existing_tombstone = database
                         .remote_deletion_tombstone(
                             &profile_id,
-                            crate::global_db::RemoteDeletionTarget::Project,
+                            tracedecay_global_db::RemoteDeletionTarget::Project,
                             Some(&project_id),
                         )
                         .await
@@ -215,13 +215,13 @@ impl StoreAdministration {
                             },
                         ));
                     }
-                    let tombstone = crate::global_db::RemoteDeletionTombstone {
-                        target: crate::global_db::RemoteDeletionTarget::Project,
+                    let tombstone = tracedecay_global_db::RemoteDeletionTombstone {
+                        target: tracedecay_global_db::RemoteDeletionTarget::Project,
                         profile_id: profile_id.clone(),
                         project_id: Some(project_id.clone()),
                         tombstone_id,
                         recorded_at_micros,
-                        cleanup: crate::global_db::RemoteDeletionCleanupState::Pending,
+                        cleanup: tracedecay_global_db::RemoteDeletionCleanupState::Pending,
                     };
                     let tombstone_outcome = database
                         .record_remote_deletion_tombstone(tombstone)
@@ -236,13 +236,13 @@ impl StoreAdministration {
                             )
                         })?;
                     let tombstone = match tombstone_outcome {
-                        crate::global_db::RemoteDeletionTombstoneRecordOutcome::Recorded(
+                        tracedecay_global_db::RemoteDeletionTombstoneRecordOutcome::Recorded(
                             tombstone,
                         )
-                        | crate::global_db::RemoteDeletionTombstoneRecordOutcome::Replayed(
+                        | tracedecay_global_db::RemoteDeletionTombstoneRecordOutcome::Replayed(
                             tombstone,
                         ) => tombstone,
-                        crate::global_db::RemoteDeletionTombstoneRecordOutcome::Conflict {
+                        tracedecay_global_db::RemoteDeletionTombstoneRecordOutcome::Conflict {
                             existing,
                         } => {
                             return Err(RemoteDeletionExecutionError::new(
@@ -261,7 +261,7 @@ impl StoreAdministration {
                     };
                     receipt.tombstone_id = Some(tombstone.tombstone_id.clone());
                     receipt.tombstone_recorded = true;
-                    if tombstone.cleanup == crate::global_db::RemoteDeletionCleanupState::Deleted {
+                    if tombstone.cleanup == tracedecay_global_db::RemoteDeletionCleanupState::Deleted {
                         return Ok(receipt.complete());
                     }
                     if let Err(failure) = self.remove_remote_deleted_project(
@@ -277,13 +277,13 @@ impl StoreAdministration {
                             RemoteDeletionFailureCode::RuntimeOwnersSettling
                                 | RemoteDeletionFailureCode::RuntimeRetirementIncomplete
                         ) {
-                            crate::global_db::RemoteDeletionCleanupState::Settling {
+                            tracedecay_global_db::RemoteDeletionCleanupState::Settling {
                                 failure_code: failure.code,
                                 phase: failure.phase,
                                 retryable: failure.retryable,
                             }
                         } else {
-                            crate::global_db::RemoteDeletionCleanupState::Partial {
+                            tracedecay_global_db::RemoteDeletionCleanupState::Partial {
                                 failure_code: failure.code,
                                 phase: failure.phase,
                                 retryable: failure.retryable,
@@ -311,7 +311,7 @@ impl StoreAdministration {
                         .transition_remote_deletion_tombstone(
                             &tombstone,
                             tombstone.cleanup.clone(),
-                            crate::global_db::RemoteDeletionCleanupState::Deleted,
+                            tracedecay_global_db::RemoteDeletionCleanupState::Deleted,
                         )
                         .await
                         .map_err(|error| {
@@ -339,13 +339,13 @@ impl StoreAdministration {
                             },
                         ));
                     }
-                    let tombstone = crate::global_db::RemoteDeletionTombstone {
-                        target: crate::global_db::RemoteDeletionTarget::Account,
+                    let tombstone = tracedecay_global_db::RemoteDeletionTombstone {
+                        target: tracedecay_global_db::RemoteDeletionTarget::Account,
                         profile_id: profile_id.clone(),
                         project_id: None,
                         tombstone_id,
                         recorded_at_micros,
-                        cleanup: crate::global_db::RemoteDeletionCleanupState::Pending,
+                        cleanup: tracedecay_global_db::RemoteDeletionCleanupState::Pending,
                     };
                     let tombstone_outcome = database
                         .record_remote_deletion_tombstone(tombstone)
@@ -360,13 +360,13 @@ impl StoreAdministration {
                             )
                         })?;
                     let tombstone = match tombstone_outcome {
-                        crate::global_db::RemoteDeletionTombstoneRecordOutcome::Recorded(
+                        tracedecay_global_db::RemoteDeletionTombstoneRecordOutcome::Recorded(
                             tombstone,
                         )
-                        | crate::global_db::RemoteDeletionTombstoneRecordOutcome::Replayed(
+                        | tracedecay_global_db::RemoteDeletionTombstoneRecordOutcome::Replayed(
                             tombstone,
                         ) => tombstone,
-                        crate::global_db::RemoteDeletionTombstoneRecordOutcome::Conflict {
+                        tracedecay_global_db::RemoteDeletionTombstoneRecordOutcome::Conflict {
                             existing,
                         } => {
                             return Err(RemoteDeletionExecutionError::new(
@@ -394,7 +394,7 @@ impl StoreAdministration {
                         )
                         .await
                     {
-                        let cleanup = crate::global_db::RemoteDeletionCleanupState::Settling {
+                        let cleanup = tracedecay_global_db::RemoteDeletionCleanupState::Settling {
                             failure_code:
                                 RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
                             phase: RemoteDeletionPhase::CancelRuntimeOwners,
@@ -436,7 +436,7 @@ impl StoreAdministration {
                         .settle_retirement_reapers(super::super::DAEMON_TASK_ABORT_DEADLINE)
                         .await
                     {
-                        let cleanup = crate::global_db::RemoteDeletionCleanupState::Settling {
+                        let cleanup = tracedecay_global_db::RemoteDeletionCleanupState::Settling {
                             failure_code: RemoteDeletionFailureCode::RuntimeOwnersSettling,
                             phase: RemoteDeletionPhase::CancelRuntimeOwners,
                             retryable: true,
@@ -479,7 +479,7 @@ impl StoreAdministration {
                                 .transition_remote_deletion_tombstone(
                                     &tombstone,
                                     tombstone.cleanup.clone(),
-                                    crate::global_db::RemoteDeletionCleanupState::Partial {
+                                    tracedecay_global_db::RemoteDeletionCleanupState::Partial {
                                         failure_code:
                                             RemoteDeletionFailureCode::ProjectEnumerationUnavailable,
                                         phase: RemoteDeletionPhase::EnumerateProjects,
@@ -520,13 +520,13 @@ impl StoreAdministration {
                                 RemoteDeletionFailureCode::RuntimeOwnersSettling
                                     | RemoteDeletionFailureCode::RuntimeRetirementIncomplete
                             ) {
-                                crate::global_db::RemoteDeletionCleanupState::Settling {
+                                tracedecay_global_db::RemoteDeletionCleanupState::Settling {
                                     failure_code: failure.code,
                                     phase: failure.phase,
                                     retryable: failure.retryable,
                                 }
                             } else {
-                                crate::global_db::RemoteDeletionCleanupState::Partial {
+                                tracedecay_global_db::RemoteDeletionCleanupState::Partial {
                                     failure_code: failure.code,
                                     phase: failure.phase,
                                     retryable: failure.retryable,
@@ -559,7 +559,7 @@ impl StoreAdministration {
                         .transition_remote_deletion_tombstone(
                             &tombstone,
                             tombstone.cleanup.clone(),
-                            crate::global_db::RemoteDeletionCleanupState::Deleted,
+                            tracedecay_global_db::RemoteDeletionCleanupState::Deleted,
                         )
                         .await
                         .map_err(|error| {
@@ -580,7 +580,7 @@ impl StoreAdministration {
 
     async fn remote_deletion_project_ids(
         &self,
-        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         profile_root: &Path,
     ) -> Result<BTreeSet<String>> {
         let mut project_ids = database
@@ -648,7 +648,7 @@ impl StoreAdministration {
     async fn remove_remote_deleted_project(
         &self,
         owners: &super::super::remote_deletion::RemoteDeletionRuntimeOwners,
-        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         profile_root: &Path,
         project_id: &str,
     ) -> std::result::Result<(), RemoteDeletionCleanupError> {

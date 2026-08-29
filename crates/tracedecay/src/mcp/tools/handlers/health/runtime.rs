@@ -7,7 +7,7 @@ use super::*;
 const SESSION_TEMPORAL_HEALTH_BUDGET: Duration = Duration::from_secs(8);
 
 async fn session_temporal_health_value(
-    project_session_db: Option<&crate::global_db::RegisteredGlobalDb>,
+    project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> Value {
     match project_session_db {
         Some(db) => match tokio::time::timeout(
@@ -46,13 +46,13 @@ async fn session_temporal_health_value(
 /// `authority_store_unavailable`) so the CLI can classify without parsing the
 /// free-form detail.
 async fn observation_authority_audit(
-    registry: Option<&crate::global_db::RegisteredGlobalDb>,
+    registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> (Option<bool>, Option<&'static str>, Option<String>) {
     match registry {
         Some(registry) => {
             let audit = match registry.read_snapshot().await {
                 Ok(snapshot) => {
-                    crate::global_db::schema_stages::validate_observation_authority_connection(
+                    tracedecay_global_db::schema_stages::validate_observation_authority_connection(
                         &snapshot,
                     )
                     .await
@@ -86,7 +86,7 @@ async fn observation_authority_audit(
 /// Registered-runtime implementation of literal workspace-placeholder paths
 /// over a registered read snapshot.
 async fn literal_workspace_placeholder_transcript_paths(
-    conn: &impl crate::db::engine::QueryExecutor,
+    conn: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
     limit: usize,
 ) -> Vec<String> {
     if limit == 0 {
@@ -101,7 +101,7 @@ async fn literal_workspace_placeholder_transcript_paths(
                     OR transcript_path LIKE '%$workspaceFolder%')
              ORDER BY transcript_path
              LIMIT ?1",
-            crate::db::engine::params![i64::try_from(limit).unwrap_or(i64::MAX)],
+            tracedecay_runtime_core::db::engine::params![i64::try_from(limit).unwrap_or(i64::MAX)],
         )
         .await
     else {
@@ -145,8 +145,8 @@ async fn attach_doctor_report(
 pub(crate) async fn handle_runtime(
     cg: &TraceDecay,
     args: Value,
-    registry: Option<&crate::global_db::RegisteredGlobalDb>,
-    project_session_db: Option<&crate::global_db::RegisteredGlobalDb>,
+    registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+    project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
     doctor_report_reader: Option<&crate::dashboard::DoctorReportReader>,
     generation_census_reader: Option<&crate::runtime_telemetry::GenerationCensusReader>,
 ) -> Result<ToolResult> {

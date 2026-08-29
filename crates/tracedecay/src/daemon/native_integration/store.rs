@@ -23,7 +23,7 @@ use tracedecay_store::{
     NativeIntegrationStoreError, NativeIntegrationStoreResult, NativeWorktreeCleanupBeginResultV1,
 };
 
-use crate::global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDbLeaseV1};
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
 /// accumulating unbounded mutation work while a durable writer is stalled.

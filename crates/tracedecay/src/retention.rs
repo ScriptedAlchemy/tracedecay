@@ -19,8 +19,8 @@ pub use tracedecay_automation::config::{
     DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_LEGACY_SESSION_RETENTION_DAYS, RetentionConfig,
 };
 
-use crate::db::engine::Executor;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::db::engine::Executor;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 /// Free-page compaction for tracked branch databases, off the hot path
 /// (plan 38, §6).
@@ -140,7 +140,7 @@ async fn delete_before(
          AND {TIMESTAMP_COLUMN} < ?1 AND {eligibility}"
     );
     executor
-        .execute(&sql, crate::db::engine::params![cutoff])
+        .execute(&sql, tracedecay_runtime_core::db::engine::params![cutoff])
         .await
         .map_err(|error| retention_error(name, "delete", &error))
 }
@@ -189,12 +189,12 @@ macro_rules! retention_backend {
     };
 }
 
-retention_backend!(crate::global_db::RegisteredGlobalDbWriteTransaction<'_>,);
+retention_backend!(tracedecay_global_db::RegisteredGlobalDbWriteTransaction<'_>,);
 
 #[cfg(test)]
 retention_backend!(
-    crate::db::engine::Connection,
-    crate::db::engine::Transaction,
+    tracedecay_runtime_core::db::engine::Connection,
+    tracedecay_runtime_core::db::engine::Transaction,
 );
 
 /// Prunes rows in `table` older than its configured window. A disabled
@@ -245,7 +245,7 @@ where
 /// Applies global-database retention in one registered write transaction.
 #[hotpath::measure(label = "retention.prune.global", future = true)]
 pub async fn prune_global_retention(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &RetentionConfig,
     now_secs: i64,
 ) -> Result<Vec<RetentionTableReport>> {
@@ -255,7 +255,7 @@ pub async fn prune_global_retention(
     Ok(reports)
 }
 
-fn retention_error(table: &str, op: &str, err: &crate::db::engine::Error) -> TraceDecayError {
+fn retention_error(table: &str, op: &str, err: &tracedecay_runtime_core::db::engine::Error) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!("retention {op} on '{table}' failed: {err}"),
         operation: format!("retention::{op}"),
@@ -266,7 +266,7 @@ fn retention_error(table: &str, op: &str, err: &crate::db::engine::Error) -> Tra
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::db::engine::{Connection, TestConnection, params};
+    use tracedecay_runtime_core::db::engine::{Connection, TestConnection, params};
 
     fn test_conn(directory: &tempfile::TempDir) -> TestConnection {
         TestConnection::open(&directory.path().join("retention.db"))

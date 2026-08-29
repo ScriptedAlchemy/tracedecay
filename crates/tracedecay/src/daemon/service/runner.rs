@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::probe::{DaemonSocketState, daemon_socket_state};
 use super::{DaemonServiceState, LAUNCHD_LABEL, tracedecay_data_dir, windows_task};

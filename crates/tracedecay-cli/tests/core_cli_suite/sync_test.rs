@@ -1,6 +1,6 @@
 use std::io::Write;
 use tempfile::NamedTempFile;
-use tracedecay::sync::*;
+use tracedecay_runtime_core::sync::*;
 
 #[test]
 fn test_content_hash_deterministic() {

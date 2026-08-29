@@ -27,7 +27,7 @@ use crate::dashboard::{
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
 };
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationWireRequestV1,
@@ -270,7 +270,7 @@ fn unavailable_error(
 
 pub(crate) async fn dashboard_configuration_authorities_for_test(
     cg: Arc<TraceDecay>,
-    profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> Result<(
     Arc<dyn DashboardApplicationRuntime>,
     Arc<dyn crate::dashboard::DashboardProfileCodeIndexWorkerSettingsPort>,

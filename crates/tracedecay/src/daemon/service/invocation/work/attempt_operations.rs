@@ -13,7 +13,7 @@ use tracedecay_tool_catalog::UseCaseId;
 use tracedecay_usecases::observability::BoundedObservabilityProducerV1;
 
 use crate::daemon_contract::{DaemonInvocationResponse, WorkApplicationOutcomeV1};
-use crate::global_db::RegisteredWorkApplicationServicesV1;
+use tracedecay_global_db::RegisteredWorkApplicationServicesV1;
 
 use super::super::work_attempt_exec::{WorkAttemptProcessRegistryV1, spawn_attempt_execution};
 use super::preparation;

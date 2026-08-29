@@ -88,7 +88,7 @@ struct ActivatedQueryStateV1 {
     profile_id: UserProfileId,
     scope: ResolvedScope,
     state: RetrievalProfileStateV1,
-    cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
+    cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -101,7 +101,7 @@ pub(crate) struct PreparedQueryActivationV1 {
     profile_id: UserProfileId,
     scope: ResolvedScope,
     activated: RetrievalProfileStateV1,
-    cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
+    cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
     query_authority: Arc<QueryAuthorityV1>,
 }
 
@@ -138,7 +138,7 @@ pub(crate) struct DaemonQueryActivationRegistrarV1 {
     provider: DaemonQueryAuthorityProviderV1,
     registry: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: std::path::PathBuf,
-    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 }
 
 impl DaemonQueryActivationRegistrarV1 {
@@ -146,7 +146,7 @@ impl DaemonQueryActivationRegistrarV1 {
         provider: DaemonQueryAuthorityProviderV1,
         registry: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: std::path::PathBuf,
-        session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Self {
         Self {
             provider,
@@ -380,7 +380,7 @@ impl DaemonQueryAuthorityProviderV1 {
         profile_id: UserProfileId,
         scope: ResolvedScope,
         activated: RetrievalProfileStateV1,
-        cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
+        cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
         privacy_domain: &PrivacyDomainId,
     ) -> Result<PreparedQueryActivationV1, QueryAuthorityUpdateErrorV1> {
         scope
@@ -471,7 +471,7 @@ impl DaemonQueryAuthorityProviderV1 {
         profile_id: UserProfileId,
         scope: ResolvedScope,
         initial: RetrievalProfileStateV1,
-        cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
+        cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
     ) -> Result<QueryAuthorityProviderStatusV1, QueryAuthorityUpdateErrorV1> {
         scope
             .validate()

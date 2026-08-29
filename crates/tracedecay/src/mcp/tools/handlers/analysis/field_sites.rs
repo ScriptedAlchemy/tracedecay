@@ -52,7 +52,7 @@ pub(crate) async fn handle_field_sites(
 
             'outer: for file in &files {
                 let abs = project_root.join(file);
-                let Ok(source) = crate::sync::read_source_file(&abs) else {
+                let Ok(source) = tracedecay_runtime_core::sync::read_source_file(&abs) else {
                     continue;
                 };
 

@@ -7,7 +7,7 @@ use tracedecay_application::{
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
 use super::{POLICY_REVISION_V1, ProjectOpenSourceEditAuthorizationV1};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 

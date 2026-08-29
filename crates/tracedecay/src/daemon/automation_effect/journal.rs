@@ -22,7 +22,7 @@ use tracedecay_private_fs::framed_log::{
 
 use super::retirement::RetirementBinding;
 use super::{AutomationSettledProblem, AutomationSettledTerminal, contract_error};
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 const MAX_AUTOMATION_JOURNAL_BYTES: u64 = 512 * 1024;
 const MAX_AUTOMATION_TERMINAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -1222,7 +1222,7 @@ pub(super) fn replace_automation_file_atomically(
         temporary_file.sync_all()?;
         drop(temporary_file);
     }
-    crate::db::DatabaseAuthority::replace_file_atomically(temporary, destination, record_name)
+    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(temporary, destination, record_name)
         .map_err(std::io::Error::other)?;
     #[cfg(windows)]
     tracedecay_runtime_core::windows_security::validate_private_file(destination)?;

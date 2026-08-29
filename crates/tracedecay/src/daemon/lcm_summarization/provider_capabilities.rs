@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationFactV1};
 
-use crate::db::{
+use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
     engine::{QueryExecutor, params},
 };

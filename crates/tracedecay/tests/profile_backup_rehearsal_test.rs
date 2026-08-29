@@ -107,7 +107,7 @@ fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {
 }
 
 fn create_backup(temp: &TempDir, fixture: &ReleasedProfileFixture) -> PathBuf {
-    let lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+    let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &fixture.profile,
         "released-copy rehearsal test",
     )

@@ -17,7 +17,7 @@ use tracedecay_code_index::grep_search::{
     MAX_LINE_BYTES, search_tree_with_cancel,
 };
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;

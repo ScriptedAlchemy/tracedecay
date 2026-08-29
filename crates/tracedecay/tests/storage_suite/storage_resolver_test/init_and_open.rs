@@ -54,7 +54,7 @@ async fn trace_decay_init_registers_default_profile_shard_globally() {
     let resolution = db.resolve_project_store_by_alias(&project).await.unwrap();
 
     assert_eq!(resolution.project.project_id, project_id);
-    let identity_path = tracedecay::worktree::git_common_dir(&project)
+    let identity_path = tracedecay_runtime_core::worktree::git_common_dir(&project)
         .unwrap()
         .join("tracedecay-project.json");
     let identity: Value = serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();

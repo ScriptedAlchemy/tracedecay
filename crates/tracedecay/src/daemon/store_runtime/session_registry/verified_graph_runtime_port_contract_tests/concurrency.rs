@@ -8,7 +8,7 @@ use super::{
 };
 
 fn reconcile_pair(
-    database: Arc<crate::db::Database>,
+    database: Arc<tracedecay_runtime_core::db::Database>,
     left: GraphGenerationManifest,
     right: GraphGenerationManifest,
     publication_key: &str,
@@ -43,7 +43,7 @@ fn reconcile_pair(
     })
 }
 
-fn assert_concurrent_replay_and_conflict(database: Arc<crate::db::Database>, scope_label: &str) {
+fn assert_concurrent_replay_and_conflict(database: Arc<tracedecay_runtime_core::db::Database>, scope_label: &str) {
     let replay_projection = projection(&format!("{scope_label}-concurrent-replay"));
     let replay_manifest = manifest(&replay_projection, "concurrent-replay", "1");
     let [first, second] = reconcile_pair(

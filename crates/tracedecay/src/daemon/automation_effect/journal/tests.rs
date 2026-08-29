@@ -600,7 +600,7 @@ fn retirement_capture_count(dashboard_root: &std::path::Path) -> usize {
         .count()
 }
 
-fn assert_admission_conflict(result: crate::errors::Result<ReservationResult>) {
+fn assert_admission_conflict(result: tracedecay_runtime_core::errors::Result<ReservationResult>) {
     assert!(matches!(
         result.expect("valid durable mismatch"),
         ReservationResult::Conflict { .. }
@@ -3098,10 +3098,10 @@ fn cancellation_observed_under_lock_leaves_foreign_reservation_pending() {
 fn retained_settlement_waiter_is_send_and_static() {
     fn assert_send_static<T: Send + 'static>() {}
 
-    assert_send_static::<super::super::RetainedSettlementWaiter<crate::errors::Result<()>>>();
+    assert_send_static::<super::super::RetainedSettlementWaiter<tracedecay_runtime_core::errors::Result<()>>>();
     assert_send_static::<
         super::super::RetainedSettlementWaiter<
-            crate::errors::Result<(
+            tracedecay_runtime_core::errors::Result<(
                 super::super::AutomationSettledTerminal,
                 AutomationRunLedgerRecord,
             )>,
@@ -3109,7 +3109,7 @@ fn retained_settlement_waiter_is_send_and_static() {
     >();
     assert_send_static::<
         super::super::RetainedSettlementWaiter<
-            crate::errors::Result<(
+            tracedecay_runtime_core::errors::Result<(
                 super::super::AutomationSettledProblem,
                 Option<AutomationRunLedgerRecord>,
             )>,
@@ -3119,7 +3119,7 @@ fn retained_settlement_waiter_is_send_and_static() {
     assert_send_static::<super::super::DeferredSettlementPairSubmission<()>>();
     assert_send_static::<
         super::super::RetainedSettlementWaiter<
-            crate::errors::Result<super::super::RetainedAutomationSettlementOutcome>,
+            tracedecay_runtime_core::errors::Result<super::super::RetainedAutomationSettlementOutcome>,
         >,
     >();
 }
@@ -3134,7 +3134,7 @@ async fn dropping_retained_waiter_does_not_abort_blocking_owner() {
             started_tx.send(()).expect("signal blocking owner");
             release_rx.recv().expect("release blocking owner");
             finished_tx.send(()).expect("signal owner completion");
-            crate::errors::Result::Ok(())
+            tracedecay_runtime_core::errors::Result::Ok(())
         }),
     };
 

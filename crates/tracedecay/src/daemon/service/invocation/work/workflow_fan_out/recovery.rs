@@ -124,7 +124,7 @@ fn reconcile_active_workflow_fan_out_page(
 
 fn resume_work_attempts_for_workflow_recovery(
     registered: &RegisteredWorkRuntime,
-    workflows: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    workflows: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     attempt_processes: &Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
     project_root: &Path,

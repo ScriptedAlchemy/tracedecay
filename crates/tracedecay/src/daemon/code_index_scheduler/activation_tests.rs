@@ -25,7 +25,7 @@ use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
     DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
 };
-use crate::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
+use tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")

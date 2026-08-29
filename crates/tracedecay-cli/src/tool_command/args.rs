@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
-use tracedecay::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::{ToolDefinition, short_tool_name};
 
 /// Legacy CLI command names that do not match the MCP tool name. The right-hand

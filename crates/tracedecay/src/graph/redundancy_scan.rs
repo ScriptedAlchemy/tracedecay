@@ -9,11 +9,11 @@
 //! 1. Pull all `Function` / `Method` nodes (optionally path-filtered).
 //! 2. Group by file. Open each file once, parse with tree-sitter,
 //!    locate every target node via its `(start_line, end_line)`, and
-//!    compute a [`Fingerprint`](crate::redundancy::Fingerprint). Fingerprints
+//!    compute a [`Fingerprint`](tracedecay_runtime_core::redundancy::Fingerprint). Fingerprints
 //!    remain request-owned; the code-index authority owns durable graph state.
 //! 3. Bucket the resulting fingerprints by `body_tokens` (±25 % window).
 //!    Within each bucket, score every pair via
-//!    [`redundancy_match_score`](crate::redundancy::redundancy_match_score),
+//!    [`redundancy_match_score`](tracedecay_runtime_core::redundancy::redundancy_match_score),
 //!    which blends the composite similarity with the body-vector cosine,
 //!    relabels cosine-rescued `naming` pairs as `body_vector`, and downranks
 //!    generic helper names.
@@ -26,9 +26,9 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::errors::{Result, TraceDecayError};
-use crate::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
-use crate::redundancy::{
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
+use tracedecay_runtime_core::redundancy::{
     Fingerprint, RedundancyMatchScore, body_token_window, compute_fingerprint, parse_file,
     redundancy_match_score, round4,
 };
@@ -1186,7 +1186,7 @@ mod tests {
         find_redundant_pairs, is_generated_path, nodes_overlap, redundancy_output, semantic_cosine,
         semantic_pairs,
     };
-    use crate::redundancy::{Fingerprint, RedundancyMatchScore};
+    use tracedecay_runtime_core::redundancy::{Fingerprint, RedundancyMatchScore};
     use tracedecay_domain::SourceSpan;
     use tracedecay_usecases::semantic_runtime::{
         SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
@@ -1848,9 +1848,9 @@ mod tests {
         }
         let secret = ["sk", "-test-", "1234567890abcdef"].concat();
         let raw = format!("const TOKEN: &str = \"{secret}\";\n{}", after_secret_body());
-        let sanitized = crate::privacy::sanitize_code_source_bytes(
+        let sanitized = tracedecay_runtime_core::privacy::sanitize_code_source_bytes(
             raw.as_bytes(),
-            crate::privacy::CodeSourceShapeV1::CodeOrProse,
+            tracedecay_runtime_core::privacy::CodeSourceShapeV1::CodeOrProse,
         )
         .expect("code-source sanitizer");
         let (sanitized_bytes, _) = sanitized.into_parts();

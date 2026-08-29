@@ -12,7 +12,7 @@ pub(crate) async fn classify_project_storage_with_registry(
     project_root: &Path,
     registry: Option<&tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime>,
     profile_root: Option<&Path>,
-) -> tracedecay::errors::Result<ProjectStorageLocation> {
+) -> tracedecay_runtime_core::errors::Result<ProjectStorageLocation> {
     let location = classify_project_storage(project_root);
     let (Some(registry), Some(profile_root)) = (registry, profile_root) else {
         return Ok(location);
@@ -26,7 +26,7 @@ pub(crate) async fn classify_project_storage_with_registry(
 fn classify_registry_storage(
     project_root: &Path,
     profile_root: &Path,
-    store: &tracedecay::global_db::StoreInstanceRecord,
+    store: &tracedecay_global_db::StoreInstanceRecord,
 ) -> Option<ProjectStorageLocation> {
     tracedecay::storage::classify_registry_storage(project_root, profile_root, store)
 }
@@ -179,7 +179,7 @@ pub(crate) fn tracedecay_dir_size(dir: &Path) -> u64 {
 pub(crate) async fn gather_target_projects(
     all: bool,
     home_tracedecay: &Option<std::path::PathBuf>,
-) -> tracedecay::errors::Result<Vec<std::path::PathBuf>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<std::path::PathBuf>> {
     if all {
         let payload = call_admin_cli(
             None,
@@ -198,11 +198,11 @@ pub(crate) async fn gather_target_projects(
 
 fn registry_project_roots(
     payload: &serde_json::Value,
-) -> tracedecay::errors::Result<Vec<std::path::PathBuf>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<std::path::PathBuf>> {
     let projects = payload
         .get("projects")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "daemon registry list response omitted projects array".to_string(),
         })?;
 
@@ -214,7 +214,7 @@ fn registry_project_roots(
                 .get("project_root")
                 .and_then(serde_json::Value::as_str)
                 .map(std::path::PathBuf::from)
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!(
                         "daemon registry list response has no project_root for project at index {index}"
                     ),
@@ -226,7 +226,7 @@ fn registry_project_roots(
 async fn call_admin_cli(
     project_root: Option<&Path>,
     arguments: serde_json::Value,
-) -> tracedecay::errors::Result<serde_json::Value> {
+) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
     let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
         project_root.map(Path::to_path_buf),
         None,
@@ -585,7 +585,7 @@ mod gather_tests {
             b"{}",
         )
         .unwrap();
-        let store = tracedecay::global_db::StoreInstanceRecord {
+        let store = tracedecay_global_db::StoreInstanceRecord {
             store_id: "store_123".to_string(),
             project_id: "proj_123".to_string(),
             store_kind: "code_project".to_string(),

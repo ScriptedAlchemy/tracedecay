@@ -26,7 +26,7 @@ use tracedecay_usecases::session::lcm::{
     LcmTranscriptIngestCommand, lcm_authority_operation_identity,
 };
 
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 mod mount;
 mod receipt;

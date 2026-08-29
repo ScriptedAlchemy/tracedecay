@@ -23,8 +23,8 @@ use crate::context::{
     CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
     CONTEXT_TEST_COVERAGE_HEADING,
 };
-use crate::errors::{Result, TraceDecayError};
-use crate::text::utf8_prefix_at_or_before;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 use crate::tracedecay::TraceDecay;
 
 const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;

@@ -8,7 +8,7 @@ use tracedecay_application::ApplicationResult;
 use crate::cli::WorkInvocationArgs;
 
 #[hotpath::measure(label = "cli.work.invoke", future = true)]
-pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay::errors::Result<()> {
+pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_runtime_core::errors::Result<()> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
     let body = read_request(&invocation.request_file)?;
@@ -26,7 +26,7 @@ pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay::errors::R
         work_json_line(&response.outcome)?
     } else {
         let outcome = response.outcome.as_ref().map_err(|problem| {
-            tracedecay::errors::TraceDecayError::Config {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("{}: {}", problem.problem.code, problem.problem.message),
             }
         })?;
@@ -91,7 +91,7 @@ fn work_json_line(outcome: &ApplicationResult<Value>) -> serde_json::Result<Stri
     crate::cli::output::json::json_line(outcome)
 }
 
-fn read_request(path: &std::path::Path) -> tracedecay::errors::Result<Value> {
+fn read_request(path: &std::path::Path) -> tracedecay_runtime_core::errors::Result<Value> {
     let payload = if path == std::path::Path::new("-") {
         let mut payload = String::new();
         std::io::stdin().read_to_string(&mut payload)?;
@@ -99,7 +99,7 @@ fn read_request(path: &std::path::Path) -> tracedecay::errors::Result<Value> {
     } else {
         std::fs::read_to_string(path)?
     };
-    serde_json::from_str(&payload).map_err(|error| tracedecay::errors::TraceDecayError::Config {
+    serde_json::from_str(&payload).map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!(
             "Work request file {} is not valid JSON: {error}",
             path.display()

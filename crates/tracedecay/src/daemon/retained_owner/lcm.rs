@@ -38,7 +38,7 @@ use crate::daemon::session_retrieval::{
     SessionApplicationRetrievalPortV1, SessionRetrievalStoreScope,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::timeutil::SearchTimeBound;
+use tracedecay_runtime_core::timeutil::SearchTimeBound;
 use tracedecay_usecases::context::ResolvedSessionIdentity;
 use tracedecay_usecases::session::SessionTemporalQuery;
 
@@ -884,7 +884,7 @@ fn time_filter(
                 .ok()
                 .filter(|value| *value >= 0)
                 .or_else(|| {
-                    crate::timeutil::parse_search_time_filter_bound(
+                    tracedecay_runtime_core::timeutil::parse_search_time_filter_bound(
                         value,
                         crate::tracedecay::current_timestamp(),
                         bound,

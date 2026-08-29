@@ -162,7 +162,7 @@ pub(crate) async fn handle_unsafe_patterns(
                     continue;
                 }
                 let abs_path = project_root.join(file);
-                let Ok(source) = crate::sync::read_source_file(&abs_path) else {
+                let Ok(source) = tracedecay_runtime_core::sync::read_source_file(&abs_path) else {
                     continue;
                 };
                 // Cheap raw pre-filter before the tree-sitter mask and the per-file

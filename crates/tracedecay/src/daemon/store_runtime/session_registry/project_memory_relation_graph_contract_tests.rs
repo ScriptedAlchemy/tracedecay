@@ -76,7 +76,7 @@ fn enrolled_root(base: &Path, project_id: &ProjectId) -> PathBuf {
 }
 
 async fn add_fact(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     lifecycle: &TestFactLifecycle,
     owner: &FactOwnerV1,
     category: FactCategoryV1,
@@ -116,7 +116,7 @@ async fn add_fact(
 }
 
 async fn add_facts(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     lifecycle: &TestFactLifecycle,
     owner: &FactOwnerV1,
     category: FactCategoryV1,
@@ -130,7 +130,7 @@ async fn add_facts(
 }
 
 async fn link_facts(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     lifecycle: &TestFactLifecycle,
     owner: &FactOwnerV1,
     operation: &str,
@@ -169,7 +169,7 @@ async fn link_facts(
 }
 
 async fn reviewed_fact(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     lifecycle: &TestFactLifecycle,
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -191,7 +191,7 @@ async fn reviewed_fact(
     ProjectMemoryCurationMutationTarget::new(fact.fact_id().clone(), fact.last_event_id().clone())
 }
 
-async fn wait_for_reconciliation(database: &crate::db::Database) {
+async fn wait_for_reconciliation(database: &tracedecay_runtime_core::db::Database) {
     let owner = database
         .memory_graph_reconciliation_task_owner()
         .expect("mounted graph reconciliation owner");
@@ -206,7 +206,7 @@ async fn wait_for_reconciliation(database: &crate::db::Database) {
 }
 
 async fn graph(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     lifecycle: &TestFactLifecycle,
     owner: FactOwnerV1,
     roots: Vec<FactId>,
@@ -266,7 +266,7 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
     let second_id = ProjectId::new("project.memory-graph.second").expect("second project id");
     let first_root = enrolled_root(temp.path(), &first_id);
     let second_root = enrolled_root(temp.path(), &second_id);
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         41,
         "project memory relation graph contract",

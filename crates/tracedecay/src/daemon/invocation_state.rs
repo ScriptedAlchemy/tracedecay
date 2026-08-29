@@ -13,7 +13,7 @@ use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::service::invocation::{DaemonAdvisoryRuntimeRegistrar, DaemonRetainedRuntimeRegistrar};
 use super::*;
@@ -90,7 +90,7 @@ impl DaemonInvocationState {
     /// must never win this process-wide installation by opening first.
     pub(crate) async fn install_profile_worker_plan(
         &self,
-        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
     ) -> Result<tracedecay_domain::configuration::CodeIndexWorkerStatusV1> {
         let configured = crate::config::read_or_initialize_profile_code_index_worker_selection(
@@ -339,7 +339,7 @@ impl DaemonInvocationState {
         &self,
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
-        cursor_keys: &crate::global_db::session_temporal::GlobalDbCursorKeyProvider,
+        cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
         code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
@@ -356,7 +356,7 @@ impl DaemonInvocationState {
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
         expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
-        cursor_keys: &crate::global_db::session_temporal::GlobalDbCursorKeyProvider,
+        cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
         code_index_scheduler::query_runtime::
@@ -382,7 +382,7 @@ impl DaemonInvocationState {
         profile_id: tracedecay_domain::configuration::UserProfileId,
         scope: tracedecay_application::ResolvedScope,
         state: crate::config::retrieval::RetrievalProfileStateV1,
-        cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
+        cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
     ) -> std::result::Result<
         query_authority_provider::QueryAuthorityProviderStatusV1,
         query_authority_provider::QueryAuthorityUpdateErrorV1,
@@ -404,7 +404,7 @@ impl DaemonInvocationState {
     pub(super) fn query_activation_registrar(
         &self,
         project_root: &Path,
-        session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Arc<dyn tracedecay_usecases::semantic_runtime::RetrievalProfileActivationObserverV1> {
         Arc::new(
             query_authority_provider::DaemonQueryActivationRegistrarV1::new(
@@ -429,7 +429,7 @@ impl DaemonInvocationState {
         graph_runtime: Arc<
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
         >,
-        graph_publication_database: Arc<crate::db::Database>,
+        graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Result<()> {
         // Code-index identity is anchored on the project root's own git
         // repository (`IndexingIdentityV1::resolve` uses `gix::open` on the

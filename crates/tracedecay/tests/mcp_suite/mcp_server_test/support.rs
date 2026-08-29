@@ -246,7 +246,7 @@ pub(crate) async fn settled_ledger_total(
     global_db_path: &std::path::Path,
     project: &std::path::Path,
     expected_calls: u64,
-) -> tracedecay::global_db::SavingsTotal {
+) -> tracedecay_global_db::SavingsTotal {
     server.ledger_writes_settled().await;
     let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(
         global_db_path
@@ -360,7 +360,7 @@ pub(crate) fn parse_metrics_line(resp: &Value) -> Option<(u64, u64)> {
 pub(crate) async fn mcp_runtime_events(
     global_db_path: &std::path::Path,
     session_id: &str,
-) -> Vec<tracedecay::global_db::AnalyticsEventRecord> {
+) -> Vec<tracedecay_global_db::AnalyticsEventRecord> {
     let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(
         global_db_path
             .parent()
@@ -369,7 +369,7 @@ pub(crate) async fn mcp_runtime_events(
     .await
     .expect("registered profile runtime opens at isolated path");
     runtime
-        .query_profile_analytics_events_for_test(&tracedecay::global_db::AnalyticsEventQuery {
+        .query_profile_analytics_events_for_test(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("mcp".to_string()),
             project_id: None,
             session_id: Some(session_id.to_string()),
@@ -387,7 +387,7 @@ pub(crate) async fn mcp_runtime_event(
     global_db_path: &std::path::Path,
     tool_name: &str,
     session_id: &str,
-) -> Option<tracedecay::global_db::AnalyticsEventRecord> {
+) -> Option<tracedecay_global_db::AnalyticsEventRecord> {
     mcp_runtime_events(global_db_path, session_id)
         .await
         .into_iter()
@@ -399,7 +399,7 @@ pub(crate) async fn expect_mcp_runtime_event(
     tool_name: &str,
     session_id: &str,
     label: &str,
-) -> tracedecay::global_db::AnalyticsEventRecord {
+) -> tracedecay_global_db::AnalyticsEventRecord {
     mcp_runtime_event(global_db_path, tool_name, session_id)
         .await
         .unwrap_or_else(|| panic!("{label}"))
@@ -412,9 +412,9 @@ pub(crate) async fn expect_mcp_runtime_event(
 pub(crate) async fn harness_mcp_runtime_events(
     harness: &tracedecay::daemon::ProductionProjectCompositionHarnessV1,
     session_id: &str,
-) -> Vec<tracedecay::global_db::AnalyticsEventRecord> {
+) -> Vec<tracedecay_global_db::AnalyticsEventRecord> {
     harness
-        .read_profile_analytics_events(&tracedecay::global_db::AnalyticsEventQuery {
+        .read_profile_analytics_events(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("mcp".to_string()),
             project_id: None,
             session_id: Some(session_id.to_string()),
@@ -434,7 +434,7 @@ pub(crate) async fn expect_harness_mcp_runtime_event(
     tool_name: &str,
     session_id: &str,
     label: &str,
-) -> tracedecay::global_db::AnalyticsEventRecord {
+) -> tracedecay_global_db::AnalyticsEventRecord {
     harness_mcp_runtime_events(harness, session_id)
         .await
         .into_iter()
@@ -467,7 +467,7 @@ pub(crate) async fn call_tool(
     response_with_id(&responses, json!(id))
 }
 
-pub(crate) fn analytics_metadata(event: &tracedecay::global_db::AnalyticsEventRecord) -> Value {
+pub(crate) fn analytics_metadata(event: &tracedecay_global_db::AnalyticsEventRecord) -> Value {
     serde_json::from_str(
         event
             .metadata_json
