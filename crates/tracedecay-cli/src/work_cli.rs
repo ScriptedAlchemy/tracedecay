@@ -339,16 +339,6 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
     )
 }
 
-pub async fn invoke_work_cli(
-    project_root: PathBuf,
-    operation: WorkOperation,
-    body: Value,
-) -> Result<ApplicationResult<Value>> {
-    Ok(invoke_work_cli_with_delivery(project_root, operation, body)
-        .await?
-        .outcome)
-}
-
 /// Invokes Work while retaining the daemon connection until the presentation
 /// layer explicitly acknowledges the terminal output boundary.
 #[hotpath::measure(label = "work_cli.invoke", future = true)]
