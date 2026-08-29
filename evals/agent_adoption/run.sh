@@ -106,13 +106,14 @@ if ! python3 "$here/grade.py" --lint-only --scenarios "$here/scenarios"; then
 fi
 
 # Hint-signature drift guard: channel attribution mirrors distinctive fragments
-# of src/hooks/tool_hints.rs. If that wording drifted and the mirror did not, a
-# live run would silently misclassify hint-driven adoptions as steering, so fail
-# fast here — before building fixtures or spending a token. Skips cleanly when
-# run from a published package without the Rust source tree.
+# of crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs. If that wording
+# drifted and the mirror did not, a live run would silently misclassify
+# hint-driven adoptions as steering, so fail fast here — before building
+# fixtures or spending a token. Skips cleanly when run from a published package
+# without the Rust source tree.
 echo "checking hint signatures against tool_hints.rs..."
 if ! python3 "$here/grade.py" --check-hints; then
-  echo "abort: hint signatures drifted from src/hooks/tool_hints.rs (see above)." >&2
+  echo "abort: hint signatures drifted from crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs (see above)." >&2
   exit 3
 fi
 
@@ -229,15 +230,22 @@ fixture_dir_for() {
 
 # ---- seed facts (scoped to fixture-main project) --------------------------- #
 seed_fact() {
-  # $1 = content ; echoes numeric id
-  ( cd "$fixture_main" && "$TD" tool fact_store --action add \
-      --content "$1" --category decision --trust 0.9 2>/dev/null ) \
-    | grep -oE '#[0-9]+' | head -1 | tr -d '#'
+  # $1 = content ; echoes canonical fact_id (fact.v1....)
+  ( cd "$fixture_main" && "$TD" tool fact_store_add \
+      --content "$1" --category decision --trust 0.9 --format json 2>/dev/null ) \
+    | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+fact = d.get("fact") if isinstance(d.get("fact"), dict) else {}
+print(fact.get("fact_id") or d.get("fact_id") or "")'
 }
 echo "seeding facts..."
 discount_id="$(seed_fact "The 2026-06 pricing review decided that order discounts are capped at 25 percent for all orders; apply_discount clamps anything larger than the 25 percent cap.")"
 currency_id="$(seed_fact "Order totals are always denominated in USD cents. Multi-currency support was explicitly rejected in the 2026-05 architecture review, so every total is USD.")"
-printf '{"discount_fact_id": %s, "currency_fact_id": %s}\n' "${discount_id:-null}" "${currency_id:-null}" > "$run_dir/seeded_facts.json"
+python3 -c 'import json,sys; print(json.dumps({"discount_fact_id": sys.argv[1] or None, "currency_fact_id": sys.argv[2] or None}))' \
+  "${discount_id:-}" "${currency_id:-}" > "$run_dir/seeded_facts.json"
 echo "  discount_fact_id=$discount_id currency_fact_id=$currency_id"
 
 git_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo unknown)"

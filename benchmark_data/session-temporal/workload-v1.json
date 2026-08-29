@@ -2,20 +2,20 @@
   "command": "scripts/run-session-temporal-benchmark.sh --run",
   "file_inventory": [
     {
-      "path": "benches/session_temporal.rs",
+      "path": "crates/tracedecay/benches/session_temporal.rs",
       "sha256": "e5c8477b50da6eb7e9ab05dac2c4ab9dc7147cf23ccab57d93860805de988e92"
     },
     {
-      "path": "src/session_temporal_benchmark.rs",
-      "sha256": "1d8d5d573c346b981c4df9007d9f203311571a448f528f6a3084b45c56082db3"
+      "path": "crates/tracedecay/src/session_temporal_benchmark.rs",
+      "sha256": "568c1c5c9eff85e5fa61ea110735c106919b27a4913a7d439c446ce1babb945f"
     },
     {
-      "path": "src/session_temporal_benchmark/root_relation_fixture.rs",
-      "sha256": "0a425aaabe0fe0f89795453aba3603a182b0e2ae9d098fd0ca53a4615c9709fb"
+      "path": "crates/tracedecay/src/session_temporal_benchmark/root_relation_fixture.rs",
+      "sha256": "b8c4bc575b78826372676976729551800ca290e6efd76b92398bd0c4b5e129fd"
     },
     {
       "path": "scripts/run-session-temporal-benchmark.sh",
-      "sha256": "a3a9fe3a17e63d601ec91bcfc875de6539007de6e9f3042f7f4ff7ab39c13888"
+      "sha256": "0fe7a01170d38c26dd89a242bf9618bde5c7ffee49af89fb93fe26e3ca69e0c4"
     },
     {
       "path": "benchmark_data/session-temporal/fixtures/codex-sanitization-receipt.json",
@@ -57,8 +57,8 @@
     "status": "accepted_for_harness"
   },
   "implementation": {
-    "path": "src/session_temporal_benchmark.rs",
-    "sha256": "1d8d5d573c346b981c4df9007d9f203311571a448f528f6a3084b45c56082db3"
+    "path": "crates/tracedecay/src/session_temporal_benchmark.rs",
+    "sha256": "568c1c5c9eff85e5fa61ea110735c106919b27a4913a7d439c446ce1babb945f"
   },
   "measurement_contract": {
     "measured_repetitions": 30,
@@ -110,7 +110,7 @@
   },
   "runner": {
     "path": "scripts/run-session-temporal-benchmark.sh",
-    "sha256": "a3a9fe3a17e63d601ec91bcfc875de6539007de6e9f3042f7f4ff7ab39c13888"
+    "sha256": "0fe7a01170d38c26dd89a242bf9618bde5c7ffee49af89fb93fe26e3ca69e0c4"
   },
   "schema_version": 2,
   "statistics": {

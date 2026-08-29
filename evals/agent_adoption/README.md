@@ -230,7 +230,7 @@ tracedecay call**:
 
 | channel | attributed when… |
 |---------|------------------|
-| `hint-driven` | a hook-injected tool hint appears before the first tracedecay call. Matched on distinctive hint phrasing mirrored from `src/hooks/tool_hints.rs` `CATEGORY_SPECS` (e.g. "route by what you're matching", "before reading whole files, consider…"), not the bare word "tracedecay" — so the system tool listing never false-positives. |
+| `hint-driven` | a hook-injected tool hint appears before the first tracedecay call. Matched on distinctive hint phrasing mirrored from `crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs` `CATEGORY_SPECS` (e.g. "route by what you're matching", "before reading whole files, consider…"), not the bare word "tracedecay" — so the system tool listing never false-positives. |
 | `skill-driven` | a `tracedecay:*` skill invocation (a `Skill` tool call) precedes the first tracedecay call. |
 | `steering-or-description` | nothing fired before the call: the session-start CLAUDE.md steering block or the MCP tool descriptions are the only prior mention that could have driven it. |
 | `unprompted` | the `bare` ablation adopted a tracedecay tool with hints + skills + steering all removed — pure tool-description pull. |
@@ -246,7 +246,7 @@ efficacy** table (count + mean score per channel per host) and a per-host
 ### Hint-signature drift guard
 
 `hint-driven` attribution depends on `HINT_SIGNATURES` in `grade.py` staying in
-sync with the hook messages in `src/hooks/tool_hints.rs` `CATEGORY_SPECS`. That
+sync with the hook messages in `crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs` `CATEGORY_SPECS`. That
 mirror is load-bearing and silent when it breaks: if the source wording drifts
 and a signature stops matching, the hint text still fires in live transcripts
 but the grader no longer recognizes it, so genuinely **hint-driven** adoptions
