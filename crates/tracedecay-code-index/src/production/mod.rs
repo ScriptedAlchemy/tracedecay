@@ -11,13 +11,12 @@ use thiserror::Error;
 use tracedecay_code_extraction::incremental::ParseError;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
-    CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, ComponentVersion, CoverageSummaryV1,
-    FileOccurrenceId, GenerationTestAttributionV1, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1, RefId, RepositoryId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1,
-    SnapshotFileDispositionV1, SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros,
-    ValidatedCodeFileV1, WorktreeId, canonical_sha256,
+    CodeIndexCapabilityManifestV1, ComponentVersion, CoverageSummaryV1, FileOccurrenceId,
+    GenerationTestAttributionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
+    ProviderEvaluationStateV1, RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
+    TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
     GraphGenerationManifest, GraphProjectionIdentity, GraphProjectorRevision,
@@ -68,6 +67,7 @@ pub use ignored_sources::{
 mod import_evidence;
 use import_evidence::{derive_import_evidence, validate_import_evidence};
 mod parser_artifacts;
+use crate::chunks::CodeSearchEligibilityV1;
 use crate::extract::{ExtractionBatchV1, ExtractionFailureV1};
 use crate::intake::{IntakeRejectionV1, ValidatedCodeSnapshotV1};
 use crate::lineage::SymbolLineageCandidateV1;
