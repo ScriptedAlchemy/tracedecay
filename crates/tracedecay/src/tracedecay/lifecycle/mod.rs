@@ -240,7 +240,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let profile_root = open_options.resolved_profile_root()?;
         if let Some(message) =
-            crate::project_registry::ephemeral_root_rejection(project_root, &profile_root)
+            tracedecay_global_db::ephemeral_root_rejection(project_root, &profile_root)
         {
             return Err(TraceDecayError::Config { message });
         }

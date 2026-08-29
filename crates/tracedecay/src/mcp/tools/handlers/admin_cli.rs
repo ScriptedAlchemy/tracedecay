@@ -465,7 +465,7 @@ async fn registry_list(
     limit: usize,
     query: Option<&str>,
 ) -> Result<Value> {
-    use crate::project_registry::{PublicCodeProject, build_project_registry_view};
+    use tracedecay_dashboard_api::project_registry::{PublicCodeProject, build_project_registry_view};
 
     let limit = limit.clamp(1, 100_000);
     let mut projects = match query {
@@ -513,7 +513,7 @@ async fn registry_context(
     global_db: &RegisteredGlobalDb,
     project_arg: Option<&Path>,
 ) -> Result<Value> {
-    use crate::project_registry::PublicProjectRegistryContext;
+    use tracedecay_dashboard_api::project_registry::PublicProjectRegistryContext;
 
     let Some(selector) = project_arg.or_else(|| cg.map(TraceDecay::project_root)) else {
         return Ok(json!({ "status": "invalid", "project": null }));

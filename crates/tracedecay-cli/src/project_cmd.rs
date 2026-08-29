@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
-use tracedecay::project_registry::{ProjectRegistryView, render_project_registry_view};
+use tracedecay_dashboard_api::project_registry::{ProjectRegistryView, render_project_registry_view};
 
 use crate::cli::ProjectsAction;
 
@@ -228,7 +228,7 @@ mod tests {
         CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectStoreContext,
         StoreArtifactRecord, StoreInstanceRecord,
     };
-    use tracedecay::project_registry::PublicProjectRegistryContext;
+    use tracedecay_dashboard_api::project_registry::PublicProjectRegistryContext;
 
     const CREDENTIAL_REMOTE_URL: &str =
         "https://user:sekret-token@github.com/example/private-repo.git";

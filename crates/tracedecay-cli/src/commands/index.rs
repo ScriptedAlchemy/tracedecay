@@ -81,7 +81,7 @@ pub(crate) async fn handle_init(
     let project_path = tracedecay::config::resolve_path(path);
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     if let Some(message) =
-        tracedecay::project_registry::ephemeral_root_rejection(&project_path, &profile_root)
+        tracedecay_global_db::ephemeral_root_rejection(&project_path, &profile_root)
     {
         return Err(tracedecay_runtime_core::errors::TraceDecayError::Config { message });
     }

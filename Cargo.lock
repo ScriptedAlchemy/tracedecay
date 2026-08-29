@@ -6082,6 +6082,7 @@ dependencies = [
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-hooks",

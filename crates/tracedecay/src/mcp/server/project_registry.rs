@@ -18,7 +18,7 @@ use crate::mcp::tools::{
     ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
     ProjectRegistryReadPort, ProjectRegistrySelector,
 };
-use crate::project_registry::{PublicCodeProject, build_project_registry_view};
+use tracedecay_dashboard_api::project_registry::{PublicCodeProject, build_project_registry_view};
 
 #[derive(Clone)]
 pub(crate) struct DaemonProjectRegistryReadService {

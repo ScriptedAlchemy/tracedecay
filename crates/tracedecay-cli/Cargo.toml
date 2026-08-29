@@ -164,6 +164,7 @@ tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-featur
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
