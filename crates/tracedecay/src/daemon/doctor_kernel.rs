@@ -1048,12 +1048,12 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 .await;
             let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
             let temporal_ok = match temporal.status() {
-                tracedecay_global_db::session_temporal::SessionTemporalHealthStatus::Complete => {
+                tracedecay_session_temporal_store::SessionTemporalHealthStatus::Complete => {
                     Some(temporal.findings().is_empty())
                 }
-                tracedecay_global_db::session_temporal::SessionTemporalHealthStatus::Partial
-                | tracedecay_global_db::session_temporal::SessionTemporalHealthStatus::Unavailable
-                | tracedecay_global_db::session_temporal::SessionTemporalHealthStatus::Locked => None,
+                tracedecay_session_temporal_store::SessionTemporalHealthStatus::Partial
+                | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Unavailable
+                | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Locked => None,
             };
             let (orphan, incident_debris) = registered_census.as_deref().map_or(
                 (

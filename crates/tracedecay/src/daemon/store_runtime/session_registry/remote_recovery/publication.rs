@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 
 use tracedecay_domain::ProjectId;
-use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
 use super::super::open_runtime_during_remote_restore;

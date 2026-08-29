@@ -338,14 +338,14 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                         detail: "the daemon multi-root read returned no evidence payload"
                             .to_owned(),
                     }),
-                tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } => {
-                    Err(DashboardDaemonReadUnavailableV1 {
-                        detail: format!(
-                            "the daemon rejected the multi-root read: {}",
-                            problem.safe_message()
-                        ),
-                    })
-                }
+                tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
+                    problem,
+                } => Err(DashboardDaemonReadUnavailableV1 {
+                    detail: format!(
+                        "the daemon rejected the multi-root read: {}",
+                        problem.safe_message()
+                    ),
+                }),
                 tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => {
                     Err(DashboardDaemonReadUnavailableV1 {
                         detail: format!("the daemon refused the multi-root read: {problem:?}"),

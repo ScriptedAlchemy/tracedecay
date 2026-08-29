@@ -1082,7 +1082,7 @@ impl HostAdmissionTestRuntimeV1 {
     async fn lcm_relation_reads_for_test(
         &self,
         session_filter: Option<&str>,
-    ) -> Result<Vec<tracedecay_global_db::session_temporal::relations::SummaryRelationRead>> {
+    ) -> Result<Vec<tracedecay_session_temporal_store::relations::SummaryRelationRead>> {
         let database = self.primary_lcm_fixture_database_for_test();
         let snapshot =
             database

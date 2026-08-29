@@ -188,6 +188,7 @@ pub fn skill_usage_ledger_path(profile_root: &Path) -> PathBuf {
         .join(SKILL_USAGE_LEDGER_FILENAME)
 }
 
+#[hotpath::measure(label = "automation.skill_usage.load", future = true)]
 pub async fn load_skill_usage_ledger(profile_root: &Path) -> Result<SkillUsageLedger> {
     let path = skill_usage_ledger_path(profile_root);
     let bytes = match tokio::fs::read(&path).await {
@@ -210,6 +211,7 @@ pub async fn load_skill_usage_ledger(profile_root: &Path) -> Result<SkillUsageLe
     })
 }
 
+#[hotpath::measure(label = "automation.skill_usage.save", future = true)]
 pub async fn save_skill_usage_ledger(profile_root: &Path, ledger: &SkillUsageLedger) -> Result<()> {
     let path = skill_usage_ledger_path(profile_root);
     if let Some(parent) = path.parent() {

@@ -75,13 +75,14 @@ async fn invoke_operation(
             let Ok(decoded) = serde_json::from_value::<IssueTaskHandoffRequestV1>(body) else {
                 return tracedecay_api::handoff_invalid_request_response(request_id);
             };
-            let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
-                request_id.as_str(),
-                HandoffApplicationInvocationV1::IssueTaskHandoff(decoded),
-                tracedecay_daemon_protocol::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
+            let invocation =
+                tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
+                    request_id.as_str(),
+                    HandoffApplicationInvocationV1::IssueTaskHandoff(decoded),
+                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
             invoke_registered_http::<IssueTaskHandoffResultV1, _>(
                 executor.as_ref(),
                 operation,
@@ -108,13 +109,14 @@ async fn invoke_operation(
             let Ok(decoded) = serde_json::from_value::<ListTaskHandoffsRequestV1>(body) else {
                 return tracedecay_api::handoff_invalid_request_response(request_id);
             };
-            let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
-                request_id.as_str(),
-                HandoffApplicationInvocationV1::ListTaskHandoffs(decoded),
-                tracedecay_daemon_protocol::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
+            let invocation =
+                tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
+                    request_id.as_str(),
+                    HandoffApplicationInvocationV1::ListTaskHandoffs(decoded),
+                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
             invoke_registered_http::<ListTaskHandoffsResultV1, _>(
                 executor.as_ref(),
                 operation,
@@ -145,13 +147,14 @@ async fn invoke_operation(
             else {
                 return tracedecay_api::handoff_invalid_request_response(request_id);
             };
-            let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
-                request_id.as_str(),
-                HandoffApplicationInvocationV1::OpenInvestigationHandoff(decoded),
-                tracedecay_daemon_protocol::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
+            let invocation =
+                tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
+                    request_id.as_str(),
+                    HandoffApplicationInvocationV1::OpenInvestigationHandoff(decoded),
+                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
             invoke_registered_http::<OpenInvestigationHandoffResultV1, _>(
                 executor.as_ref(),
                 operation,
@@ -178,13 +181,14 @@ async fn invoke_operation(
             let Ok(decoded) = serde_json::from_value::<OpenTaskHandoffRequestV1>(body) else {
                 return tracedecay_api::handoff_invalid_request_response(request_id);
             };
-            let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
-                request_id.as_str(),
-                HandoffApplicationInvocationV1::OpenTaskHandoff(decoded),
-                tracedecay_daemon_protocol::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
+            let invocation =
+                tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
+                    request_id.as_str(),
+                    HandoffApplicationInvocationV1::OpenTaskHandoff(decoded),
+                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
             invoke_registered_http::<OpenTaskHandoffResultV1, _>(
                 executor.as_ref(),
                 operation,

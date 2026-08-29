@@ -174,6 +174,7 @@ pub struct VerifiedGraphSnapshot {
     database: crate::GraphDbLeaseV1,
     head: Arc<VerifiedGenerationLease>,
     closure: BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>,
+    direct_sealed: bool,
 }
 
 impl fmt::Debug for VerifiedGraphSnapshot {
@@ -261,6 +262,20 @@ impl VerifiedGraphSnapshot {
             database,
             head,
             closure,
+            direct_sealed: false,
+        }
+    }
+
+    pub(crate) fn new_direct_sealed(
+        database: crate::GraphDbLeaseV1,
+        head: Arc<VerifiedGenerationLease>,
+    ) -> Self {
+        let projection = head.locator.projection.clone();
+        Self {
+            database,
+            head: Arc::clone(&head),
+            closure: BTreeMap::from([(projection, head)]),
+            direct_sealed: true,
         }
     }
 
@@ -289,6 +304,11 @@ impl VerifiedGraphSnapshot {
         self.with_operation(|| {
             let lease = self.lease_for_projection(&reference.projection)?;
             let namespace = lease.locator.physical_namespace()?;
+            if self.direct_sealed {
+                return self
+                    .database
+                    .entity(&namespace, &reference.identity, cancellation);
+            }
             // A sealed generation's point reads serve from its compacted
             // per-generation store; the digest proved the exact row set, so
             // a miss there is authoritative and never re-read from staging.
@@ -510,9 +530,11 @@ impl VerifiedGraphSnapshot {
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     #[must_use]
     pub fn serves_from_sealed_store(&self) -> bool {
-        self.database
-            .sealed_generation_reader(&self.head.locator)
-            .is_some()
+        self.direct_sealed
+            || self
+                .database
+                .sealed_generation_reader(&self.head.locator)
+                .is_some()
     }
 
     pub(crate) fn lease_for_projection(

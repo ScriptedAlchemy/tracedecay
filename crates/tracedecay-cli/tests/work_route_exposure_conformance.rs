@@ -1621,10 +1621,15 @@ fn post_probe(
 /// Builds the same in-process router the daemon mounts, used only as secondary
 /// evidence so an inner/outer disagreement can be named precisely.
 async fn inner_router(project: &Path) -> axum::Router {
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.to_path_buf()), None, false, false)
-            .expect("production daemon handshake");
-    let client = tracedecay::daemon::invocation_client_for_current(handshake).expect("production daemon client");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        Some(project.to_path_buf()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
+    let client = tracedecay::daemon::invocation_client_for_current(handshake)
+        .expect("production daemon client");
     http_application_router(
         client,
         OperationEventAuthority::default(),

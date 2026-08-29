@@ -43,6 +43,9 @@ TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false
 # CARGO_TARGET_<TRIPLE>_LINKER to a linker executable directly. Developers
 # who want mold locally opt in through their own linker config or RUSTFLAGS
 # (a user-set RUSTFLAGS env var replaces these flags entirely).
+# Hotpath lanes that need --cfg tokio_unstable must source
+# scripts/hotpath-rustflags.sh so the env still carries mold and
+# unpacked split-debuginfo.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "split-debuginfo=unpacked"]
 

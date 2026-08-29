@@ -88,7 +88,7 @@ struct ActivatedQueryStateV1 {
     profile_id: UserProfileId,
     scope: ResolvedScope,
     state: RetrievalProfileStateV1,
-    cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
+    cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -101,7 +101,7 @@ pub(crate) struct PreparedQueryActivationV1 {
     profile_id: UserProfileId,
     scope: ResolvedScope,
     activated: RetrievalProfileStateV1,
-    cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
+    cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
     query_authority: Arc<QueryAuthorityV1>,
 }
 
@@ -380,7 +380,7 @@ impl DaemonQueryAuthorityProviderV1 {
         profile_id: UserProfileId,
         scope: ResolvedScope,
         activated: RetrievalProfileStateV1,
-        cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
+        cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
         privacy_domain: &PrivacyDomainId,
     ) -> Result<PreparedQueryActivationV1, QueryAuthorityUpdateErrorV1> {
         scope
@@ -471,7 +471,7 @@ impl DaemonQueryAuthorityProviderV1 {
         profile_id: UserProfileId,
         scope: ResolvedScope,
         initial: RetrievalProfileStateV1,
-        cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
+        cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
     ) -> Result<QueryAuthorityProviderStatusV1, QueryAuthorityUpdateErrorV1> {
         scope
             .validate()
