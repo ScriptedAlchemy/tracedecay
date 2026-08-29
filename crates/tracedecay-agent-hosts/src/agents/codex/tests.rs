@@ -1228,3 +1228,14 @@ fn codex_update_plugin_refreshes_bundle_and_records_hook_trust() {
     );
     assert_eq!(codex_hook_trust_followup(home.path()), None);
 }
+
+#[test]
+fn detected_host_surface_reports_codex_home() {
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(CodexIntegration.detected_host_surface(home.path()), None);
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    assert_eq!(
+        CodexIntegration.detected_host_surface(home.path()),
+        Some(home.path().join(".codex"))
+    );
+}

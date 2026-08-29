@@ -174,6 +174,11 @@ impl AgentIntegration for CursorIntegration {
         home.join(".cursor").is_dir()
     }
 
+    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+        let surface = home.join(".cursor");
+        surface.is_dir().then_some(surface)
+    }
+
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
         Some(cursor_plugin_manifest_path(home))
     }
@@ -2401,6 +2406,17 @@ mod tests {
         let project = TempDir::new().unwrap();
         sweep_legacy_project_artifacts(project.path()).expect("sweep should succeed");
         assert!(!project.path().join(".cursor").exists());
+    }
+
+    #[test]
+    fn detected_host_surface_reports_cursor_home() {
+        let home = TempDir::new().unwrap();
+        assert_eq!(CursorIntegration.detected_host_surface(home.path()), None);
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        assert_eq!(
+            CursorIntegration.detected_host_surface(home.path()),
+            Some(home.path().join(".cursor"))
+        );
     }
 
     /// The cwd-based sweep must never treat the home directory as a project:

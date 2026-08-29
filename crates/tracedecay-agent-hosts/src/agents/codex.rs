@@ -308,6 +308,18 @@ impl AgentIntegration for CodexIntegration {
             || codex_plugin_manifest_path(home).exists()
     }
 
+    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+        let config_dir = home.join(".codex");
+        if config_dir.is_dir() {
+            return Some(config_dir);
+        }
+        if let Some(cached) = codex_plugin_cached_install_dirs(home).into_iter().next() {
+            return Some(cached);
+        }
+        let manifest = codex_plugin_manifest_path(home);
+        manifest.exists().then_some(manifest)
+    }
+
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
         let current_cache =
             codex_plugin_current_cached_install_dir(home).join(".codex-plugin/plugin.json");

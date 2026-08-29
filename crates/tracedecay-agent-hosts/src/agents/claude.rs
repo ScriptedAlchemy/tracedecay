@@ -252,6 +252,11 @@ impl AgentIntegration for ClaudeIntegration {
         home.join(".claude").is_dir()
     }
 
+    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+        let surface = home.join(".claude");
+        surface.is_dir().then_some(surface)
+    }
+
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
         Some(plugin_marketplace_manifest_path(home))
     }
