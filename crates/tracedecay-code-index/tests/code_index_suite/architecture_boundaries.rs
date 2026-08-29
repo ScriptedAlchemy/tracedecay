@@ -9,10 +9,11 @@ use tracedecay_domain::{
     FileOccurrenceId, LanguageId, ManifestDigest, ProjectionBatchRequestV1, ProjectionKeyV1,
     ProjectionKindV1, ProjectionReplayReasonV1, RefId, RepositoryId, SanitizationReceiptId,
     SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    UtcMicros, ValidatedCodeSnapshotV1, WorktreeId,
+    UtcMicros, WorktreeId,
 };
 
 use crate::support::{id, registry};
+use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
 
 struct RejectingSink;
 
