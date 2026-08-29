@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,8 +9,8 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::{
-    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphGenerationManifest,
-    GraphIdempotencyKey, NeverCancelled, VerifiedGraphSnapshot,
+    GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
+    GraphGenerationManifest, GraphIdempotencyKey, NeverCancelled, VerifiedGraphSnapshot,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -20,10 +21,12 @@ use tracedecay_rusqlite_runtime::{
 use tracedecay_store::{
     AdmissionConfigV1, BrainId, GraphProjectionIdentityV1, GraphPublicationInputDigestV1,
     GraphPublicationOperationContextV1, GraphPublicationStoreV1, ProjectId,
-    RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
-    StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+    RetainedGraphStoreOwnerOperationLeaseErrorV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
 };
 
 #[derive(Debug)]
@@ -44,6 +47,31 @@ impl RetainedGraphStoreLeaseV1 for BenchmarkGraphLease {
 
     fn canonical_path(&self) -> &Path {
         &self.canonical_path
+    }
+}
+
+impl RetainedGraphStoreOwnerAttachmentV1 for BenchmarkGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    fn issue_operation_lease(
+        &self,
+    ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+    {
+        Ok(Arc::new(Self {
+            binding: self.binding.clone(),
+            verified_locator: self.verified_locator.clone(),
+            canonical_path: self.canonical_path.clone(),
+        }))
     }
 }
 
@@ -136,6 +164,9 @@ pub struct PersistentBenchmarkGraph {
     pub(super) authority: GraphPublicationExactSqlStorage,
     pub(super) latest_head: Option<tracedecay_store::GraphVerifiedHeadV1>,
     latest_projection: Option<GraphProjectionIdentityV1>,
+    /// Verified heads per projection, for benches that publish many
+    /// projections into the same store (`publish_new_projection`).
+    projection_heads: BTreeMap<String, tracedecay_store::GraphVerifiedHeadV1>,
     pub(super) sequence: usize,
     _root: TempDir,
 }
@@ -195,7 +226,7 @@ impl PersistentBenchmarkGraph {
         let handle = handle
             .with_write_authority(Arc::new(AlwaysAuthorized))
             .expect("benchmark exact SQL write authority attaches");
-        Self {
+        let graph = Self {
             registry: GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 })
                 .expect("benchmark graph registry config is valid"),
             authority: GraphPublicationExactSqlStorage::from_authorized_handle(handle)
@@ -206,9 +237,52 @@ impl PersistentBenchmarkGraph {
             _readers: readers,
             latest_head: None,
             latest_projection: None,
+            projection_heads: BTreeMap::new(),
             sequence: 0,
             _root: root,
+        };
+        graph.mount_runtime();
+        graph
+    }
+
+    /// Mounts the shard's graph runtime: publication and recovery resolve
+    /// the owner attachment first, exactly as the production store registry
+    /// does. `GraphDbRegistry::close` unmounts, so flows that close and then
+    /// publish or recover again must re-mount.
+    pub(crate) fn mount_runtime(&self) {
+        let attachment = self
+            .registry
+            .resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+                operation: self.registration(),
+                authority_attachment: Box::new(BenchmarkGraphLease {
+                    binding: self.binding.clone(),
+                    verified_locator: self.verified_locator(),
+                    canonical_path: self.graph_path.clone(),
+                }),
+            })
+            .expect("benchmark graph runtime mounts");
+        drop(attachment);
+    }
+
+    /// Publishes `manifest` against its own projection's verified head, so
+    /// many projections can accumulate in the same store — the shape of the
+    /// real code graph's shard-by-shard build.
+    #[allow(dead_code)] // Each bench binary compiles this module separately.
+    pub fn publish_new_projection(
+        &mut self,
+        manifest: GraphGenerationManifest,
+    ) -> VerifiedGraphSnapshot {
+        let key = format!(
+            "{}/{}",
+            manifest.projection.namespace.as_str(),
+            manifest.projection.projection.as_str()
+        );
+        self.latest_head = self.projection_heads.get(&key).cloned();
+        let snapshot = self.publish(manifest, None);
+        if let Some(head) = self.latest_head.clone() {
+            self.projection_heads.insert(key, head);
         }
+        snapshot
     }
 
     pub fn publish(
@@ -268,11 +342,26 @@ impl PersistentBenchmarkGraph {
         commit.snapshot
     }
 
+    /// Closes the shard's store through the registry — the same path every
+    /// production close takes — and re-mounts the runtime so later
+    /// operations can reopen it. Separated from [`Self::recover_snapshot`]
+    /// so benches can time the close in isolation.
+    #[allow(dead_code)] // Each bench binary compiles this module separately.
+    pub fn close_store(&self) {
+        let registration = self.registration();
+        self.registry
+            .close(&registration)
+            .expect("benchmark graph store closes");
+        self.mount_runtime();
+    }
+
+    #[allow(dead_code)] // Each bench binary compiles this module separately.
     pub fn recover_snapshot(&mut self) -> VerifiedGraphSnapshot {
         let registration = self.registration();
         self.registry
             .close(&registration)
             .expect("benchmark graph store closes");
+        self.mount_runtime();
         self.sequence += 1;
         let (control, probe) = operation_control(self.sequence);
         let context = GraphPublicationOperationContextV1::new(&control, &probe)
@@ -292,14 +381,18 @@ impl PersistentBenchmarkGraph {
             .expect("benchmark verified snapshot recovers")
     }
 
-    pub(super) fn registration(&self) -> GraphDbRegistration {
-        let canonical_path = self.graph_path.clone();
-        let verified_locator = VerifiedStoreLocatorV1::new(
+    fn verified_locator(&self) -> VerifiedStoreLocatorV1 {
+        VerifiedStoreLocatorV1::new(
             self.binding.shard_id.clone(),
             self.binding.incarnation,
-            canonical_store_locator_digest(&canonical_path)
+            canonical_store_locator_digest(&self.graph_path)
                 .expect("benchmark graph locator digest is valid"),
-        );
+        )
+    }
+
+    pub(super) fn registration(&self) -> GraphDbRegistration {
+        let canonical_path = self.graph_path.clone();
+        let verified_locator = self.verified_locator();
         GraphDbRegistration {
             authority_lease: Arc::new(BenchmarkGraphLease {
                 binding: self.binding.clone(),

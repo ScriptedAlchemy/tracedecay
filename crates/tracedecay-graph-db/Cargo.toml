@@ -174,6 +174,11 @@ name = "replay_after_mismatch"
 harness = false
 required-features = ["test-helpers"]
 
+[[bench]]
+name = "publication_scale"
+harness = false
+required-features = ["test-helpers"]
+
 [[test]]
 name = "backup_contract"
 required-features = ["test-helpers"]
