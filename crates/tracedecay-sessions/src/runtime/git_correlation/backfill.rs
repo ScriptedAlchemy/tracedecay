@@ -351,7 +351,7 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 ///
 /// When `opts.dry_run` is set no rows are written; the returned counts reflect
 /// what *would* have been written.
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.git_correlation.backfill", future = true)]
 pub async fn run_backfill<S, E, G>(
     session_store: &S,
     analytics_events: &[E],
@@ -406,7 +406,7 @@ pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
 ///
 /// Analytics timestamps are not consulted here. Canonical history indexing
 /// derives bounded pages from durable session activity and Git evidence.
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.git_correlation.backfill.incremental", future = true)]
 pub async fn run_incremental_backfill<S: GitCorrelationSessionStore, G>(
     session_store: &S,
     git: &G,
