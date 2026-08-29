@@ -53,12 +53,6 @@ hotpath-cpu = [
     "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
 ]
-# Documented skip only: enabling this does not compile harness tests. Those
-# tests need global-db `pub(crate)` fixture symbols
-# (`open_registered_test_database_fixture`, `SessionTemporalFixtureCountV1`
-# in `tests/harness.rs`); widening those would leak non-contract internals.
-# Integration coverage stays in `tracedecay-global-db` and the root crate.
-global-db-harness = []
 # Exposes package-owned fixture constructors to dependent package tests only.
 test-helpers = [
     "tracedecay-graph-db/test-helpers",
@@ -97,6 +91,9 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+# Dev-dep cycle is allowed: this crate's unit tests need the registered
+# global-db fixture surface; production never depends on global-db.
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }

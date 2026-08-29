@@ -11,8 +11,10 @@
 mod handle;
 mod schema_constants;
 mod support;
+#[cfg(test)]
+mod test_registered_impls;
 pub use handle::{
-    SessionTemporalAccess, SessionTemporalDbExt, SessionTemporalExec, SessionTemporalQuery,
+    SessionTemporalAccess, SessionTemporalExec, SessionTemporalQuery,
     SessionTemporalRegisteredDb, SessionTemporalWriteTxn,
 };
 pub use schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
@@ -791,7 +793,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync> RegisteredGlobalDbSessionTempor
         parse_lcm_source_cursor_offset(binding, &sort_key)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.query.freeze")]
+    #[hotpath::measure(future = true, label = "session_temporal.query.freeze")]
     async fn freeze(
         &self,
         request: &AuthorizedTemporalExecutionRequest,
@@ -900,7 +902,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync> RegisteredGlobalDbSessionTempor
     where
         E: VersionedTokenEstimator + Sync,
     {
-        hotpath::gauge!("global_db.session_temporal.execution").inc(1u32);
+        hotpath::gauge!("session_temporal.execution").inc(1u32);
         let (read_snapshot, snapshot, root_readiness) = self.freeze(&request).await?;
         let authenticator =
             GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
@@ -975,7 +977,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1 f
         E: VersionedTokenEstimator + Sync + 'a,
     {
         Box::pin(async move {
-            hotpath::gauge!("global_db.session_temporal.execution").inc(1u32);
+            hotpath::gauge!("session_temporal.execution").inc(1u32);
             let (read_snapshot, snapshot, _) = self.freeze(request.temporal()).await?;
             let authenticator =
                 GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)

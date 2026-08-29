@@ -21,7 +21,7 @@ mod derived;
 mod materialize;
 mod persist;
 mod receipts;
-#[cfg(all(test, feature = "global-db-harness"))]
+#[cfg(test)]
 mod tests;
 
 use materialize::materialize_session_temporal_refresh_batch_in_transaction;
@@ -78,7 +78,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     ///
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.query.pending_refresh"
+        label = "session_temporal.query.pending_refresh"
     )]
     pub async fn pending_session_temporal_refresh_page_result(
         &self,
@@ -270,7 +270,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.projection.materialize"
+        label = "session_temporal.projection.materialize"
     )]
     pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
@@ -349,13 +349,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.txn.persist_projection"
+        label = "session_temporal.txn.persist_projection"
     )]
     pub async fn persist_session_temporal_projection_batch_result(
         &self,
         batch: SessionTemporalProjectionBatchV1,
     ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
-        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
                 .map_err(|error| storage(PERSIST_OPERATION, error))?
@@ -367,7 +367,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             ProjectionProgressBaseline::Empty,
         )
         .await?;
-        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        hotpath::measure_block!("session_temporal.txn.commit", {
             transaction
                 .commit()
                 .await

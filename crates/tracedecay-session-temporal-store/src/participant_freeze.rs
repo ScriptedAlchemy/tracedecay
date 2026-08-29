@@ -470,10 +470,10 @@ struct FrozenWatermarksWire {
     summary_frontier: u64,
 }
 
-#[cfg(all(test, feature = "global-db-harness"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::_harness_placeholder::open_registered_test_database_fixture;
+    use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
     use tempfile::tempdir;
     use tracedecay_domain::{RetrievalGrainV1, TemporalModeV1};
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;

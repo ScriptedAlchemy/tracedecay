@@ -498,13 +498,13 @@ fn canonical_projected_message(
 }
 
 impl GlobalDbHydrationBackend<'_> {
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.hydrate.resolve")]
+    #[hotpath::measure(future = true, label = "session_temporal.hydrate.resolve")]
     async fn resolve_current(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         anchor_id: &RetrievalAnchorId,
     ) -> Result<HydrationResolution, HydrationError> {
-        hotpath::gauge!("global_db.session_temporal.hydration").inc(1u32);
+        hotpath::gauge!("session_temporal.hydration").inc(1u32);
         let control = snapshot.request().execution_control();
         control.checkpoint()?;
         let resolution = resolve_current(
@@ -518,14 +518,14 @@ impl GlobalDbHydrationBackend<'_> {
         Ok(resolution)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.hydrate.read")]
+    #[hotpath::measure(future = true, label = "session_temporal.hydrate.read")]
     async fn read_bounded(
         &self,
         descriptor: &PayloadDescriptor,
         max_bytes: usize,
         control: &ExecutionControl,
     ) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
-        hotpath::gauge!("global_db.session_temporal.hydration").inc(1u32);
+        hotpath::gauge!("session_temporal.hydration").inc(1u32);
         control.checkpoint()?;
         match &descriptor.source {
             PayloadSource::Occurrence {
@@ -1335,7 +1335,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[path = "hydration/graph_relation_tests.rs"]
 mod graph_relation_tests;
 
-#[cfg(all(test, feature = "global-db-harness"))]
+#[cfg(test)]
 mod tests {
     use std::fs;
     use std::future::Future;
@@ -1368,7 +1368,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::_harness_placeholder::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
     use tracedecay_query::temporal::ports::{
         BindingDigest, ExecutionLimits, KernelVersions, TemporalAuthorizedRoot, TemporalPortError,
         TemporalSnapshotRequest, TemporalWatermarks,
@@ -1396,7 +1396,49 @@ mod tests {
         }
     }
 
-    impl HostAdmissionTestRuntimeV1 {
+    trait HostAdmissionHydrationFixture {
+        async fn hydration_read_for_test(&self) -> RegisteredHydrationRead;
+        async fn activate_temporal_generation_for_hydration_test(&self, session_id: &str);
+        async fn seed_session_occurrence_for_test(
+            &self,
+            provider: &str,
+            session_id: &str,
+            observation: &DurableObservationV1,
+            anchor: &RetrievalAnchorRecord,
+            message_id: &str,
+            canonical_payload: &str,
+        );
+        async fn corrupt_hydration_occurrence_message_id_for_test(
+            &self,
+            session_id: &str,
+            message_id: &str,
+        );
+        async fn corrupt_hydration_observation_json_for_test(&self, observation_id: &str);
+        async fn seed_root_hydration_fixture_for_test(
+            &self,
+            provider: &str,
+            observation: &DurableObservationV1,
+            anchor: &RetrievalAnchorRecord,
+            canonical_payload: &str,
+            legacy_projection_poison: &str,
+        );
+        async fn move_hydration_session_outside_root_for_test(
+            &self,
+            provider: &str,
+            session_id: &str,
+        );
+        async fn seed_snapshot_hydration_fixture_for_test(
+            &self,
+            occurrence_observation: &DurableObservationV1,
+            occurrence_anchor: &RetrievalAnchorRecord,
+            summary_anchor: &RetrievalAnchorRecord,
+            authority_anchor: &RetrievalAnchorRecord,
+        );
+        fn hydration_storage_fingerprint_for_test(&self) -> HydrationStorageFingerprint;
+        async fn drift_hydration_anchor_owner_for_test(&self, anchor_id: &RetrievalAnchorId);
+    }
+
+    impl HostAdmissionHydrationFixture for HostAdmissionTestRuntimeV1 {
         async fn hydration_read_for_test(&self) -> RegisteredHydrationRead {
             let database = self
                 .registered_database(HostAdmissionScope::Profile)
@@ -2180,7 +2222,7 @@ mod tests {
     fn checked_in_goal_observation() -> DurableObservationV1 {
         let record_id = ObservationId::new("record.goal.fixture").expect("record");
         let encoded = include_str!(
-            "../../../../tests/fixtures/provider_normalization/codex/thread_goal_updated.expected_envelope.json"
+            "../../../tests/fixtures/provider_normalization/codex/thread_goal_updated.expected_envelope.json"
         )
         .replace("$STABLE_RECORD_ID", record_id.as_str());
         let envelope: CanonicalObservationEnvelopeV1 =

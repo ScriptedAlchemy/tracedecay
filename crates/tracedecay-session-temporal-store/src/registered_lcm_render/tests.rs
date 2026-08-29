@@ -2,7 +2,7 @@ use tempfile::tempdir;
 use tracedecay_domain::RetrievalAnchorId;
 
 use super::*;
-use crate::_harness_placeholder::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
 /// Mirrors the canonical fixture's summary lineage as the relation graph
 /// publishes it: the parent's sources are `[summary-child, raw 12]` and the

@@ -64,7 +64,7 @@ fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCache
     let cache = SESSION_TEMPORAL_HEALTH_CACHE.get_or_init(|| {
         hotpath::mutex!(
             Mutex::new(HashMap::new()),
-            label = "global_db.session_temporal.doctor.cache"
+            label = "session_temporal.doctor.cache"
         )
     });
     let mut cache = cache
@@ -82,7 +82,7 @@ fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCache
     Arc::clone(cache.entry(path.to_path_buf()).or_insert_with(|| {
         Arc::new(hotpath::mutex!(
             tokio::sync::Mutex::new(None),
-            label = "global_db.session_temporal.doctor.lane"
+            label = "session_temporal.doctor.lane"
         ))
     }))
 }
@@ -107,7 +107,7 @@ fn store_file_fingerprint(
 fn session_temporal_store_fingerprint(
     database_path: &Path,
 ) -> std::io::Result<SessionTemporalStoreFingerprint> {
-    hotpath::measure_block!("global_db.session_temporal.doctor.fingerprint", {
+    hotpath::measure_block!("session_temporal.doctor.fingerprint", {
         let Some(database) = store_file_fingerprint(database_path)? else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -124,7 +124,7 @@ fn session_temporal_store_fingerprint(
 }
 
 fn session_temporal_store_family_bytes(database_path: &Path) -> std::io::Result<u64> {
-    hotpath::measure_block!("global_db.session_temporal.doctor.stat", {
+    hotpath::measure_block!("session_temporal.doctor.stat", {
         let database = std::fs::metadata(database_path)?.len();
         let mut wal_path = database_path.as_os_str().to_os_string();
         wal_path.push("-wal");
@@ -674,7 +674,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// retained registered reader pool. Identical requests coalesce behind one
     /// per-store lane and reuse a very short-lived result only while the exact
     /// database/WAL fingerprint remains unchanged.
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.doctor.query")]
+    #[hotpath::measure(future = true, label = "session_temporal.doctor.query")]
     pub async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
         let database_path = self.db_path();
         if !permits_synchronous_session_temporal_health(database_path) {
@@ -715,7 +715,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.session_temporal.doctor.diagnose")]
+#[hotpath::measure(future = true, label = "session_temporal.doctor.diagnose")]
 async fn diagnose_snapshot(conn: &impl crate::handle::SessionTemporalQuery) -> SessionTemporalHealthReport {
     let inventory = match snapshot_schema_inventory(conn).await {
         Ok(inventory) => inventory,
@@ -846,7 +846,7 @@ struct SchemaInventory {
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.doctor.query.inventory"
+    label = "session_temporal.doctor.query.inventory"
 )]
 async fn snapshot_schema_inventory(
     conn: &impl crate::handle::SessionTemporalQuery,
@@ -887,7 +887,7 @@ async fn snapshot_schema_inventory(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.doctor.query.column_shape"
+    label = "session_temporal.doctor.query.column_shape"
 )]
 async fn snapshot_column_shape_drift(
     conn: &impl crate::handle::SessionTemporalQuery,
@@ -923,7 +923,7 @@ fn normalize_sql(sql: &str) -> String {
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.doctor.query.schema_version"
+    label = "session_temporal.doctor.query.schema_version"
 )]
 async fn snapshot_schema_version(
     conn: &impl crate::handle::SessionTemporalQuery,
@@ -938,7 +938,7 @@ async fn snapshot_schema_version(
     rows.next().await?.map(|row| row.get(0)).transpose()
 }
 
-#[hotpath::measure(future = true, label = "global_db.session_temporal.doctor.query.count")]
+#[hotpath::measure(future = true, label = "session_temporal.doctor.query.count")]
 async fn snapshot_count(
     conn: &impl crate::handle::SessionTemporalQuery,
     sql: &str,
@@ -1028,25 +1028,28 @@ fn unavailable_report_with_reason(
 #[inline(always)]
 fn record_session_doctor_cache_hit() {
     #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.session_temporal.doctor.cache_hits").inc(1_u64);
+    hotpath::gauge!("session_temporal.doctor.cache_hits").inc(1_u64);
 }
 
 #[inline(always)]
 fn record_session_doctor_cache_miss() {
     #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.session_temporal.doctor.cache_misses").inc(1_u64);
+    hotpath::gauge!("session_temporal.doctor.cache_misses").inc(1_u64);
 }
 
 #[inline(always)]
 fn record_session_doctor_check() {
     #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.session_temporal.doctor.checks").inc(1_u64);
+    hotpath::gauge!("session_temporal.doctor.checks").inc(1_u64);
 }
 
-#[cfg(all(test, feature = "global-db-harness"))]
+#[cfg(test)]
 mod cache_tests {
     use super::*;
-    use crate::_harness_placeholder::{RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime};
+    use crate::handle::SessionTemporalAccess;
+    use tracedecay_global_db::tests::harness::{
+        RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime,
+    };
 
     #[test]
     fn session_temporal_fingerprint_tracks_database_and_wal_changes() {
@@ -1086,10 +1089,12 @@ mod cache_tests {
             RegisteredGlobalDbHarness::open_without_relation_graph("doctor-unbound-relation-graph")
                 .await;
 
-        let report = harness.registered.session_temporal_doctor_health().await;
+        let report = SessionTemporalAccess::new(&harness.registered)
+            .session_temporal_doctor_health()
+            .await;
 
-        assert_eq!(report.status, SessionTemporalHealthStatus::Partial);
-        assert!(report.findings.contains(&SessionTemporalHealthFinding {
+        assert_eq!(report.status(), SessionTemporalHealthStatus::Partial);
+        assert!(report.findings().contains(&SessionTemporalHealthFinding {
             kind: SessionTemporalHealthFindingKind::RelationGraphUnavailable,
             count: 1,
         }));
@@ -1102,13 +1107,12 @@ mod cache_tests {
             .await
             .expect("registered profile runtime");
 
-        let report = runtime
-            .profile_database()
+        let report = SessionTemporalAccess::new(runtime.profile_database())
             .session_temporal_doctor_health()
             .await;
 
-        assert_eq!(report.status, SessionTemporalHealthStatus::Complete);
-        assert!(!report.findings.iter().any(|finding| {
+        assert_eq!(report.status(), SessionTemporalHealthStatus::Complete);
+        assert!(!report.findings().iter().any(|finding| {
             matches!(
                 finding.kind,
                 SessionTemporalHealthFindingKind::RelationGraphUnavailable

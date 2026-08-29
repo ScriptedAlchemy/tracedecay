@@ -39,7 +39,7 @@ mod records;
 mod rows;
 #[cfg(test)]
 mod semantic_filter_tests;
-#[cfg(all(test, feature = "global-db-harness"))]
+#[cfg(test)]
 mod tests;
 
 use super::projection::observation_envelope_from_payload;
@@ -967,7 +967,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(batch)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.query.candidates")]
+    #[hotpath::measure(future = true, label = "session_temporal.query.candidates")]
     async fn produce_candidates(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1134,7 +1134,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(PageStatus::Complete)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.query.records")]
+    #[hotpath::measure(future = true, label = "session_temporal.query.records")]
     async fn produce_records(
         &self,
         scope: &TemporalRetrievalScope,

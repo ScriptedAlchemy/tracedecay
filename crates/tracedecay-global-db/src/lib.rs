@@ -124,7 +124,8 @@ pub use registered::{
     MAX_PENDING_RECEIPTED_DELIVERIES_V1, MAX_WORK_ATTEMPT_DELIVERY_FANOUTS_V1,
     PendingDeliverySourceReceiptV1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
     RegisteredGlobalDbOwnerV1, RegisteredGlobalDbWeakLeaseIssuerV1,
-    RegisteredGlobalDbWriteTransaction, RegisteredWorkApplicationServicesV1,
+    RegisteredGlobalDbWriteTransaction, RegisteredGlobalDbWriterConnection,
+    RegisteredWorkApplicationServicesV1,
     RegisteredWorkProductServicesV1, RegisteredWorkflowApplicationServicesV1,
     WorkAttemptDeliveryCensusReadV1,
 };

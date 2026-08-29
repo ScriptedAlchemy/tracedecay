@@ -72,7 +72,7 @@ async fn session_summary_ids(
     Ok(ids)
 }
 
-#[hotpath::measure(future = true, label = "global_db.session_temporal.describe")]
+#[hotpath::measure(future = true, label = "session_temporal.describe")]
 pub(super) async fn describe(
     snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmDescribeRequest,
@@ -137,7 +137,7 @@ pub(super) async fn describe(
     })
 }
 
-#[hotpath::measure(future = true, label = "global_db.session_temporal.expand")]
+#[hotpath::measure(future = true, label = "session_temporal.expand")]
 pub(super) async fn expand(
     snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmExpandRequest,
@@ -1008,6 +1008,6 @@ async fn next_row(
         .map_err(|error| LcmError::Db(error.to_string()))
 }
 
-#[cfg(all(test, feature = "global-db-harness"))]
+#[cfg(test)]
 #[path = "registered_lcm_render/tests.rs"]
 mod tests;

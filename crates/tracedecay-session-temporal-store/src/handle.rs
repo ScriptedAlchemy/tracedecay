@@ -110,12 +110,3 @@ impl<D: SessionTemporalRegisteredDb + ?Sized> std::ops::Deref for SessionTempora
         self.0
     }
 }
-
-/// Ergonomic constructor so callers can write `db.session_temporal().method()`.
-pub trait SessionTemporalDbExt: SessionTemporalRegisteredDb {
-    fn session_temporal(&self) -> SessionTemporalAccess<'_, Self> {
-        SessionTemporalAccess::new(self)
-    }
-}
-
-impl<T: SessionTemporalRegisteredDb + ?Sized> SessionTemporalDbExt for T {}

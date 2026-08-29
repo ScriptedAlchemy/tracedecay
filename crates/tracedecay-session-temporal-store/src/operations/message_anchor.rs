@@ -306,7 +306,7 @@ async fn publishing_scope(
         .map_err(|_| LcmError::SummarySourceNotOwnedBySession)
 }
 
-#[cfg(all(test, feature = "global-db-harness"))]
+#[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
     use tempfile::tempdir;
@@ -320,13 +320,13 @@ mod tests {
         SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
         SessionId, UserProfileId, UtcMicros,
     };
-    use tracedecay_runtime_core::db::engine::{Executor, params};
+    use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::lcm::types::{
         LcmError, LcmImmutableSummaryPublication, LcmSourceRef, LcmSummaryNodeDraft,
     };
 
     use crate::relations::{SessionRelationProjection, SessionRelationScope};
-    use crate::_harness_placeholder::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
         SanitizationReceiptV1::new(

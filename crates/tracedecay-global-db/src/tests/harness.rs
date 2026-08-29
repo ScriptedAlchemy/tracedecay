@@ -534,9 +534,9 @@ impl RegisteredGlobalDbHarness {
 #[doc(hidden)]
 pub use tracedecay_sessions::admission::HostAdmissionScope;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SessionTemporalFixtureCountV1 {
+pub enum SessionTemporalFixtureCountV1 {
     ProjectionReceipts,
     Occurrences,
     Assertions,
@@ -741,8 +741,8 @@ impl HostAdmissionTestRuntimeV1 {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn observation_store(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn observation_store(
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_runtime_core::errors::Result<crate::GlobalDbObservationStore> {
@@ -892,8 +892,8 @@ impl HostAdmissionTestRuntimeV1 {
             )
     }
 
-    #[cfg(test)]
-    pub(crate) fn session_temporal_store_for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn session_temporal_store_for_test(
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_runtime_core::errors::Result<
@@ -926,8 +926,8 @@ impl HostAdmissionTestRuntimeV1 {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) async fn session_temporal_fixture_count_for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn session_temporal_fixture_count_for_test(
         &self,
         scope: HostAdmissionScope,
         kind: SessionTemporalFixtureCountV1,
@@ -957,8 +957,8 @@ impl HostAdmissionTestRuntimeV1 {
         row.get(0).map_err(Into::into)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn lcm_describe_for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn lcm_describe_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmDescribeRequest,
     ) -> Result<
@@ -968,8 +968,8 @@ impl HostAdmissionTestRuntimeV1 {
         self.profile_registered.lcm_describe(request).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn lcm_expand_for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn lcm_expand_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmExpandRequest,
     ) -> Result<
@@ -979,8 +979,8 @@ impl HostAdmissionTestRuntimeV1 {
         self.profile_registered.lcm_expand(request).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn seed_lcm_render_fixture_for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn seed_lcm_render_fixture_for_test(
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_runtime_core::errors::Result<()> {
@@ -1102,7 +1102,7 @@ impl HostAdmissionTestRuntimeV1 {
 /// the payload sanitizer binds at ingest, so a seeded raw row satisfies
 /// `verify_raw_message_receipt`. Returns a SQL-escaped literal ready to embed
 /// directly in a fixture `INSERT`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 fn lcm_render_fixture_sanitization_metadata(
     content: &str,
 ) -> tracedecay_runtime_core::errors::Result<String> {
@@ -1453,8 +1453,8 @@ async fn open_registered_test_database_with_identity(
 /// sealed schema installation, owner migration, and client issuance route as
 /// production admission. Tests may use engine fixtures for post-admission
 /// corruption setup, but never install the registered schema directly.
-#[cfg(test)]
-pub(crate) async fn open_registered_test_database_fixture(
+#[cfg(any(test, feature = "test-helpers"))]
+pub async fn open_registered_test_database_fixture(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
 ) -> tracedecay_runtime_core::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>

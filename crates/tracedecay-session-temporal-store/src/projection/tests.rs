@@ -32,7 +32,9 @@ use super::materialize::*;
 use super::persist::persist_occurrences;
 use super::record_canonical_observation_effect;
 use crate::GlobalDbSessionTemporalStore;
-use crate::_harness_placeholder::{
+use crate::handle::SessionTemporalRegisteredDb;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
     open_registered_test_database_fixture,
 };
@@ -82,14 +84,62 @@ impl<T: Executor> Executor for QueryCountingConnection<'_, T> {
     }
 }
 
+impl<T: crate::handle::SessionTemporalQuery> crate::handle::SessionTemporalQuery
+    for QueryCountingConnection<'_, T>
+{
+    fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> impl std::future::Future<
+        Output = Result<Rows, tracedecay_runtime_core::db::engine::Error>,
+    > + Send
+    where
+        P: IntoParams + Send,
+    {
+        self.queries.fetch_add(1, Ordering::Relaxed);
+        crate::handle::SessionTemporalQuery::query(self.inner, sql, params)
+    }
+}
+
+impl<T: crate::handle::SessionTemporalExec> crate::handle::SessionTemporalExec
+    for QueryCountingConnection<'_, T>
+{
+    fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> impl std::future::Future<
+        Output = Result<u64, tracedecay_runtime_core::db::engine::Error>,
+    > + Send
+    where
+        P: IntoParams + Send,
+    {
+        crate::handle::SessionTemporalExec::execute(self.inner, sql, params)
+    }
+
+    fn execute_batch(
+        &self,
+        sql: &str,
+    ) -> impl std::future::Future<
+        Output = Result<(), tracedecay_runtime_core::db::engine::Error>,
+    > + Send {
+        crate::handle::SessionTemporalExec::execute_batch(self.inner, sql)
+    }
+}
+
 fn fixture_session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
 }
 
-fn temporal_store(runtime: &HostAdmissionTestRuntimeV1) -> GlobalDbSessionTemporalStore<'_> {
-    runtime
-        .session_temporal_store_for_test(HostAdmissionScope::Profile)
-        .expect("registered profile session-temporal store")
+fn temporal_store(
+    runtime: &HostAdmissionTestRuntimeV1,
+) -> GlobalDbSessionTemporalStore<'_, RegisteredGlobalDb> {
+    GlobalDbSessionTemporalStore::new(
+        runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile session-temporal store"),
+    )
 }
 
 fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
@@ -264,7 +314,7 @@ fn fixture_observation_from_facts(
 fn fixture_goal_observation() -> (DurableObservationV1, AnchoredObservationWrite) {
     let record_id = ObservationId::new("record.goal.fixture").unwrap();
     let encoded = include_str!(
-        "../../../../../tests/fixtures/provider_normalization/codex/thread_goal_updated.expected_envelope.json"
+        "../../../../tests/fixtures/provider_normalization/codex/thread_goal_updated.expected_envelope.json"
     )
     .replace("$STABLE_RECORD_ID", record_id.as_str());
     let envelope: CanonicalObservationEnvelopeV1 = serde_json::from_str(&encoded).unwrap();
@@ -1589,10 +1639,11 @@ async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
         .registered_database(HostAdmissionScope::Profile)
         .unwrap();
     let snapshot = database.read_snapshot().await.unwrap();
-    let (scope, relation_store) = database.session_relation_store().unwrap();
+    let (scope, relation_store) =
+        SessionTemporalRegisteredDb::session_relation_store(database).unwrap();
     let projection = super::super::relation_projection::reconstruct_session_relation_projection(
         &snapshot,
-        scope,
+        &scope,
         &session_id,
         batch.generation(),
         100,
@@ -1604,7 +1655,7 @@ async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
     relation_store.replace(&projection).unwrap();
     let loaded = relation_store
         .load_projection(
-            scope,
+            &scope,
             &session_id,
             batch.generation().value(),
             100,

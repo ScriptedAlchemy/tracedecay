@@ -6535,6 +6535,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-capture",
  "tracedecay-domain",
+ "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-query",
  "tracedecay-runtime-core",

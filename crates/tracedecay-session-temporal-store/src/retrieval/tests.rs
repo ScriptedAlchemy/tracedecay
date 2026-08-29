@@ -9,7 +9,7 @@ use super::cursors::*;
 use super::queries::*;
 use super::records::*;
 use super::*;
-use crate::_harness_placeholder::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
     engine::{Connection, Executor, TestConnection, Value as SqlValue},
@@ -398,7 +398,18 @@ impl RegisteredTemporalRead {
     }
 }
 
-impl HostAdmissionTestRuntimeV1 {
+trait HostAdmissionRetrievalFixture {
+    async fn retrieval_read_for_test(&self) -> RegisteredTemporalRead;
+    async fn activate_temporal_generation_for_retrieval_test(&self, session_id: &str, generation: u64);
+    async fn seed_candidate_query_fixture_for_test(&self);
+    async fn seed_cross_session_record_fixture_for_test(&self);
+    async fn seed_derived_record_fixture_for_test(&self);
+    async fn seed_oversized_record_fixture_for_test(&self);
+    async fn seed_provider_summary_fixture_for_test(&self);
+    async fn seed_historical_summary_successor_fixture_for_test(&self);
+}
+
+impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
     async fn retrieval_read_for_test(&self) -> RegisteredTemporalRead {
         let database = self
             .registered_database(HostAdmissionScope::Profile)
