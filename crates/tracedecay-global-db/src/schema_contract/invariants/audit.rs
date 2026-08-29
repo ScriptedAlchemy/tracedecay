@@ -2278,6 +2278,16 @@ mod tests {
                 .filter(|sql| sql.contains(needle))
                 .count()
         }
+
+        fn statement_containing(&self, needle: &str) -> String {
+            self.statements
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|sql| sql.contains(needle))
+                .cloned()
+                .unwrap_or_else(|| panic!("no captured statement contained {needle:?}"))
+        }
     }
 
     impl<T: QueryExecutor> QueryExecutor for CountingSnapshot<'_, T> {
@@ -2444,6 +2454,41 @@ mod tests {
             counting.issued("SELECT provenance.observation_id, provenance.output_ordinal"),
             1,
             "provenance rows must be read once per page"
+        );
+
+        let authority_sql =
+            counting.statement_containing("MAX(provenance.message_created) AS projector_owned");
+        let requested = serde_json::to_string(&[serde_json::json!({
+            "provider": "codex",
+            "message_id": "message.record.audit-batch-0"
+        })])
+        .unwrap();
+        let mut rows = snapshot
+            .query(
+                &format!("EXPLAIN QUERY PLAN {authority_sql}"),
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, requested],
+            )
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            plan.push(row.get::<String>(3).unwrap());
+        }
+        assert!(
+            plan.iter().any(|detail| {
+                detail.contains("idx_observation_projection_provenance_output")
+                    && detail.contains(
+                        "projector_version=? AND output_provider=? AND output_message_id=?",
+                    )
+            }),
+            "authority lookup must seek each requested output through the exact index: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|detail| {
+                detail.contains("idx_observation_projection_provenance_output")
+                    && detail.ends_with("(projector_version=?)")
+            }),
+            "authority lookup regressed to a projector-wide provenance scan: {plan:?}"
         );
         // The per-row baseline this replaced spent fifteen reads on every
         // projected message; the batched path must stay comfortably under ten.
