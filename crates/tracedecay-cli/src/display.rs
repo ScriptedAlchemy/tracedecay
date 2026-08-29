@@ -6,7 +6,9 @@
 use std::fmt::Write as _;
 
 use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1;
-use tracedecay_runtime_core::text::{format_number, format_relative_time, format_token_count};
+use tracedecay_runtime_core::text::{
+    format_bytes, format_number, format_relative_time, format_token_count,
+};
 use tracedecay_runtime_core::timeutil::format_yyyy_mm_dd;
 use tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot;
 
@@ -207,7 +209,7 @@ fn shuffle_flags(flags: &[String]) -> Vec<String> {
 
 /// Print the top title row: version (left) + country flags (right).
 fn print_version_flags_row(country_flags: &[String], inner_width: usize) {
-    let version = crate::version::build_version();
+    let version = tracedecay::version::build_version();
     let title = format!("   TraceDecay v{version}");
     let title_display_width = title.len();
     let available = inner_width.saturating_sub(2);
