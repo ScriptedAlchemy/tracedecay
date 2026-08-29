@@ -166,7 +166,7 @@ pub fn run(command: RemoteCommand) -> Result<()> {
 fn run_status(json: bool) -> Result<()> {
     let status = hotpath::measure_block!(
         "serve.remote.status.read",
-        crate::daemon::live_remote_operational_status()?
+        tracedecay::daemon::live_remote_operational_status()?
     );
     if json {
         print!("{}", status_json_line(&status)?);
@@ -320,7 +320,7 @@ fn caller_local_spool_evidence(
     ) {
         return None;
     }
-    match crate::daemon::live_remote_operational_status() {
+    match tracedecay::daemon::live_remote_operational_status() {
         Ok(RemoteOperationalStatusReadV1::Observed { status, .. }) => Some(status.spool),
         Ok(
             RemoteOperationalStatusReadV1::Unconfigured

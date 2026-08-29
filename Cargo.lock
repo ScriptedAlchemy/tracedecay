@@ -6091,6 +6091,7 @@ dependencies = [
  "tracedecay-lsp",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracedecay-sdk",
  "tracedecay-sessions",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",

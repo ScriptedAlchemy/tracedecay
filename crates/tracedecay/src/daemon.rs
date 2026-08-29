@@ -228,7 +228,7 @@ mod graph_resolution;
 pub(crate) mod native_integration;
 use graph_resolution::retained_project_server_resolver;
 mod http_application;
-pub(crate) use http_application::live_remote_operational_status;
+pub use http_application::live_remote_operational_status;
 mod http_application_router;
 pub(crate) mod remote_protocol;
 mod remote_query;
