@@ -587,7 +587,9 @@ pub fn ingest_refusal_read_from_censuses(
         std::collections::BTreeMap::new();
     for census in censuses {
         match census {
-            tracedecay_global_db::observation::ObservationRefusalCensusV1::Observed { refusals } => {
+            tracedecay_global_db::observation::ObservationRefusalCensusV1::Observed {
+                refusals,
+            } => {
                 for refusal in refusals {
                     let key = (refusal.provider.clone(), refusal.reason.clone());
                     let entry = merged.entry(key).or_insert(0);
@@ -675,7 +677,10 @@ fn orphan_store_findings_from_census(
     now: i64,
 ) -> DoctorStorageFamilyReadV1 {
     let classified = tracedecay_maintenance::retention::orphan_stores::classify_stores(census, now);
-    let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(classified, retention_secs);
+    let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
+        classified,
+        retention_secs,
+    );
     storage_family_read(
         plan.collect
             .iter()
@@ -1549,9 +1554,9 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 Err(_) => HostIntegrationReadV1::Unknown,
             };
             let inputs = DoctorKernelInputsV1 {
-                configuration: configuration_read_from_pin::<tracedecay_runtime_core::errors::TraceDecayError>(
-                    &pinned,
-                ),
+                configuration: configuration_read_from_pin::<
+                    tracedecay_runtime_core::errors::TraceDecayError,
+                >(&pinned),
                 runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {
                     serving: true,
                     startup_converged: graph_authority_current && registered_authority_current,

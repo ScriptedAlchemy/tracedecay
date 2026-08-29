@@ -124,7 +124,7 @@ pub fn snapshot_cursor_after(
 /// offsets. `max_new_bytes` is one logical source-byte budget for the complete
 /// sweep.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.observation.capture_snapshot", future = true)]
 pub async fn capture_snapshot_observations<R, D, B, L>(
     facade: &dyn HostAdmission,
     provider: &'static str,

@@ -194,7 +194,7 @@ mod tests {
             guard.record_panic(now, 7);
         }
 
-        let far_future = now + Duration::from_secs(86_400);
+        let far_future = now + Duration::from_hours(24);
         assert!(
             guard.suppresses_pass(far_future, 7),
             "unchanged input must stay quarantined however long the wait"

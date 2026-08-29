@@ -14,7 +14,8 @@ use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 
 use super::{
     CommittedRetrievalProfileStateV1, SemanticActivationReceiptV1,
-    SemanticRetainedVectorGenerationsV1, project_semantic_production_runtime,
+    SemanticCurrentLinkedActivationV1, SemanticRetainedVectorGenerationsV1,
+    project_semantic_production_runtime,
 };
 
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
@@ -90,7 +91,7 @@ impl SemanticRedundancyProfileV1 {
 struct SemanticRedundancyAuthorityV1 {
     scope_digest: ManifestDigest,
     accepted_profile_digest: ManifestDigest,
-    pins: SemanticCompatibilityPinsV1,
+    activation: SemanticCurrentLinkedActivationV1,
     calibration_digest: ManifestDigest,
     redundancy_profile_digest: ManifestDigest,
 }
@@ -181,7 +182,7 @@ pub fn project_committed_semantic_pins(project_root: &Path) -> Option<SemanticCo
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
         .and_then(|state| state.authority.as_ref())
-        .map(|authority| authority.pins.clone())
+        .map(|authority| authority.activation.compatibility.clone())
 }
 
 /// Durable Ready receipt last installed for this project, if any.
@@ -192,15 +193,23 @@ pub fn project_committed_semantic_pins(project_root: &Path) -> Option<SemanticCo
 pub fn project_semantic_activation_receipt(
     project_root: &Path,
 ) -> Option<SemanticActivationReceiptV1> {
+    with_project_semantic_activation_receipt(project_root, |receipt| receipt)
+}
+
+pub(crate) fn with_project_semantic_activation_receipt<T>(
+    project_root: &Path,
+    reader: impl FnOnce(Option<SemanticActivationReceiptV1>) -> T,
+) -> T {
     let activation = project_semantic_activation_gate(project_root);
     let _activation = activation
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    redundancy_states()
+    let receipt = redundancy_states()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
-        .and_then(|state| state.activation_receipt.clone())
+        .and_then(|state| state.activation_receipt.clone());
+    reader(receipt)
 }
 
 pub fn project_semantic_retained_vector_generations(
@@ -457,10 +466,10 @@ async fn read_project_semantic_redundancy_generation(
             .and_then(|state| state.authority.clone())?
     };
     let vectors = project_semantic_production_runtime(project_root)?
-        .active_vector_generation(&authority.pins)
+        .active_vector_generation(&authority.activation.compatibility)
         .await?;
-    if vectors.generation_id() != &authority.pins.vector_generation_id
-        || vectors.embedding_key() != &authority.pins.projection
+    if vectors.generation_id() != &authority.activation.compatibility.vector_generation_id
+        || vectors.embedding_key() != &authority.activation.compatibility.projection
         || vectors.embedding_key().embedding_key().metric != EmbeddingMetricV1::Cosine
     {
         return None;
@@ -524,14 +533,19 @@ async fn read_project_semantic_redundancy_generation(
             scope_digest: authority.scope_digest.as_str().to_owned(),
             accepted_profile_digest: authority.accepted_profile_digest.as_str().to_owned(),
             calibration_profile_id: authority
-                .pins
+                .activation
+                .compatibility
                 .calibration
                 .calibration_profile_id
                 .as_str()
                 .to_owned(),
             calibration_digest: authority.calibration_digest.as_str().to_owned(),
             redundancy_profile_digest: authority.redundancy_profile_digest.as_str().to_owned(),
-            maximum_distance_micros: authority.pins.calibration.maximum_distance_micros,
+            maximum_distance_micros: authority
+                .activation
+                .compatibility
+                .calibration
+                .maximum_distance_micros,
         },
         vectors: admitted,
     })
@@ -569,7 +583,7 @@ fn redundancy_authority_from_committed(
     Some(SemanticRedundancyAuthorityV1 {
         scope_digest: committed.scope.scope_digest.clone(),
         accepted_profile_digest,
-        pins: pins.clone(),
+        activation: activation.clone(),
         calibration_digest,
         redundancy_profile_digest,
     })
@@ -579,6 +593,179 @@ fn redundancy_authority_from_committed(
 mod tests {
     use super::project_semantic_activation_gate;
     use std::path::Path;
+
+    /// End-to-end status coherence: a concurrent activation that mutates the
+    /// receipt under the project activation gate is never interleaved into
+    /// the public status snapshot. The reader waits behind the gate, then
+    /// observes the post-mutation truth instead of pairing a stale Ready
+    /// receipt with the newer registry state.
+    #[tokio::test]
+    async fn application_status_observes_activation_mutations_coherently() {
+        use super::{SemanticProjectRedundancyStateV1, redundancy_states};
+        use crate::semantic_runtime::{
+            SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticActivationRequestV1,
+            SemanticConfigurationPinV1, SemanticFallbackReasonV1,
+            SemanticRetainedVectorGenerationsV1, SemanticRuntimeStateV1,
+            project_semantic_application_status, register_project_semantic_runtime,
+            unregister_project_semantic_runtime,
+        };
+        use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
+        use tracedecay_domain::{
+            CodeGenerationId, ManifestDigest, UtcMicros, VectorGenerationIdV1,
+        };
+        use tracedecay_semantic::{
+            DaemonSemanticRuntimeHandleV1, PreparedSemanticRuntimeCommitV1,
+            SemanticGenerationPointerV1, SemanticRuntimeWorkV1,
+        };
+
+        let project_root = Path::new("/tmp/tracedecay-activation-snapshot-gate").to_path_buf();
+        let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("handle");
+        let generation = VectorGenerationIdV1::new(
+            tracedecay_domain::canonical_sha256(&("redundancy.snapshot-gate.vector", 's'))
+                .expect("vector generation digest"),
+        );
+        let published = SemanticGenerationPointerV1 {
+            generation: generation.clone(),
+            source_generation: CodeGenerationId::new("code-generation.snapshot-gate")
+                .expect("source generation"),
+            projection_key: tracedecay_semantic::session_pool::test_support::authority()
+                .projection()
+                .projection_key()
+                .clone(),
+        };
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            CodeGenerationId::new("code-generation.snapshot-gate").expect("source generation"),
+            1,
+            move |_progress| async move {
+                Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
+                    Ok(published)
+                }))
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while handle.current().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("current generation published");
+        register_project_semantic_runtime(project_root.clone(), handle);
+
+        let pin = SemanticConfigurationPinV1 {
+            revision_id: ConfigurationRevisionId::try_from(
+                "configuration.revision.snapshot-gate".to_owned(),
+            )
+            .expect("configuration revision"),
+            snapshot_id: ConfigurationSnapshotId::try_from(
+                "configuration.snapshot.snapshot-gate".to_owned(),
+            )
+            .expect("configuration snapshot"),
+            effective_behavior_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+                .expect("configuration digest"),
+        };
+        let receipt = SemanticActivationReceiptV1::issue(
+            &SemanticActivationCommandV1::new(
+                pin.clone(),
+                SemanticActivationRequestV1::new(generation, None, None)
+                    .expect("activation request"),
+            )
+            .expect("activation command"),
+            UtcMicros(10),
+        )
+        .expect("durable activation receipt");
+        redundancy_states()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root.clone(),
+                SemanticProjectRedundancyStateV1 {
+                    revision: ConfigurationRevisionId::try_from(
+                        "configuration.revision.snapshot-gate".to_owned(),
+                    )
+                    .expect("configuration revision"),
+                    roots: SemanticRetainedVectorGenerationsV1::default(),
+                    authority: None,
+                    activation_receipt: Some(receipt.clone()),
+                },
+            );
+
+        let ready = project_semantic_application_status(&project_root, Some(pin.clone()))
+            .expect("mounted status");
+        assert_eq!(
+            ready.state,
+            SemanticRuntimeStateV1::Current {
+                receipt: receipt.clone()
+            },
+            "the durable receipt pairs with the current scheduler generation"
+        );
+
+        let gate = project_semantic_activation_gate(&project_root);
+        let activation_guard = gate.lock().expect("activation gate");
+        let (status_tx, status_rx) = std::sync::mpsc::channel();
+        let reader_root = project_root.clone();
+        let reader_pin = pin.clone();
+        let reader = std::thread::spawn(move || {
+            let status = project_semantic_application_status(&reader_root, Some(reader_pin));
+            status_tx.send(status).expect("deliver raced status");
+        });
+        assert!(
+            status_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "the status snapshot must wait for the concurrent activation's gate"
+        );
+        redundancy_states()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&project_root)
+            .expect("redundancy state")
+            .activation_receipt = None;
+        drop(activation_guard);
+        let raced = status_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("status after the activation gate releases")
+            .expect("mounted status");
+        assert!(
+            matches!(
+                raced.state,
+                SemanticRuntimeStateV1::Degraded {
+                    reason: SemanticFallbackReasonV1::InvalidRuntimeStatus,
+                    ..
+                }
+            ),
+            "the snapshot must observe the concurrent clearing, never a stale Ready pairing"
+        );
+        reader.join().expect("status reader thread");
+        unregister_project_semantic_runtime(&project_root);
+    }
+
+    #[test]
+    fn activation_receipt_snapshot_holds_the_project_gate_for_its_reader() {
+        use std::sync::{Arc, Barrier};
+
+        let project_root = Path::new("/fast/tmp/tracedecay-semantic-status-snapshot");
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let reader = {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                super::with_project_semantic_activation_receipt(project_root, |_| {
+                    entered.wait();
+                    release.wait();
+                });
+            })
+        };
+
+        entered.wait();
+        let activation = project_semantic_activation_gate(project_root);
+        assert!(
+            activation.try_lock().is_err(),
+            "the receipt and scheduler projection must share one activation snapshot"
+        );
+        release.wait();
+        reader.join().expect("activation snapshot reader");
+    }
 
     #[test]
     fn activation_in_one_project_does_not_block_another_projects_reads() {

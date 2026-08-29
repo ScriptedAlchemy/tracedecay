@@ -1242,14 +1242,15 @@ struct TestHostConfigWritePause {
 }
 
 #[cfg(test)]
+type TestHostConfigWritePauseEntry = (
+    PathBuf,
+    TestHostConfigWriteBoundary,
+    std::sync::Weak<TestHostConfigWritePause>,
+);
+
+#[cfg(test)]
 static TEST_HOST_CONFIG_WRITE_PAUSES: std::sync::LazyLock<
-    std::sync::Mutex<
-        Vec<(
-            PathBuf,
-            TestHostConfigWriteBoundary,
-            std::sync::Weak<TestHostConfigWritePause>,
-        )>,
-    >,
+    std::sync::Mutex<Vec<TestHostConfigWritePauseEntry>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 #[cfg(test)]

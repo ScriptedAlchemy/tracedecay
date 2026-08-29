@@ -3,9 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_store::ProjectId;
 
 use super::{MovedStoreAdoption, TraceDecay, TraceDecayOpenOptions};
@@ -124,8 +124,8 @@ impl TraceDecay {
 
         let mut roots = Vec::new();
         for candidate in candidates {
-            let candidate =
-                tracedecay_runtime_core::worktree::repository_identity_root(&candidate).unwrap_or(candidate);
+            let candidate = tracedecay_runtime_core::worktree::repository_identity_root(&candidate)
+                .unwrap_or(candidate);
             let Ok(canonical) = candidate.canonicalize() else {
                 continue;
             };
@@ -168,8 +168,9 @@ impl TraceDecay {
         // A non-git root persists nothing — its identity is deterministic
         // from the canonical path with the registry as the durable home.
         // Nothing is ever written into the working tree.
-        let enrollment_root = tracedecay_runtime_core::worktree::repository_identity_root(project_root)
-            .unwrap_or_else(|| project_root.to_path_buf());
+        let enrollment_root =
+            tracedecay_runtime_core::worktree::repository_identity_root(project_root)
+                .unwrap_or_else(|| project_root.to_path_buf());
         match enrollment_root.canonicalize() {
             Ok(canonical) => {
                 if storage::read_repository_identity_marker(&canonical)?.is_none() {
@@ -230,8 +231,9 @@ impl TraceDecay {
         // legacy file is never consulted again. The file itself is left
         // untouched — users may delete it.
         if selected.is_none() {
-            let enrollment_root = tracedecay_runtime_core::worktree::repository_identity_root(project_root)
-                .unwrap_or_else(|| project_root.to_path_buf());
+            let enrollment_root =
+                tracedecay_runtime_core::worktree::repository_identity_root(project_root)
+                    .unwrap_or_else(|| project_root.to_path_buf());
             if let Some(marker) = storage::read_legacy_enrollment_marker(&enrollment_root)?
                 && marker.storage_mode == storage::StorageMode::ProfileSharded
             {

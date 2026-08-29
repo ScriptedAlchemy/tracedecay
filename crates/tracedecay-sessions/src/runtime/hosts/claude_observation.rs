@@ -760,7 +760,7 @@ where
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.hosts.claude.drain_projection", future = true)]
 pub async fn drain_projection_queue<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
@@ -868,7 +868,7 @@ async fn advance_source_frontier<A: HostAdmission + ?Sized>(
 }
 
 /// Ingest one Claude source through caller-prepared project admission authority.
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.hosts.claude.ingest_source", future = true)]
 pub async fn ingest_source_with_observations_with_admission<A>(
     source: &ClaudeSource,
     project_root: &Path,

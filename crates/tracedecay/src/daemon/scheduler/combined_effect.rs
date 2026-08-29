@@ -19,8 +19,8 @@ use crate::daemon::automation_effect::{
     DeferredProblemSettlementRequest, DeferredRunSettlementRequest, DeferredSettlementOutcome,
     DeferredSettlementRequest,
 };
-use tracedecay_runtime_core::errors::Result;
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::Result;
 
 pub(super) enum CombinedEffectAdmission {
     Execute {
@@ -124,9 +124,11 @@ fn failed_leg_terminal(
         })),
         None => DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
             error: error
-                .unwrap_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: fallback_message,
-                })
+                .unwrap_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: fallback_message,
+                    },
+                )
                 .into(),
         })),
     }
@@ -776,7 +778,8 @@ async fn run_execute_pair(
                     error: error.into(),
                 })),
                 DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                    error: tracedecay_runtime_core::errors::TraceDecayError::Config { message }.into(),
+                    error: tracedecay_runtime_core::errors::TraceDecayError::Config { message }
+                        .into(),
                 })),
                 PairResultOrder::ReflectorFirst,
                 PairResultMode::Handled,

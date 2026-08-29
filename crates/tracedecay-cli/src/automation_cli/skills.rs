@@ -128,10 +128,11 @@ fn deploy_skills_to_current_project(
 ) -> tracedecay_runtime_core::errors::Result<
     tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploymentReceipt,
 > {
-    let current =
-        std::env::current_dir().map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+    let current = std::env::current_dir().map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("resolve current project for managed-skill deployment: {error}"),
-        })?;
+        }
+    })?;
     let project_root =
         tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(&current);
     Ok(

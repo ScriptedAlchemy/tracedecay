@@ -19,8 +19,7 @@ pub fn shard_manifest(
 ) -> GraphGenerationManifest {
     let projection = GraphProjectionIdentity::new(
         GraphNamespace::new("benchmark-code").expect("benchmark namespace is valid"),
-        GraphProjectionId::new(format!("shard-{shard:03}"))
-            .expect("benchmark projection is valid"),
+        GraphProjectionId::new(format!("shard-{shard:03}")).expect("benchmark projection is valid"),
     );
     let identity = |index: usize| format!("symbol:{shard:03}:{index:06}");
     let entities = (0..entity_count)

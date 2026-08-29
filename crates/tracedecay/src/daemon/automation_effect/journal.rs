@@ -1222,8 +1222,12 @@ pub(super) fn replace_automation_file_atomically(
         temporary_file.sync_all()?;
         drop(temporary_file);
     }
-    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(temporary, destination, record_name)
-        .map_err(std::io::Error::other)?;
+    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
+        temporary,
+        destination,
+        record_name,
+    )
+    .map_err(std::io::Error::other)?;
     #[cfg(windows)]
     tracedecay_runtime_core::windows_security::validate_private_file(destination)?;
     Ok(())

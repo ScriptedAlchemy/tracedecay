@@ -26,14 +26,14 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use crate::tracedecay::TraceDecay;
+use tracedecay_domain::SourceSpan;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_runtime_core::redundancy::{
     Fingerprint, RedundancyMatchScore, body_token_window, compute_fingerprint, parse_file,
     redundancy_match_score, round4,
 };
-use crate::tracedecay::TraceDecay;
-use tracedecay_domain::SourceSpan;
 use tracedecay_usecases::semantic_runtime::{
     SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,
 };
@@ -1186,8 +1186,8 @@ mod tests {
         find_redundant_pairs, is_generated_path, nodes_overlap, redundancy_output, semantic_cosine,
         semantic_pairs,
     };
-    use tracedecay_runtime_core::redundancy::{Fingerprint, RedundancyMatchScore};
     use tracedecay_domain::SourceSpan;
+    use tracedecay_runtime_core::redundancy::{Fingerprint, RedundancyMatchScore};
     use tracedecay_usecases::semantic_runtime::{
         SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
     };
@@ -1843,9 +1843,10 @@ mod tests {
 
     #[test]
     fn redacted_code_source_span_is_valid_against_the_raw_file() {
-        if tracedecay_code_extraction::ts_provider::language("rust").is_err() {
-            panic!("rust grammar must be available to prove the span-units regression");
-        }
+        assert!(
+            tracedecay_code_extraction::ts_provider::language("rust").is_ok(),
+            "rust grammar must be available to prove the span-units regression"
+        );
         let secret = ["sk", "-test-", "1234567890abcdef"].concat();
         let raw = format!("const TOKEN: &str = \"{secret}\";\n{}", after_secret_body());
         let sanitized = tracedecay_runtime_core::privacy::sanitize_code_source_bytes(
@@ -1899,9 +1900,10 @@ mod tests {
 
     #[test]
     fn shortened_raw_file_is_still_typed_stale() {
-        if tracedecay_code_extraction::ts_provider::language("rust").is_err() {
-            panic!("rust grammar must be available to prove genuine staleness still refuses");
-        }
+        assert!(
+            tracedecay_code_extraction::ts_provider::language("rust").is_ok(),
+            "rust grammar must be available to prove genuine staleness still refuses"
+        );
         let body = after_secret_body();
         let temp = tempfile::tempdir().unwrap();
         let src_dir = temp.path().join("src");

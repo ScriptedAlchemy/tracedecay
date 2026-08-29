@@ -1207,7 +1207,7 @@ impl CodexSource {
     /// Advances one bounded retained discovery slice and resolves the exact
     /// rollout filename used by a Codex hook event. Repeated calls continue the
     /// same iterator instead of rereading the corpus prefix.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "sessions.hosts.codex.find_session")]
     pub(crate) fn find_session_transcript_paths_bounded(
         &self,
         session_id: &str,
@@ -1550,7 +1550,7 @@ impl CodexSource {
     /// Bounded discovery for long-lived schedulers. The caller must
     /// acknowledge only after every returned path was dispositioned and any
     /// advanced durable frontier was persisted.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "sessions.hosts.codex.discover")]
     pub(crate) fn discover_transcript_paths_with_state(
         &self,
         bounds: TranscriptDiscoveryBounds,

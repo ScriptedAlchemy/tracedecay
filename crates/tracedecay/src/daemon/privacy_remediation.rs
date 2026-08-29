@@ -15,9 +15,9 @@ use tracedecay_usecases::memory::{
     PrivacyRemediationTriggerV1, ProjectMemoryPrivacyRemediationReceiptV1,
 };
 
-use tracedecay_runtime_core::errors::Result;
-use tracedecay_global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
 use crate::tracedecay::TraceDecay;
+use tracedecay_global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::errors::Result;
 
 /// Spawns the bounded background rescan for one adopted project store.
 pub(crate) fn spawn_at_rest_privacy_remediation(
@@ -288,7 +288,9 @@ mod tests {
             .expect("inspect persisted memory payloads")
     }
 
-    async fn assertion_payload_purge_receipts(database: &tracedecay_runtime_core::db::Database) -> i64 {
+    async fn assertion_payload_purge_receipts(
+        database: &tracedecay_runtime_core::db::Database,
+    ) -> i64 {
         database
             .query_scalar_i64(
                 "inspect at-rest privacy purge receipts",
@@ -398,9 +400,12 @@ mod tests {
         let profile_root = temp.path().join("profile");
         let project_id = ProjectId::new("project.privacy-remediation.fixture").expect("project id");
         let project_root = enrolled_root(temp.path(), &project_id);
-        let _database_scope =
-            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 43, "privacy remediation test")
-                .expect("daemon database scope");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            43,
+            "privacy remediation test",
+        )
+        .expect("daemon database scope");
         let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
             .await

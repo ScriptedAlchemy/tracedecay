@@ -8,8 +8,8 @@ use tracedecay_store::{
     SessionRefreshProgressV1, SessionTemporalProjectionBatchV1,
 };
 
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::daemon) struct SessionTemporalRefreshPolicy {

@@ -151,8 +151,9 @@ fn body_candidates(
     for candidate in candidates {
         let path = required_file_path(&candidate)?;
         let metadata = required_metadata(&candidate)?;
-        if scope_prefix.is_none_or(|scope| tracedecay_runtime_core::path_scope::path_matches_scope(path, Some(scope)))
-        {
+        if scope_prefix.is_none_or(|scope| {
+            tracedecay_runtime_core::path_scope::path_matches_scope(path, Some(scope))
+        }) {
             let preference = NodeKind::from_str(&metadata.kind)
                 .map_or(u8::MAX, |kind| body_kind_preference(&kind));
             scoped.push((preference, candidate));
@@ -176,17 +177,19 @@ fn source_body_for_node(
 ) -> Result<String> {
     let project_path = ProjectPath::resolve(project_root, Path::new(file_path));
     match project_path {
-        Ok(ref path) => match tracedecay_runtime_core::sync::read_source_file(&path.absolute_path()) {
-            Ok(source) => {
-                if !touched.iter().any(|path| path == file_path) {
-                    touched.push(file_path.to_string());
+        Ok(ref path) => {
+            match tracedecay_runtime_core::sync::read_source_file(&path.absolute_path()) {
+                Ok(source) => {
+                    if !touched.iter().any(|path| path == file_path) {
+                        touched.push(file_path.to_string());
+                    }
+                    Ok(extract_lines(&source, start_line, end_line))
                 }
-                Ok(extract_lines(&source, start_line, end_line))
+                Err(error) => Err(TraceDecayError::Config {
+                    message: format!("cannot read indexed source body '{file_path}': {error}"),
+                }),
             }
-            Err(error) => Err(TraceDecayError::Config {
-                message: format!("cannot read indexed source body '{file_path}': {error}"),
-            }),
-        },
+        }
         Err(error) => Err(error),
     }
 }

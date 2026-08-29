@@ -23,8 +23,6 @@ use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
-use tracedecay_runtime_core::errors::TraceDecayError;
-#[cfg(feature = "test-transport")]
 use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
 use tracedecay::mcp::ToolResult;
 #[cfg(feature = "test-transport")]
@@ -44,6 +42,8 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, SessionProjectionGenerationV1, UtcMicros, derive_exact_observation_anchor_id,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::errors::TraceDecayError;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 #[cfg(feature = "test-transport")]

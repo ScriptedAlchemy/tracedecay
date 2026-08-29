@@ -656,11 +656,11 @@ fn fixture_backed_hermes_tool_call_reaches_canonical_envelope() {
     // tests/transcript_ingest_suite/hermes.rs::write_hermes_profile.
     // Provider-parser path: native_observation_record → normalize_native_observation.
     let input: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/hermes/assistant_tool_call.input.json"
+        "../../../../../../tests/fixtures/provider_normalization/hermes/assistant_tool_call.input.json"
     ))
     .expect("Hermes golden input");
     let expected: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/hermes/assistant_tool_call.expected_envelope.json"
+        "../../../../../../tests/fixtures/provider_normalization/hermes/assistant_tool_call.expected_envelope.json"
     ))
     .expect("Hermes golden expected envelope");
     let tool_calls = input["tool_calls"].clone();
@@ -752,7 +752,7 @@ fn fixture_backed_hermes_tool_call_reaches_canonical_envelope() {
 #[test]
 fn hermes_workflow_lookalike_fields_do_not_emit_workflow_lifecycle() {
     let input: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/hermes/workflow_lookalike.input.json"
+        "../../../../../../tests/fixtures/provider_normalization/hermes/workflow_lookalike.input.json"
     ))
     .expect("Hermes workflow lookalike input");
     let mut row = fixture(input["row_id"].as_i64().unwrap());

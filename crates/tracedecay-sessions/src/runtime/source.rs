@@ -527,7 +527,7 @@ async fn ingest_one<S: TranscriptIngestStore>(
 /// Persist an already parsed transcript through the ordered transcript commit
 /// and graph-publication boundary. Observation coordinators reuse this after
 /// their one-pass privacy parse and Claude fold.
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.source.persist_transcript", future = true)]
 pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     store: &S,
     provider: &'static str,

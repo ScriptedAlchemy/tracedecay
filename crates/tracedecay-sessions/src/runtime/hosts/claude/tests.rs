@@ -742,7 +742,7 @@ fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
 #[test]
 fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
     let bytes = include_bytes!(
-        "../../../../../tests/fixtures/provider_normalization/claude/assistant_thinking_text_tool_use.input.json"
+        "../../../../../../tests/fixtures/provider_normalization/claude/assistant_thinking_text_tool_use.input.json"
     );
     let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
     let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(

@@ -194,9 +194,11 @@ async fn test_scout_owner(
 ) -> Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1> {
     crate::daemon::store_runtime::register_registered_schema_installer();
     let database_path = temporary.path().join("edit-stop-feedback.db");
-    let database_authority =
-        tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(&database_path, "edit stop feedback")
-            .expect("database authority");
+    let database_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+        &database_path,
+        "edit stop feedback",
+    )
+    .expect("database authority");
     let database = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &database_path,
         &database_authority,

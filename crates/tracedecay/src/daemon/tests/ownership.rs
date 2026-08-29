@@ -270,9 +270,12 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "project-server-cache-test")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "project-server-cache-test",
+    )
+    .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let direct_route = super::super::ProjectRouteKey::from_handshake(&project, &direct).unwrap();
     let alias_route = super::super::ProjectRouteKey::from_handshake(
@@ -400,9 +403,12 @@ async fn interrupted_post_insert_activation_retains_maintenance_ownership() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "interrupted-activation-test")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "interrupted-activation-test",
+    )
+    .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
 
     let (published_tx, published_rx) = tokio::sync::oneshot::channel();

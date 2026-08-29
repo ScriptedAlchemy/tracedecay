@@ -7,8 +7,6 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_automation_runtime::ports::session_store::AutomationSessionStore;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::hermes_skill_bridge::{
@@ -23,6 +21,8 @@ use tracedecay_automation_runtime::automation::skill_usage::{
     record_skill_usage, skill_improvement_recommendations, stale_skill_recommendations,
     summarize_skill_usage, summarize_skill_usage_for,
 };
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::renderers;
 use super::support::{tool_json, tool_json_with_md};

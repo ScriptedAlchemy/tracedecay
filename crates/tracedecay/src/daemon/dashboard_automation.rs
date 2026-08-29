@@ -28,9 +28,9 @@ use tracedecay_dashboard_api::{
 };
 use tracedecay_domain::configuration::UserProfileId;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::server::{RetainedProjectGraphRequest, RetainedProjectServerResolver};
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 mod retained_curator;
 pub(crate) use retained_curator::execute_retained_memory_curator;

@@ -17,8 +17,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::store::{GlobalDbGitCorrelationStore, GlobalDbSessionIngestAuthority};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
 const COALESCED_JOURNAL_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
@@ -679,8 +679,10 @@ impl DaemonSessionSyncService {
             )
             .await
             .map_err(store_error)?
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "session sync journal disappeared".to_owned(),
+            .ok_or_else(|| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: "session sync journal disappeared".to_owned(),
+                }
             })?;
             let mut journal: SessionSyncJournalV1 =
                 serde_json::from_str(&current).map_err(journal_decode_error)?;
@@ -736,9 +738,11 @@ impl DaemonSessionSyncService {
             .read_session_sync_journal(key)
             .await
             .map_err(store_error)?
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "session sync journal disappeared".to_owned(),
-            })?;
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: "session sync journal disappeared".to_owned(),
+                },
+            )?;
         let journal: SessionSyncJournalV1 =
             serde_json::from_str(&current).map_err(journal_decode_error)?;
         let source_frontiers = context
@@ -1028,7 +1032,9 @@ fn saturating_usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-fn contract_error(error: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
+fn contract_error(
+    error: impl std::fmt::Display,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: error.to_string(),
     }
@@ -1040,13 +1046,17 @@ fn store_error(error: impl std::fmt::Display) -> tracedecay_runtime_core::errors
     }
 }
 
-fn journal_decode_error(error: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
+fn journal_decode_error(
+    error: impl std::fmt::Display,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!("session sync journal decode failed: {error}"),
     }
 }
 
-fn journal_encode_error(error: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
+fn journal_encode_error(
+    error: impl std::fmt::Display,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!("session sync journal encode failed: {error}"),
     }

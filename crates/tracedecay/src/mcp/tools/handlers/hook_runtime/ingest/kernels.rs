@@ -20,10 +20,10 @@ use std::pin::Pin;
 use serde_json::Value;
 use tracedecay_domain::ObservationScopeV1;
 
-use tracedecay_runtime_core::errors::Result;
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::Result;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
 use tracedecay_usecases::host_admission::{HostAdmissionFacade, HostAdmissionOutcome};

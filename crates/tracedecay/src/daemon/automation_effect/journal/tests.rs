@@ -3098,7 +3098,9 @@ fn cancellation_observed_under_lock_leaves_foreign_reservation_pending() {
 fn retained_settlement_waiter_is_send_and_static() {
     fn assert_send_static<T: Send + 'static>() {}
 
-    assert_send_static::<super::super::RetainedSettlementWaiter<tracedecay_runtime_core::errors::Result<()>>>();
+    assert_send_static::<
+        super::super::RetainedSettlementWaiter<tracedecay_runtime_core::errors::Result<()>>,
+    >();
     assert_send_static::<
         super::super::RetainedSettlementWaiter<
             tracedecay_runtime_core::errors::Result<(
@@ -3119,7 +3121,9 @@ fn retained_settlement_waiter_is_send_and_static() {
     assert_send_static::<super::super::DeferredSettlementPairSubmission<()>>();
     assert_send_static::<
         super::super::RetainedSettlementWaiter<
-            tracedecay_runtime_core::errors::Result<super::super::RetainedAutomationSettlementOutcome>,
+            tracedecay_runtime_core::errors::Result<
+                super::super::RetainedAutomationSettlementOutcome,
+            >,
         >,
     >();
 }

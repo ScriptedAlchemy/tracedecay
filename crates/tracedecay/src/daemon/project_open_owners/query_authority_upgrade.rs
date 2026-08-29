@@ -22,11 +22,13 @@ pub(super) enum DeferredQueryAuthorityMountV1 {
     Configured {
         profile_id: tracedecay_domain::configuration::UserProfileId,
     },
-    /// The checked-in core exact/lexical/graph fallback (no committed
-    /// activation); cursor keys are reloaded at attempt time from the same
-    /// durable session store the open-time mount used.
+    /// The checked-in core exact/lexical/graph fallback. When a committed
+    /// activation is warming, its exact revision keeps the retry inside that
+    /// fence; otherwise this is the ordinary standalone fallback. Cursor keys
+    /// are reloaded from the same durable store used at project open.
     CoreFallback {
         session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+        committed_revision: Option<tracedecay_domain::configuration::ConfigurationRevisionId>,
     },
 }
 
@@ -102,25 +104,37 @@ async fn try_deferred_mount(
                 .mount_query_authority_for_project(project_root, profile_id, scope)
                 .await
         }
-        DeferredQueryAuthorityMountV1::CoreFallback { session_db } => {
-            match session_db.load_session_cursor_key_provider_result().await {
-                Ok(cursor_keys) => {
+        DeferredQueryAuthorityMountV1::CoreFallback {
+            session_db,
+            committed_revision,
+        } => match session_db.load_session_cursor_key_provider_result().await {
+            Ok(cursor_keys) => {
+                if let Some(committed_revision) = committed_revision {
+                    invocation
+                        .mount_core_query_authority_for_committed_fallback(
+                            project_root,
+                            scope,
+                            committed_revision,
+                            &cursor_keys,
+                        )
+                        .await
+                } else {
                     invocation
                         .mount_core_query_authority_for_project(project_root, scope, &cursor_keys)
                         .await
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        event = "query_authority_mount",
-                        outcome = "deferred_failed",
-                        project_id = %scope.project_id,
-                        reason = %error,
-                        "durable query cursor key is unavailable; deferred mount abandoned"
-                    );
-                    return DeferredMountAttemptV1::Terminal;
-                }
             }
-        }
+            Err(error) => {
+                tracing::warn!(
+                    event = "query_authority_mount",
+                    outcome = "deferred_failed",
+                    project_id = %scope.project_id,
+                    reason = %error,
+                    "durable query cursor key is unavailable; deferred mount abandoned"
+                );
+                return DeferredMountAttemptV1::Terminal;
+            }
+        },
     };
     match outcome {
         Ok(()) => {

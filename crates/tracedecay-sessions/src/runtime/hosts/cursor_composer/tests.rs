@@ -264,11 +264,11 @@ fn composer_bubble_without_turn_field_leaves_turn_unset() {
 #[test]
 fn fixture_backed_composer_assistant_bubble_reaches_canonical_envelope() {
     let native: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble.input.json"
+        "../../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble.input.json"
     ))
     .expect("Cursor composer golden input");
     let expected: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble.expected_envelope.json"
+        "../../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble.expected_envelope.json"
     ))
     .expect("Cursor composer golden expected envelope");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(1, 2).unwrap();
@@ -322,11 +322,11 @@ fn fixture_backed_composer_assistant_bubble_reaches_canonical_envelope() {
 #[test]
 fn fixture_backed_composer_envelope_todos_reach_workflow_lifecycle() {
     let native: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
+        "../../../../../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
     ))
     .expect("Cursor composer envelope todos golden input");
     let expected: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.expected_envelope.json"
+        "../../../../../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.expected_envelope.json"
     ))
     .expect("Cursor composer envelope todos expected envelope");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
@@ -415,7 +415,7 @@ fn fixture_backed_composer_envelope_todos_reach_workflow_lifecycle() {
 #[test]
 fn envelope_todo_checkpoint_uses_fixture_backed_content_fingerprint() {
     let native: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
+        "../../../../../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
     ))
     .expect("Cursor composer envelope todos golden input");
     assert!(native.get("lastUpdatedAt").is_some_and(Value::is_null));
@@ -451,11 +451,11 @@ fn envelope_todo_checkpoint_uses_fixture_backed_content_fingerprint() {
 #[test]
 fn fixture_backed_composer_bubble_colocates_message_and_todo_lifecycle() {
     let native: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble_with_todos.input.json"
+        "../../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble_with_todos.input.json"
     ))
     .expect("Cursor composer bubble+todos golden input");
     let expected: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble_with_todos.expected_envelope.json"
+        "../../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble_with_todos.expected_envelope.json"
     ))
     .expect("Cursor composer bubble+todos expected envelope");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(1, 2).unwrap();

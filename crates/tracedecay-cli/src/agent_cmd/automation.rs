@@ -23,16 +23,20 @@ pub(super) fn validate_codex_automation_flags(
     Ok(())
 }
 
-pub(super) fn validate_codex_automation_project_path() -> tracedecay_runtime_core::errors::Result<PathBuf> {
-    let project_path =
-        std::env::current_dir().map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
+pub(super) fn validate_codex_automation_project_path()
+-> tracedecay_runtime_core::errors::Result<PathBuf> {
+    let project_path = std::env::current_dir().map_err(|e| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("could not determine current project directory: {e}"),
-        })?;
-    std::fs::canonicalize(&project_path).map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: format!(
-            "could not canonicalize project directory {}: {e}",
-            project_path.display()
-        ),
+        }
+    })?;
+    std::fs::canonicalize(&project_path).map_err(|e| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
+            message: format!(
+                "could not canonicalize project directory {}: {e}",
+                project_path.display()
+            ),
+        }
     })
 }
 

@@ -131,7 +131,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use tracedecay_maintenance::retention::orphan_stores::{StoreContentFence, StoreDirectoryFence};
+    use tracedecay_maintenance::retention::orphan_stores::{
+        StoreContentFence, StoreDirectoryFence,
+    };
 
     fn orphan_finding(disposition: StoreDisposition) -> OrphanStoreFinding {
         OrphanStoreFinding {

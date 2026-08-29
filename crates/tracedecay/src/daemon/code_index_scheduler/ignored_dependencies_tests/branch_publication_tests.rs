@@ -280,9 +280,12 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
         .expect("project enrollment");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 92, "ignored-dependency-race")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        92,
+        "ignored-dependency-race",
+    )
+    .expect("daemon database scope");
     let graph_runtime = Arc::new(
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity,
