@@ -25,7 +25,7 @@ const MAX_RELATION_HEALTH_RELATIONS: usize = 100_000;
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.query.relation_health"
+        label = "session_temporal.query.relation_health"
     )]
     pub(super) async fn with_relation_graph_health(
         &self,

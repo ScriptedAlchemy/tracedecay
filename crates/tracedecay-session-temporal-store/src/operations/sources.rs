@@ -35,7 +35,7 @@ struct LoadedSummarySource {
     owner_json: String,
 }
 
-#[hotpath::measure(future = true, label = "global_db.session_temporal.sources.prepare")]
+#[hotpath::measure(future = true, label = "session_temporal.sources.prepare")]
 pub(super) async fn prepare_sources(
     conn: &impl crate::handle::SessionTemporalExec,
     publication: &LcmImmutableSummaryPublication,

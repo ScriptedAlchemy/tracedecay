@@ -13,7 +13,7 @@ use super::super::rebuild::checkpoint_relation_rebuild_control;
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.projection.rebuild_derived"
+    label = "session_temporal.projection.rebuild_derived"
 )]
 pub(super) async fn rebuild_derived_evidence(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -41,7 +41,7 @@ pub(super) async fn rebuild_derived_evidence(
     checkpoint_relation_rebuild_control(control)?;
 
     let occurrences = load_occurrence_refs(conn, batch.session_id(), generation, control).await?;
-    hotpath::gauge!("global_db.session_temporal.derived.occurrence_rows")
+    hotpath::gauge!("session_temporal.derived.occurrence_rows")
         .inc(occurrences.len() as u64);
     if occurrences.is_empty() {
         return Ok(());
@@ -51,11 +51,11 @@ pub(super) async fn rebuild_derived_evidence(
     };
     let derived =
         derive_session_evidence_from_occurrences(batch.session_id(), &occurrences, &policy)?;
-    hotpath::gauge!("global_db.session_temporal.derived.evidence_records")
+    hotpath::gauge!("session_temporal.derived.evidence_records")
         .inc(derived.len() as u64);
     for record in derived {
         checkpoint_relation_rebuild_control(control)?;
-        hotpath::gauge!("global_db.session_temporal.derived.member_rows")
+        hotpath::gauge!("session_temporal.derived.member_rows")
             .inc(u64::from(record.member_count()));
         persist_derived_record(conn, batch.session_id(), generation, &record, control).await?;
     }

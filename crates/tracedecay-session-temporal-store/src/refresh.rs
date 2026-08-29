@@ -158,12 +158,12 @@ impl SessionRefreshRecoveryV1 {
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.txn.begin_refresh")]
+    #[hotpath::measure(future = true, label = "session_temporal.txn.begin_refresh")]
     pub async fn begin_or_join_session_refresh_result(
         &self,
         request: SessionRefreshBeginOrJoinRequestV1,
     ) -> SessionStoreResult<SessionRefreshBeginOrJoinReceiptV1> {
-        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
                 .map_err(|error| storage(BEGIN_REFRESH, error))?
@@ -174,7 +174,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             read_joinable_operation_by_digest(&transaction, request.session_id(), &request_digest)
                 .await?
         {
-            hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            hotpath::measure_block!("session_temporal.txn.commit", {
                 transaction
                     .commit()
                     .await
@@ -302,7 +302,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             )
             .await
             .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        hotpath::measure_block!("session_temporal.txn.commit", {
             transaction
                 .commit()
                 .await
@@ -335,7 +335,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.persist.refresh_batch"
+        label = "session_temporal.persist.refresh_batch"
     )]
     pub async fn persist_session_refresh_projection_batch_controlled_result(
         &self,
@@ -347,7 +347,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         SessionTemporalProjectionBatchReceiptV1,
     )> {
         validate_progress_batch_identity(&progress, &batch)?;
-        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
                 .map_err(|error| storage(PERSIST_REFRESH, error))?
@@ -384,7 +384,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 )
                 .await?;
                 checkpoint_relation_rebuild_control(&execution_control)?;
-                hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+                hotpath::measure_block!("session_temporal.txn.commit", {
                     transaction
                         .commit()
                         .await
@@ -425,7 +425,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         )
         .await?;
         checkpoint_relation_rebuild_control(&execution_control)?;
-        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        hotpath::measure_block!("session_temporal.txn.commit", {
             transaction
                 .commit()
                 .await
@@ -436,13 +436,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.persist.refresh_progress"
+        label = "session_temporal.persist.refresh_progress"
     )]
     pub async fn persist_session_refresh_progress_result(
         &self,
         progress: SessionRefreshProgressV1,
     ) -> SessionStoreResult<SessionRefreshProgressV1> {
-        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
                 .map_err(|error| storage(PERSIST_REFRESH, error))?
@@ -460,7 +460,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             read_progress(&transaction, progress.session_id(), progress.operation_id()).await?
         {
             if progress_logically_equal(&existing, &progress) {
-                hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+                hotpath::measure_block!("session_temporal.txn.commit", {
                     transaction
                         .commit()
                         .await
@@ -510,7 +510,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             progress.updated_at(),
         )
         .await?;
-        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        hotpath::measure_block!("session_temporal.txn.commit", {
             transaction
                 .commit()
                 .await
@@ -521,7 +521,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.query.refresh_progress"
+        label = "session_temporal.query.refresh_progress"
     )]
     pub async fn session_refresh_progress_result(
         &self,
@@ -536,7 +536,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.txn.complete_refresh"
+        label = "session_temporal.txn.complete_refresh"
     )]
     pub async fn complete_session_refresh_result(
         &self,
@@ -557,7 +557,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }
         drop(snapshot);
 
-        let preflight = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        let preflight = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
                 .map_err(|error| storage(COMPLETE_REFRESH, error))?
@@ -574,7 +574,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 context: "refresh completion target coverage",
             });
         }
-        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        hotpath::measure_block!("session_temporal.txn.commit", {
             preflight
                 .commit()
                 .await
@@ -590,7 +590,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         )
         .await?;
 
-        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
                 .map_err(|error| storage(COMPLETE_REFRESH, error))?
@@ -600,7 +600,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         {
             require_exact_completion(&receipt, &request)?;
             checkpoint_relation_rebuild_control(&execution_control)?;
-            hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            hotpath::measure_block!("session_temporal.txn.commit", {
                 transaction
                     .commit()
                     .await
@@ -679,7 +679,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         )
         .await?;
         checkpoint_relation_rebuild_control(&execution_control)?;
-        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        hotpath::measure_block!("session_temporal.txn.commit", {
             transaction
                 .commit()
                 .await
@@ -688,12 +688,12 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(SessionRefreshReceiptV1::completed(request, terminal_at))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.txn.fail_refresh")]
+    #[hotpath::measure(future = true, label = "session_temporal.txn.fail_refresh")]
     pub async fn fail_session_refresh_result(
         &self,
         request: SessionRefreshFailureRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
-        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
                 .map_err(|error| storage(FAIL_REFRESH, error))?
@@ -702,7 +702,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             read_receipt(&transaction, request.session_id(), request.operation_id()).await?
         {
             require_exact_failure(&receipt, &request)?;
-            hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            hotpath::measure_block!("session_temporal.txn.commit", {
                 transaction
                     .commit()
                     .await
@@ -774,7 +774,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             terminal_at,
         )
         .await?;
-        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        hotpath::measure_block!("session_temporal.txn.commit", {
             transaction
                 .commit()
                 .await
@@ -783,12 +783,12 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(SessionRefreshReceiptV1::failed(request, terminal_at))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.txn.cancel_refresh")]
+    #[hotpath::measure(future = true, label = "session_temporal.txn.cancel_refresh")]
     pub async fn cancel_session_refresh_result(
         &self,
         request: SessionRefreshCancellationRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
-        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
                 .map_err(|error| storage(CANCEL_REFRESH, error))?
@@ -797,7 +797,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             read_receipt(&transaction, request.session_id(), request.operation_id()).await?
         {
             require_exact_cancellation(&receipt, &request)?;
-            hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            hotpath::measure_block!("session_temporal.txn.commit", {
                 transaction
                     .commit()
                     .await
@@ -868,7 +868,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             terminal_at,
         )
         .await?;
-        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        hotpath::measure_block!("session_temporal.txn.commit", {
             transaction
                 .commit()
                 .await
@@ -879,7 +879,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.query.refresh_receipt"
+        label = "session_temporal.query.refresh_receipt"
     )]
     pub async fn session_refresh_receipt_result(
         &self,
@@ -894,7 +894,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.query.refresh_recovery"
+        label = "session_temporal.query.refresh_recovery"
     )]
     pub async fn session_refresh_recovery_result(
         &self,
@@ -910,7 +910,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.query.refresh_running"
+        label = "session_temporal.query.refresh_running"
     )]
     pub async fn running_session_refreshes_result(
         &self,

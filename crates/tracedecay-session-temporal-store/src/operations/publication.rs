@@ -154,7 +154,7 @@ async fn append_summary_relation(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.persist.publish_summary"
+    label = "session_temporal.persist.publish_summary"
 )]
 pub async fn publish_immutable_summary(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -329,7 +329,7 @@ async fn insert_canonical_node(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.publication.verify_replay"
+    label = "session_temporal.publication.verify_replay"
 )]
 async fn exact_replay_receipt(
     conn: &impl crate::handle::SessionTemporalExec,

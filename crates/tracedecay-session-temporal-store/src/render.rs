@@ -24,7 +24,7 @@ pub enum CanonicalLcmSourceHydrationError {
     PayloadIntegrity,
 }
 
-#[hotpath::measure(label = "global_db.session_temporal.hydrate.render")]
+#[hotpath::measure(label = "session_temporal.hydrate.render")]
 pub fn apply_canonical_content(
     mut expansion: LcmExpandResponse,
     slice: LcmContentSlice,

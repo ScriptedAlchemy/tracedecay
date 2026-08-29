@@ -71,7 +71,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.persist.relation_projection"
+        label = "session_temporal.persist.relation_projection"
     )]
     pub async fn apply_active_session_relation_projection(
         &self,
@@ -139,7 +139,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     #[hotpath::measure(
         future = true,
-        label = "global_db.session_temporal.persist.recover_relations"
+        label = "session_temporal.persist.recover_relations"
     )]
     pub async fn recover_pending_session_relation_projections(
         &self,
@@ -269,7 +269,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.persist.seed_relation"
+    label = "session_temporal.persist.seed_relation"
 )]
 pub async fn seed_session_relation_projection(
     database: &impl SessionTemporalRegisteredDb,

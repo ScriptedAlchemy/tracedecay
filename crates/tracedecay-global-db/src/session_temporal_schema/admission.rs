@@ -148,7 +148,7 @@ pub(crate) enum SessionTemporalSchemaAdmission {
 }
 
 /// Classifies a store without changing its schema or retained session state.
-#[hotpath::measure(future = true, label = "global_db.session_temporal.schema.admit")]
+#[hotpath::measure(future = true, label = "session_temporal.schema.admit")]
 pub(crate) async fn require_admissible_session_temporal_schema(
     conn: &impl QueryExecutor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,

@@ -80,7 +80,7 @@ pub async fn session_temporal_projection_record_count(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.persist.projection_batch"
+    label = "session_temporal.persist.projection_batch"
 )]
 pub async fn persist_session_temporal_projection_batch_in_transaction(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -174,7 +174,7 @@ pub(crate) enum ProjectionProgressBaseline {
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.persist.seed_projection"
+    label = "session_temporal.persist.seed_projection"
 )]
 pub async fn seed_active_projection_in_transaction(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -614,13 +614,13 @@ pub(super) async fn canonical_occurrence(
 fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
     #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("global_db.session_temporal.persistence.source_projections")
+        hotpath::gauge!("session_temporal.persistence.source_projections")
             .inc(work.source_projections);
-        hotpath::gauge!("global_db.session_temporal.persistence.envelope_parses")
+        hotpath::gauge!("session_temporal.persistence.envelope_parses")
             .inc(work.envelope_parses);
-        hotpath::gauge!("global_db.session_temporal.persistence.projection_output_index_rows")
+        hotpath::gauge!("session_temporal.persistence.projection_output_index_rows")
             .inc(work.indexed_outputs);
-        hotpath::gauge!("global_db.session_temporal.persistence.projection_output_lookups")
+        hotpath::gauge!("session_temporal.persistence.projection_output_lookups")
             .inc(work.output_lookups);
     }
     #[cfg(not(feature = "hotpath"))]
@@ -1271,7 +1271,7 @@ pub(super) const fn assertion_kind_for_relation(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.projection.rebuild_occurrences"
+    label = "session_temporal.projection.rebuild_occurrences"
 )]
 pub(super) async fn rebuild_current_occurrences(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -1339,7 +1339,7 @@ pub(super) async fn rebuild_current_occurrences(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.projection.rebuild_assertions"
+    label = "session_temporal.projection.rebuild_assertions"
 )]
 pub(super) async fn rebuild_assertion_derivatives(
     conn: &impl crate::handle::SessionTemporalExec,

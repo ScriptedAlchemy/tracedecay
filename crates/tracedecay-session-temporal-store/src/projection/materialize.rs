@@ -352,7 +352,7 @@ pub(super) struct OccurrenceMaterializationWork {
 #[inline(always)]
 fn record_occurrence_materialization_work(work: OccurrenceMaterializationWork) {
     #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.session_temporal.occurrence_materialization.envelope_parses")
+    hotpath::gauge!("session_temporal.occurrence_materialization.envelope_parses")
         .inc(work.envelope_parses);
     #[cfg(not(feature = "hotpath"))]
     let _ = work;
@@ -626,7 +626,7 @@ pub(super) struct RelationDerivationWork {
 #[inline(always)]
 fn record_relation_derivation_work(work: RelationDerivationWork) {
     #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.session_temporal.relation_derivation.envelope_parses")
+    hotpath::gauge!("session_temporal.relation_derivation.envelope_parses")
         .inc(work.envelope_parses);
     #[cfg(not(feature = "hotpath"))]
     let _ = work;
@@ -634,7 +634,7 @@ fn record_relation_derivation_work(work: RelationDerivationWork) {
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.projection.candidate_parent"
+    label = "session_temporal.projection.candidate_parent"
 )]
 async fn candidate_parent_message_resolver(
     conn: &impl crate::handle::SessionTemporalQuery,
@@ -706,7 +706,7 @@ async fn candidate_parent_message_resolver(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.projection.parent_resolver"
+    label = "session_temporal.projection.parent_resolver"
 )]
 pub async fn canonical_parent_message_resolver(
     conn: &impl crate::handle::SessionTemporalQuery,
@@ -827,15 +827,15 @@ pub async fn canonical_parent_message_resolver(
 #[inline(always)]
 fn record_parent_resolver_probe() {
     #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.session_temporal.parent_resolver.query_probes").inc(1_u64);
+    hotpath::gauge!("session_temporal.parent_resolver.query_probes").inc(1_u64);
 }
 
 #[inline(always)]
 fn record_parent_resolver_row(bytes: u64) {
     #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("global_db.session_temporal.parent_resolver.rows").inc(1_u64);
-        hotpath::gauge!("global_db.session_temporal.parent_resolver.row_payload_bytes").inc(bytes);
+        hotpath::gauge!("session_temporal.parent_resolver.rows").inc(1_u64);
+        hotpath::gauge!("session_temporal.parent_resolver.row_payload_bytes").inc(bytes);
     }
     #[cfg(not(feature = "hotpath"))]
     let _ = bytes;

@@ -104,7 +104,7 @@ async fn record_pending_effect_journal(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "global_db.session_temporal.txn.apply_relation")]
+#[hotpath::measure(future = true, label = "session_temporal.txn.apply_relation")]
 pub async fn apply_relation_projection(
     database: &impl SessionTemporalRegisteredDb,
     projection: &SessionRelationProjection,
@@ -149,7 +149,7 @@ pub async fn apply_relation_projection(
             "native graph acknowledged a different relation watermark",
         ));
     }
-    let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+    let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
         database
             .begin_write_transaction()
             .await
@@ -196,7 +196,7 @@ pub async fn apply_relation_projection(
             "relation effect journal changed during native graph acknowledgement",
         ));
     }
-    hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+    hotpath::measure_block!("session_temporal.txn.commit", {
         transaction
             .commit()
             .await

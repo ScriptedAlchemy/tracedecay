@@ -11,7 +11,7 @@ use super::CanonicalPublicationManifest;
 /// consulted for identity, replay, authorization, or publication decisions.
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.publication.project_summary"
+    label = "session_temporal.publication.project_summary"
 )]
 pub(super) async fn project_canonical_summary(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -55,7 +55,7 @@ pub(super) async fn project_canonical_summary(
         )
         .await?;
     }
-    hotpath::gauge!("global_db.session_temporal.publication.summary_projection_rows")
+    hotpath::gauge!("session_temporal.publication.summary_projection_rows")
         .inc(1_u64.saturating_add(manifest.source_refs.len() as u64));
     Ok(())
 }

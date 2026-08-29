@@ -71,7 +71,7 @@ pub(super) fn validate_lineage_projection(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.publication.validate_predecessor"
+    label = "session_temporal.publication.validate_predecessor"
 )]
 pub(super) async fn validate_current_predecessor(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -96,7 +96,7 @@ pub(super) async fn validate_current_predecessor(
         .await?;
     let mut current_for_identity = Vec::new();
     while let Some(row) = matching.next().await? {
-        hotpath::gauge!("global_db.session_temporal.publication.predecessor_manifest_rows")
+        hotpath::gauge!("session_temporal.publication.predecessor_manifest_rows")
             .inc(1_u64);
         let candidate_id: String = row.get(0)?;
         let manifest_raw: String = row.get(1)?;
@@ -143,7 +143,7 @@ pub(super) async fn validate_current_predecessor(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.persist.publish_generation"
+    label = "session_temporal.persist.publish_generation"
 )]
 pub(super) async fn publish_candidate_generation(
     conn: &impl crate::handle::SessionTemporalExec,

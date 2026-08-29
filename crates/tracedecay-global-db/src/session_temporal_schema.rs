@@ -573,7 +573,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
 
 pub(crate) use tracedecay_session_temporal_store::TEMPORAL_TABLE_COLUMNS;
 
-#[hotpath::measure(future = true, label = "global_db.session_temporal.schema.migrate")]
+#[hotpath::measure(future = true, label = "session_temporal.schema.migrate")]
 pub(crate) async fn migrate_released_v3_session_temporal_schema(
     conn: &impl Executor,
 ) -> tracedecay_runtime_core::errors::Result<()> {
@@ -758,7 +758,7 @@ pub(crate) async fn migrate_released_v3_session_temporal_schema(
 }
 
 /// Installs the final schema into a store already proven fresh by admission.
-#[hotpath::measure(future = true, label = "global_db.session_temporal.schema.install")]
+#[hotpath::measure(future = true, label = "session_temporal.schema.install")]
 pub(crate) async fn install_session_temporal_schema(
     conn: &impl Executor,
 ) -> tracedecay_runtime_core::errors::Result<()> {

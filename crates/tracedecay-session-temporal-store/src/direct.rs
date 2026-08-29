@@ -59,7 +59,7 @@ pub async fn resolve_expand_target(
 /// hydration, and derived-evidence queries do.
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.query.direct_occurrence"
+    label = "session_temporal.query.direct_occurrence"
 )]
 async fn resolve_occurrence_anchor(
     read: &TemporalSqlRead<'_>,
@@ -117,7 +117,7 @@ async fn resolve_occurrence_anchor(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.query.direct_summary"
+    label = "session_temporal.query.direct_summary"
 )]
 async fn resolve_summary_anchor(
     read: &TemporalSqlRead<'_>,
@@ -163,7 +163,7 @@ async fn resolve_summary_anchor(
 
 #[hotpath::measure(
     future = true,
-    label = "global_db.session_temporal.query.direct_external"
+    label = "session_temporal.query.direct_external"
 )]
 async fn resolve_external_anchor(
     read: &TemporalSqlRead<'_>,
