@@ -2734,17 +2734,7 @@ fn projected_chunk_transient_bytes(
 }
 
 fn lexical_token_count(value: &str) -> usize {
-    let mut count = 0usize;
-    let mut inside_token = false;
-    for character in value.chars() {
-        let accepted =
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':' | '.' | '/');
-        if accepted && !inside_token {
-            count = count.saturating_add(1);
-        }
-        inside_token = accepted;
-    }
-    count
+    tracedecay_domain::technical_tokens(value).count()
 }
 
 fn chunk_owned_bytes(chunk: &CodeSearchChunkV1) -> usize {

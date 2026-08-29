@@ -12,7 +12,7 @@ use tracedecay_domain::{
     FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1, LanguageDescriptorRevision,
     LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId, validate_code_logical_path,
+    SourceOccurrenceId, exact_search_canonical, technical_tokens, validate_code_logical_path,
 };
 
 use super::{
@@ -1554,27 +1554,24 @@ fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
     }
 }
 
+/// Posting-key form of one minted term: the shared per-field search
+/// canonicalization over the mint canonical, after stripping the extraction
+/// `commit:` prefix so bare-hash query literals address the same key.
 fn canonical_projected_exact_term(term: &ExactTechnicalTermV1) -> Cow<'_, [u8]> {
     let bytes = term.canonical_bytes();
     let Ok(value) = std::str::from_utf8(bytes) else {
         return Cow::Borrowed(bytes);
     };
-    let canonical = match term.kind() {
-        ExactTechnicalTermKindV1::CommitIdentifier => value
-            .strip_prefix("commit:")
-            .unwrap_or(value)
-            .to_ascii_lowercase(),
-        ExactTechnicalTermKindV1::CompilerErrorCode
-        | ExactTechnicalTermKindV1::RuntimeErrorCode => value.to_ascii_uppercase(),
-        ExactTechnicalTermKindV1::CliFlag
-        | ExactTechnicalTermKindV1::ToolName
-        | ExactTechnicalTermKindV1::ConfigurationKey => value.to_ascii_lowercase(),
-        _ => return Cow::Borrowed(bytes),
+    let value = if term.kind() == ExactTechnicalTermKindV1::CommitIdentifier {
+        value.strip_prefix("commit:").unwrap_or(value)
+    } else {
+        value
     };
+    let canonical = exact_search_canonical(exact_field_for_kind(term.kind()), value);
     if canonical.as_bytes() == bytes {
         Cow::Borrowed(bytes)
     } else {
-        Cow::Owned(canonical.into_bytes())
+        Cow::Owned(canonical.into_owned().into_bytes())
     }
 }
 
@@ -1601,12 +1598,8 @@ fn normalize_lexical(value: &str) -> String {
 }
 
 fn lexical_tokens(value: &str) -> Vec<String> {
-    value
-        .split(|ch: char| {
-            !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '/'))
-        })
-        .filter(|term| !term.is_empty())
-        .map(normalize_lexical)
+    technical_tokens(value)
+        .map(|(_, token)| normalize_lexical(token))
         .collect()
 }
 
