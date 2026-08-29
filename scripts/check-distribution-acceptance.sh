@@ -549,6 +549,7 @@ for required_package in \
   tracedecay-tool-catalog \
   tracedecay-lsp \
   tracedecay-code-index \
+  tracedecay-code-index-runtime \
   tracedecay-code-extraction \
   tracedecay-query \
   tracedecay-semantic; do
