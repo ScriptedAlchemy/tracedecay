@@ -258,7 +258,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     .await
     .expect("registered project runtime");
     let database = host
-        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project database");
     let session_id = id::<SessionId>("session.work.evidence-journey");
     let task_id = id::<TaskId>("task.work.evidence-journey");

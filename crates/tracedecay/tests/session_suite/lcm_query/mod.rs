@@ -10,7 +10,7 @@ use tracedecay_sessions::runtime::lcm::{
     MAX_DERIVED_SNIPPET_CHARS,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::common::{self, lcm_dag_message as raw_message};
 

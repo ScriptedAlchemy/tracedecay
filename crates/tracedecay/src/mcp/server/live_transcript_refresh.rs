@@ -53,7 +53,7 @@ fn refresh_unavailable(tool_name: &str) -> TraceDecayError {
             "temporal_refresh_unavailable",
             true,
             DETAIL,
-            tracedecay_host_admission::HostAdmissionStatus::Unavailable.as_wire(),
+            tracedecay_sessions::admission::HostAdmissionStatus::Unavailable.as_wire(),
         )
     } else {
         TraceDecayError::Config {

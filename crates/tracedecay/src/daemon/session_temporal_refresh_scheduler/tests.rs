@@ -31,7 +31,7 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use tracedecay_host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 use super::SessionTemporalRefreshTestAuthority;
 

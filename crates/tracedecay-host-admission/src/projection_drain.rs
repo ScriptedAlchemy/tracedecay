@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostProjectionDrainOutcome};
 use tracedecay_store::ProjectionPersistOutcome;
 
 use super::*;

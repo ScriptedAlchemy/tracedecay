@@ -17,7 +17,7 @@ use tracedecay_store::{
     SessionTemporalSnapshotRequestV1,
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
-use tracedecay_host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 fn session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()

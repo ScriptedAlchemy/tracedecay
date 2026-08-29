@@ -6,7 +6,8 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use super::super::HostAdmissionOutcome;
+use tracedecay_sessions::admission::HostAdmissionOutcome;
+
 use super::*;
 
 fn bounds() -> SpoolBounds {

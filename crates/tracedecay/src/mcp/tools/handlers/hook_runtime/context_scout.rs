@@ -16,7 +16,10 @@ use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
 use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
-use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay_host_admission::{
+    HostAdmissionAuthorities,
+    HostAdmissionFacade,
+};
 use tracedecay_usecases::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };

@@ -43,9 +43,7 @@ hotpath-cpu = [
     "tracedecay-store/hotpath-cpu",
     "tracedecay-usecases/hotpath-cpu",
 ]
-# Forwards the sessions wire-test helpers (`read_bounded_line`,
-# `line_outcome_to_io`) so dependents' test builds resolve them without
-# enabling in-process transports.
+# Forwards sessions/usecases fixture surfaces for this crate's own tests.
 test-helpers = ["tracedecay-sessions/test-helpers", "tracedecay-usecases/test-helpers"]
 test-transport = ["test-helpers", "tracedecay-usecases/test-transport"]
 

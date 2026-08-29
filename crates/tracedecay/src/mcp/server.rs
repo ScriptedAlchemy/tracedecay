@@ -23,9 +23,12 @@ use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
-use tracedecay_host_admission::{
-    HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome,
+    HostAdmissionStatus,
+    is_wire_oversized_io_error,
 };
+use tracedecay_host_admission::TerminalReason;
 use tracedecay_usecases::request_identity::McpConnectionIdentityAuthority;
 
 use super::hook_events::{self, HookAgent, HookEventPlan};

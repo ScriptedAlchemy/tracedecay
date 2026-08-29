@@ -21,6 +21,9 @@ use tracedecay_store::{
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_private_fs::background_cpu::process_background_cpu;
 use tracedecay_runtime_core::privacy::{PrivacySanitizerError, RecordSanitizerV1};
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus, HostProjectionDrainOutcome,
+};
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_usecases::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
@@ -45,9 +48,6 @@ mod spool;
 
 pub use replay::{
     REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, classify_replay_pass, replay_backoff,
-};
-pub use tracedecay_sessions::admission::{
-    HostAdmissionDispositionClass, HostAdmissionStatus, HostAdmissionTelemetryDisposition,
 };
 
 pub use runtime::{DurableHostAdmission, HostAdmissionRuntime};
@@ -193,18 +193,6 @@ impl HostAdmissionReplay<'_> {
 pub(crate) use schedule::{FairEnqueueOutcome, FairScheduleBounds, FairSourceScheduler};
 pub(crate) use spool::{HostAdmissionSpool, SpoolError, SpoolIntegrity};
 pub use spool::{SpoolBounds, SpoolOpenReport, SpoolRecord, TerminalReason};
-#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-pub use tracedecay_sessions::admission::wire::{line_outcome_to_io, read_bounded_line};
-pub use tracedecay_sessions::admission::{
-    BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, MAX_WIRE_MESSAGE_BYTES,
-    MCP_OVERSIZE_ID_INSPECT_BYTES, WIRE_RECORD_TOO_LARGE, WireReadOutcome,
-    is_wire_oversized_io_error, read_bounded_mcp_line, read_bounded_to_string,
-    wire_oversized_inspect_prefix, wire_oversized_io_error, wire_oversized_io_error_with_prefix,
-};
-
-pub use tracedecay_sessions::admission::{
-    HostAdmissionOutcome, HostAdmissionScope, HostProjectionDrainOutcome,
-};
 
 /// Constructs a [`HostAdmissionOutcome`] for usecases-specific reason codes;
 /// the canonical constructors live on the sessions type, whose grouped

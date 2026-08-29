@@ -14,7 +14,7 @@ use tracedecay_store::{
     ObservationStore, ObservationStoreError, ObservationWrite,
 };
 use tracedecay_usecases::anchor_resolution::EvidenceAnchorReportResolver;
-use tracedecay_host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_usecases::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
 
 use super::{

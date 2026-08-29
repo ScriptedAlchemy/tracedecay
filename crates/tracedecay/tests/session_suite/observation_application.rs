@@ -20,7 +20,7 @@ use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
     ObservationStore, ProjectionPersistOutcome,
 };
-use tracedecay_host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_usecases::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
     CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,

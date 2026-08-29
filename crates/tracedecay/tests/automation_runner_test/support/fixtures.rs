@@ -14,7 +14,7 @@ use tracedecay_agent_hosts::ports::project_runtime::ProjectRuntime;
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 use super::{project_memory_owner, test_automation_run_control};
 

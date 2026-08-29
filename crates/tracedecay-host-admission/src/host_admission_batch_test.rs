@@ -20,7 +20,7 @@ use tracedecay_private_fs::background_cpu::{
 use tracedecay_runtime_core::privacy::{
     ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
-use tracedecay_sessions::admission::HostAdmission;
+use tracedecay_sessions::admission::{HostAdmission, HostAdmissionScope};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationWrite,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,

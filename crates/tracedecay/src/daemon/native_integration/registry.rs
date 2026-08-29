@@ -693,7 +693,7 @@ mod tests {
 
     use super::DaemonNativeIntegrationServiceRegistry;
     use crate::host_admission::HostAdmissionTestRuntimeV1;
-    use tracedecay_host_admission::HostAdmissionScope;
+    use tracedecay_sessions::admission::HostAdmissionScope;
 
     fn init_repository(root: &Path) {
         for arguments in [

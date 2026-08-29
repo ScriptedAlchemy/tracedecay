@@ -359,7 +359,7 @@ mod tests {
 
     use super::{resolve_initialize_roots_project_path, select_initialize_project_path};
     use crate::host_admission::HostAdmissionTestRuntimeV1;
-    use tracedecay_host_admission::HostAdmissionScope;
+    use tracedecay_sessions::admission::HostAdmissionScope;
 
     fn run_git(root: &Path, args: &[&str]) {
         let status = Command::new("git")

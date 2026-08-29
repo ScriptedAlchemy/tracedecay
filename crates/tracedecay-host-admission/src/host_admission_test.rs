@@ -1,3 +1,6 @@
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
+};
 use tracedecay_store::ObservationStoreError;
 
 use super::*;

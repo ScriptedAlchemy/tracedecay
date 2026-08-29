@@ -18,8 +18,11 @@ use super::writer_test_support::{
 use super::{CodeIndexReconcileSink, McpServer};
 use crate::mcp::project_route::HookProjectRouteCache;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent};
+use tracedecay_sessions::admission::HostAdmissionStatus;
 use tracedecay_host_admission::{
-    HostAdmissionBroker, HostAdmissionRuntime, HostAdmissionStatus, SharedHostAdmissionBroker,
+    HostAdmissionBroker,
+    HostAdmissionRuntime,
+    SharedHostAdmissionBroker,
     SpoolBounds,
 };
 

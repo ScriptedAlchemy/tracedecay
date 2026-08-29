@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_runtime_core::errors::TraceDecayError;
 
-use super::super::{HostAdmissionOutcome, HostAdmissionStatus, admission_outcome};
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+
+use super::super::admission_outcome;
 use super::{SpoolOverflowDisposition, frames::FORMAT_VERSION};
 
 const HOST_ADMISSION_SPOOL_AUTHORITY: &str = "host-admission spool";

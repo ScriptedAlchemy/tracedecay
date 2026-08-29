@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use tracedecay_domain::ObservationScopeV1;
-use tracedecay_sessions::admission::HostDiscoveryQueueEntry;
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostDiscoveryQueueEntry};
 
-use super::{HostAdmissionFacade, HostAdmissionOutcome, host_scope};
+use super::{HostAdmissionFacade, host_scope};
 
 impl HostAdmissionFacade<'_> {
     #[hotpath::measure(label = "usecases.admission.has_session_message", future = true)]

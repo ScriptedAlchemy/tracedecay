@@ -7,9 +7,14 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_sessions::runtime::source::TranscriptSource;
-use tracedecay_host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome,
+    HostAdmissionScope,
     HostAdmissionStatus,
+};
+use tracedecay_host_admission::{
+    HostAdmissionAuthorities,
+    HostAdmissionFacade,
 };
 use tracedecay_usecases::observation::ObservationCancellation;
 use tracedecay_usecases::session::lcm::{

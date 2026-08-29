@@ -19,7 +19,7 @@ use tracedecay_sessions::runtime::cursor::{
 use tracedecay_sessions::runtime::source::{TranscriptIngestError, TranscriptSource};
 use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionProvider};
 use tracedecay_store::ObservationReplayRequest;
-use tracedecay_host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::claude::write_claude_transcript;
 use crate::cline_like::{vscode_storage_root, write_task};

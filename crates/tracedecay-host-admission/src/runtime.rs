@@ -9,14 +9,14 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_runtime_core::errors::TraceDecayError;
 
-use super::{
-    FairEnqueueOutcome, FairScheduleBounds, FairSourceScheduler, HostAdmissionOutcome,
-    HostAdmissionSpool, SpoolBounds, SpoolError, SpoolIntegrity, SpoolOpenReport, SpoolRecord,
-    TerminalReason,
-};
-
+use tracedecay_sessions::admission::HostAdmissionOutcome;
 #[cfg(test)]
-use super::HostAdmissionStatus;
+use tracedecay_sessions::admission::HostAdmissionStatus;
+
+use super::{
+    FairEnqueueOutcome, FairScheduleBounds, FairSourceScheduler, HostAdmissionSpool, SpoolBounds,
+    SpoolError, SpoolIntegrity, SpoolOpenReport, SpoolRecord, TerminalReason,
+};
 
 pub(crate) const DEFAULT_MAX_REPLAY_RECORDS_PER_PASS: usize = 64;
 

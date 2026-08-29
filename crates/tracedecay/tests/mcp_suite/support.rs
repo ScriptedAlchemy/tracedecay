@@ -57,7 +57,7 @@ use tracedecay_store::{
 #[cfg(feature = "test-transport")]
 use tracedecay_temporal_query::ports::ExecutionControl;
 #[cfg(feature = "test-transport")]
-use tracedecay_host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 

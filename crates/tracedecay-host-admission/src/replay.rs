@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use super::HostAdmissionOutcome;
+use tracedecay_sessions::admission::HostAdmissionOutcome;
 
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(25);

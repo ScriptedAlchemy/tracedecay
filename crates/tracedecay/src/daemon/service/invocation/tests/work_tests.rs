@@ -76,7 +76,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     .await
     .expect("registered project runtime");
     let database = host
-        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project database");
     let actor = ActorId::new("actor.work.core-invocation").expect("actor id");
     let scope = ResolvedScope::new(
@@ -497,7 +497,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     .await
     .expect("registered project runtime");
     let database = host
-        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project database");
     let actor = ActorId::new("actor.work.task-activity").expect("actor id");
     let scope = ResolvedScope::new(
