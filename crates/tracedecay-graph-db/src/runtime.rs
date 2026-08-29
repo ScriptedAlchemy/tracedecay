@@ -749,19 +749,12 @@ impl GraphDb {
 
     /// Physically close the underlying graph database.
     ///
-    /// TODO(grafeo-close-checkpoint): `GrafeoDB::close` flushes with
-    /// `FlushReason::Explicit`, which re-serializes *every* section even when
-    /// none is dirty — so this call rebuilds an already-durable store and is
-    /// the dominant cost of the daemon's `daemon.shutdown.store_close` phase.
-    /// The one-line fork fix (close is a checkpoint, not an explicit
-    /// CHECKPOINT) is prepared but not yet on the pinned branch; see
-    /// `docs/vendor-patches/grafeo-close-checkpoint-dirty-only.patch`. When it
-    /// lands, bump the `grafeo-*` revs in the root `Cargo.toml`
-    /// `[patch.crates-io]` block together and delete this note.
-    ///
-    /// There is no sound tracedecay-side workaround: skipping the close would
-    /// forfeit the durability confirmation this function reports, and the
-    /// dirty-section state that makes the skip safe is private to grafeo.
+    /// The pinned grafeo elides the close-time checkpoint when the container
+    /// is already current (empty WAL, no replay at open, no WAL-bypassing
+    /// mutation, header watermarks matching the live store), so closing a
+    /// store that was only read costs teardown, not a full container rewrite.
+    /// Any change — WAL records, sidecar replay, index builds, named-graph
+    /// management — still checkpoints in full before this returns.
     #[hotpath::measure(label = "graph_db.runtime.close", impl_type = "GraphDb")]
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
         // Before the write lock, while a read guard is still available:

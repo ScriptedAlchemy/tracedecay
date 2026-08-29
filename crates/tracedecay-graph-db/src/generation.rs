@@ -914,13 +914,14 @@ pub(crate) fn verify_sealed_copy_generation(
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+) -> Result<(GraphRecoveredGenerationDigestV1, u64), GraphDbError> {
     #[cfg(test)]
     SEALED_COPY_PROOFS.with(|count| count.set(count.get() + 1));
-    // The sealed copy's own proof does not report canonical bytes: the
-    // verify-once marker is keyed on the staging container, not on a sealed
-    // per-generation copy that is proven at build and at reopen.
-    verify_recovered_rows(database, identity, expected, check).map(|(digest, _)| digest)
+    // The canonical byte count is the same stream the staging proof would
+    // have hashed (the digests match byte for byte), so a sealed *build* —
+    // which enumerated the staging database's rows to produce this copy —
+    // may file it with the publication's verify-once marker.
+    verify_recovered_rows(database, identity, expected, check)
 }
 
 fn verify_recovered_rows(
