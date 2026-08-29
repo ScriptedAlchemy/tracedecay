@@ -2596,6 +2596,7 @@ impl TranscriptSource for CodexSource {
         }
     }
 
+    #[hotpath::measure(label = "sessions.hosts.codex.parse")]
     fn parse_new(
         &self,
         path: &Path,
