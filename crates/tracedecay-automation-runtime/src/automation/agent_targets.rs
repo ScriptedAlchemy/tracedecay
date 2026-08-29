@@ -39,6 +39,7 @@ fn generated_agent_id(relative: &'static str) -> &'static str {
         .unwrap_or_else(|| panic!("invalid generated Codex agent path: {relative}"))
 }
 
+#[hotpath::measure(label = "automation.host_io.install_agents")]
 pub fn install_codex_managed_agents(home: &Path) -> Result<ManagedAgentInstallSummary> {
     let agents_dir = agents_dir(home);
     fs::create_dir_all(&agents_dir)?;
@@ -73,6 +74,7 @@ pub fn install_codex_managed_agents(home: &Path) -> Result<ManagedAgentInstallSu
     })
 }
 
+#[hotpath::measure(label = "automation.host_io.remove_agents")]
 pub fn remove_managed_agents(agents_dir: &Path) -> Result<()> {
     let manifest_path = agents_dir.join(MANIFEST_FILE);
     let exported = match fs::read_to_string(&manifest_path) {

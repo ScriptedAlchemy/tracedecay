@@ -157,7 +157,7 @@ pub(crate) enum TransactionCommand {
     },
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "rusqlite_runtime.exact_sql.writer_command")]
 pub(crate) fn run_writer_command(
     connection: &mut Connection,
     command: WriterCommand,

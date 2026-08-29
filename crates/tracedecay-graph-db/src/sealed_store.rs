@@ -57,8 +57,9 @@ use crate::lease::GenerationLocator;
 use crate::location::PersistentGraphStoreState;
 use crate::projection::graph_properties_live_bytes;
 use crate::state::{
-    EndpointIdentityCache, load_entity, load_entity_by_node, load_relation_by_locator_cached,
-    projection_entity_nodes_sorted_checked, projection_relation_nodes_sorted_checked,
+    EndpointIdentityCache, latest_projection, load_entity, load_entity_by_node,
+    load_relation_by_locator_cached, projection_entity_nodes_sorted_checked,
+    projection_relation_nodes_sorted_checked,
 };
 use crate::{
     GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntity,
@@ -66,6 +67,82 @@ use crate::{
     GraphMutation, GraphNamespace, GraphProjectionIdentity, GraphWriteBatch, NeverCancelled,
     mutation,
 };
+
+/// Opens and verifies one dependency-free sealed generation without opening
+/// the shared mutable staging database.
+pub(crate) fn open_direct_sealed_generation(
+    database_path: &Path,
+    projection: crate::GraphProjectionIdentity,
+    generation: crate::GraphGenerationId,
+    expected: &GraphRecoveredGenerationDigestV1,
+    authority_lease: Arc<dyn tracedecay_store::RetainedGraphStoreLeaseV1>,
+) -> Result<Option<(crate::GraphDbLeaseV1, GraphGenerationManifestIdentity)>, GraphDbError> {
+    if sealed_store_disabled() {
+        return Ok(None);
+    }
+    let locator = GenerationLocator::new(projection.clone(), generation.clone());
+    let physical_namespace = locator.physical_namespace()?;
+    let directory =
+        sealed_generation_directory(&sealed_store_root(database_path), &physical_namespace);
+    let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
+    let sealed_path = directory.join(SEALED_STORE_DATABASE_FILE);
+    let receipt_bytes = match std::fs::read(&receipt_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(sealed_store_io_failure("receipt read failed", error)),
+    };
+    let receipt: SealedStoreReceiptV1 = serde_json::from_slice(&receipt_bytes)
+        .map_err(|error| GraphDbError::unavailable(format!("sealed receipt decode: {error}")))?;
+    if receipt.version != SEALED_STORE_RECEIPT_VERSION
+        || receipt.recovered_digest != expected.as_str()
+        || receipt.physical_namespace != physical_namespace.as_str()
+        || receipt.namespace != projection.namespace.as_str()
+        || receipt.projection != projection.projection.as_str()
+        || receipt.generation != generation.as_str()
+    {
+        return Err(GraphDbError::unavailable(
+            "sealed generation store receipt does not bind this generation".to_owned(),
+        ));
+    }
+    let database = GraphDb::open_with_store_state(
+        sealed_database_options(sealed_path),
+        Some(PersistentGraphStoreState::Existing),
+    )
+    .map_err(|error| sealed_store_failure("reopen failed", error))?;
+    let identity = {
+        let guard = database.read_guard()?;
+        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let recovered = latest_projection(native, &physical_namespace, &projection.projection)?
+            .ok_or_else(|| GraphDbError::GenerationMismatch {
+                namespace: projection.namespace.to_string(),
+                projection: projection.projection.to_string(),
+                generation: generation.to_string(),
+                message: "sealed generation is missing its projection commit".to_owned(),
+            })?;
+        GraphGenerationManifestIdentity::new(
+            projection,
+            generation,
+            recovered.commit.source_generation,
+            recovered.commit.watermark,
+            Vec::new(),
+        )
+    };
+    let verification = {
+        let guard = database.read_guard()?;
+        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        verify_sealed_copy_generation(native, &identity, expected, &|| Ok(()))
+    };
+    if let Err(error) = verification {
+        let _ = database.close();
+        return Err(sealed_store_failure(
+            "post-reopen verification failed",
+            error,
+        ));
+    }
+    database.mark_sealed_read_only();
+    let lease = crate::owner::issue_derived_read_lease(database, authority_lease)?;
+    Ok(Some((lease, identity)))
+}
 
 /// One mutation page applied while copying rows into a sealed store. The
 /// bounds mirror native staging so a copy can never exceed the canonical

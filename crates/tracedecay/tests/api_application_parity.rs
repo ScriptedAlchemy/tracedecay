@@ -11,9 +11,6 @@ use tracedecay::application_surface::{
     parse_application_surface_request, resolve_application_surface_dispatch,
     resolve_http_application_surface_dispatch,
 };
-use tracedecay_daemon_protocol::{
-    BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
-};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
 use tracedecay::mcp::tools::get_tool_definitions;
 use tracedecay_api::{
@@ -23,6 +20,9 @@ use tracedecay_api::{
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, CancellationSignal, Deadline,
     IdempotencyKey, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
+};
+use tracedecay_daemon_protocol::{
+    BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
 };
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,

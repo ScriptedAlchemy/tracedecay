@@ -24,9 +24,6 @@ use tracedecay::application_surface::{
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay::application_surface::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay::daemon::{DaemonHandshake, call_default_tool};
-use tracedecay_daemon_protocol::{
-    DaemonInvocationClient, DaemonLspSessionClient, RequestedOutputFormat,
-};
 use tracedecay::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_api::sse_response;
@@ -41,6 +38,9 @@ use tracedecay_application::{
     CancellationSignal, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
     CoverageCompleteness, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
     OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
+};
+use tracedecay_daemon_protocol::{
+    DaemonInvocationClient, DaemonLspSessionClient, RequestedOutputFormat,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
@@ -89,9 +89,11 @@ async fn runtime_fixture() -> RuntimeFixture {
     let (environment, project) = common::IsolatedEnv::acquire().await;
     let daemon = common::spawn_tracedecay_daemon(environment.home());
     initialize_project(environment.home(), &project);
-    let handshake = tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-        .expect("daemon handshake");
-    let client = tracedecay::daemon::invocation_client_for_current(handshake.clone()).expect("daemon client");
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
+            .expect("daemon handshake");
+    let client = tracedecay::daemon::invocation_client_for_current(handshake.clone())
+        .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -145,9 +147,11 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     assert_command_success("tracedecay init", &output);
     let storage = run_storage_status(environment.home(), &project, true);
     assert_command_success("open indexed LSP project", &storage);
-    let handshake = tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-        .expect("daemon handshake");
-    let client = tracedecay::daemon::invocation_client_for_current(handshake.clone()).expect("daemon client");
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
+            .expect("daemon handshake");
+    let client = tracedecay::daemon::invocation_client_for_current(handshake.clone())
+        .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -204,9 +208,11 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
 
-    let handshake = tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-        .expect("daemon handshake");
-    let client = tracedecay::daemon::invocation_client_for_current(handshake.clone()).expect("daemon client");
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
+            .expect("daemon handshake");
+    let client = tracedecay::daemon::invocation_client_for_current(handshake.clone())
+        .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -2578,8 +2584,8 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         false,
     )
     .expect("cross-scope daemon handshake");
-    let other_client =
-        tracedecay::daemon::invocation_client_for_current(other_handshake).expect("cross-scope daemon client");
+    let other_client = tracedecay::daemon::invocation_client_for_current(other_handshake)
+        .expect("cross-scope daemon client");
     let (deadline, cancellation) = lsp_control();
     let mut cross_scope = DaemonLspSessionClient::open(
         other_client,

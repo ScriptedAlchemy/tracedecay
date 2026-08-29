@@ -17,7 +17,6 @@ use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::server::{
     McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, SERVER_INSTRUCTIONS,
@@ -36,20 +35,21 @@ use scheduler::{
     automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
     run_automation_scheduler_tick, scheduler_task_log_fields,
 };
-use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
-use tracedecay_runtime_core::cancellation::CancellationToken;
-pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
     BrokerListener, BrokerStream, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
     DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome, DaemonInvocationRequest,
     DaemonInvocationResponse, default_loopback_endpoint, parse_daemon_invocation_request,
 };
+pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 #[cfg(unix)]
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
     ensure_private_socket_parent, unix_socket_path_within_limit,
 };
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub use tracedecay_daemon_protocol::SOCKET_ENV;

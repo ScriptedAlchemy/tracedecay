@@ -434,7 +434,8 @@ pub struct McpServer {
     /// never masquerades as a real session.
     connection_identity: McpConnectionIdentityAuthority,
     /// One lazy authenticated application client retained for this server.
-    application_surface_client: tokio::sync::OnceCell<tracedecay_daemon_protocol::DaemonInvocationClient>,
+    application_surface_client:
+        tokio::sync::OnceCell<tracedecay_daemon_protocol::DaemonInvocationClient>,
     /// Daemon-local executor installed by production project composition.
     /// External/direct servers fall back to the authenticated socket client.
     application_invocation_executor:

@@ -232,7 +232,7 @@ pub struct RegisteredGlobalDb {
     database: Database,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: OnceLock<(
-        crate::session_temporal::relations::SessionRelationScope,
+        tracedecay_session_temporal_store::relations::SessionRelationScope,
         tracedecay_graph_db::GraphDbLeaseV1,
         StoreRuntimeBindingV1,
         VerifiedStoreLocatorV1,

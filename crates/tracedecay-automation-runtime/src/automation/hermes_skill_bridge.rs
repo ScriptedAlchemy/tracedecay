@@ -96,6 +96,7 @@ impl Default for HermesSkillBridgeContracts {
 }
 
 /// Loads Hermes-owned skill state from the one supported user install.
+#[hotpath::measure(label = "automation.hermes.inventory")]
 pub fn load_standard_hermes_skill_bridge(
     options: HermesSkillBridgeOptions,
 ) -> Result<HermesSkillBridgeSnapshot> {

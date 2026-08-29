@@ -60,7 +60,10 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailab
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+        '_,
+        tracedecay_runtime_core::errors::Result<()>,
+    > {
         Box::pin(async { Ok(()) })
     }
 }

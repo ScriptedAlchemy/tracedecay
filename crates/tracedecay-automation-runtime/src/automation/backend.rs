@@ -113,9 +113,9 @@ impl CodexAppServerBackend {
 
 impl AgentTaskBackend for CodexAppServerBackend {
     // One backend attempt end to end, distinct from the retry-ladder block
-    // (`automation_backend_startup`) that also includes backoff sleeps.
+    // (`automation.backend.startup`) that also includes backoff sleeps.
     #[hotpath::measure(
-        label = "automation_backend_invoke",
+        label = "automation.backend.invoke",
         impl_type = "CodexAppServerBackend"
     )]
     fn run_task(

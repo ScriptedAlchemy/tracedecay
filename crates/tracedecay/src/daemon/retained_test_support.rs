@@ -61,14 +61,18 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
     > {
         Box::pin(async move {
             if cancellation.is_cancelled() {
-                return Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
-                    stage: tracedecay_application::CancellationStage::BeforeAdmission,
-                });
+                return Err(
+                    tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
+                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                    },
+                );
             }
             if tracedecay_daemon_protocol::deadline_remaining(&deadline).is_none() {
-                return Err(tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
-                    stage: tracedecay_application::CancellationStage::BeforeAdmission,
-                });
+                return Err(
+                    tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
+                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                    },
+                );
             }
             Ok(self
                 .service

@@ -83,8 +83,8 @@ use tracedecay_code_index::test_attribution::{
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
 use tracedecay_runtime_core::db::Database;
+use tracedecay_session_temporal_store::GlobalDbCursorKeyProvider;
 use tracedecay_temporal_query::cursor::{
     CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
 };
