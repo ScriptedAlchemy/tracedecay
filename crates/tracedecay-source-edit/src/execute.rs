@@ -8,8 +8,8 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 use tracedecay_graph_db::GraphCancellation;
 
-use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
+use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
@@ -197,10 +197,10 @@ fn authority_still_matches(
         && authority.proof == request.proof
 }
 
-#[hotpath::measure(label = "usecases.edit.execute", future = true)]
+#[hotpath::measure(label = "source_edit.execute", future = true)]
 pub(super) async fn execute_source_edit_inner<A>(
     graph: &SourceEditRuntime,
-    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
     authorization: &A,
@@ -522,18 +522,21 @@ where
         return Ok(record.into_live_application_result(live_outcome, None));
     }
 
-    let (effect_result, plan_complete) = crate::tracedecay::apply_source_edit_plan(
-        planned_files,
-        run_source_edit(
-            graph,
-            SourceEditGraphReadAuthorityV1 {
-                port: code_graph,
-                context: &request.context,
-                observed_at: request.observed_at,
-                cancellation: graph_cancellation,
-            },
-            request.edit.clone().with_dry_run(false),
+    let (effect_result, plan_complete) = hotpath::future!(
+        tracedecay_usecases::tracedecay::apply_source_edit_plan(
+            planned_files,
+            run_source_edit(
+                graph,
+                SourceEditGraphReadAuthorityV1 {
+                    port: code_graph,
+                    context: &request.context,
+                    observed_at: request.observed_at,
+                    cancellation: graph_cancellation,
+                },
+                request.edit.clone().with_dry_run(false),
+            ),
         ),
+        label = "source_edit.apply_plan"
     )
     .await;
     let outcome = match effect_result {
@@ -623,10 +626,10 @@ where
     Ok(record.into_live_application_result(outcome, verification))
 }
 
-#[hotpath::measure(label = "usecases.edit.preview", future = true)]
+#[hotpath::measure(label = "source_edit.preview", future = true)]
 pub(super) async fn resolve_source_edit_preview(
     graph: &SourceEditRuntime,
-    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
     context: &tracedecay_application::RequestContext,
     observed_at: tracedecay_domain::UtcMicros,
     cancellation: Arc<dyn GraphCancellation>,
@@ -642,17 +645,18 @@ pub(super) async fn resolve_source_edit_preview(
         SourceEditRequest::RenameSymbol { dry_run: false, .. } => edit,
         _ => edit.with_dry_run(true),
     };
-    let (outcome, planned_files) = crate::tracedecay::capture_source_edit_plan(run_source_edit(
-        graph,
-        SourceEditGraphReadAuthorityV1 {
-            port: code_graph,
-            context,
-            observed_at,
-            cancellation,
-        },
-        capture_edit,
-    ))
-    .await;
+    let (outcome, planned_files) =
+        tracedecay_usecases::tracedecay::capture_source_edit_plan(run_source_edit(
+            graph,
+            SourceEditGraphReadAuthorityV1 {
+                port: code_graph,
+                context,
+                observed_at,
+                cancellation,
+            },
+            capture_edit,
+        ))
+        .await;
     let mut outcome = outcome?;
     if !outcome.success() {
         return Ok(ResolvedSourceEditPreview {
@@ -700,7 +704,7 @@ fn source_edit_graph_cancellation(
     context: &tracedecay_application::RequestContext,
 ) -> Arc<dyn GraphCancellation> {
     control.map_or_else(
-        || crate::graph::request_graph_cancellation(context),
+        || tracedecay_usecases::graph::request_graph_cancellation(context),
         SourceEditEffectControlV1::graph_cancellation,
     )
 }

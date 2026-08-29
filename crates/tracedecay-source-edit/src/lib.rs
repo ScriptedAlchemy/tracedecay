@@ -1,11 +1,18 @@
+//! Durable source-edit preview, apply, rollback, and reconciliation.
+//!
+//! This crate sits beside the usecases spine: only the composition root
+//! consumes it. Plan capture and apply still go through
+//! `tracedecay_usecases::tracedecay`; graph reads go through
+//! `tracedecay_usecases::graph`.
+
 use tracedecay_application::{
     ApplicationOperation, SourceEditAuthorizationPort, SourceEditEffectRequestV1,
     SourceEditReconciliationRequestV1, SourceEditRequest,
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
+use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 const JOURNAL_VERSION: u8 = 1;
 const MAX_DURABLE_RECORD_BYTES: usize = 4 * 1024 * 1024;
@@ -39,7 +46,7 @@ use verify::config_error;
 /// preview and recaptures state under its edit lock.
 pub async fn preview_source_edit_expected_state(
     graph: &SourceEditRuntime,
-    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
     context: &tracedecay_application::RequestContext,
     observed_at: tracedecay_domain::UtcMicros,
     edit: SourceEditRequest,
@@ -49,7 +56,7 @@ pub async fn preview_source_edit_expected_state(
         code_graph,
         context,
         observed_at,
-        crate::graph::request_graph_cancellation(context),
+        tracedecay_usecases::graph::request_graph_cancellation(context),
         edit,
     )
     .await?;
@@ -63,7 +70,7 @@ pub async fn preview_source_edit_expected_state(
 
 pub async fn execute_source_edit<A>(
     graph: &SourceEditRuntime,
-    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
     authorization: &A,
@@ -76,7 +83,7 @@ where
 
 pub async fn execute_source_edit_with_control<A>(
     graph: &SourceEditRuntime,
-    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
     authorization: &A,

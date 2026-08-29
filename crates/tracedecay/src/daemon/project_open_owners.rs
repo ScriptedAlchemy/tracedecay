@@ -273,7 +273,7 @@ async fn invoke_project_open_source_edit(
         invocation.deadline.clone(),
         invocation.cancellation.context(),
     )?;
-    let effect_control = tracedecay_usecases::edit::SourceEditEffectControlV1::new(
+    let effect_control = tracedecay_source_edit::SourceEditEffectControlV1::new(
         context.deadline().clone(),
         invocation.cancellation.clone(),
     );
@@ -327,7 +327,7 @@ async fn invoke_project_open_source_edit(
         proof: current.proof,
         observed_at,
     };
-    tracedecay_usecases::edit::execute_source_edit_with_control(
+    tracedecay_source_edit::execute_source_edit_with_control(
         &*graph,
         code_graph.as_ref(),
         &operation,
@@ -345,7 +345,7 @@ async fn invoke_project_open_source_edit_reconciliation(
     invocation: crate::mcp::server::SourceEditReconciliationInvocationV1,
 ) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
     let observed_at = now_micros();
-    let effect_control = tracedecay_usecases::edit::SourceEditEffectControlV1::new(
+    let effect_control = tracedecay_source_edit::SourceEditEffectControlV1::new(
         invocation.deadline.clone(),
         invocation.cancellation.clone(),
     );
@@ -379,7 +379,7 @@ async fn invoke_project_open_source_edit_reconciliation(
         proof: current.proof,
         observed_at,
     };
-    tracedecay_usecases::edit::reconcile_source_edit_effect_unknown_with_control(
+    tracedecay_source_edit::reconcile_source_edit_effect_unknown_with_control(
         &*graph,
         request,
         &authorization,

@@ -26,6 +26,7 @@ members = [
     "crates/tracedecay-search-eval",
     "crates/tracedecay-semantic",
     "crates/tracedecay-sessions",
+    "crates/tracedecay-source-edit",
     "crates/tracedecay-temporal-query",
     "crates/tracedecay-rusqlite-runtime",
     "crates/tracedecay-store",

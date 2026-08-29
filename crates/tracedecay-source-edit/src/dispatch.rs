@@ -4,11 +4,11 @@ use tracedecay_application::{RequestContext, SourceEditRequest};
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::GraphCancellation;
 
-use crate::graph::{
+use tracedecay_runtime_core::errors::Result;
+use tracedecay_usecases::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadRequest, map_code_graph_read_runtime_error,
 };
-use crate::tracedecay::{SourceEditGraphReadV1, SourceEditRuntime};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_usecases::tracedecay::{SourceEditGraphReadV1, SourceEditRuntime};
 
 use super::outcome::SourceEditOutcome;
 
@@ -19,7 +19,7 @@ pub(super) struct SourceEditGraphReadAuthorityV1<'a> {
     pub(super) cancellation: Arc<dyn GraphCancellation>,
 }
 
-#[hotpath::measure(label = "usecases.edit.graph_read", future = true)]
+#[hotpath::measure(label = "source_edit.graph_read", future = true)]
 async fn admitted_graph(
     authority: &SourceEditGraphReadAuthorityV1<'_>,
 ) -> Result<SourceEditGraphReadV1> {
@@ -45,7 +45,7 @@ async fn admitted_graph(
     ))
 }
 
-#[hotpath::measure(label = "usecases.edit.dispatch", future = true)]
+#[hotpath::measure(label = "source_edit.dispatch", future = true)]
 pub(super) async fn run_source_edit(
     graph: &SourceEditRuntime,
     graph_read: SourceEditGraphReadAuthorityV1<'_>,

@@ -304,9 +304,9 @@ pub(super) fn durable_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edit::test_support::*;
+    use crate::test_support::*;
 
-    use crate::edit::digest::persist_record;
+    use crate::digest::persist_record;
     use std::fs;
     use tempfile::tempdir;
     use tracedecay_application::source_edit::MoveHint;

@@ -5,8 +5,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
+use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
@@ -49,7 +49,7 @@ fn rollback_journal(
     input_digest: &ManifestDigest,
     predicted_state: Option<ManifestDigest>,
     candidate_files: Vec<String>,
-    recovery_files: Vec<crate::tracedecay::PlannedSourceEditFile>,
+    recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
 ) -> Result<SourceEditJournalV1> {
     let recovery_digest = (!recovery_files.is_empty())
         .then(|| source_edit_recovery_digest(&recovery_files))
@@ -130,7 +130,7 @@ fn persist_pre_effect(
     Ok(record.into_live_application_result(outcome, None))
 }
 
-#[hotpath::measure(label = "usecases.edit.rollback", future = true)]
+#[hotpath::measure(label = "source_edit.rollback", future = true)]
 pub(super) async fn execute_source_edit_rollback_inner<A>(
     graph: &SourceEditRuntime,
     operation: &ApplicationOperation,
@@ -287,11 +287,13 @@ where
     let recovery_files = retained
         .recovery_files
         .iter()
-        .map(|file| crate::tracedecay::PlannedSourceEditFile {
-            relative_path: file.relative_path.clone(),
-            expected: file.intended.clone(),
-            intended: file.expected.clone(),
-        })
+        .map(
+            |file| tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                relative_path: file.relative_path.clone(),
+                expected: file.intended.clone(),
+                intended: file.expected.clone(),
+            },
+        )
         .collect::<Vec<_>>();
     let mut journal = rollback_journal(
         operation,
@@ -319,7 +321,7 @@ where
 
     let apply_result = hotpath::future!(
         graph.apply_source_edit_rollback(&retained.recovery_files),
-        label = "usecases.edit.rollback.apply"
+        label = "source_edit.rollback.apply"
     )
     .await;
     let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;

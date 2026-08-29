@@ -5932,6 +5932,7 @@ dependencies = [
  "tracedecay-search-eval",
  "tracedecay-semantic",
  "tracedecay-sessions",
+ "tracedecay-source-edit",
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
@@ -6547,6 +6548,25 @@ dependencies = [
  "tracedecay-temporal-query",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "tracedecay-source-edit"
+version = "0.1.0"
+dependencies = [
+ "hotpath",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tracedecay-graph-db",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
+ "tracing",
 ]
 
 [[package]]

@@ -10,8 +10,8 @@ use tracedecay_application::{
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 
-use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
+use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::digest::{load_record, persist_record, source_edit_recovery_digest};
@@ -44,7 +44,7 @@ pub(super) struct SourceEditJournalV1 {
     pub(super) predicted_state: Option<ManifestDigest>,
     pub(super) candidate_files: Vec<String>,
     #[serde(default)]
-    pub(super) recovery_files: Vec<crate::tracedecay::PlannedSourceEditFile>,
+    pub(super) recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
     #[serde(default)]
     pub(super) recovery_digest: Option<ManifestDigest>,
     pub(super) request: SourceEditDurableRequestV1,
@@ -96,7 +96,7 @@ pub(super) struct SourceEditRollbackRecordV1 {
     pub(super) scope: tracedecay_application::ResolvedScope,
     pub(super) expected_state: ManifestDigest,
     pub(super) committed_state: ManifestDigest,
-    pub(super) recovery_files: Vec<crate::tracedecay::PlannedSourceEditFile>,
+    pub(super) recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
     pub(super) recovery_digest: ManifestDigest,
     pub(super) record_digest: ManifestDigest,
 }
@@ -156,7 +156,7 @@ pub(super) struct ResolvedSourceEditPreview {
     pub(super) candidate_files: Vec<String>,
     pub(super) expected_state: Option<ManifestDigest>,
     pub(super) predicted_state: Option<ManifestDigest>,
-    pub(super) planned_files: Vec<crate::tracedecay::PlannedSourceEditFile>,
+    pub(super) planned_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
 }
 
 impl SourceEditDurability {
@@ -169,8 +169,11 @@ impl SourceEditDurability {
         }
     }
 
-    pub(super) fn lock(&self) -> Result<crate::tracedecay::SyncLockGuard> {
-        crate::tracedecay::try_acquire_sync_lock_at(&self.root.join("source-edit.lock"))
+    #[hotpath::measure(label = "source_edit.lock")]
+    pub(super) fn lock(&self) -> Result<tracedecay_usecases::tracedecay::SyncLockGuard> {
+        tracedecay_usecases::tracedecay::try_acquire_sync_lock_at(
+            &self.root.join("source-edit.lock"),
+        )
     }
 
     pub(super) fn journal_path(&self) -> PathBuf {

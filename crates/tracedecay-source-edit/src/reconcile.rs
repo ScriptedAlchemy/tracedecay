@@ -8,8 +8,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
+use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
@@ -24,7 +24,7 @@ use super::records::{
 };
 use super::verify::{application_contract_error, application_problem, config_error};
 
-#[hotpath::measure(label = "usecases.edit.reconcile", future = true)]
+#[hotpath::measure(label = "source_edit.reconcile", future = true)]
 pub(super) async fn reconcile_source_edit_effect_unknown_inner<A>(
     graph: &SourceEditRuntime,
     request: SourceEditReconciliationRequestV1,
@@ -226,7 +226,7 @@ fn reconcile_prepared_source_edit(
     reconcile_prepared_source_edit_controlled(durability, project_root, operation, request, None)
 }
 
-#[hotpath::measure(label = "usecases.edit.reconcile_prepared")]
+#[hotpath::measure(label = "source_edit.reconcile_prepared")]
 fn reconcile_prepared_source_edit_controlled(
     durability: &SourceEditDurability,
     project_root: &Path,
@@ -326,7 +326,7 @@ fn reconcile_prepared_source_edit_controlled(
     Ok(result)
 }
 
-#[hotpath::measure(label = "usecases.edit.recover", future = true)]
+#[hotpath::measure(label = "source_edit.recover", future = true)]
 pub(super) async fn recover_source_edit_transaction(
     durability: &SourceEditDurability,
     graph: &SourceEditRuntime,
@@ -382,7 +382,7 @@ pub(super) async fn recover_source_edit_transaction(
     if journal.predicted_state.as_ref() == Some(&observed_state) {
         hotpath::future!(
             graph.commit_source_edit_postimages(&journal.recovery_files),
-            label = "usecases.edit.recover.commit"
+            label = "source_edit.recover.commit"
         )
         .await?;
         let outcome = SourceEditOutcome::Reconciled {
@@ -416,7 +416,7 @@ pub(super) async fn recover_source_edit_transaction(
     }
     hotpath::future!(
         graph.recover_source_edit_preimages(&journal.recovery_files),
-        label = "usecases.edit.recover.preimage"
+        label = "source_edit.recover.preimage"
     )
     .await?;
     let restored_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
@@ -444,7 +444,7 @@ pub(super) async fn recover_source_edit_transaction(
     durability.clear_journal()
 }
 
-#[hotpath::measure(label = "usecases.edit.replay")]
+#[hotpath::measure(label = "source_edit.replay")]
 pub(super) fn recover_or_replay(
     durability: &SourceEditDurability,
     request: &SourceEditEffectRequestV1,
@@ -523,9 +523,9 @@ fn reconcile_journal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edit::test_support::*;
+    use crate::test_support::*;
 
-    use crate::edit::digest::{planned_source_edit_state_digest, source_edit_recovery_digest};
+    use crate::digest::{planned_source_edit_state_digest, source_edit_recovery_digest};
     use std::fs;
     use tempfile::tempdir;
     use tracedecay_application::source_edit::EditResult;
@@ -568,7 +568,7 @@ mod tests {
         };
         let request = fixture_request();
         let mut journal = fixture_journal(&request, SourceEditJournalStateV1::Prepared);
-        journal.recovery_files = vec![crate::tracedecay::PlannedSourceEditFile {
+        journal.recovery_files = vec![tracedecay_usecases::tracedecay::PlannedSourceEditFile {
             relative_path: "src/lib.rs".to_owned(),
             expected: Some("old".to_owned()),
             intended: Some("new".to_owned()),
@@ -865,7 +865,7 @@ mod tests {
         journal.predicted_state = Some(
             planned_source_edit_state_digest(
                 &files,
-                &[crate::tracedecay::PlannedSourceEditFile {
+                &[tracedecay_usecases::tracedecay::PlannedSourceEditFile {
                     relative_path: "src/lib.rs".to_owned(),
                     expected: Some("before".to_owned()),
                     intended: Some("after".to_owned()),
@@ -930,7 +930,7 @@ mod tests {
         journal.predicted_state = Some(
             planned_source_edit_state_digest(
                 &files,
-                &[crate::tracedecay::PlannedSourceEditFile {
+                &[tracedecay_usecases::tracedecay::PlannedSourceEditFile {
                     relative_path: "src/lib.rs".to_owned(),
                     expected: Some("before".to_owned()),
                     intended: Some("intended".to_owned()),
