@@ -13,7 +13,8 @@ use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
     UpdatePluginOutcome, backup_and_write_json, load_json_file, load_jsonc_file_strict,
-    mcp_config_has_tracedecay, safe_write_text_file, uninstall_mcp_server_entry,
+    mcp_config_has_tracedecay, safe_remove_host_file, safe_write_text_file,
+    uninstall_mcp_server_entry,
 };
 
 pub struct CursorIntegration;
@@ -434,8 +435,8 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
         return Ok(());
     };
     if metadata.file_type().is_symlink() || metadata.is_file() {
-        std::fs::remove_file(install_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", install_dir.display()),
+        safe_remove_host_file(install_dir).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", install_dir.display()),
         })?;
         return Ok(());
     }
@@ -462,21 +463,56 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     // hand-maintained legacy list to fall out of date. User-added files
     // outside `skills/` (and any non-tracedecay skill dir) are preserved.
     sweep_retired_bundle_skill_dirs(install_dir)?;
-    remove_cursor_managed_skill_overlay(install_dir);
+    remove_cursor_managed_skill_overlay(install_dir)?;
+    for path in cursor_plugin_managed_paths(install_dir) {
+        remove_cursor_plugin_file(&path)?;
+    }
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
-        std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", install_dir.display()),
-        })?;
-    } else {
-        for path in cursor_plugin_managed_paths(install_dir) {
-            std::fs::remove_file(&path).ok();
+        match std::fs::remove_dir_all(install_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to remove {}: {error}", install_dir.display()),
+                });
+            }
         }
     }
     Ok(())
 }
 
-fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
-    std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
+fn remove_cursor_plugin_file(path: &Path) -> Result<()> {
+    match safe_remove_host_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", path.display()),
+        }),
+    }
+}
+
+fn remove_cursor_managed_skill_overlay(install_dir: &Path) -> Result<()> {
+    let overlay = install_dir.join("skills/agent-managed");
+    match super::collect_regular_files(&overlay) {
+        Ok(files) => {
+            for path in files {
+                remove_cursor_plugin_file(&path)?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to inspect {}: {error}", overlay.display()),
+            });
+        }
+    }
+    match std::fs::remove_dir_all(&overlay) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", overlay.display()),
+        }),
+    }
 }
 
 /// Recognize a receiptless Cursor deployment as a prior first-party install.
@@ -2196,6 +2232,49 @@ mod tests {
         assert!(
             install_dir.join("user-file.txt").exists(),
             "an unmanaged dir must be left untouched"
+        );
+    }
+
+    #[test]
+    fn uninstall_removes_managed_files_and_preserves_user_files() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
+        std::fs::write(install_dir.join("user-keep.txt"), "keep").unwrap();
+
+        remove_cursor_plugin_install(&install_dir).expect("uninstall should succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(install_dir.join("user-keep.txt")).unwrap(),
+            "keep"
+        );
+        assert!(
+            !install_dir.join(".cursor-plugin/plugin.json").exists(),
+            "managed plugin files must be removed beside operator files"
+        );
+        assert!(
+            !install_dir.join("rules/tracedecay.mdc").exists(),
+            "managed rule files must be removed beside operator files"
+        );
+    }
+
+    #[test]
+    fn leftover_managed_file_removal_propagates_errors() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
+        std::fs::write(install_dir.join("user-keep.txt"), "keep").unwrap();
+        let managed = install_dir.join("rules/tracedecay.mdc");
+        std::fs::remove_file(&managed).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+        std::fs::write(managed.join("nested"), "blocked").unwrap();
+
+        let error = remove_cursor_plugin_install(&install_dir)
+            .expect_err("a leftover managed path that is not a file must fail uninstall");
+        assert!(error.to_string().contains("failed to remove"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(install_dir.join("user-keep.txt")).unwrap(),
+            "keep"
         );
     }
 
