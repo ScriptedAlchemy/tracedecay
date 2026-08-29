@@ -6071,6 +6071,7 @@ dependencies = [
  "tracedecay-policy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",

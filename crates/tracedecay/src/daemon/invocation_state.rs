@@ -356,7 +356,7 @@ impl DaemonInvocationState {
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
         expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
-        cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+        cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
         code_index_scheduler::query_runtime::
