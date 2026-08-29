@@ -37,6 +37,9 @@ impl ServiceRunner {
     ) -> Result<()> {
         match self {
             Self::Systemd => {
+                // `install-service` (start=true) both enables the unit and
+                // starts it. `--no-start` writes the unit file only, so the
+                // operator can inspect it before the first enable.
                 if start {
                     run_systemctl(&["daemon-reload"])?;
                     run_systemctl(&["enable", "--now", super::super::SERVICE_NAME])?;

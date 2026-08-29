@@ -427,7 +427,7 @@ pub(crate) async fn run_post_update_command(
         Ok(lifecycle_lease) => run_post_update_tasks(no_reinstall, lifecycle_lease).await,
         Err(error) => Err(error),
     };
-    let restore_result = guard.finish();
+    let restore_result = guard.finish_after_update();
     combine_operation_and_restore("post-update", operation_result, restore_result)
 }
 

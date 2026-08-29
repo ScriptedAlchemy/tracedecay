@@ -554,3 +554,75 @@ async fn store_layout_resolution_surfaces_split_identity_conflict()
     assert_eq!(std::fs::read(legacy_db)?, legacy_before);
     Ok(())
 }
+
+#[test]
+fn doctor_fails_stopped_or_disabled_units_with_enable_now_remedy() {
+    use super::{DaemonServiceDoctorVerdict, daemon_service_doctor_verdict};
+    use crate::daemon::DaemonServiceState;
+
+    for state in [
+        DaemonServiceState::StoppedEnabled,
+        DaemonServiceState::StoppedDisabled,
+        DaemonServiceState::Masked,
+    ] {
+        assert_eq!(
+            daemon_service_doctor_verdict(state),
+            DaemonServiceDoctorVerdict::Fail,
+            "{state:?} must be a Doctor failure"
+        );
+        let message = state.lifecycle_operator_advice();
+        assert!(
+            message.contains("tracedecay daemon install-service"),
+            "{state:?} must name install-service, got: {message}"
+        );
+        if cfg!(target_os = "linux") {
+            assert!(
+                message.contains("systemctl --user enable --now tracedecay.service"),
+                "{state:?} must name enable --now, got: {message}"
+            );
+        }
+    }
+
+    let stopped_disabled = DaemonServiceState::StoppedDisabled.lifecycle_operator_advice();
+    assert!(
+        stopped_disabled.contains("stopped and disabled"),
+        "stopped+disabled wording must be exact, got: {stopped_disabled}"
+    );
+    let stopped = DaemonServiceState::StoppedEnabled.lifecycle_operator_advice();
+    assert!(
+        stopped.contains("installed but stopped"),
+        "stopped wording must be exact, got: {stopped}"
+    );
+    assert!(
+        !stopped.contains("disabled"),
+        "enabled-but-stopped must not claim disabled, got: {stopped}"
+    );
+}
+
+#[test]
+fn doctor_warns_on_missing_or_running_disabled_units() {
+    use super::{DaemonServiceDoctorVerdict, daemon_service_doctor_verdict};
+    use crate::daemon::DaemonServiceState;
+
+    assert_eq!(
+        daemon_service_doctor_verdict(DaemonServiceState::Missing),
+        DaemonServiceDoctorVerdict::Warn
+    );
+    assert_eq!(
+        daemon_service_doctor_verdict(DaemonServiceState::RunningDisabled),
+        DaemonServiceDoctorVerdict::Warn
+    );
+    assert_eq!(
+        daemon_service_doctor_verdict(DaemonServiceState::RunningEnabled),
+        DaemonServiceDoctorVerdict::Pass
+    );
+    let missing = DaemonServiceState::Missing.lifecycle_operator_advice();
+    assert!(
+        missing.contains("tracedecay daemon install-service"),
+        "missing unit must name install-service, got: {missing}"
+    );
+    assert!(
+        missing.contains("ensure the service is running"),
+        "missing unit keeps the generic ensure-running text, got: {missing}"
+    );
+}

@@ -401,6 +401,7 @@ pub use service::{
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_quiesced_installed_service,
 };
+pub(crate) use service::{installed_service_state, unavailable_daemon_socket_advice};
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
