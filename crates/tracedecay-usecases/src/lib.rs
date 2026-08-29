@@ -112,6 +112,7 @@ pub mod store;
 pub mod tracedecay;
 pub mod user_config;
 
+pub use lsp_support::analyzer_runtime_config_error;
 pub use source_authorization::{
     ProjectSourceAccessDenial, ProjectSourceAccessOutcome, ProjectSourceAccessSnapshot,
     project_source_access_snapshot_for_request,

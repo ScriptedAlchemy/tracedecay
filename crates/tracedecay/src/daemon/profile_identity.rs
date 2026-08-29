@@ -1,24 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use tracedecay_agent_hosts::ports::project_runtime::ProfileIdentity;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::storage::{
+    PROFILE_IDENTITY_RECORD_NAME, PROFILE_IDENTITY_SCHEMA_VERSION, ProfileIdentityRecordV1,
+    read_existing_profile_identity_record,
+};
 use crate::storage::PROFILE_IDENTITY_FILENAME;
 
 use super::authority::canonical_identity_path;
-
-const PROFILE_IDENTITY_SCHEMA_VERSION: u32 = 1;
-const PROFILE_IDENTITY_RECORD_NAME: &str = "profile identity record";
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct LocalProfileIdentityRecordV1 {
-    schema_version: u32,
-    brain_id: BrainId,
-    profile_id: UserProfileId,
-}
 
 /// Durable random identity for one local `TraceDecay` profile root.
 ///
@@ -27,7 +19,7 @@ struct LocalProfileIdentityRecordV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalProfileIdentityAuthorityV1 {
     profile_root: PathBuf,
-    record: LocalProfileIdentityRecordV1,
+    record: ProfileIdentityRecordV1,
 }
 
 impl LocalProfileIdentityAuthorityV1 {
@@ -62,33 +54,18 @@ pub(crate) fn load_existing(profile_root: &Path) -> Result<LocalProfileIdentityA
     let profile_root = canonical_identity_path(profile_root)?;
     validate_private_profile_root(&profile_root)?;
     let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
-    let record = read_existing_record(&path)?.ok_or_else(|| TraceDecayError::Config {
-        message: format!(
-            "ResetRequired: {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing from an existing profile",
-            path.display()
-        ),
+    let record = read_existing_profile_identity_record(&path)?.ok_or_else(|| {
+        TraceDecayError::Config {
+            message: format!(
+                "ResetRequired: {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing from an existing profile",
+                path.display()
+            ),
+        }
     })?;
     Ok(LocalProfileIdentityAuthorityV1 {
         profile_root,
         record,
     })
-}
-
-/// Reads the exact final profile identity record, failing when it is absent.
-///
-/// Backup and restore verification require the persisted identity; unlike
-/// [`load_or_create`] this never mints a new one, and unlike
-/// [`load_existing`] it does not validate the enclosing root — the record may
-/// live inside staged backup material rather than a live profile root.
-pub(crate) fn read_required(profile_root: &Path) -> Result<(BrainId, UserProfileId)> {
-    let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
-    let record = read_existing_record(&path)?.ok_or_else(|| TraceDecayError::Config {
-        message: format!(
-            "required {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing",
-            path.display()
-        ),
-    })?;
-    Ok((record.brain_id, record.profile_id))
 }
 
 #[hotpath::measure(label = "daemon.profile_identity.load_or_create")]
@@ -100,11 +77,13 @@ pub(super) fn load_or_create_pinned(
     if expected.is_some() {
         validate_private_profile_root(&profile_root)?;
         let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
-        let record = read_existing_record(&path)?.ok_or_else(|| TraceDecayError::Config {
-            message: format!(
-                "{PROFILE_IDENTITY_RECORD_NAME} '{}' is missing after its identity was pinned",
-                path.display()
-            ),
+        let record = read_existing_profile_identity_record(&path)?.ok_or_else(|| {
+            TraceDecayError::Config {
+                message: format!(
+                    "{PROFILE_IDENTITY_RECORD_NAME} '{}' is missing after its identity was pinned",
+                    path.display()
+                ),
+            }
         })?;
         validate_expected_identity(&path, &record, expected)?;
         return Ok(LocalProfileIdentityAuthorityV1 {
@@ -122,7 +101,7 @@ pub(super) fn load_or_create_pinned(
     validate_private_profile_root(&profile_root)?;
 
     let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
-    if let Some(record) = read_existing_record(&path)? {
+    if let Some(record) = read_existing_profile_identity_record(&path)? {
         validate_expected_identity(&path, &record, expected)?;
         return Ok(LocalProfileIdentityAuthorityV1 {
             profile_root,
@@ -143,11 +122,13 @@ pub(super) fn load_or_create_pinned(
         &bytes,
         PROFILE_IDENTITY_RECORD_NAME,
     )?;
-    let persisted = read_existing_record(&path)?.ok_or_else(|| TraceDecayError::Config {
-        message: format!(
-            "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared after publication",
-            path.display()
-        ),
+    let persisted = read_existing_profile_identity_record(&path)?.ok_or_else(|| {
+        TraceDecayError::Config {
+            message: format!(
+                "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared after publication",
+                path.display()
+            ),
+        }
     })?;
     if persisted != record {
         return Err(TraceDecayError::Config {
@@ -165,7 +146,7 @@ pub(super) fn load_or_create_pinned(
 
 fn validate_expected_identity(
     path: &Path,
-    record: &LocalProfileIdentityRecordV1,
+    record: &ProfileIdentityRecordV1,
     expected: Option<(&BrainId, &UserProfileId)>,
 ) -> Result<()> {
     let Some((brain_id, profile_id)) = expected else {
@@ -182,56 +163,8 @@ fn validate_expected_identity(
     Ok(())
 }
 
-fn read_existing_record(path: &Path) -> Result<Option<LocalProfileIdentityRecordV1>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(profile_identity_io("inspect", path, &error)),
-    };
-    validate_private_identity_file(path, &metadata)?;
-    let encoded =
-        tracedecay_runtime_core::db::DatabaseAuthority::read_record_strict(path, PROFILE_IDENTITY_RECORD_NAME)?
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared while being read",
-                    path.display()
-                ),
-            })?;
-    let record =
-        serde_json::from_str::<LocalProfileIdentityRecordV1>(&encoded).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!(
-                    "invalid {PROFILE_IDENTITY_RECORD_NAME} '{}': {error}",
-                    path.display()
-                ),
-            }
-        })?;
-    validate_record(path, &record)?;
-    Ok(Some(record))
-}
-
-fn validate_record(path: &Path, record: &LocalProfileIdentityRecordV1) -> Result<()> {
-    if record.schema_version != PROFILE_IDENTITY_SCHEMA_VERSION {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "unsupported {PROFILE_IDENTITY_RECORD_NAME} schema_version={} in '{}'",
-                record.schema_version,
-                path.display()
-            ),
-        });
-    }
-    record
-        .brain_id
-        .validate()
-        .map_err(|error| invalid_identity(path, "brain_id", error))?;
-    record
-        .profile_id
-        .validate()
-        .map_err(|error| invalid_identity(path, "profile_id", error))
-}
-
-fn new_record() -> Result<LocalProfileIdentityRecordV1> {
-    Ok(LocalProfileIdentityRecordV1 {
+fn new_record() -> Result<ProfileIdentityRecordV1> {
+    Ok(ProfileIdentityRecordV1 {
         schema_version: PROFILE_IDENTITY_SCHEMA_VERSION,
         brain_id: BrainId::new(random_identity("brain")?).map_err(|error| {
             TraceDecayError::Config {
@@ -252,15 +185,6 @@ fn random_identity(prefix: &str) -> Result<String> {
         message: format!("failed to generate local {prefix} identity: {error}"),
     })?;
     Ok(format!("{prefix}.{}", hex::encode(bytes)))
-}
-
-fn invalid_identity(path: &Path, field: &str, error: impl std::fmt::Display) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
-            "invalid {field} in {PROFILE_IDENTITY_RECORD_NAME} '{}': {error}",
-            path.display()
-        ),
-    }
 }
 
 fn profile_identity_io(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecayError {
@@ -304,31 +228,6 @@ fn validate_private_profile_root(path: &Path) -> Result<()> {
             return Err(TraceDecayError::Config {
                 message: format!(
                     "profile identity root '{}' must have permissions 0700",
-                    path.display()
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_private_identity_file(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "{PROFILE_IDENTITY_RECORD_NAME} '{}' must be a private regular file",
-                path.display()
-            ),
-        });
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        if metadata.permissions().mode() & 0o777 != 0o600 {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "{PROFILE_IDENTITY_RECORD_NAME} '{}' must have permissions 0600",
                     path.display()
                 ),
             });

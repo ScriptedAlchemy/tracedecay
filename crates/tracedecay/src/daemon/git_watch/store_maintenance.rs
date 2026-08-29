@@ -10,7 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::branch::BranchAdminAction;
-use crate::config::{CompactionThresholdConfig, RetentionConfig};
+use crate::config::RetentionConfig;
+use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
@@ -1936,7 +1937,7 @@ pub(super) async fn run_branch_compaction(
         return true;
     };
     let active_db_path = layout.graph_db_path.clone();
-    let candidates = crate::retention::branch_compaction::select_branch_db_candidates(
+    let candidates = tracedecay_maintenance::retention::branch_compaction::select_branch_db_candidates(
         &layout.data_root,
         &meta,
         &active_db_path,
@@ -1944,7 +1945,7 @@ pub(super) async fn run_branch_compaction(
     if candidates.is_empty() {
         return true;
     }
-    let report = crate::retention::branch_compaction::compact_branch_databases(&candidates, config);
+    let report = tracedecay_maintenance::retention::branch_compaction::compact_branch_databases(&candidates, config);
     if report.policy_invalid {
         // Never silent: an out-of-range threshold disables the pass entirely
         // and would otherwise be indistinguishable from "nothing to compact".
@@ -1974,7 +1975,7 @@ pub(super) async fn run_branch_compaction(
         .iter()
         .filter(|skip| {
             skip.reason
-                == crate::retention::branch_compaction::BranchCompactionSkipReason::IncrementalVacuumUnavailable
+                == tracedecay_maintenance::retention::branch_compaction::BranchCompactionSkipReason::IncrementalVacuumUnavailable
         })
         .count();
     log_daemon_event(
@@ -1993,7 +1994,7 @@ pub(super) async fn run_branch_compaction(
 }
 
 pub(super) fn branch_compaction_succeeded(
-    report: &crate::retention::branch_compaction::BranchCompactionReport,
+    report: &tracedecay_maintenance::retention::branch_compaction::BranchCompactionReport,
 ) -> bool {
     !report.policy_invalid && report.skipped.is_empty()
 }

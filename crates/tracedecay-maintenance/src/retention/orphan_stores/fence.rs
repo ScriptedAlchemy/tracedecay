@@ -193,7 +193,7 @@ pub(super) fn capture_store_content_fence_controlled(
     capture_store_content_fence_impl(profile_root, data_root, Some(control))
 }
 
-#[hotpath::measure(label = "retention.orphan.fence.content")]
+#[hotpath::measure(label = "maintenance.orphan_stores.fence_content")]
 fn capture_store_content_fence_impl(
     profile_root: &Path,
     data_root: &Path,

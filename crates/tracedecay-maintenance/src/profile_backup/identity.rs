@@ -8,6 +8,9 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use tracedecay_runtime_core::storage::{
+    PROFILE_IDENTITY_FILENAME, PROFILE_IDENTITY_RECORD_NAME, read_existing_profile_identity_record,
+};
 
 use super::{ProfileBackupEntry, ProfileBackupError, checked_join};
 
@@ -19,27 +22,42 @@ pub struct ProfileBackupProjectIdentity {
     pub store_relpath: String,
 }
 
-/// Reads the profile identity the backup binds to, through the canonical
-/// profile-identity authority (never minting a new record).
+/// Reads the persisted profile-identity record through runtime-core file
+/// primitives (never minting a new record). The daemon remains the write
+/// authority that publishes this file.
 pub(super) fn read_required_profile_identity(
     profile_root: &Path,
     corrupt_material: bool,
 ) -> Result<(String, String), ProfileBackupError> {
-    crate::daemon::profile_identity::read_required(profile_root)
-        .map(|(brain_id, profile_id)| {
-            (brain_id.as_str().to_owned(), profile_id.as_str().to_owned())
-        })
-        .map_err(|error| {
-            let message = format!(
-                "profile identity of '{}' is not the exact final shape: {error}",
-                profile_root.display()
-            );
-            if corrupt_material {
-                ProfileBackupError::corrupt(message)
-            } else {
-                ProfileBackupError::invalid(message)
-            }
-        })
+    let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
+    let record = match read_existing_profile_identity_record(&path) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return Err(classify_identity_error(
+                corrupt_material,
+                format!(
+                    "required {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing",
+                    path.display()
+                ),
+            ));
+        }
+        Err(error) => return Err(classify_identity_error(corrupt_material, error.to_string())),
+    };
+    Ok((
+        record.brain_id.as_str().to_owned(),
+        record.profile_id.as_str().to_owned(),
+    ))
+}
+
+fn classify_identity_error(
+    corrupt_material: bool,
+    message: impl Into<String>,
+) -> ProfileBackupError {
+    if corrupt_material {
+        ProfileBackupError::corrupt(message)
+    } else {
+        ProfileBackupError::invalid(message)
+    }
 }
 
 /// Collects the durable identity of every project store named by `entries`,

@@ -1,25 +1,21 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::quarantine::{QuarantineRecoveryOutcome, recover_existing_store_quarantine};
 use super::*;
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_runtime_core::db::DaemonDatabaseScope;
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::tests::RegisteredGlobalDbTestRuntime;
+use tracedecay_runtime_core::storage::{
+    STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
+};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 const DAY: i64 = 24 * 60 * 60;
-static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
 async fn open_registered_db(
     profile_root: &Path,
-) -> (
-    DaemonSessionRuntimeRegistryV1,
-    DaemonDatabaseScope,
-    RegisteredGlobalDbLeaseV1,
-) {
+) -> (RegisteredGlobalDbTestRuntime, tracedecay_global_db::RegisteredGlobalDbLeaseV1) {
     // `create_dir_all` in the callers honours the ambient umask, so under a
     // group-writable umask (0002) the profile root lands at 0775 and profile
     // identity refuses it. A real profile root is always 0700; make the
@@ -29,16 +25,11 @@ async fn open_registered_db(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let identity = crate::daemon::profile_identity::load_or_create(profile_root).unwrap();
-    let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
-    let scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(profile_root, nonce, "orphan store sweep test")
-            .unwrap();
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+    let runtime = RegisteredGlobalDbTestRuntime::profile(profile_root)
         .await
         .unwrap();
-    let database = registry.profile_database().await.unwrap();
-    (registry, scope, database)
+    let database = runtime.profile_database_arc();
+    (runtime, database)
 }
 
 fn entry(
@@ -184,14 +175,14 @@ fn malformed_manifest_bytes_mark_the_census_entry_unverifiable() {
     let data_root = profile.path().join("stores/malformed");
     std::fs::create_dir_all(&data_root).unwrap();
     std::fs::write(
-        data_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         b"{ this is not valid manifest json",
     )
     .unwrap();
 
     // Exercise the same parse the census performs, so the fixture proves the
     // production decode path — not a hand-set flag — yields unverifiable.
-    let bytes = std::fs::read(data_root.join(crate::storage::STORE_MANIFEST_FILENAME)).unwrap();
+    let bytes = std::fs::read(data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME)).unwrap();
     let parsed = serde_json::from_slice::<StoreManifest>(&bytes).ok();
     assert!(parsed.is_none(), "fixture manifest must be unparseable");
 
@@ -501,7 +492,7 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     // Orphan identity: canonical + display roots that no longer exist.
     let dead_root = tmp.path().join("moved-away-repo");
 
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
 
     // Anchor timestamps at a real epoch base so the recorded last-write drives
     // the age (not the freshly-written file mtime, which would be "now").
@@ -577,7 +568,7 @@ async fn registered_collection_refuses_same_second_directory_replacement() {
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let dead_root = tmp.path().join("moved-away-repo");
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let data_root = seed_store(
         &db,
         &profile_root,
@@ -599,7 +590,7 @@ async fn registered_collection_refuses_same_second_directory_replacement() {
     let displaced = profile_root.join("displaced-store");
     std::fs::rename(&data_root, &displaced).unwrap();
     std::fs::create_dir_all(&data_root).unwrap();
-    for name in ["graph.db", crate::storage::STORE_MANIFEST_FILENAME] {
+    for name in ["graph.db", tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME] {
         let source = displaced.join(name);
         let target = data_root.join(name);
         std::fs::copy(&source, &target).unwrap();
@@ -645,7 +636,7 @@ async fn registered_collection_rejects_profile_contained_data_root_symlink() {
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let dead_root = tmp.path().join("moved-away-repo");
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let data_root = seed_store(
         &db,
         &profile_root,
@@ -705,7 +696,7 @@ async fn sweep_preserves_immature_sibling_store_identity() {
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let dead_root = tmp.path().join("moved-away-repo");
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let now = 1_700_000_000i64;
     let old_root = seed_store(
         &db,
@@ -761,7 +752,7 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
     let dead_root = tmp.path().join("old-repository-root");
     let live_root = tmp.path().join("renamed-repository-root");
     std::fs::create_dir_all(&live_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let store_root = seed_store(
         &db,
         &profile_root,
@@ -782,10 +773,10 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
         data_root: store_root.clone(),
         graph_db_relpath: PathBuf::from("graph.db"),
         sessions_db_relpath: PathBuf::from("sessions.db"),
-        branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
+        branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
     };
     std::fs::write(
-        store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
@@ -810,8 +801,8 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
     assert_eq!(target_stores.len(), 1);
     assert_eq!(target_stores[0].store_id, "store_moved");
     assert_eq!(target_stores[0].project_id, "proj_live");
-    let relinked_manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let relinked_manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     assert_eq!(relinked_manifest.project_id.as_deref(), Some("proj_live"));
@@ -832,7 +823,7 @@ async fn sweep_resumes_manifest_forward_after_interrupted_relink() {
     let dead_root = tmp.path().join("old-repository-root");
     let live_root = tmp.path().join("renamed-repository-root");
     std::fs::create_dir_all(&live_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let store_root = seed_store(
         &db,
         &profile_root,
@@ -843,14 +834,14 @@ async fn sweep_resumes_manifest_forward_after_interrupted_relink() {
     )
     .await;
     seed_project(&db, "proj_live", &live_root, 1_700_000_000).await;
-    let mut manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let mut manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     manifest.project_id = Some("proj_live".to_string());
     manifest.project_root = live_root;
-    crate::storage::write_store_manifest_to_path(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    tracedecay_runtime_core::storage::write_store_manifest_to_path(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         &manifest,
     )
     .unwrap();
@@ -885,7 +876,7 @@ async fn sweep_leaves_relinkable_store_unchanged_without_exact_target_registrati
     let dead_root = tmp.path().join("old-repository-root");
     let unregistered_live_root = tmp.path().join("unregistered-live-root");
     std::fs::create_dir_all(&unregistered_live_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let store_root = seed_store(
         &db,
         &profile_root,
@@ -895,13 +886,13 @@ async fn sweep_leaves_relinkable_store_unchanged_without_exact_target_registrati
         1_700_000_000,
     )
     .await;
-    let mut manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let mut manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     manifest.project_root = unregistered_live_root;
     std::fs::write(
-        store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
@@ -919,8 +910,8 @@ async fn sweep_leaves_relinkable_store_unchanged_without_exact_target_registrati
         .unwrap();
     assert_eq!(prior.len(), 1);
     assert_eq!(prior[0].store_id, "store_moved");
-    let unchanged_manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let unchanged_manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     assert_eq!(unchanged_manifest.project_id.as_deref(), Some("proj_old"));
@@ -934,7 +925,7 @@ async fn relink_database_failure_rolls_back_manifest_and_registry() {
     let dead_root = tmp.path().join("old-repository-root");
     let live_root = tmp.path().join("registered-live-root");
     std::fs::create_dir_all(&live_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let store_root = seed_store(
         &db,
         &profile_root,
@@ -945,13 +936,13 @@ async fn relink_database_failure_rolls_back_manifest_and_registry() {
     )
     .await;
     seed_project(&db, "proj_live", &live_root, 1_700_000_000).await;
-    let mut manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let mut manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     manifest.project_root = live_root;
     std::fs::write(
-        store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
@@ -984,8 +975,8 @@ async fn relink_database_failure_rolls_back_manifest_and_registry() {
             .unwrap()
             .is_empty()
     );
-    let restored_manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let restored_manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     assert_eq!(restored_manifest.project_id.as_deref(), Some("proj_old"));
@@ -1019,10 +1010,10 @@ async fn seed_store(
         data_root: data_root.clone(),
         graph_db_relpath: PathBuf::from("graph.db"),
         sessions_db_relpath: PathBuf::from("sessions.db"),
-        branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
+        branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
     };
     std::fs::write(
-        data_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
@@ -1085,7 +1076,7 @@ async fn registered_store_census_resumes_across_bounded_project_pages() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     for suffix in ["a", "b", "c"] {
         seed_store(
             db.as_ref(),
@@ -1124,7 +1115,7 @@ async fn durable_memory_rows_block_orphan_store_collection() {
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let dead_root = tmp.path().join("moved-away-repo");
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let base = 1_700_000_000i64;
     let data_root = seed_store(
         &db,
@@ -1181,7 +1172,7 @@ async fn memory_v2_rows_block_orphan_store_collection() {
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let dead_root = tmp.path().join("moved-away-repo");
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let base = 1_700_000_000i64;
     let data_root = seed_store(
         &db,
@@ -1227,7 +1218,7 @@ async fn empty_memory_table_does_not_block_collection() {
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let dead_root = tmp.path().join("moved-away-repo");
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let base = 1_700_000_000i64;
     let data_root = seed_store(
         &db,
@@ -1270,7 +1261,7 @@ async fn census_finds_unregistered_project_dir_and_ignores_registered_ones() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
 
     let registered_root = tmp.path().join("registered-repo");
     std::fs::create_dir_all(&registered_root).unwrap();
@@ -1304,7 +1295,7 @@ async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_you
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
 
     let base = 1_700_000_000i64;
     let old_dir = profile_root.join("projects").join("proj_old_ghost");
@@ -1360,7 +1351,7 @@ async fn sweep_unregistered_stores_collects_an_exactly_empty_old_directory() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
 
     let base = 1_700_000_000i64;
     let empty_dir = profile_root.join("projects").join("proj_empty_ghost");
@@ -1384,7 +1375,7 @@ async fn sweep_unregistered_stores_aborts_when_directory_gets_registered_first()
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
 
     let base = 1_700_000_000i64;
     let dir = profile_root.join("projects").join("proj_became_live");
@@ -1432,7 +1423,7 @@ async fn unregistered_collection_refuses_same_second_directory_replacement() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let data_root = profile_root.join("projects/proj_replaced_unregistered");
     std::fs::create_dir_all(&data_root).unwrap();
 
@@ -1480,7 +1471,7 @@ async fn unregistered_collection_rejects_profile_contained_data_root_symlink() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let data_root = profile_root.join("projects/proj_symlinked_unregistered");
     std::fs::create_dir_all(&data_root).unwrap();
 
@@ -1528,7 +1519,7 @@ fn quarantine_restores_same_second_manifest_mutation() {
     let profile_root = tmp.path().join("profile");
     let data_root = profile_root.join("stores/manifest-race");
     std::fs::create_dir_all(&data_root).unwrap();
-    let manifest = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+    let manifest = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
     std::fs::write(&manifest, b"before").unwrap();
     let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
     let original_time =
@@ -1796,7 +1787,7 @@ async fn registered_collection_payload_fence_cancellation_is_terminal() {
     let profile_root = tmp.path().join("profile");
     let data_root = profile_root.join("stores/payload-fence-cancelled");
     seed_payload_fence_work(&data_root);
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let finding = payload_fence_finding(data_root.clone(), "stores/payload-fence-cancelled");
     let plan = CollectionPlan {
         collect: vec![finding],
@@ -1841,7 +1832,7 @@ async fn unregistered_collection_payload_fence_deadline_is_distinct() {
     let profile_root = tmp.path().join("profile");
     let data_root = profile_root.join("projects/proj_payload_fence_deadline");
     seed_payload_fence_work(&data_root);
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let finding = payload_fence_finding(data_root.clone(), "projects/proj_payload_fence_deadline");
     let plan = UnregisteredCollectionPlan {
         collect: vec![UnregisteredStoreFinding {
@@ -1983,7 +1974,7 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let base = 1_700_000_000i64;
     for name in ["proj_page_a", "proj_page_b", "proj_page_c"] {
         std::fs::create_dir_all(profile_root.join("projects").join(name)).unwrap();
@@ -2267,7 +2258,7 @@ fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
         .expect("the first bounded source slice does not contain every project")
         .clone();
     let torn = target[..target.len() - 1].to_owned();
-    assert!(crate::storage::validate_project_id(&torn).is_ok());
+    assert!(tracedecay_runtime_core::storage::validate_project_id(&torn).is_ok());
     let mut output = std::fs::OpenOptions::new()
         .append(true)
         .open(&inventory_path)
@@ -2317,8 +2308,8 @@ fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
     let inventory = super::unregistered_page::portable_inventory_path(&profile_root, &signature);
     std::fs::create_dir_all(inventory.parent().unwrap()).unwrap();
 
-    let writer_lock = crate::storage::acquire_sidecar_lock_blocking(
-        &crate::storage::append_lock_path(&inventory),
+    let writer_lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(
+        &tracedecay_runtime_core::storage::append_lock_path(&inventory),
     )
     .unwrap();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -2378,7 +2369,7 @@ async fn unregistered_store_sweep_returns_cancelled_without_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(profile_root.join("projects/proj_cancelled")).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let cancellation = CancellationToken::new();
     cancellation.cancel();
 
@@ -2412,7 +2403,7 @@ async fn unregistered_store_sweep_returns_deadline_without_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(profile_root.join("projects/proj_deadline")).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let cancellation = CancellationToken::new();
 
     let report = sweep_unregistered_store_page(
@@ -2452,7 +2443,7 @@ async fn unregistered_store_sweep_reconciles_interrupted_quarantine() {
     let quarantine = projects.join(".tracedecay-orphan-quarantine-proj_paged_recovery-42-7");
     std::fs::create_dir_all(&quarantine).unwrap();
     std::fs::write(quarantine.join("payload.bin"), b"recover through pager").unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let cancellation = CancellationToken::new();
 
     let report = sweep_unregistered_store_page(
@@ -2489,13 +2480,13 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
 
     let base = 1_700_000_000i64;
     let dir = profile_root.join("projects").join("proj_ghost_with_memory");
     std::fs::create_dir_all(&dir).unwrap();
     {
-        let connection = rusqlite::Connection::open(dir.join(crate::config::DB_FILENAME)).unwrap();
+        let connection = rusqlite::Connection::open(dir.join(tracedecay_runtime_core::config::DB_FILENAME)).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
@@ -2504,7 +2495,7 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
             .unwrap();
     }
     filetime::set_file_mtime(
-        dir.join(crate::config::DB_FILENAME),
+        dir.join(tracedecay_runtime_core::config::DB_FILENAME),
         filetime::FileTime::from_unix_time(base - 100 * DAY, 0),
     )
     .unwrap();
@@ -2537,7 +2528,7 @@ mod durable_inventory {
             data_root: project_root,
             graph_db_relpath: PathBuf::from(graph_db_relpath),
             sessions_db_relpath: PathBuf::from("sessions.db"),
-            branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
+            branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
         };
         serde_json::to_vec(&manifest).unwrap()
     }
@@ -2743,7 +2734,7 @@ async fn symlink_manifest_is_unverifiable_and_never_collected() {
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let dead_root = tmp.path().join("moved-away-repo");
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let data_root = seed_store(
         &db,
         &profile_root,
@@ -2753,7 +2744,7 @@ async fn symlink_manifest_is_unverifiable_and_never_collected() {
         1_700_000_000 - 100 * DAY,
     )
     .await;
-    let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+    let manifest_path = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
     let target = tmp.path().join("manifest-target.json");
     std::fs::copy(&manifest_path, &target).unwrap();
     std::fs::remove_file(&manifest_path).unwrap();
@@ -2776,7 +2767,7 @@ async fn symlink_graph_database_is_durable_data_protected() {
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let dead_root = tmp.path().join("moved-away-repo");
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let data_root = seed_store(
         &db,
         &profile_root,
@@ -2813,7 +2804,7 @@ async fn symlink_branch_database_is_durable_data_protected() {
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let dead_root = tmp.path().join("moved-away-repo");
-    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
     let data_root = seed_store(
         &db,
         &profile_root,

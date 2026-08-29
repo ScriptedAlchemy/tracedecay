@@ -117,6 +117,7 @@ pub(super) fn verify_restored_artifact(path: &Path) -> Result<(), ProfileBackupE
     Ok(())
 }
 
+#[hotpath::measure(label = "maintenance.profile_backup.snapshot_sqlite")]
 fn snapshot_sqlite(source: &Path, destination: &Path) -> Result<(), ProfileBackupError> {
     let source_connection = Connection::open_with_flags(
         source,
@@ -192,6 +193,7 @@ fn snapshot_sqlite(source: &Path, destination: &Path) -> Result<(), ProfileBacku
 
 /// Rebuilds a closed Grafeo store into a verified single-file snapshot by
 /// running it through the graph database's fenced backup and restore path.
+#[hotpath::measure(label = "maintenance.profile_backup.snapshot_graph")]
 fn snapshot_graph_store(source: &Path, destination: &Path) -> Result<(), ProfileBackupError> {
     let cancellation = never_cancelled();
     let native = native_backup_path(destination)?;

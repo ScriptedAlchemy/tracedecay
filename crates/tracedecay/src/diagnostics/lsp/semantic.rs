@@ -19,6 +19,7 @@ use tracedecay_lsp::{
 };
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_usecases::analyzer_runtime_config_error;
 use tracedecay_usecases::lsp_runtime::{
     DaemonSemanticProviderAdapter, UpstreamCapabilityInitializationAuthority,
 };
@@ -60,12 +61,15 @@ pub async fn production_semantic_authorities(
                 .ok_or_else(|| TraceDecayError::Config {
                     message: format!("no LSP adapter registered for language '{language}'"),
                 })?;
-            if let Some(authority) = broker.semantic_authority_if_available(
-                language,
-                workspace_root.clone(),
-                root_uri.clone(),
-                timeouts,
-            )? {
+            if let Some(authority) = broker
+                .semantic_authority_if_available(
+                    language,
+                    workspace_root.clone(),
+                    root_uri.clone(),
+                    timeouts,
+                )
+                .map_err(analyzer_runtime_config_error)?
+            {
                 routes.push((language, adapter, authority));
             }
         }

@@ -123,10 +123,33 @@ struct SealedStoreReceiptV1 {
     relations: usize,
 }
 
+/// How [`GraphDb::ensure_sealed_generation_store`] satisfied a publication's
+/// request for a sealed per-generation store.
+pub(crate) enum SealedStoreInstall {
+    /// The sealed-store lane cannot serve this database (feature off,
+    /// memory-backed, or no reopen configuration); publication keeps the
+    /// staging close/reopen proof.
+    Unavailable,
+    /// A digest-verified sealed store is installed for reads.
+    ///
+    /// `staging_proof` carries the canonical byte count of the digest proof
+    /// when this call *built* the artifact by enumerating the staging
+    /// database's rows: that enumeration plus the matching post-reopen digest
+    /// is the evidence that the staging container serves exactly the
+    /// authority's rows, so the caller may file a verify-once marker against
+    /// it. An adopted pre-existing artifact proves only itself — its rows
+    /// were never read out of this container — so it carries `None` and the
+    /// staging container earns its marker the next time a full proof runs.
+    Installed { staging_proof: Option<u64> },
+}
+
 /// A reopened, digest-verified, compacted single-generation store.
 pub(crate) struct SealedGenerationStore {
     locator: GenerationLocator,
     recovered_digest: String,
+    /// Canonical bytes hashed by the post-reopen digest proof — the size of
+    /// the exact row stream `recovered_digest` covers.
+    canonical_bytes: u64,
     directory: PathBuf,
     database: Arc<GraphDb>,
 }
@@ -365,24 +388,25 @@ impl GraphDb {
     /// digest-verified, and is installed for reads. Builds it from this
     /// staging database's verified rows when missing.
     ///
-    /// Returns `true` when the exact post-reopen-verified artifact is
-    /// installed. A memory-backed database and a disabled lane return
-    /// `false`; their publication path retains the staging proof.
+    /// Returns [`SealedStoreInstall::Installed`] when the exact
+    /// post-reopen-verified artifact is installed. A memory-backed database
+    /// and a disabled lane return [`SealedStoreInstall::Unavailable`]; their
+    /// publication path retains the staging proof.
     #[hotpath::measure(label = "graph_db.sealed_store.ensure", impl_type = "GraphDb")]
     pub(crate) fn ensure_sealed_generation_store(
         &self,
         identity: &GraphGenerationManifestIdentity,
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<bool, GraphDbError> {
+    ) -> Result<SealedStoreInstall, GraphDbError> {
         if sealed_store_disabled() {
-            return Ok(false);
+            return Ok(SealedStoreInstall::Unavailable);
         }
         let Some(reopen) = self.inner.reopen.as_ref() else {
-            return Ok(false);
+            return Ok(SealedStoreInstall::Unavailable);
         };
         let Some(database_path) = reopen.config.path.clone() else {
-            return Ok(false);
+            return Ok(SealedStoreInstall::Unavailable);
         };
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
@@ -393,12 +417,17 @@ impl GraphDb {
             if let Some(existing) = sealed.get(&locator)
                 && existing.recovered_digest() == expected.as_str()
             {
-                return Ok(true);
+                // An earlier ensure in this open installed it; if that call
+                // built from staging rows it filed the marker then.
+                return Ok(SealedStoreInstall::Installed {
+                    staging_proof: None,
+                });
             }
         }
-        let store = build_or_open_sealed_store(self, identity, expected, &database_path, check)?;
+        let (store, staging_proof) =
+            build_or_open_sealed_store(self, identity, expected, &database_path, check)?;
         self.install_sealed_generation_store(locator, store)?;
-        Ok(true)
+        Ok(SealedStoreInstall::Installed { staging_proof })
     }
 
     /// Opens an existing sealed store for `identity` without building one.
@@ -554,14 +583,15 @@ fn build_or_open_sealed_store(
     expected: &GraphRecoveredGenerationDigestV1,
     database_path: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Arc<SealedGenerationStore>, GraphDbError> {
+) -> Result<(Arc<SealedGenerationStore>, Option<u64>), GraphDbError> {
     let physical_namespace = identity.physical_namespace()?;
     let root = sealed_store_root(database_path);
     let directory = sealed_generation_directory(&root, &physical_namespace);
     // Idempotent replay: an artifact from an earlier seal of this exact
-    // generation is adopted if its receipt binds the same digest.
+    // generation is adopted if its receipt binds the same digest. Adoption
+    // never enumerates `source`'s rows, so it yields no staging proof.
     match open_sealed_store(&directory, identity, expected) {
-        Ok(Some(store)) => return Ok(store),
+        Ok(Some(store)) => return Ok((store, None)),
         Ok(None) => {}
         Err(_) => remove_sealed_directory(&directory),
     }
@@ -606,7 +636,14 @@ fn build_or_open_sealed_store(
         }
     }
     match open_sealed_store(&directory, identity, expected) {
-        Ok(Some(store)) => Ok(store),
+        // This call enumerated the staging database's rows into the copy and
+        // the reopen digest matched the authority's expectation: together
+        // that is the staging container's own proof, sized by the canonical
+        // bytes the reopen hashed.
+        Ok(Some(store)) => {
+            let canonical_bytes = store.canonical_bytes;
+            Ok((store, Some(canonical_bytes)))
+        }
         Ok(None) => {
             remove_sealed_directory(&directory);
             Err(GraphDbError::unavailable(
@@ -890,22 +927,26 @@ fn open_sealed_store(
     // Prove the compacted, reopened store serves exactly the sealed rows.
     // This runs once per install (build or recovery adoption), so a corrupt
     // or truncated artifact is discarded before it answers a single read.
-    {
+    let canonical_bytes = {
         let guard = database.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        if let Err(error) = verify_sealed_copy_generation(native, identity, expected, &|| Ok(())) {
-            drop(guard);
-            let _ = database.close();
-            return Err(sealed_store_failure(
-                "post-reopen verification failed",
-                error,
-            ));
+        match verify_sealed_copy_generation(native, identity, expected, &|| Ok(())) {
+            Ok((_, canonical_bytes)) => canonical_bytes,
+            Err(error) => {
+                drop(guard);
+                let _ = database.close();
+                return Err(sealed_store_failure(
+                    "post-reopen verification failed",
+                    error,
+                ));
+            }
         }
-    }
+    };
     database.mark_sealed_read_only();
     Ok(Some(Arc::new(SealedGenerationStore {
         locator: GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
         recovered_digest: expected.as_str().to_owned(),
+        canonical_bytes,
         directory: directory.to_path_buf(),
         database,
     })))
