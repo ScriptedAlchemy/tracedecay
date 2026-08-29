@@ -52,8 +52,8 @@ const DAEMON_OPEN_FILE_LIMIT: u32 = 8_192;
 /// self-imposed budget raced whatever `DefaultTimeoutStopSec` the host was
 /// configured with. When the supervisor's bound is the tighter one, systemd
 /// SIGKILLs the cgroup mid-drain: the typed shutdown receipts that name the
-/// stuck owner are exactly the thing that never gets written, and on
-/// `Restart=on-failure` the kill can catch the replacement instance too.
+/// stuck owner are exactly the thing that never gets written, and on a
+/// restarting unit the kill can catch the replacement instance too.
 ///
 /// Stating the bound explicitly, strictly above `DAEMON_SHUTDOWN_DEADLINE`,
 /// makes the daemon's deadline the one that fires first — so a slow shutdown
@@ -62,6 +62,12 @@ const DAEMON_OPEN_FILE_LIMIT: u32 = 8_192;
 const DAEMON_STOP_TIMEOUT_SECS: u64 =
     super::DAEMON_SHUTDOWN_DEADLINE.as_secs() + DAEMON_STOP_TIMEOUT_MARGIN_SECS;
 const DAEMON_STOP_TIMEOUT_MARGIN_SECS: u64 = 15;
+
+/// Backoff between supervisor restarts of the generated user unit.
+///
+/// Two seconds matches the launchd `ThrottleInterval` and is long enough to
+/// let an OOM-killed cgroup release memory before the next `ExecStart`.
+const DAEMON_RESTART_SEC: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
@@ -153,6 +159,15 @@ impl QuiescedDaemonLifecycle {
 
     pub fn finish_with_state(mut self, state: DaemonServiceState) -> Result<()> {
         self.restore_state(state)
+    }
+
+    /// Restores the post-update target rather than the captured snapshot.
+    ///
+    /// See [`DaemonServiceState::expected_after_update`]: installed units that
+    /// were found stopped are started; masked and missing stay as captured.
+    pub fn finish_after_update(self) -> Result<()> {
+        let target = self.previous_state.expected_after_update();
+        self.finish_with_state(target)
     }
 
     pub fn finish_without_restore(mut self) {
@@ -253,7 +268,7 @@ pub fn with_exclusive_maintenance_window<T>(
         .to_string();
     guard.release_lease_for_executable_replacement();
     let operation_result = action(&token);
-    let restore_result = guard.restore();
+    let restore_result = guard.finish_after_update();
     combine_operation_and_restore(operation, operation_result, restore_result)
 }
 
@@ -265,6 +280,91 @@ impl DaemonServiceState {
     fn is_enabled(self) -> bool {
         matches!(self, Self::RunningEnabled | Self::StoppedEnabled)
     }
+
+    pub(crate) fn lifecycle_operator_advice(self) -> String {
+        let remedy = daemon_service_enable_now_remedy();
+        match self {
+            Self::RunningEnabled => {
+                "TraceDecay daemon unit is installed, enabled, and running.".to_string()
+            }
+            Self::RunningDisabled => format!(
+                "TraceDecay daemon unit is running but disabled, so it will not return after an exit. Run {remedy}."
+            ),
+            Self::StoppedEnabled => {
+                format!("TraceDecay daemon unit is installed but stopped. Run {remedy}.")
+            }
+            Self::StoppedDisabled => format!(
+                "TraceDecay daemon unit is installed but stopped and disabled. Run {remedy}."
+            ),
+            Self::Masked => {
+                format!("TraceDecay daemon unit is masked. Unmask it, then run {remedy}.")
+            }
+            Self::Missing => {
+                "Run `tracedecay daemon install-service` and ensure the service is running."
+                    .to_string()
+            }
+        }
+    }
+
+    /// State to restore after `tracedecay update` / `upgrade`.
+    ///
+    /// The supervisor snapshot cannot tell "operator stopped this on purpose"
+    /// from "found dead" (`StoppedEnabled` covers both `systemctl --user stop`
+    /// and an OOM-killed unit that hit its start limit). Leaving a dead
+    /// installed unit stopped is the worse failure: every later update
+    /// preserves that deadness. Masked and missing stay untouched — those are
+    /// explicit operator shapes. A unit that was running while disabled keeps
+    /// that enablement; a unit found stopped and disabled is healed, because
+    /// that is the observed outage shape (dead + disabled).
+    pub(crate) const fn expected_after_update(self) -> Self {
+        match self {
+            Self::Missing | Self::Masked => self,
+            Self::RunningDisabled => Self::RunningDisabled,
+            Self::RunningEnabled | Self::StoppedEnabled | Self::StoppedDisabled => {
+                Self::RunningEnabled
+            }
+        }
+    }
+}
+
+pub(crate) fn daemon_service_enable_now_remedy() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "`tracedecay daemon install-service` or `systemctl --user enable --now tracedecay.service`"
+    } else {
+        "`tracedecay daemon install-service`"
+    }
+}
+
+pub(crate) fn unavailable_daemon_socket_advice(
+    socket_path: &Path,
+    state: Option<DaemonServiceState>,
+) -> String {
+    match state {
+        Some(DaemonServiceState::RunningEnabled | DaemonServiceState::RunningDisabled) => {
+            format!(
+                "The unit reports running, but socket '{}' is not available. Check `tracedecay daemon status`.",
+                socket_path.display()
+            )
+        }
+        Some(state) => state.lifecycle_operator_advice(),
+        None => match installed_service_unit_present() {
+            Ok(true) => format!(
+                "TraceDecay daemon unit is installed but the socket is not available. Run {}.",
+                daemon_service_enable_now_remedy()
+            ),
+            Ok(false) | Err(_) => {
+                "Run `tracedecay daemon install-service` and ensure the service is running."
+                    .to_string()
+            }
+        },
+    }
+}
+
+/// Unit-file presence only. Connect-path diagnosis must not spawn `systemctl`,
+/// which races tests that fake PATH and is slower than a socket miss.
+pub(crate) fn installed_service_unit_present() -> Result<bool> {
+    let service_path = service_unit_path()?;
+    service_unit_exists(&service_path)
 }
 
 impl DaemonServiceSpec {
@@ -290,14 +390,21 @@ impl DaemonServiceSpec {
             "[Unit]\n\
              Description=TraceDecay daemon\n\
              After=network.target\n\
+             # A dead user unit stays dead through every `tracedecay update`\n\
+             # until an operator heals it. Disable start-rate limiting so\n\
+             # Restart=always is not abandoned after an OOM burst.\n\
+             StartLimitIntervalSec=0\n\
              \n\
              [Service]\n\
              Type=simple\n\
              Environment=\"PATH={}\"\n\
              Environment=\"MALLOC_ARENA_MAX=2\"\n\
              ExecStart={} daemon run --socket {}{}\n\
-             Restart=on-failure\n\
-             RestartSec=2\n\
+             # Restart=always (not on-failure): come back after OOM SIGKILL,\n\
+             # crash, or a clean-but-unexpected exit. A looping daemon is\n\
+             # preferable to a permanently silent socket.\n\
+             Restart=always\n\
+             RestartSec={}\n\
              TimeoutStopSec={}\n\
              LimitNOFILE={}\n\
              \n\
@@ -307,6 +414,7 @@ impl DaemonServiceSpec {
             self.tracedecay_bin.display(),
             self.socket_path.display(),
             remote_arguments,
+            DAEMON_RESTART_SEC,
             DAEMON_STOP_TIMEOUT_SECS,
             DAEMON_OPEN_FILE_LIMIT,
         ))
@@ -879,11 +987,22 @@ pub fn verify_installed_service_quiesced_under_lease() -> Result<DaemonServiceSt
     Ok(state)
 }
 
-/// Restores the exact running/disabled state captured before maintenance.
+/// Restores the managed daemon after an update maintenance window.
+///
+/// History (`ef3b3cb0`, later comments) described this as restoring the exact
+/// captured running/disabled snapshot so an operator-stopped daemon stayed
+/// stopped. That snapshot cannot distinguish an explicit stop from a unit
+/// found dead (OOM, start-limit, disabled-by-accident). After-update restore
+/// therefore starts an installed, non-masked unit — see
+/// [`DaemonServiceState::expected_after_update`]. Non-update callers that must
+/// preserve a stopped snapshot use [`QuiescedDaemonLifecycle::finish`] rather
+/// than this function.
+///
 /// Callers hold a shared lifecycle lease, never the exclusive mutation lease.
 #[doc(hidden)]
 #[hotpath::measure(label = "daemon.service.restore")]
 pub fn restore_installed_service_after_update(previous_state: DaemonServiceState) -> Result<()> {
+    let previous_state = previous_state.expected_after_update();
     if !previous_state.is_running() || !cfg!(any(target_os = "linux", target_os = "macos", windows))
     {
         return Ok(());
@@ -931,7 +1050,7 @@ pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
     operation_result
 }
 
-fn installed_service_state() -> Result<DaemonServiceState> {
+pub(crate) fn installed_service_state() -> Result<DaemonServiceState> {
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
         return Ok(DaemonServiceState::Missing);

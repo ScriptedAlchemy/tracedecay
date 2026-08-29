@@ -142,9 +142,40 @@ fn transient_daemon_connect_errors_cover_restart_window_only() {
     assert!(super::super::is_transient_daemon_connect_error(
         std::io::ErrorKind::ConnectionRefused
     ));
+    assert!(
+        super::super::is_transient_daemon_connect_error(std::io::ErrorKind::WouldBlock),
+        "unix-socket EAGAIN (listen backlog full) must ride the restart grace"
+    );
     assert!(!super::super::is_transient_daemon_connect_error(
         std::io::ErrorKind::PermissionDenied
     ));
+}
+
+#[test]
+fn saturated_connect_advice_is_distinct_from_restart_advice() {
+    let saturated = super::super::daemon_connect_failure_advice(std::io::ErrorKind::WouldBlock);
+    let restarting = super::super::daemon_connect_failure_advice(std::io::ErrorKind::NotFound);
+    let refused =
+        super::super::daemon_connect_failure_advice(std::io::ErrorKind::ConnectionRefused);
+
+    assert!(
+        saturated.contains("up but not accepting connections"),
+        "WouldBlock must name saturation, got: {saturated}"
+    );
+    assert!(
+        saturated.contains("overloaded"),
+        "WouldBlock must name overload, got: {saturated}"
+    );
+    assert!(
+        !saturated.contains("restarting"),
+        "saturation must not claim the daemon is restarting, got: {saturated}"
+    );
+    assert!(
+        restarting.contains("may be restarting"),
+        "missing socket must keep the restart hint, got: {restarting}"
+    );
+    assert_eq!(restarting, refused);
+    assert_ne!(saturated, restarting);
 }
 
 // start_paused: these restart-window tests only wait on tokio timers

@@ -271,8 +271,22 @@ pub(crate) fn default_available_socket_path() -> Result<PathBuf> {
 pub(crate) fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
     matches!(
         kind,
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::WouldBlock
     )
+}
+
+pub(crate) fn is_saturated_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
+    kind == std::io::ErrorKind::WouldBlock
+}
+
+pub(crate) fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
+    if is_saturated_daemon_connect_error(kind) {
+        "The daemon is up but not accepting connections — likely overloaded. Retry shortly, or check `tracedecay daemon status`."
+    } else {
+        "The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`."
+    }
 }
 
 pub(crate) async fn connect_to_daemon_connection(
@@ -347,8 +361,9 @@ async fn connect_with_restart_grace_resolving(
                 if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
                     return Err(TraceDecayError::Config {
                         message: format!(
-                            "could not connect to TraceDecay daemon endpoint '{}': {err}. The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`.",
-                            connection.endpoint
+                            "could not connect to TraceDecay daemon endpoint '{}': {err}. {}",
+                            connection.endpoint,
+                            daemon_connect_failure_advice(err.kind())
                         ),
                     });
                 }
