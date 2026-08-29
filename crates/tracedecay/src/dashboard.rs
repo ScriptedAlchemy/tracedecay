@@ -253,12 +253,11 @@ impl DashboardGraphTestRuntimeV1 {
                 label = "dashboard.graph.project_memory"
             )
             .await?;
-            let graph_proxy = project_database.memory_graph_runtime().ok_or_else(|| {
-                tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "bind dashboard project graph".to_owned(),
-                    message: "project memory database has no verified graph runtime".to_owned(),
-                }
-            })?;
+            let graph_proxy = crate::host_admission::await_bound_graph_runtime(
+                &project_database,
+                "bind dashboard project graph",
+            )
+            .await?;
             // A lost set race means another caller already bound the same
             // weak proxy; the required postcondition holds either way.
             let _ = registered.bind_project_graph_runtime(graph_proxy);
