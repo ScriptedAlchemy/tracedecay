@@ -21,7 +21,7 @@ use tracedecay_application::{
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use super::branch_admin::StoreAdministration;
-use crate::db::DatabaseStorageTelemetryHandle;
+use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub(super) mod generation;
@@ -1003,7 +1003,7 @@ impl Default for MaintenanceCoordinator {
 /// database or a mounted project graph. Arcs are cloned into the item so the
 /// store stays alive for the duration of the writer-held critical section.
 enum MaintenanceStoreWork {
-    Session(crate::global_db::RegisteredGlobalDbLeaseV1),
+    Session(tracedecay_global_db::RegisteredGlobalDbLeaseV1),
     Graph(Arc<crate::tracedecay::TraceDecay>),
 }
 
@@ -1062,7 +1062,7 @@ fn cursor_after_attempted_units(
 impl MaintenanceCoordinator {
     pub(super) async fn spawn(
         profile_root: PathBuf,
-        profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: crate::config::RetentionConfig,
@@ -1123,7 +1123,7 @@ impl MaintenanceCoordinator {
     async fn run(
         &self,
         profile_root: PathBuf,
-        profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: crate::config::RetentionConfig,
@@ -1148,7 +1148,7 @@ impl MaintenanceCoordinator {
     async fn run_tick(
         &self,
         profile_root: &Path,
-        profile_database: &crate::global_db::RegisteredGlobalDb,
+        profile_database: &tracedecay_global_db::RegisteredGlobalDb,
         administration: &StoreAdministration,
         code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: &crate::config::RetentionConfig,
@@ -1491,10 +1491,10 @@ impl Default for ColdStorePageMetrics {
 #[hotpath::measure(label = "daemon.maintenance.cold_store_page", future = true)]
 async fn run_cold_store_page(
     profile_root: &Path,
-    profile_database: &crate::global_db::RegisteredGlobalDb,
+    profile_database: &tracedecay_global_db::RegisteredGlobalDb,
     retention: &crate::config::RetentionConfig,
     cancellation: &tracedecay_usecases::context::CancellationToken,
-) -> crate::errors::Result<ColdStorePageMetrics> {
+) -> tracedecay_runtime_core::errors::Result<ColdStorePageMetrics> {
     let checkpoint_path = checkpoint_path(profile_root);
     let cursor = load_cursor(&checkpoint_path).unwrap_or(ColdStoreCursorV1 {
         after_project_id: None,
@@ -1510,7 +1510,7 @@ async fn run_cold_store_page(
         || retention.incident_debris_retention_days.is_some()
     {
         Some(
-            now_secs_i64().map_err(|message| crate::errors::TraceDecayError::Config {
+            now_secs_i64().map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: message.to_owned(),
             })?,
         )
@@ -1545,7 +1545,7 @@ async fn run_cold_store_page(
     if let Some(days) = retention.orphan_store_gc_days {
         let findings = crate::retention::orphan_stores::classify_stores(
             &page.entries,
-            retention_now.ok_or_else(|| crate::errors::TraceDecayError::Config {
+            retention_now.ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "maintenance retention clock unavailable".to_owned(),
             })?,
         );
@@ -1572,7 +1572,7 @@ async fn run_cold_store_page(
             &page.entries,
             profile_root,
             retention_window_secs(days),
-            retention_now.ok_or_else(|| crate::errors::TraceDecayError::Config {
+            retention_now.ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "maintenance retention clock unavailable".to_owned(),
             })?,
         );
@@ -1600,7 +1600,7 @@ async fn run_cold_store_page(
         after_project_id: None,
     });
     persist_cursor(&checkpoint_path, &next_cursor).map_err(|error| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("persist maintenance cold-store cursor: {error}"),
         }
     })?;
@@ -1963,15 +1963,15 @@ mod tests {
         let database_path = temporary.path().join("project.db");
         let other_database_path = temporary.path().join("other.db");
         crate::daemon::store_runtime::register_registered_schema_installer();
-        let authority = crate::db::DatabaseAuthority::acquire_test(
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
             &database_path,
             "maintenance telemetry shutdown fixture",
         )
         .expect("telemetry fixture database authority");
-        let (database, _) = crate::db::Database::publish_test_runtime(
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
             &database_path,
             &authority,
-            crate::db::TestDatabaseRuntimeMode::Initialize,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
         )
         .await
         .expect("telemetry fixture database");

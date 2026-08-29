@@ -60,7 +60,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for RecordingMultiRootExecut
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -489,7 +489,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
     database
         .set_parse_offset(
             cursor_path.to_str().unwrap(),
-            crate::global_db::ParseOffset {
+            tracedecay_global_db::ParseOffset {
                 byte_offset: 4,
                 mtime: 100,
                 file_id: 0,
@@ -500,7 +500,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
     database
         .set_parse_offset(
             claude_path.to_str().unwrap(),
-            crate::global_db::ParseOffset {
+            tracedecay_global_db::ParseOffset {
                 byte_offset: 20,
                 mtime: 200,
                 file_id: 0,

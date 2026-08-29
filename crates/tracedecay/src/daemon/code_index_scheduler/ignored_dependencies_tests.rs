@@ -98,7 +98,7 @@ fn project_id() -> ProjectId {
 }
 
 fn git(root: &Path, arguments: &[&str]) {
-    let status = Command::new(crate::git::git_program())
+    let status = Command::new(tracedecay_runtime_core::git::git_program())
         .current_dir(root)
         .args(arguments)
         .status()
@@ -316,7 +316,7 @@ export function GenerationAnchor() { return 1; }
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 91, "ignored-dependency-graph")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 91, "ignored-dependency-graph")
             .expect("daemon database scope");
     let graph_runtime = Arc::new(
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(

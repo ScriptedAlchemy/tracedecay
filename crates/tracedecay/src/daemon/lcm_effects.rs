@@ -3,7 +3,7 @@ use std::time::Duration;
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_sessions::runtime::lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSummarizerMode,
 };
@@ -250,8 +250,8 @@ fn summary_unavailable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::global_db::RegisteredGlobalDb;
-    use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_global_db::RegisteredGlobalDb;
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use serde_json::Value;
     use tracedecay_domain::SessionId;
     use tracedecay_runtime_core::db::engine::params;
@@ -438,7 +438,7 @@ mod tests {
                 &session_id,
                 &relation_ids,
                 4_096,
-                crate::global_db::session_temporal::store::execution_control_graph_cancellation(
+                tracedecay_global_db::session_temporal::store::execution_control_graph_cancellation(
                     &read_control,
                 ),
             )
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(
             db.recover_pending_session_relation_projections(
                 1,
-                crate::global_db::session_temporal::store::execution_control_graph_cancellation(
+                tracedecay_global_db::session_temporal::store::execution_control_graph_cancellation(
                     &read_control,
                 ),
             )
@@ -470,7 +470,7 @@ mod tests {
                 &session_id,
                 &relation_ids,
                 4_096,
-                crate::global_db::session_temporal::store::execution_control_graph_cancellation(
+                tracedecay_global_db::session_temporal::store::execution_control_graph_cancellation(
                     &restart_control,
                 ),
             )
@@ -813,7 +813,7 @@ mod tests {
                 "INSERT INTO session_messages (
                      provider, message_id, session_id, role, ordinal, text, kind, metadata_json
                  ) VALUES (?1, ?2, ?3, 'system', ?4, ?5, ?6, ?7)",
-                crate::db::engine::params![
+                tracedecay_runtime_core::db::engine::params![
                     provider,
                     message_id,
                     session_id,

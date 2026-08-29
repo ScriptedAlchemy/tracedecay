@@ -22,7 +22,7 @@ fn daemon_observability_producer_identity(
             authorized_scope_ref: project_id.as_str().to_owned(),
             process_boot_id: format!(
                 "daemon:{}:{registration}",
-                crate::runtime_identity::process_run_id()
+                tracedecay_runtime_core::runtime_identity::process_run_id()
             ),
             producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION.to_owned(),
             configuration_revision: configuration_revision.as_str().to_owned(),
@@ -33,7 +33,7 @@ fn daemon_observability_producer_identity(
 
 fn registered_observability_producer_matches_mount(
     registered: &RegisteredObservabilityProducerV1,
-    database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+    database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     project_id: &ProjectId,
     configuration_revision: &ManifestDigest,
     configuration_provenance_revision: &ManifestDigest,
@@ -58,7 +58,7 @@ impl DaemonInvocationService {
     pub(crate) async fn mount_observability_producer(
         &self,
         project_root: PathBuf,
-        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         project_id: ProjectId,
         configuration_revision: ManifestDigest,
         configuration_provenance_revision: ManifestDigest,

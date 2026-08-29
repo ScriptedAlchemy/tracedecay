@@ -52,7 +52,7 @@ impl McpServer {
             }
             None => None,
         };
-        if crate::analytics::is_skill_view_tool(tool_name)
+        if tracedecay_agent_hosts::analytics::is_skill_view_tool(tool_name)
             && let Some(request_id) = json_rpc_request_id_string(id)
             && let Some(map) = handler_arguments.as_object_mut()
         {

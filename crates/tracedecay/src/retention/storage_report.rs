@@ -2,13 +2,13 @@
 //! size and free-page ratio for every registered profile-sharded store under
 //! a profile root, plus an unregistered-directory backlog summary —
 //! reachable from `tracedecay storage report` without a live daemon
-//! or any [`crate::global_db::RegisteredGlobalDb`] writer authority.
+//! or any [`tracedecay_global_db::RegisteredGlobalDb`] writer authority.
 //!
 //! # Why this does not snapshot stores in place
 //!
 //! The registry read does, because it is one small file and needs a
 //! consistent view of `code_projects`. The *per-store size sampling*
-//! deliberately does not. [`crate::sqlite_read_snapshot`] freezes a database
+//! deliberately does not. [`tracedecay_runtime_core::sqlite_read_snapshot`] freezes a database
 //! family by reflinking it, falling back to a **full byte copy** when the
 //! filesystem cannot reflink, and any graph database a live daemon has open
 //! is WAL-backed and therefore takes that path. Running this report over the
@@ -261,7 +261,7 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// blocking pool so this CLI path matches the daemon-paged sibling and does
 /// not stall the async runtime.
 #[hotpath::measure(label = "retention.storage.report", future = true)]
-pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<StorageReport> {
+pub async fn build_storage_report(profile_root: &Path) -> tracedecay_runtime_core::errors::Result<StorageReport> {
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // Capture the profile's physical footprint before opening any SQLite
     // readers. A report must describe the profile supplied by its caller, not
@@ -311,7 +311,7 @@ struct SampledRegisteredStorage {
 async fn load_registered_project_rows(
     profile_root: &Path,
     global_db_path: &Path,
-) -> crate::errors::Result<Vec<(String, String)>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<(String, String)>> {
     let profile_root = profile_root.to_path_buf();
     let global_db_path = global_db_path.to_path_buf();
     let (scratch, snapshot_source) = tokio::task::spawn_blocking(move || {
@@ -329,14 +329,14 @@ async fn load_registered_project_rows(
         let snapshot_source = scratch.path().join(GLOBAL_DB_FILENAME);
         copy_sqlite_family(&global_db_path, &snapshot_source)
             .map_err(|error| report_error("copy global.db family for read-only report", error))?;
-        Ok::<_, crate::errors::TraceDecayError>((scratch, snapshot_source))
+        Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>((scratch, snapshot_source))
     })
     .await
     .map_err(|error| report_error("join global.db family copy", error))??;
-    let snapshot = crate::sqlite_read_snapshot::open_foreign_in(
+    let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_foreign_in(
         &snapshot_source,
         scratch.path(),
-        crate::sqlite_read_snapshot::SnapshotReadControl::unlimited(),
+        tracedecay_runtime_core::sqlite_read_snapshot::SnapshotReadControl::unlimited(),
     )
     .await
     .map_err(|error| report_error("open global.db read snapshot", error))?;
@@ -369,7 +369,7 @@ fn sample_registered_storage(
     profile_root: &Path,
     global_db_path: &Path,
     registered_projects: Vec<(String, String)>,
-) -> crate::errors::Result<SampledRegisteredStorage> {
+) -> tracedecay_runtime_core::errors::Result<SampledRegisteredStorage> {
     let mut registered_ids = HashSet::new();
     let mut stores = Vec::new();
     let mut code_generation_retention = Vec::new();
@@ -407,10 +407,10 @@ fn sample_registered_storage(
 #[hotpath::measure(label = "retention.storage.report_page", future = true)]
 pub(crate) async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
-    global_db: &crate::global_db::RegisteredGlobalDb,
+    global_db: &tracedecay_global_db::RegisteredGlobalDb,
     cursor: Option<&str>,
     limit: usize,
-) -> crate::errors::Result<StorageReport> {
+) -> tracedecay_runtime_core::errors::Result<StorageReport> {
     let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
     let global_db_bytes = database_family_bytes(&profile_root.join(GLOBAL_DB_FILENAME));
     let cursor = cursor.unwrap_or(PROJECT_CURSOR_PREFIX);
@@ -425,7 +425,7 @@ pub(crate) async fn build_storage_report_page_from_registered_global_db(
         projects.truncate(limit);
         let next_cursor = if has_more {
             let Some(last_project) = projects.last() else {
-                return Err(crate::errors::TraceDecayError::Config {
+                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "project storage report page lost its continuation".to_owned(),
                 });
             };
@@ -462,7 +462,7 @@ pub(crate) async fn build_storage_report_page_from_registered_global_db(
         .map_err(|error| report_error("join daemon-backed storage report page", error))?;
     }
     let Some(after_directory) = cursor.strip_prefix(DIRECTORY_CURSOR_PREFIX) else {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "invalid daemon storage report cursor".to_owned(),
         });
     };
@@ -572,7 +572,7 @@ pub async fn build_project_storage_report_from_daemon(
     profile_root: &Path,
     project_id: &str,
     canonical_root: &Path,
-) -> crate::errors::Result<StorageReport> {
+) -> tracedecay_runtime_core::errors::Result<StorageReport> {
     let profile_root = profile_root.to_path_buf();
     let project_id = project_id.to_owned();
     let canonical_root = canonical_root.to_path_buf();
@@ -598,9 +598,9 @@ pub fn build_project_storage_report(
     project_id: &str,
     canonical_root: &Path,
     vector_readable_sources: Option<BTreeSet<CodeGenerationId>>,
-) -> crate::errors::Result<StorageReport> {
+) -> tracedecay_runtime_core::errors::Result<StorageReport> {
     crate::storage::validate_project_id(project_id).map_err(|message| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: message.to_owned(),
         }
     })?;
@@ -638,7 +638,7 @@ fn append_project_report(
     stores: &mut Vec<StoreSizeReportEntry>,
     code_generation_retention: &mut Vec<CodeGenerationRetentionDryRunEntry>,
     code_generation_retention_availability: &mut Vec<CodeGenerationRetentionAvailabilityEntry>,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let data_root = profile_root.join("projects").join(project_id);
     let graph_db_path = data_root.join(crate::config::DB_FILENAME);
     if let Some(entry) = sample_store_size(&graph_db_path) {
@@ -750,7 +750,7 @@ fn append_project_report(
 fn generation_digest_scan_exceeds_budget(
     store_root: &Path,
     maximum_bytes: u64,
-) -> crate::errors::Result<bool> {
+) -> tracedecay_runtime_core::errors::Result<bool> {
     let entries = std::fs::read_dir(store_root.join(CODE_GENERATIONS_DIRECTORY))
         .map_err(|error| report_error("list code-generation retention files", error))?;
     let mut bytes = 0u64;
@@ -957,8 +957,8 @@ pub(crate) fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
 fn report_error(
     operation: &'static str,
     error: impl std::fmt::Display,
-) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Database {
+) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Database {
         operation: operation.to_string(),
         message: error.to_string(),
     }
@@ -971,7 +971,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::db::engine::TestConnection;
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
     fn store(project_id: &str, total_bytes: u64) -> StoreSizeReportEntry {
         StoreSizeReportEntry {
@@ -1085,7 +1085,7 @@ mod tests {
         for (project_id, canonical_root) in projects {
             conn.execute(
                 "INSERT INTO code_projects (project_id, canonical_root) VALUES (?1, ?2)",
-                crate::db::engine::params![*project_id, *canonical_root],
+                tracedecay_runtime_core::db::engine::params![*project_id, *canonical_root],
             )
             .await
             .unwrap();

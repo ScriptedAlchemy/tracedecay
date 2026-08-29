@@ -1,6 +1,6 @@
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::errors::Result;
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::Result;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};

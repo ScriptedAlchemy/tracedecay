@@ -233,7 +233,7 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     graph_manifest_provider: Arc<super::code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
     authority: Arc<CanonicalCodeGraphStoreLeaseV1>,
-    project_database: Arc<crate::db::Database>,
+    project_database: Arc<tracedecay_runtime_core::db::Database>,
     project_id: ProjectId,
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
@@ -281,7 +281,7 @@ impl Drop for RetainedCodeGraphRuntimeV1 {
 /// [`RetainedCodeGraphRuntimeV1`].
 pub(crate) struct RetainedVerifiedGraphRuntimeV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
-    database: crate::db::DatabaseOwnerV1,
+    database: tracedecay_runtime_core::db::DatabaseOwnerV1,
     graph: GraphDbOwnerAttachmentV1,
     store_target: Mutex<Option<CanonicalGraphStoreOwnerRetirementTargetV1>>,
     relational_binding: tracedecay_store::StoreRuntimeBindingV1,
@@ -307,7 +307,7 @@ pub(crate) struct MemoryGraphOperationRetirementReservationV1<'a> {
 impl RetainedVerifiedGraphRuntimeV1 {
     pub(crate) fn issue_database_lease(
         &self,
-    ) -> std::result::Result<crate::db::Database, GraphDbError> {
+    ) -> std::result::Result<tracedecay_runtime_core::db::Database, GraphDbError> {
         self.require_operation_admission()?;
         self.database.issue_lease().map_err(|error| {
             GraphDbError::unavailable(format!(
@@ -348,7 +348,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
 
     pub(crate) fn reserve_database_retirement(
         &self,
-    ) -> std::result::Result<crate::db::DatabaseOwnerRetirementReservationV1, GraphDbError> {
+    ) -> std::result::Result<tracedecay_runtime_core::db::DatabaseOwnerRetirementReservationV1, GraphDbError> {
         self.database.reserve_retirement().map_err(|error| {
             GraphDbError::unavailable(format!(
                 "memory database owner cannot reserve retirement: {error:?}"
@@ -1638,7 +1638,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         worktree_id: WorktreeId,
         reference: Option<RefId>,
         generation_id: CodeGenerationId,
-        project_database: Arc<crate::db::Database>,
+        project_database: Arc<tracedecay_runtime_core::db::Database>,
         replay_binding: crate::daemon::code_index_scheduler::CodeGraphReplayBindingV1,
         // The generation the code index just decoded to serve queries, when the
         // caller has one. Offering it to the manifest provider is what makes
@@ -1747,7 +1747,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn reconcile_deleted_code_generation_graph_replays(
         &self,
         project_id: ProjectId,
-        project_database: &crate::db::Database,
+        project_database: &tracedecay_runtime_core::db::Database,
         generation: &CodeGenerationId,
         generation_file: &str,
         cancellation: &tracedecay_usecases::context::CancellationToken,

@@ -4,8 +4,8 @@
 //! without querying `.tracedecay` databases directly. Reuses the same
 //! durable-analytics service functions the `tracedecay analytics
 //! diagnostics` CLI and dashboard analytics API use
-//! ([`crate::global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
-//! [`crate::global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
+//! ([`tracedecay_global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
+//! [`tracedecay_global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
 //! [`crate::dashboard::analytics_api::hint_summary_from_counts`],
 //! [`tracedecay_agent_hosts::automation::run_ledger::load_run_records`]) rather than
 //! re-implementing queries against those tables.
@@ -24,10 +24,10 @@ use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 use tracedecay_usecases::memory::MemoryApplication;
 
 use crate::daemon::retained_owner::{MemoryTargetAccessV1, open_project_retained_memory_target};
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
 use crate::store::DatabaseFactStore;
-use crate::timeutil::parse_rfc3339_timestamp;
+use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 use tracedecay_agent_hosts::automation::run_ledger::load_run_records;
@@ -181,7 +181,7 @@ fn config_error(message: impl std::fmt::Display) -> TraceDecayError {
 /// Strips a `tracedecay_`/`mcp__tracedecay__` prefix and returns the bucket
 /// name for a tool. Unknown/non-tracedecay tool names bucket as `"other"`.
 fn tool_tier(tool_name: &str) -> &'static str {
-    let normalized = crate::analytics::normalize_tool_name(tool_name);
+    let normalized = tracedecay_agent_hosts::analytics::normalize_tool_name(tool_name);
     let normalized = normalized
         .strip_prefix("tracedecay_")
         .unwrap_or(normalized.as_str());

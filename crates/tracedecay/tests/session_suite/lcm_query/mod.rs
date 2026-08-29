@@ -1,5 +1,5 @@
 use tempfile::TempDir;
-use tracedecay::global_db::ParseOffset;
+use tracedecay_global_db::ParseOffset;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_sessions::runtime::lcm::{

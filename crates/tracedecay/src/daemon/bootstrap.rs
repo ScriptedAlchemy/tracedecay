@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::*;
 
@@ -110,13 +110,13 @@ async fn run_foreground_loopback(
     })?;
     prewarm_static_daemon_bootstrap_catalog();
     let requested = transport::default_loopback_endpoint();
-    let _lifecycle_lease = crate::lifecycle_lease::acquire_shared_for_profile(
+    let _lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
         "managed daemon database ownership",
     )?;
     let mut authority =
         authority::DaemonAuthority::acquire(&profile_root, &requested, binary_version())?;
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         authority.record().epoch,
         &authority.record().process_run_id,
@@ -514,13 +514,13 @@ async fn run_foreground_unix(
     })?;
     prewarm_static_daemon_bootstrap_catalog();
     let endpoint = transport::DaemonEndpoint::Unix(socket_path);
-    let _lifecycle = crate::lifecycle_lease::acquire_shared_for_profile(
+    let _lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
         "managed daemon database ownership",
     )?;
     let mut authority =
         authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version())?;
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         authority.record().epoch,
         &authority.record().process_run_id,

@@ -40,7 +40,7 @@ use tracedecay_usecases::request_identity::{PreviewIdentityDomain, derive_previe
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
@@ -709,7 +709,7 @@ pub(super) async fn register_project_open_production_owners(
     let requester = access.requester.clone();
     // One worktree discovery serves both the Git transaction authority here
     // and the native-integration mount below.
-    let repository_root = crate::worktree::git_worktree_root(project_root);
+    let repository_root = tracedecay_runtime_core::worktree::git_worktree_root(project_root);
     if let Some(repository_root) = repository_root.as_deref() {
         hotpath::future!(
             git_transactions.install_authority(
@@ -1202,7 +1202,7 @@ async fn register_semantic_activation_owner(
     project_root: &Path,
     server: &McpServer,
     graph: &Arc<crate::tracedecay::TraceDecay>,
-    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
     configuration: &tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
 ) -> Result<()> {
@@ -1468,8 +1468,8 @@ async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     scope_grant: tracedecay_application::CapabilityGrantSnapshot,
-    registered_database: crate::global_db::RegisteredGlobalDbLeaseV1,
-    database: crate::db::Database,
+    registered_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    database: tracedecay_runtime_core::db::Database,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     admitted_providers: &[AdmittedLspProvider],
     root_uri: String,

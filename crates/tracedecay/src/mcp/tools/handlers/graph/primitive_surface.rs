@@ -7,7 +7,7 @@ use tracedecay_application::retrieval::{
 };
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use crate::mcp::tools::ToolResult;
 
 use super::super::support::text_tool_result;

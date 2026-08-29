@@ -8,7 +8,7 @@
 use serde_json::{Value, json};
 
 use crate::ast_grep_search::{AstGrepSearchMatch, search_tree_scoped_with_cancel};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;

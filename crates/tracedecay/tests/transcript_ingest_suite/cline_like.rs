@@ -1,5 +1,5 @@
 use tempfile::TempDir;
-use tracedecay::global_db::ParseOffset;
+use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
 use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptIngestError, TranscriptSource};

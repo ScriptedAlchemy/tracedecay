@@ -116,7 +116,7 @@ fn verified_gini_values(
                 "verified Gini symbol is missing lineage metadata",
             )
         })?;
-        if crate::path_scope::path_matches_scope(path, path_prefix) {
+        if tracedecay_runtime_core::path_scope::path_matches_scope(path, path_prefix) {
             symbols.push((symbol.occurrence, path.clone(), metadata.clone()));
         }
     }

@@ -25,7 +25,7 @@ use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay::types::{Node, NodeKind, Visibility};
@@ -70,13 +70,13 @@ pub fn register_test_schema_installer() {
     tracedecay_global_db::register_test_schema_installer();
 }
 
-pub async fn initialize_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+pub async fn initialize_test_database(path: &Path) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test initialize")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize).await
 }
 
-pub async fn open_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+pub async fn open_test_database(path: &Path) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing).await
@@ -84,7 +84,7 @@ pub async fn open_test_database(path: &Path) -> tracedecay::errors::Result<(Data
 
 pub async fn open_test_database_read_only(
     path: &Path,
-) -> tracedecay::errors::Result<(Database, bool)> {
+) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test read-only open")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::ReadOnly).await
@@ -862,7 +862,7 @@ pub fn ensure_tracedecay_daemon(home: &Path) {
 /// the spawn with `ENOENT` even though git is installed; resolving to an
 /// absolute path up front removes the per-spawn PATH walk.
 pub fn git_program() -> std::ffi::OsString {
-    tracedecay::git::git_program().to_os_string()
+    tracedecay_runtime_core::git::git_program().to_os_string()
 }
 
 #[cfg(unix)]
@@ -1283,7 +1283,7 @@ impl LcmTestRuntime {
         scope: HostAdmissionScope,
         node_id: &str,
         source_node_id: &str,
-    ) -> tracedecay::errors::Result<()> {
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         self.runtime
             .replace_lcm_summary_source_for_test(scope, node_id, source_node_id)
             .await

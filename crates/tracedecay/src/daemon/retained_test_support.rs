@@ -21,7 +21,7 @@ use super::project_open_owners::{
 };
 use super::service::invocation::{DaemonInvocationService, DaemonRetainedRuntimeRegistrar};
 use crate::daemon_client::invocation_now_micros;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Clone)]
 struct RetainedOwnerTestExecutor {

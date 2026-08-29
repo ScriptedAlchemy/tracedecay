@@ -15,14 +15,14 @@ pub(crate) use wake::SessionTemporalRefreshWake;
 #[cfg(test)]
 pub(crate) struct SessionTemporalRefreshTestAuthority {
     _runtime: crate::host_admission::HostAdmissionTestRuntimeV1,
-    database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 }
 
 #[cfg(test)]
 impl SessionTemporalRefreshTestAuthority {
     pub(crate) fn new(
         runtime: crate::host_admission::HostAdmissionTestRuntimeV1,
-        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Self {
         Self {
             _runtime: runtime,
@@ -30,7 +30,7 @@ impl SessionTemporalRefreshTestAuthority {
         }
     }
 
-    fn database(&self) -> &crate::global_db::RegisteredGlobalDb {
+    fn database(&self) -> &tracedecay_global_db::RegisteredGlobalDb {
         self.database.as_ref()
     }
 

@@ -23,8 +23,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::registry_maintenance::{RootLivenessV1, probe_root};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 mod fence;
@@ -755,7 +755,7 @@ pub(crate) async fn execute_registered_collection(
     db: &RegisteredGlobalDb,
     plan: &CollectionPlan,
     profile_root: &Path,
-) -> crate::errors::Result<(CollectionOutcome, usize)> {
+) -> tracedecay_runtime_core::errors::Result<(CollectionOutcome, usize)> {
     execute_registered_collection_controlled(db, plan, profile_root, unbounded_collection_control())
         .await
 }
@@ -766,7 +766,7 @@ pub(crate) async fn execute_registered_collection_controlled(
     plan: &CollectionPlan,
     profile_root: &Path,
     control: CollectionControl<'_>,
-) -> crate::errors::Result<(CollectionOutcome, usize)> {
+) -> tracedecay_runtime_core::errors::Result<(CollectionOutcome, usize)> {
     let mut outcome = CollectionOutcome::default();
     let mut retired = 0usize;
     for finding in &plan.collect {
@@ -984,7 +984,7 @@ pub(crate) async fn execute_registered_collection_controlled(
                 "SELECT store_relpath, created_at, last_write_at
                  FROM store_instances
                  WHERE project_id = ?1 AND store_id = ?2",
-                crate::db::engine::params![finding.project_id.as_str(), finding.store_id.as_str()],
+                tracedecay_runtime_core::db::engine::params![finding.project_id.as_str(), finding.store_id.as_str()],
             ))
             .await
         {
@@ -1075,7 +1075,7 @@ pub(crate) async fn execute_registered_collection_controlled(
                  WHERE project_id = ?1 AND store_id = ?2
                    AND store_relpath = ?3 AND created_at = ?4
                    AND last_write_at IS ?5",
-                crate::db::engine::params![
+                tracedecay_runtime_core::db::engine::params![
                     finding.project_id.as_str(),
                     finding.store_id.as_str(),
                     finding.expected_store_relpath.as_str(),
@@ -1129,7 +1129,7 @@ pub(crate) async fn execute_registered_collection_controlled(
                    AND NOT EXISTS (
                        SELECT 1 FROM store_instances WHERE project_id = ?1
                 )",
-                crate::db::engine::params![finding.project_id.as_str()],
+                tracedecay_runtime_core::db::engine::params![finding.project_id.as_str()],
             ))
             .await
         {
@@ -1190,8 +1190,8 @@ pub(crate) async fn execute_registered_collection_controlled(
 fn orphan_db_error(
     operation: &'static str,
     error: impl std::fmt::Display,
-) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Database {
+) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Database {
         operation: operation.to_string(),
         message: error.to_string(),
     }
@@ -1478,7 +1478,7 @@ fn durable_check_scratch_root(profile_root: &Path) -> PathBuf {
 /// instead of maintaining a fixed list: both legacy memory and Memory V2 add
 /// durable tables, and a newly added table must be protected automatically.
 /// Side-effect-free with respect to the store: opens the database through
-/// [`crate::sqlite_read_snapshot`], so the live store is never mutated or
+/// [`tracedecay_runtime_core::sqlite_read_snapshot`], so the live store is never mutated or
 /// locked against a concurrent writer.
 async fn check_durable_memory_rows(
     data_root: &Path,
@@ -1543,7 +1543,7 @@ async fn check_durable_memory_rows(
                AND type = 'table'
                AND name LIKE ?1 ESCAPE '\\'
              ORDER BY name",
-            crate::db::engine::params!["memory\\_%"],
+            tracedecay_runtime_core::db::engine::params!["memory\\_%"],
         ))
         .await
     {
@@ -1742,11 +1742,11 @@ pub(crate) fn dir_size_bytes_controlled(
 pub(crate) async fn build_store_census(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
-) -> crate::errors::Result<Vec<StoreCensusEntry>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<StoreCensusEntry>> {
     let projects = db.list_code_projects(usize::MAX).await?;
     build_store_census_for_projects(db, profile_root, &projects, None)
         .await?
-        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "unbounded store census was unexpectedly interrupted".to_owned(),
         })
 }
@@ -1763,7 +1763,7 @@ pub(crate) async fn build_store_census_page(
     profile_root: &Path,
     after_project_id: Option<&str>,
     limit: usize,
-) -> crate::errors::Result<StoreCensusPageV1> {
+) -> tracedecay_runtime_core::errors::Result<StoreCensusPageV1> {
     let limit = limit.clamp(1, 64);
     let mut projects = db
         .list_code_projects_after(after_project_id, limit.saturating_add(1))
@@ -1775,7 +1775,7 @@ pub(crate) async fn build_store_census_page(
         .flatten();
     let entries = build_store_census_for_projects(db, profile_root, &projects, None)
         .await?
-        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "unbounded store census page was unexpectedly interrupted".to_owned(),
         })?;
     Ok(StoreCensusPageV1 {
@@ -1787,9 +1787,9 @@ pub(crate) async fn build_store_census_page(
 async fn build_store_census_for_projects(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
-    projects: &[crate::global_db::CodeProjectRecord],
+    projects: &[tracedecay_global_db::CodeProjectRecord],
     control: Option<CollectionControl<'_>>,
-) -> crate::errors::Result<Option<Vec<StoreCensusEntry>>> {
+) -> tracedecay_runtime_core::errors::Result<Option<Vec<StoreCensusEntry>>> {
     let mut census = Vec::new();
     // Aliases and the git common directory are part of the identity: a linked
     // worktree or a second enrolled checkout keeps the store live even when
@@ -1926,7 +1926,7 @@ async fn inspect_store_leaf_cheap(
     profile_root: &Path,
     data_root: &Path,
     control: Option<CollectionControl<'_>>,
-) -> crate::errors::Result<Option<CheapStoreInspect>> {
+) -> tracedecay_runtime_core::errors::Result<Option<CheapStoreInspect>> {
     if let Some(control) = control {
         if control.completion().is_some() {
             return Ok(None);
@@ -1963,7 +1963,7 @@ async fn inspect_store_leaf_cheap(
     tokio::task::spawn_blocking(move || inspect_store_leaf_cheap_sync(&profile_root, &data_root))
         .await
         .map(Some)
-        .map_err(|error| crate::errors::TraceDecayError::Config {
+        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("store census inspect join failed: {error}"),
         })
 }
@@ -1972,7 +1972,7 @@ async fn attach_lazy_content_fences(
     census: &mut [StoreCensusEntry],
     profile_root: &Path,
     control: Option<CollectionControl<'_>>,
-) -> crate::errors::Result<Option<()>> {
+) -> tracedecay_runtime_core::errors::Result<Option<()>> {
     for entry in census.iter_mut() {
         if matches!(classify_one(entry), StoreDisposition::Live) {
             continue;
@@ -2027,7 +2027,7 @@ pub(crate) async fn sweep_orphan_stores(
     retention_secs: i64,
     now: i64,
     apply: bool,
-) -> crate::errors::Result<OrphanSweepReport> {
+) -> tracedecay_runtime_core::errors::Result<OrphanSweepReport> {
     let census = build_store_census(db, profile_root).await?;
     let findings = classify_stores(&census, now);
     let plan = plan_collection(findings, retention_secs);
@@ -2128,7 +2128,7 @@ pub(crate) async fn census_unregistered_project_dirs(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     now: i64,
-) -> crate::errors::Result<Vec<UnregisteredStoreFinding>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<UnregisteredStoreFinding>> {
     let cancellation = CancellationToken::new();
     let report = sweep_unregistered_store_page(
         db,
@@ -2197,7 +2197,7 @@ pub(crate) async fn execute_unregistered_collection(
     db: &RegisteredGlobalDb,
     plan: &UnregisteredCollectionPlan,
     profile_root: &Path,
-) -> crate::errors::Result<CollectionOutcome> {
+) -> tracedecay_runtime_core::errors::Result<CollectionOutcome> {
     execute_unregistered_collection_controlled(
         db,
         plan,
@@ -2213,7 +2213,7 @@ pub(crate) async fn execute_unregistered_collection_controlled(
     plan: &UnregisteredCollectionPlan,
     profile_root: &Path,
     control: CollectionControl<'_>,
-) -> crate::errors::Result<CollectionOutcome> {
+) -> tracedecay_runtime_core::errors::Result<CollectionOutcome> {
     let mut outcome = CollectionOutcome::default();
     for finding in &plan.collect {
         if let Some(completion) = control.completion() {
@@ -2420,7 +2420,7 @@ pub(crate) async fn execute_unregistered_collection_controlled(
         let mut rows = match control
             .race(transaction.query(
                 "SELECT 1 FROM code_projects WHERE project_id = ?1",
-                crate::db::engine::params![finding.project_dir_name.as_str()],
+                tracedecay_runtime_core::db::engine::params![finding.project_dir_name.as_str()],
             ))
             .await
         {
@@ -2621,7 +2621,7 @@ pub(crate) async fn sweep_unregistered_stores(
     retention_secs: i64,
     now: i64,
     apply: bool,
-) -> crate::errors::Result<UnregisteredStoreSweepReport> {
+) -> tracedecay_runtime_core::errors::Result<UnregisteredStoreSweepReport> {
     let cancellation = CancellationToken::new();
     let report = sweep_unregistered_store_page(
         db,
@@ -2644,7 +2644,7 @@ pub(crate) async fn sweep_unregistered_stores(
         && (completion_is_terminal || report.next_cursor.is_none())
         && (apply || report.outcome.collected.is_empty());
     if !receipt_is_consistent {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "unregistered-store page returned an inconsistent receipt".to_owned(),
         });
     }

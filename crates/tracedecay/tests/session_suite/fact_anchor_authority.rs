@@ -10,15 +10,15 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::db::{Database, DatabaseAuthority};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority};
 #[cfg(feature = "test-transport")]
-use tracedecay::db::{
+use tracedecay_runtime_core::db::{
     DatabaseAuthorityRole, TestDatabaseRuntimeMode, enter_maintenance_database_scope,
 };
-use tracedecay::global_db::StoreInstanceUpsert;
+use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
-use tracedecay::lifecycle_lease::acquire_exclusive_for_profile;
+use tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile;
 use tracedecay::store::DatabaseFactStore;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,

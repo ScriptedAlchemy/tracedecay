@@ -4,7 +4,7 @@ use serde::Serialize;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
 
@@ -149,7 +149,7 @@ pub(crate) async fn analyze_test_risk(
                 && !n.skip_test_coverage
                 && !n.qualified_name.contains("::tests::")
         })
-        .filter(|n| crate::path_scope::path_matches_scope(&n.file, path_prefix))
+        .filter(|n| tracedecay_runtime_core::path_scope::path_matches_scope(&n.file, path_prefix))
         .collect();
 
     let excluded_count = eligible_fns

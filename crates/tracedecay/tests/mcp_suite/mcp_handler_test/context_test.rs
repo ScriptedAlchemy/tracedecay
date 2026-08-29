@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::process::Command;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::errors::{Result as TraceDecayResult, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay::mcp::ToolResult;
 
 struct ScopedProductionContextFixture {

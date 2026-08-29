@@ -20,7 +20,7 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::global_db::ProjectRegistryContext;
+use tracedecay_global_db::ProjectRegistryContext;
 use crate::mcp::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
 use tracedecay_usecases::context::ApplicationScopeError;
 
@@ -164,7 +164,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{QueryScopeError, resolve_query_scope};
-    use crate::global_db::{CodeProjectRecord, ProjectRegistryContext};
+    use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext};
 
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git")

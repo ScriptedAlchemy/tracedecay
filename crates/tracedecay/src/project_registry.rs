@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::global_db::{
+use tracedecay_global_db::{
     CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
 };
 // The registry data structs (and `PublicCodeProject::from_record`) are the
@@ -197,7 +197,7 @@ fn project_kind(project: &CodeProjectRecord) -> String {
 /// `project_root`.
 ///
 /// A tracedecay project id is shared across every linked worktree of a
-/// repository: [`crate::global_db::RegisteredGlobalDb::upsert_code_project`] indexes a
+/// repository: [`tracedecay_global_db::RegisteredGlobalDb::upsert_code_project`] indexes a
 /// `git-common-dir:<common dir>` alias back to whichever project id first
 /// registered it, so a session opened from *any* linked worktree resolves
 /// to the same project id as the primary checkout. Because that same upsert
@@ -208,7 +208,7 @@ fn project_kind(project: &CodeProjectRecord) -> String {
 /// the primary checkout.
 ///
 /// Given the worktree's own root and its already-resolved
-/// [`crate::worktree::git_common_dir`], this returns `Some(primary_root)`
+/// [`tracedecay_runtime_core::worktree::git_common_dir`], this returns `Some(primary_root)`
 /// when `project_root` is a linked worktree and the primary checkout still
 /// exists on disk. It returns `None` — meaning "register `project_root` as
 /// given" — when `project_root` already *is* the primary checkout, isn't a
@@ -374,7 +374,7 @@ mod tests {
         let worktree = tmp.path().join("main-wt");
         std::fs::create_dir_all(&primary).unwrap();
         std::fs::create_dir_all(&worktree).unwrap();
-        // `crate::worktree::git_common_dir` always returns a canonicalized
+        // `tracedecay_runtime_core::worktree::git_common_dir` always returns a canonicalized
         // path — mirror that guarantee here rather than a raw join.
         let primary = primary.canonicalize().unwrap();
         let common_dir = primary.join(".git");

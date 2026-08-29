@@ -18,7 +18,7 @@ use tracedecay_store::{
 use super::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus, HostAdmissionTestRuntimeV1,
 };
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
@@ -170,7 +170,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn run_git_backfill_for_test(
         &self,
-        analytics_events: &[crate::global_db::AnalyticsEventRecord],
+        analytics_events: &[tracedecay_global_db::AnalyticsEventRecord],
         git: &dyn tracedecay_sessions::runtime::git_correlation::GitReflogSource,
         options: &tracedecay_sessions::runtime::git_correlation::BackfillOptions,
     ) -> std::result::Result<

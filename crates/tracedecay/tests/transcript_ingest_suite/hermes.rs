@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::global_db::ParseOffset;
+use tracedecay_global_db::ParseOffset;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     MAX_OBSERVATION_RECORD_BYTES, ProjectId, ProviderUsageCounterSemanticsV1,

@@ -23,8 +23,8 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -150,7 +150,7 @@ impl DashboardProfileCodeIndexWorkerSettingsPort
 }
 
 fn dashboard_code_index_worker_configuration(
-    configuration: crate::global_db::configuration::ProfileCodeIndexWorkerConfigurationV1,
+    configuration: tracedecay_global_db::configuration::ProfileCodeIndexWorkerConfigurationV1,
 ) -> DashboardCodeIndexWorkerConfigurationV1 {
     DashboardCodeIndexWorkerConfigurationV1 {
         configuration_snapshot_id: configuration.snapshot_id.as_str().to_owned(),

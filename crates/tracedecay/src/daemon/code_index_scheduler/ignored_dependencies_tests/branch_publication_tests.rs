@@ -50,7 +50,7 @@ impl CodeIndexExecutionControlV1 for PauseAfterCandidatePublication {
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> String {
-    let output = Command::new(crate::git::git_program())
+    let output = Command::new(tracedecay_runtime_core::git::git_program())
         .current_dir(root)
         .args(arguments)
         .output()
@@ -281,7 +281,7 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 92, "ignored-dependency-race")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 92, "ignored-dependency-race")
             .expect("daemon database scope");
     let graph_runtime = Arc::new(
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(

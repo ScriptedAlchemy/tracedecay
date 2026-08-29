@@ -37,7 +37,7 @@ use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
     WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
 };
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const WORK_CLI_DEADLINE_MICROS: i64 = 120_000_000;

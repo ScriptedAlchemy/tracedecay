@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::{contract_error, journal::DurableAutomationAdmission, recovery_index, retirement};
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 #[hotpath::measure(label = "daemon.automation.effect.housekeeping", future = true)]
 pub(super) async fn finalize_terminal_housekeeping(

@@ -192,7 +192,7 @@ fn scope_reconciliation_operates_on_the_shared_code_index_parent() {
 }
 
 fn scope_fixture_git(root: &Path, args: &[&str]) {
-    let status = Command::new(crate::git::git_program())
+    let status = Command::new(tracedecay_runtime_core::git::git_program())
         .current_dir(root)
         .args(args)
         .status()
@@ -426,7 +426,7 @@ fn fast_watch_config() -> SyncConfig {
 const TEST_READY_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = Command::new(crate::git::git_program())
+    let output = Command::new(tracedecay_runtime_core::git::git_program())
         .args(["-c", "user.name=t", "-c", "user.email=t@t"])
         .args(args)
         .current_dir(dir)
@@ -483,7 +483,7 @@ fn linked_worktree_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 async fn ready_registered_state(watcher: &GitWatcher, repo: &Path) -> Arc<WatchState> {
-    let common = crate::worktree::git_common_dir(repo).expect("repository common directory");
+    let common = tracedecay_runtime_core::worktree::git_common_dir(repo).expect("repository common directory");
     let projects = watcher.inner.projects.lock().await;
     Arc::clone(projects.get(&common).expect("repository registered"))
 }
@@ -517,7 +517,7 @@ fn max_files_watch_is_recognized_as_the_watch_limit() {
 /// presently out of watches, by making the exact same `install_watches` call
 /// the production task makes.
 async fn currently_watch_limited(repo: &Path) -> bool {
-    let Some(common) = crate::worktree::git_common_dir(repo) else {
+    let Some(common) = tracedecay_runtime_core::worktree::git_common_dir(repo) else {
         return false;
     };
     let Some(git_dir) = worktree_git_dir(repo) else {
@@ -681,7 +681,7 @@ async fn linked_worktrees_share_one_repository_watcher() {
         1,
         "linked roots share one slot and an unrelated repository is capped"
     );
-    let common = crate::worktree::git_common_dir(&primary).expect("common directory");
+    let common = tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("common directory");
     let state = projects.get(&common).expect("repository watcher");
     assert!(state.contains_worktree(&primary.canonicalize().unwrap()));
     assert!(state.contains_worktree(&linked.canonicalize().unwrap()));
@@ -692,7 +692,7 @@ async fn linked_worktrees_share_one_repository_watcher() {
 #[test]
 fn unmounted_linked_worktree_operation_does_not_block_mounted_sibling() {
     let (_container, primary, linked) = linked_worktree_fixture();
-    let common = crate::worktree::git_common_dir(&primary).expect("git common dir");
+    let common = tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("git common dir");
     let primary_git_dir = worktree_git_dir(&primary).expect("primary git dir");
     let linked_git_dir = worktree_git_dir(&linked).expect("linked git dir");
     let state = WatchState::new(
@@ -746,7 +746,7 @@ fn registered_worktree_operation_scan_fails_closed_at_its_cap() {
 #[tokio::test]
 async fn callback_failure_requests_conservative_reconciliation() {
     let repo = temp_repo();
-    let common = crate::worktree::git_common_dir(repo.path()).expect("git common dir");
+    let common = tracedecay_runtime_core::worktree::git_common_dir(repo.path()).expect("git common dir");
     let git_dir = worktree_git_dir(repo.path()).expect("git dir");
     let state = WatchState::new(
         common,

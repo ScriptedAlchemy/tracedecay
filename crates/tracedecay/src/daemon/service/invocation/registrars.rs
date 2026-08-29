@@ -711,13 +711,13 @@ impl DaemonConfigurationRuntimeRegistrar {
     pub(crate) async fn commit_profile_code_index_worker_selection(
         &self,
         project_root: &Path,
-        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         profile_id: &UserProfileId,
         request_id: &str,
         selection: tracedecay_domain::configuration::CodeIndexWorkerSelectionV1,
         expected_revision: ConfigurationRevisionId,
         idempotency_key: ConfigurationIdempotencyKey,
-    ) -> Result<crate::global_db::configuration::ProfileCodeIndexWorkerCommitV1, TraceDecayError>
+    ) -> Result<tracedecay_global_db::configuration::ProfileCodeIndexWorkerCommitV1, TraceDecayError>
     {
         let registered = self
             .service
@@ -923,7 +923,7 @@ impl DaemonWorkRuntimeRegistrar {
     pub(in crate::daemon) async fn register(
         &self,
         project_root: PathBuf,
-        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         authority: WorkAuthority,
         actor: ActorId,
         grant: CapabilityGrantSnapshot,

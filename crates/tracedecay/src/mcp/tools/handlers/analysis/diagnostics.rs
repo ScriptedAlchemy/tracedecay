@@ -105,7 +105,7 @@ fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> T
 /// Read-only and fail-open: an unavailable verified projection is reported as
 /// explicitly empty rather than omitted.
 async fn session_correlation_health_json(
-    session_db: Option<&crate::global_db::RegisteredGlobalDb>,
+    session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> Value {
     let health = match session_db {
         Some(db) => crate::store::GlobalDbGitCorrelationStore::new(db)
@@ -152,7 +152,7 @@ pub(crate) async fn handle_diagnostics(
     args: Value,
     diagnostics_cache: Option<&crate::diagnostics::DiagnosticsCache>,
     diagnostics_lsp: Option<&tokio::sync::Mutex<DiagnosticBroker>>,
-    session_db: Option<&crate::global_db::RegisteredGlobalDb>,
+    session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
     use crate::diagnostics::run_all;
 

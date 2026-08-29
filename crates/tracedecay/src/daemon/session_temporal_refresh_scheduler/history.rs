@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_usecases::observation::ObservationCancellation;
 
 pub(in crate::daemon) type SessionHistoricalIngestPass<'a> =

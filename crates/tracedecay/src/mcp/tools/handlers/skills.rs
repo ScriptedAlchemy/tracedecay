@@ -7,8 +7,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::ports::session_store::AutomationSessionStore;
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 use tracedecay_agent_hosts::automation::hermes_skill_bridge::{
@@ -187,7 +187,7 @@ pub(super) async fn handle_skill_view(
                 .get("__mcp_request_id")
                 .and_then(Value::as_str)
                 .map(|request_id| analytics_import_key_for_request(
-                    &crate::global_db::RegisteredGlobalDb::canonical_project_key(
+                    &tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(
                         cg.project_root(),
                     ),
                     "mcp",

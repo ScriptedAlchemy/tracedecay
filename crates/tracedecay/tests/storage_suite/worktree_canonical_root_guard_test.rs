@@ -223,7 +223,7 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
         .project_registry_context_by_id(&project_id)
         .await
         .expect("registry context should exist");
-    let git_common_dir = tracedecay::worktree::git_common_dir(&fx.worktree)
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&fx.worktree)
         .expect("linked worktree must expose a git common dir");
     let expected_alias = format!(
         "git-common-dir:{}",
@@ -251,7 +251,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
             .await
             .expect("global db should open");
-        let git_common_dir = tracedecay::worktree::git_common_dir(&fx.worktree);
+        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&fx.worktree);
         db.upsert_code_project(
             &project_id,
             &fx.worktree,

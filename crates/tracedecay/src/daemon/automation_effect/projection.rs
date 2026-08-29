@@ -25,7 +25,7 @@ use tracedecay_store::{
 };
 
 use super::contract_error;
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 pub(super) fn project_run_summary(
     task: AutomationTaskV1,

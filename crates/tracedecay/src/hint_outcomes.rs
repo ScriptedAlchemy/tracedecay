@@ -21,7 +21,7 @@ use tracedecay_domain::{AdoptionOutcomeLinkedV1, CoverageStateV1};
 use tracedecay_usecases::observability::record_adoption_outcome;
 
 use crate::analytics_bridge::HookImportSource;
-use crate::global_db::{
+use tracedecay_global_db::{
     AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb, SessionActivityRow,
 };
 use tracedecay_agent_hosts::hooks::hint_outcomes::HintOutcomeStats;
@@ -407,7 +407,7 @@ fn activity_from_row(
 fn activity_tool_names(row: &SessionActivityRow) -> Result<Vec<String>, HintOutcomePortError> {
     let mut tools = Vec::new();
     if let Some(names) = &row.tool_names {
-        tools.extend(crate::analytics::split_tool_names(names));
+        tools.extend(tracedecay_agent_hosts::analytics::split_tool_names(names));
     }
     if let Some(metadata) = &row.metadata_json {
         let value = serde_json::from_str::<Value>(metadata).map_err(|error| {

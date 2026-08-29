@@ -16,8 +16,8 @@ use crate::daemon::store_runtime::session_registry::{
     ProjectSessionReplacementReservationV1, ProjectSessionReplacementVacancyV1,
     RegisteredSessionOwnerV1, SessionGraphOwnerV1,
 };
-use crate::db::{Database, DatabaseAccessMode};
-use crate::global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
+use tracedecay_runtime_core::db::{Database, DatabaseAccessMode};
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 
 mod quarantine;
 
@@ -66,7 +66,7 @@ impl RemoteRecoveryPublicationContextV1 {
         project_id: &ProjectId,
         mut replacement: ProjectSessionReplacementReservationV1,
         operation: &'static str,
-        error: crate::errors::TraceDecayError,
+        error: tracedecay_runtime_core::errors::TraceDecayError,
     ) -> Result<T> {
         // A recovered candidate has never been published to Ready. Its prior
         // exact close proof remains the only authority for another physical
@@ -569,7 +569,7 @@ impl RemoteRecoveryPublicationContextV1 {
         let rejected = destination.with_extension(format!(
             "remote-restore-rejected-{expected_published_identity:016x}.sqlite3"
         ));
-        crate::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically(
+        tracedecay_runtime_core::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically(
             rollback,
             destination,
             &rejected,
@@ -678,7 +678,7 @@ impl RemoteRecoveryPublicationContextV1 {
         }
         hotpath::measure_block!(
             "daemon.session_registry.remote_recovery.restore.file_swap",
-            crate::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically(
+            tracedecay_runtime_core::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically(
                 &staging,
                 &destination,
                 &rollback,
@@ -739,7 +739,7 @@ mod tests {
         std::fs::create_dir_all(&project_root).expect("project root");
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
             .expect("durable profile identity");
-        let _database_scope = crate::db::enter_daemon_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             1,
             "recovered candidate retirement retry",

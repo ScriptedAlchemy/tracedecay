@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 
 use crate::diagnostics::{Diagnostic, Driver, Scope, is_diagnostic_level};
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 pub struct TscDriver;
 

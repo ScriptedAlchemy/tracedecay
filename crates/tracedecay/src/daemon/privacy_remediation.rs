@@ -15,8 +15,8 @@ use tracedecay_usecases::memory::{
     PrivacyRemediationTriggerV1, ProjectMemoryPrivacyRemediationReceiptV1,
 };
 
-use crate::errors::Result;
-use crate::global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::errors::Result;
+use tracedecay_global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
 use crate::tracedecay::TraceDecay;
 
 /// Spawns the bounded background rescan for one adopted project store.
@@ -232,7 +232,7 @@ mod tests {
     }
 
     async fn seed_legacy_fact(
-        database: &crate::db::Database,
+        database: &tracedecay_runtime_core::db::Database,
         owner: &FactOwnerV1,
         label: &str,
         content: &str,
@@ -273,7 +273,7 @@ mod tests {
     }
 
     async fn persisted_payload_rows_containing(
-        database: &crate::db::Database,
+        database: &tracedecay_runtime_core::db::Database,
         marker: &str,
     ) -> i64 {
         database
@@ -288,7 +288,7 @@ mod tests {
             .expect("inspect persisted memory payloads")
     }
 
-    async fn assertion_payload_purge_receipts(database: &crate::db::Database) -> i64 {
+    async fn assertion_payload_purge_receipts(database: &tracedecay_runtime_core::db::Database) -> i64 {
         database
             .query_scalar_i64(
                 "inspect at-rest privacy purge receipts",
@@ -298,7 +298,7 @@ mod tests {
             .expect("inspect persisted privacy purge receipts")
     }
 
-    async fn orphaned_payload_fts_rows(database: &crate::db::Database) -> i64 {
+    async fn orphaned_payload_fts_rows(database: &tracedecay_runtime_core::db::Database) -> i64 {
         database
             .query_scalar_i64(
                 "inspect at-rest privacy FTS cleanup",
@@ -321,7 +321,7 @@ mod tests {
     }
 
     async fn capture_payload_row(
-        database: &crate::db::Database,
+        database: &tracedecay_runtime_core::db::Database,
         fact_id: &tracedecay_domain::FactId,
     ) -> LegacyPayloadRow {
         let mut rows = database
@@ -352,7 +352,7 @@ mod tests {
     /// superseded a secret-bearing assertion without an explicit purge
     /// receipt. The final immutable trigger is restored before remediation.
     async fn restore_pre_purge_superseded_payload(
-        database: &crate::db::Database,
+        database: &tracedecay_runtime_core::db::Database,
         payload: &LegacyPayloadRow,
     ) {
         let transaction = database
@@ -375,7 +375,7 @@ mod tests {
                 "INSERT INTO memory_v2_assertion_payloads(
                     assertion_id, fact_id, owner_kind, project_id, payload_json, content
                  ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                crate::db::engine::params![
+                tracedecay_runtime_core::db::engine::params![
                     payload.assertion_id.as_str(),
                     payload.fact_id.as_str(),
                     payload.owner_kind.as_str(),
@@ -399,7 +399,7 @@ mod tests {
         let project_id = ProjectId::new("project.privacy-remediation.fixture").expect("project id");
         let project_root = enrolled_root(temp.path(), &project_id);
         let _database_scope =
-            crate::db::enter_daemon_database_scope(&profile_root, 43, "privacy remediation test")
+            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 43, "privacy remediation test")
                 .expect("daemon database scope");
         let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -515,7 +515,7 @@ mod tests {
         let profile_root = temp.path().join("profile");
         let project_id = ProjectId::new("project.privacy-remediation.denial").expect("project id");
         let project_root = enrolled_root(temp.path(), &project_id);
-        let _database_scope = crate::db::enter_daemon_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             44,
             "privacy remediation denial test",
@@ -623,7 +623,7 @@ mod tests {
         let project_id =
             ProjectId::new("project.privacy-remediation-superseded").expect("project id");
         let project_root = enrolled_root(temp.path(), &project_id);
-        let _database_scope = crate::db::enter_daemon_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             43,
             "superseded privacy remediation test",
@@ -722,7 +722,7 @@ mod tests {
         let profile_root = home.path().join("profile");
         let project_id = ProjectId::new("project.privacy-remediation-many").expect("project id");
         let project_root = enrolled_root(home.path(), &project_id);
-        let _database_scope = crate::db::enter_daemon_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             43,
             "privacy remediation batch test",

@@ -34,7 +34,7 @@ use tracedecay_domain::{
 #[cfg(feature = "semantic-fastembed")]
 use crate::config::SemanticResourceCeilings;
 #[cfg(feature = "semantic-fastembed")]
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 #[cfg(feature = "semantic-fastembed")]
 use crate::semantic_code::{
     CatalogedFastEmbedModelV1, DaemonSemanticRuntimeHandleV1, FastEmbedModelCatalogV1,
@@ -162,7 +162,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 fn git(root: &Path, args: &[&str]) {
-    let status = Command::new(crate::git::git_program())
+    let status = Command::new(tracedecay_runtime_core::git::git_program())
         .current_dir(root)
         .args(args)
         .status()
@@ -171,7 +171,7 @@ fn git(root: &Path, args: &[&str]) {
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> String {
-    let output = Command::new(crate::git::git_program())
+    let output = Command::new(tracedecay_runtime_core::git::git_program())
         .current_dir(root)
         .args(args)
         .output()
@@ -1320,7 +1320,7 @@ fn capture_sanitizes_code_and_propagates_scan_evidence() {
 
     assert_eq!(
         snapshot.sanitizer_revision.as_str(),
-        crate::privacy::CODE_SOURCE_SANITIZER_VERSION_V1
+        tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1
     );
     assert!(
         snapshot
@@ -6117,7 +6117,7 @@ fn durable_publication_streams_canonical_bytes_and_reuses_immutable_target() {
     let mut reopened = super::DaemonCodeIndexPublicationStoreV1::new(
         store.path(),
         fixture.path(),
-        SanitizerRevision::new(crate::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
             .expect("sanitizer revision"),
     )
     .expect("reopen publication store");
@@ -9268,16 +9268,16 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
 
     let database_root = TempDir::new().expect("database root");
     let database_path = database_root.path().join("diagnostics.db");
-    let authority = crate::db::DatabaseAuthority::acquire_test(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &database_path,
         "diagnostics identity admission test",
     )
     .expect("database authority");
     crate::daemon::store_runtime::register_registered_schema_installer();
-    let (database, _guard) = crate::db::Database::publish_test_runtime(
+    let (database, _guard) = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &database_path,
         &authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
     )
     .await
     .expect("open diagnostics database");
@@ -9537,12 +9537,12 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
     let database_path = database_root.path().join("diagnostics.db");
     crate::daemon::store_runtime::register_registered_schema_installer();
     let authority =
-        crate::db::DatabaseAuthority::acquire_test(&database_path, "diagnostics absent resolver")
+        tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(&database_path, "diagnostics absent resolver")
             .expect("database authority");
-    let (database, _guard) = crate::db::Database::publish_test_runtime(
+    let (database, _guard) = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &database_path,
         &authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
     )
     .await
     .expect("open diagnostics database");
@@ -9922,7 +9922,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 93, "failed cold-mount graph replay")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 93, "failed cold-mount graph replay")
             .expect("daemon database scope");
     let graph_runtime = Arc::new(
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
@@ -10062,7 +10062,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         .expect("project enrollment");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         94,
         "small persistent graph activation",

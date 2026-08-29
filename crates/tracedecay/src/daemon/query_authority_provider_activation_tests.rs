@@ -34,7 +34,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _cursor_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 2, "query-semantic-activation")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 2, "query-semantic-activation")
             .expect("database scope");
     let session_registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
@@ -531,7 +531,7 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     let profile_sessions_path =
         tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
     let _scope_guard =
-        crate::db::enter_daemon_database_scope(&profile_root, 1, "query-cursor-restart")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "query-cursor-restart")
             .expect("daemon database scope");
     let session_registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(

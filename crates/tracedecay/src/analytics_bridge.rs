@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tracedecay_domain::ObservationScopeV1;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 
 // The shared hook-analytics core (durable JSONL importer plus its data types)
 // lives in `tracedecay-usecases`. The root binary keeps only the CLI/daemon
@@ -43,8 +43,8 @@ pub(crate) async fn import_hook_analytics(
 
 // ── CLI entry points (`tracedecay analytics …`) ────────────────────────
 
-fn cli_error(message: impl std::fmt::Display) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Config {
+fn cli_error(message: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: message.to_string(),
     }
 }
@@ -60,7 +60,7 @@ async fn registered_diagnostics_message_count(
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
     all_projects: bool,
-) -> crate::errors::Result<i64> {
+) -> tracedecay_runtime_core::errors::Result<i64> {
     let mut total = match project_sessions {
         Some(database) => database.session_message_count().await.map_err(cli_error)?,
         None => 0,
@@ -77,7 +77,7 @@ async fn registered_diagnostics_message_count(
 /// `tracedecay analytics sync`: import hook JSONL rows into the durable
 /// `analytics_events` table and print what happened.
 #[hotpath::measure(label = "analytics.sync_cli")]
-pub async fn run_analytics_sync() -> crate::errors::Result<()> {
+pub async fn run_analytics_sync() -> tracedecay_runtime_core::errors::Result<()> {
     let project_root = cli_project_root();
     let outcome = call_admin_cli(project_root, json!({ "action": "analytics_sync" })).await?;
     println!(
@@ -93,7 +93,7 @@ pub async fn run_analytics_sync() -> crate::errors::Result<()> {
 pub async fn run_analytics_diagnostics(
     all_projects: bool,
     no_sync: bool,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let project_root = cli_project_root();
     let summary = call_admin_cli(
         project_root,
@@ -115,7 +115,7 @@ pub async fn run_analytics_diagnostics(
 async fn call_admin_cli(
     project_root: Option<PathBuf>,
     arguments: Value,
-) -> crate::errors::Result<Value> {
+) -> tracedecay_runtime_core::errors::Result<Value> {
     let handshake =
         crate::daemon::DaemonHandshake::for_current_client(project_root, None, false, false)?;
     let result =
@@ -140,7 +140,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     project_root: Option<&Path>,
     all_projects: bool,
     no_sync: bool,
-) -> crate::errors::Result<Value> {
+) -> tracedecay_runtime_core::errors::Result<Value> {
     const EVENT_SAMPLE_LIMIT: usize = 10_000;
 
     let import = if no_sync {
@@ -156,7 +156,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     };
     let events = hotpath::measure_block!(
         "analytics.events",
-        gdb.query_analytics_events(&crate::global_db::AnalyticsEventQuery {
+        gdb.query_analytics_events(&tracedecay_global_db::AnalyticsEventQuery {
             provider: None,
             project_id: project_filter.clone(),
             session_id: None,
@@ -318,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn cli_diagnostics_exposes_canonical_observatory_and_costs_coverage() {
-        let harness = crate::global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "analytics-cli-observability-parity",
         )
         .await;

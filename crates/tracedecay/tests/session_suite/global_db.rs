@@ -1,6 +1,6 @@
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
+use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::runtime::lcm::LcmStorageKind;
 use tracedecay_sessions::runtime::{
@@ -27,11 +27,11 @@ trait RegisteredSessionTestExt {
     async fn append_analytics_event(
         &self,
         event: &AnalyticsEventInsert,
-    ) -> tracedecay::errors::Result<i64>;
+    ) -> tracedecay_runtime_core::errors::Result<i64>;
     async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
-    ) -> tracedecay::errors::Result<Vec<tracedecay::global_db::AnalyticsEventRecord>>;
+    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>>;
     async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord>;
     async fn get_session_message(
         &self,
@@ -73,32 +73,32 @@ trait RegisteredSessionTestExt {
         &self,
         observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
-    ) -> tracedecay::errors::Result<i64>;
-    async fn session_message_count(&self) -> tracedecay::errors::Result<i64>;
+    ) -> tracedecay_runtime_core::errors::Result<i64>;
+    async fn session_message_count(&self) -> tracedecay_runtime_core::errors::Result<i64>;
     async fn session_message_count_for_project(
         &self,
         project_key: &str,
-    ) -> tracedecay::errors::Result<i64>;
-    async fn set_parse_offset(&self, path: &str, offset: tracedecay::global_db::ParseOffset);
-    async fn session_ingest_health(&self) -> tracedecay::global_db::SessionIngestHealth;
+    ) -> tracedecay_runtime_core::errors::Result<i64>;
+    async fn set_parse_offset(&self, path: &str, offset: tracedecay_global_db::ParseOffset);
+    async fn session_ingest_health(&self) -> tracedecay_global_db::SessionIngestHealth;
     async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
-    ) -> tracedecay::global_db::SessionIngestHealth;
+    ) -> tracedecay_global_db::SessionIngestHealth;
 }
 
 impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
     async fn append_analytics_event(
         &self,
         event: &AnalyticsEventInsert,
-    ) -> tracedecay::errors::Result<i64> {
+    ) -> tracedecay_runtime_core::errors::Result<i64> {
         self.append_profile_analytics_event_for_test(event).await
     }
 
     async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
-    ) -> tracedecay::errors::Result<Vec<tracedecay::global_db::AnalyticsEventRecord>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>> {
         self.query_profile_analytics_events_for_test(query).await
     }
 
@@ -203,12 +203,12 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
         &self,
         observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
-    ) -> tracedecay::errors::Result<i64> {
+    ) -> tracedecay_runtime_core::errors::Result<i64> {
         self.record_session_span_for_test(HostAdmissionScope::Profile, observation, merge_gap_secs)
             .await
     }
 
-    async fn session_message_count(&self) -> tracedecay::errors::Result<i64> {
+    async fn session_message_count(&self) -> tracedecay_runtime_core::errors::Result<i64> {
         self.session_message_count_for_test(HostAdmissionScope::Profile, None)
             .await
     }
@@ -216,18 +216,18 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
     async fn session_message_count_for_project(
         &self,
         project_key: &str,
-    ) -> tracedecay::errors::Result<i64> {
+    ) -> tracedecay_runtime_core::errors::Result<i64> {
         self.session_message_count_for_test(HostAdmissionScope::Profile, Some(project_key))
             .await
     }
 
-    async fn set_parse_offset(&self, path: &str, offset: tracedecay::global_db::ParseOffset) {
+    async fn set_parse_offset(&self, path: &str, offset: tracedecay_global_db::ParseOffset) {
         self.set_parse_offset_for_test(HostAdmissionScope::Profile, path, offset)
             .await
             .expect("registered parse offset write");
     }
 
-    async fn session_ingest_health(&self) -> tracedecay::global_db::SessionIngestHealth {
+    async fn session_ingest_health(&self) -> tracedecay_global_db::SessionIngestHealth {
         self.session_ingest_health_for_test(HostAdmissionScope::Profile, None)
             .await
             .expect("registered session ingest health")
@@ -236,7 +236,7 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
     async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
-    ) -> tracedecay::global_db::SessionIngestHealth {
+    ) -> tracedecay_global_db::SessionIngestHealth {
         self.session_ingest_health_for_test(HostAdmissionScope::Profile, provider)
             .await
             .expect("registered provider session ingest health")
@@ -1310,7 +1310,7 @@ async fn session_ingest_health_reports_pending_transcript_backlog() {
     }
 
     // drained: offset == file size; backlogged: 200 of 500 bytes ingested.
-    let cursor = |byte_offset, mtime| tracedecay::global_db::ParseOffset {
+    let cursor = |byte_offset, mtime| tracedecay_global_db::ParseOffset {
         byte_offset,
         mtime,
         file_id: 0,
@@ -1351,7 +1351,7 @@ async fn session_ingest_health_can_filter_by_provider() {
         db.upsert_session(&session).await;
     }
 
-    let cursor = |byte_offset, mtime| tracedecay::global_db::ParseOffset {
+    let cursor = |byte_offset, mtime| tracedecay_global_db::ParseOffset {
         byte_offset,
         mtime,
         file_id: 0,

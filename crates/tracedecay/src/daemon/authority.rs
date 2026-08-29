@@ -13,7 +13,7 @@ use tracedecay_runtime_core::path_safety::{
     canonicalize_existing_prefix, collapse_relative_components,
 };
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::profile_identity::LocalProfileIdentityAuthorityV1;
 use super::transport::DaemonEndpoint;
@@ -152,7 +152,7 @@ impl DaemonAuthority {
             .unwrap_or_default();
         let record = DaemonAuthorityRecord {
             pid: std::process::id(),
-            process_run_id: crate::runtime_identity::process_run_id().to_string(),
+            process_run_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
             started_at_unix_secs: i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
             epoch: prior_epoch.saturating_add(1),
             version: version.to_string(),
@@ -388,7 +388,7 @@ fn write_record(path: &Path, record: &DaemonAuthorityRecord) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(record).map_err(|error| TraceDecayError::Config {
         message: format!("failed to encode daemon authority record: {error}"),
     })?;
-    crate::db::DatabaseAuthority::publish_record_atomically(
+    tracedecay_runtime_core::db::DatabaseAuthority::publish_record_atomically(
         &temporary,
         path,
         &bytes,

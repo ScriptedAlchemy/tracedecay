@@ -40,7 +40,7 @@ use tracedecay_usecases::stack_coordinator::{
     DaemonGitHubStackCoordinatorV1, StackCoordinatorErrorV1,
 };
 
-use crate::global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::stack_runtime::DaemonGitHubStackRuntimeV1;

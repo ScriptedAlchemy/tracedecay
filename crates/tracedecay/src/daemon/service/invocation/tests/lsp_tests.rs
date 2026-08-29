@@ -406,14 +406,14 @@ struct LspDeliveryFixture {
     recorder: Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
     authority: Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
     producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
-    db: crate::global_db::RegisteredGlobalDbLeaseV1,
+    db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 }
 
 async fn lsp_delivery_fixture() -> LspDeliveryFixture {
     let pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.lsp.delivery").expect("project id");
-    let runtime = crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
         tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         project.path(),
         project_id.clone(),

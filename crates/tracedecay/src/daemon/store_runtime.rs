@@ -21,7 +21,7 @@ pub(crate) mod session_registry;
 /// session-scoped shard must call this first. Idempotent.
 pub(crate) fn register_registered_schema_installer() {
     tracedecay_runtime_core::ports::registered_schema::register(|connection| {
-        Box::pin(crate::global_db::ensure_registered_schema(connection))
+        Box::pin(tracedecay_global_db::ensure_registered_schema(connection))
     });
 }
 

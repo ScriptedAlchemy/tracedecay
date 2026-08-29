@@ -27,7 +27,7 @@ pub(super) enum DeferredQueryAuthorityMountV1 {
     /// fence; otherwise this is the ordinary standalone fallback. Cursor keys
     /// are reloaded from the same durable store used at project open.
     CoreFallback {
-        session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         committed_revision: Option<tracedecay_domain::configuration::ConfigurationRevisionId>,
     },
 }

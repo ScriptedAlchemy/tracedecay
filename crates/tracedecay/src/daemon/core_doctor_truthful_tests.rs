@@ -24,12 +24,12 @@ async fn initialize_test_project(
         profile_root: Some(profile_root.to_path_buf()),
         global_db_path: Some(profile_root.join("registry.db")),
     };
-    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         profile_root,
         "truthful core Doctor fixture initialization",
     )
     .expect("acquire fixture lifecycle authority");
-    let _database_scope = crate::db::enter_maintenance_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
         &lifecycle,
         profile_root,
         "truthful core Doctor fixture initialization",
@@ -85,7 +85,7 @@ async fn live_runtime_snapshot_does_not_fabricate_store_metadata_after_observati
         crate::daemon::profile_identity::load_or_create(&profile)
             .expect("load fixture profile identity"),
     );
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile,
         REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
         "core-doctor-missing-live-store-metadata",

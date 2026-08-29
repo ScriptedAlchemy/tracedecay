@@ -174,7 +174,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     .await
     .unwrap();
     runtime
-        .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
+        .append_profile_analytics_event_for_test(&tracedecay_global_db::AnalyticsEventInsert {
             provider: "mcp".to_string(),
             project_id: project_id.clone(),
             session_id: Some("mcp-skill-session".to_string()),
@@ -320,7 +320,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     server
         .host_admission_test_runtime_for_test()
         .expect("server should retain the host-admission test runtime")
-        .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
+        .append_profile_analytics_event_for_test(&tracedecay_global_db::AnalyticsEventInsert {
             provider: "mcp".to_string(),
             project_id,
             session_id: Some("mcp-skill-session".to_string()),

@@ -69,14 +69,14 @@ impl ProjectSessionTestRuntime {
     pub(super) async fn get_parse_offset(
         &self,
         path: &str,
-    ) -> Option<tracedecay::global_db::ParseOffset> {
+    ) -> Option<tracedecay_global_db::ParseOffset> {
         self.runtime
             .project_parse_offset_for_test(path)
             .await
             .unwrap()
     }
 
-    pub(super) async fn session_message_count(&self) -> tracedecay::errors::Result<i64> {
+    pub(super) async fn session_message_count(&self) -> tracedecay_runtime_core::errors::Result<i64> {
         self.runtime.project_session_message_count_for_test().await
     }
 
@@ -235,7 +235,7 @@ async fn parse_offset_for_task_history(
     runtime: &ProjectSessionTestRuntime,
     _project: &Path,
     path: &Path,
-) -> Option<tracedecay::global_db::ParseOffset> {
+) -> Option<tracedecay_global_db::ParseOffset> {
     let path_text = path.to_string_lossy();
     if let Some(offset) = runtime.get_parse_offset(path_text.as_ref()).await {
         return Some(offset);

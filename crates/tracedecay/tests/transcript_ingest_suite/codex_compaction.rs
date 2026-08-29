@@ -7,7 +7,7 @@ use std::io::Write;
 use std::process::Stdio;
 
 use tempfile::TempDir;
-use tracedecay::global_db::ParseOffset;
+use tracedecay_global_db::ParseOffset;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
 use tracedecay_sessions::runtime::codex::CodexSource;

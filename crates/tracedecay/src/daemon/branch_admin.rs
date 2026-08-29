@@ -8,7 +8,7 @@ use std::sync::{
 
 use serde_json::json;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(any(unix, test))]
@@ -450,7 +450,7 @@ impl ProfileHostAdmissionBootstrapContext {
 pub(super) struct StoreAdministration {
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     authenticated_profile_database_scopes:
-        Arc<ProfiledTokioMutex<HashMap<PathBuf, crate::db::DaemonDatabaseScope>>>,
+        Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_runtime_core::db::DaemonDatabaseScope>>>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
     session_runtime_registry_admission_closed: Arc<AtomicBool>,
     gate: Arc<StoreWriterGates>,
@@ -589,10 +589,10 @@ impl StoreAdministration {
         if scopes.contains_key(&profile_root) {
             return Ok(());
         }
-        let scope = crate::db::enter_daemon_database_scope(
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             0,
-            crate::runtime_identity::process_run_id(),
+            tracedecay_runtime_core::runtime_identity::process_run_id(),
         )?;
         scopes.insert(profile_root, scope);
         Ok(())
@@ -604,7 +604,7 @@ impl StoreAdministration {
     )]
     pub(super) async fn registered_profile_session_database(
         &self,
-    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         self.ensure_account_active().await?;
         self.session_runtime_registry()
             .await?
@@ -618,7 +618,7 @@ impl StoreAdministration {
     )]
     pub(super) async fn registered_profile_database(
         &self,
-    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let database = self.raw_registered_profile_database().await?;
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
@@ -637,7 +637,7 @@ impl StoreAdministration {
 
     async fn raw_registered_profile_database(
         &self,
-    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         self.session_runtime_registry()
             .await?
             .profile_database()
@@ -668,7 +668,7 @@ impl StoreAdministration {
     )]
     pub(super) async fn remote_account_deletion_tombstone(
         &self,
-    ) -> Result<Option<crate::global_db::RemoteDeletionTombstone>> {
+    ) -> Result<Option<tracedecay_global_db::RemoteDeletionTombstone>> {
         let database = self.raw_registered_profile_database().await?;
         database
             .remote_account_deletion_tombstone(self.profile_identity()?.profile_id().as_str())
@@ -678,7 +678,7 @@ impl StoreAdministration {
     #[hotpath::measure(label = "daemon.branch_admin.mounted_session_databases", future = true)]
     pub(super) async fn mounted_registered_session_databases(
         &self,
-    ) -> Vec<crate::global_db::RegisteredGlobalDbLeaseV1> {
+    ) -> Vec<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let Ok(profile_root) = self
             .profile_identity()
             .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
@@ -732,7 +732,7 @@ impl StoreAdministration {
         &self,
         project_root: &Path,
         store_layout: &crate::storage::StoreLayout,
-    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let project_id = store_layout
             .identity
             .project_id
@@ -802,7 +802,7 @@ impl StoreAdministration {
     )]
     pub(super) async fn host_admission_broker(
         &self,
-        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<tracedecay_usecases::host_admission::SharedHostAdmissionBroker> {
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database

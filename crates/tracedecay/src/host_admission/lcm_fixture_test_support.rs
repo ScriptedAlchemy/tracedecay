@@ -202,7 +202,7 @@ impl HostAdmissionTestRuntimeV1 {
                 "UPDATE lcm_raw_messages
                  SET content = ?2, snippet_text = ?2, index_text = ?2
                  WHERE store_id = ?1",
-                crate::db::engine::params![store_id, poison],
+                tracedecay_runtime_core::db::engine::params![store_id, poison],
             )
             .await
             .map_err(|error| TraceDecayError::Database {
@@ -605,7 +605,7 @@ impl HostAdmissionTestRuntimeV1 {
             .query(
                 "SELECT store_id FROM lcm_raw_messages
                  WHERE provider = ?1 AND message_id = ?2",
-                crate::db::engine::params![provider, message_id],
+                tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await
             .map_err(|error| TraceDecayError::Database {
@@ -734,7 +734,7 @@ impl HostAdmissionTestRuntimeV1 {
                 transaction
                     .execute(
                         "UPDATE lcm_summary_nodes SET summary_text = ?2 WHERE node_id = ?1",
-                        crate::db::engine::params![node_id, text],
+                        tracedecay_runtime_core::db::engine::params![node_id, text],
                     )
                     .await
             }
@@ -744,7 +744,7 @@ impl HostAdmissionTestRuntimeV1 {
                         "UPDATE lcm_raw_messages
                          SET timestamp = timestamp + ?2
                          WHERE store_id = ?1",
-                        crate::db::engine::params![store_id, delta],
+                        tracedecay_runtime_core::db::engine::params![store_id, delta],
                     )
                     .await
             }
@@ -759,7 +759,7 @@ impl HostAdmissionTestRuntimeV1 {
                         "UPDATE session_temporal_generations
                          SET frozen_watermarks_json = ?3
                          WHERE session_id = ?1 AND generation = ?2",
-                        crate::db::engine::params![session_id, generation, json],
+                        tracedecay_runtime_core::db::engine::params![session_id, generation, json],
                     )
                     .await
             }
@@ -772,7 +772,7 @@ impl HostAdmissionTestRuntimeV1 {
                     .execute(
                         "DELETE FROM session_summary_availability
                          WHERE session_id = ?1 AND generation = ?2 AND summary_id = ?3",
-                        crate::db::engine::params![session_id, generation, summary_id],
+                        tracedecay_runtime_core::db::engine::params![session_id, generation, summary_id],
                     )
                     .await
             }
@@ -787,7 +787,7 @@ impl HostAdmissionTestRuntimeV1 {
                         "UPDATE session_summary_availability
                          SET source_horizon_json = ?4
                          WHERE session_id = ?1 AND generation = ?2 AND summary_id = ?3",
-                        crate::db::engine::params![
+                        tracedecay_runtime_core::db::engine::params![
                             session_id,
                             generation,
                             summary_id,
@@ -813,7 +813,7 @@ impl HostAdmissionTestRuntimeV1 {
                              availability = ?4,
                              reason = ?5
                          WHERE session_id = ?1 AND generation = ?2 AND summary_id = ?3",
-                        crate::db::engine::params![
+                        tracedecay_runtime_core::db::engine::params![
                             session_id,
                             generation,
                             summary_id,
@@ -833,7 +833,7 @@ impl HostAdmissionTestRuntimeV1 {
                          SET state = 'failed',
                              completed_at = COALESCE(completed_at, activated_at, ready_at, created_at)
                          WHERE session_id = ?1 AND generation = ?2",
-                        crate::db::engine::params![session_id, generation],
+                        tracedecay_runtime_core::db::engine::params![session_id, generation],
                     )
                     .await
             }
@@ -871,7 +871,7 @@ impl HostAdmissionTestRuntimeV1 {
                              payload_digest = ?3,
                              receipt_json = ?4
                          WHERE receipt_id = ?1",
-                        crate::db::engine::params![
+                        tracedecay_runtime_core::db::engine::params![
                             receipt_id,
                             sanitizer_version,
                             payload_digest,
@@ -890,7 +890,7 @@ impl HostAdmissionTestRuntimeV1 {
                         "UPDATE session_occurrences
                          SET source_provider = ?3
                          WHERE session_id = ?1 AND message_id = ?2",
-                        crate::db::engine::params![session_id, message_id, source_provider],
+                        tracedecay_runtime_core::db::engine::params![session_id, message_id, source_provider],
                     )
                     .await
             }
@@ -1082,7 +1082,7 @@ impl HostAdmissionTestRuntimeV1 {
     async fn lcm_relation_reads_for_test(
         &self,
         session_filter: Option<&str>,
-    ) -> Result<Vec<crate::global_db::session_temporal::relations::SummaryRelationRead>> {
+    ) -> Result<Vec<tracedecay_global_db::session_temporal::relations::SummaryRelationRead>> {
         let database = self.primary_lcm_fixture_database_for_test();
         let snapshot =
             database
@@ -1175,7 +1175,7 @@ impl HostAdmissionTestRuntimeV1 {
                 "SELECT snippet_text, index_text
                  FROM lcm_raw_messages
                  WHERE provider = ?1 AND message_id = ?2",
-                crate::db::engine::params![provider, message_id],
+                tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await?;
         let Some(row) = rows.next().await? else {
@@ -1225,7 +1225,7 @@ impl HostAdmissionTestRuntimeV1 {
                 "SELECT metadata_json
                  FROM lcm_raw_messages
                  WHERE provider = ?1 AND message_id = ?2",
-                crate::db::engine::params![provider, message_id],
+                tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await?;
         let Some(row) = rows.next().await? else {
@@ -1386,7 +1386,7 @@ impl HostAdmissionTestRuntimeV1 {
                  SET session_id = ?2, payload_digest = ?3, manifest_json = ?4,
                      receipt_id = ?5, created_at = ?6
                  WHERE payload_ref = ?1",
-                crate::db::engine::params![
+                tracedecay_runtime_core::db::engine::params![
                     payload_ref,
                     replacement.session_id.as_str(),
                     replacement.payload_digest.as_str(),
@@ -1469,7 +1469,7 @@ impl HostAdmissionTestRuntimeV1 {
                  WHERE availability.session_id = ?1
                    AND generation.state = 'active'
                  ORDER BY availability.summary_id",
-                crate::db::engine::params![session_id],
+                tracedecay_runtime_core::db::engine::params![session_id],
             )
             .await
             .map_err(|error| TraceDecayError::Database {
@@ -1522,7 +1522,7 @@ impl HostAdmissionTestRuntimeV1 {
                         expand_hint, metadata_json, created_at + 1000000
                  FROM lcm_summary_nodes
                  WHERE node_id = ?2",
-                crate::db::engine::params![poison_node_id, predecessor_node_id],
+                tracedecay_runtime_core::db::engine::params![poison_node_id, predecessor_node_id],
             )
             .await
             .map_err(|error| TraceDecayError::Database {

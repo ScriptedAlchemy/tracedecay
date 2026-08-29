@@ -10,7 +10,7 @@ use tracedecay_domain::{
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1;
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 const MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1: usize = 64;
 
@@ -489,7 +489,7 @@ async fn lookup_context_scout_lifecycle_inner(
                ) = ?1
              ORDER BY sequence DESC
              LIMIT ?2",
-            crate::db::engine::params![session_id.as_str(), limit],
+            tracedecay_runtime_core::db::engine::params![session_id.as_str(), limit],
         )
         .await
         .map_err(|_| Failure::ObservationQueryFailed)?;

@@ -376,7 +376,7 @@ mod tests {
     use super::*;
 
     fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(crate::git::git_program())
+        let status = Command::new(tracedecay_runtime_core::git::git_program())
             .current_dir(root)
             .args(arguments)
             .status()

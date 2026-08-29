@@ -2,7 +2,7 @@ use tracedecay_domain::{
     ComponentVersion, LanguageId, SanitizationReceiptId, SanitizerDispositionV1, SensitivityLevelV1,
 };
 
-use crate::privacy::{
+use tracedecay_runtime_core::privacy::{
     CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, CodeSourceShapeV1,
     sanitize_code_source_bytes, verify_sanitized_json_payload,
 };

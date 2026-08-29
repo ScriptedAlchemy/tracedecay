@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
 use tracedecay_store::ProjectId;
 
@@ -91,7 +91,7 @@ impl TraceDecay {
     /// Candidate enrollment roots a registered project claims: its canonical
     /// and display roots plus every registered alias.
     pub(crate) fn registry_context_candidate_roots(
-        context: &crate::global_db::ProjectRegistryContext,
+        context: &tracedecay_global_db::ProjectRegistryContext,
     ) -> Vec<PathBuf> {
         let mut candidates = vec![
             PathBuf::from(&context.project.canonical_root),
@@ -125,7 +125,7 @@ impl TraceDecay {
         let mut roots = Vec::new();
         for candidate in candidates {
             let candidate =
-                crate::worktree::repository_identity_root(&candidate).unwrap_or(candidate);
+                tracedecay_runtime_core::worktree::repository_identity_root(&candidate).unwrap_or(candidate);
             let Ok(canonical) = candidate.canonicalize() else {
                 continue;
             };
@@ -168,7 +168,7 @@ impl TraceDecay {
         // A non-git root persists nothing — its identity is deterministic
         // from the canonical path with the registry as the durable home.
         // Nothing is ever written into the working tree.
-        let enrollment_root = crate::worktree::repository_identity_root(project_root)
+        let enrollment_root = tracedecay_runtime_core::worktree::repository_identity_root(project_root)
             .unwrap_or_else(|| project_root.to_path_buf());
         match enrollment_root.canonicalize() {
             Ok(canonical) => {
@@ -205,7 +205,7 @@ impl TraceDecay {
         // Every linked worktree resolves through its repository, attached or
         // not; suppressing this for detached worktrees dropped them onto the
         // path-hashed identity fallback and minted a duplicate store.
-        let git_common_dir = crate::worktree::git_common_dir(project_root);
+        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(project_root);
         if selected.is_none()
             && let Some(registry_database) = registry_database
             && let Some(resolution) = registry_database
@@ -230,7 +230,7 @@ impl TraceDecay {
         // legacy file is never consulted again. The file itself is left
         // untouched — users may delete it.
         if selected.is_none() {
-            let enrollment_root = crate::worktree::repository_identity_root(project_root)
+            let enrollment_root = tracedecay_runtime_core::worktree::repository_identity_root(project_root)
                 .unwrap_or_else(|| project_root.to_path_buf());
             if let Some(marker) = storage::read_legacy_enrollment_marker(&enrollment_root)?
                 && marker.storage_mode == storage::StorageMode::ProfileSharded

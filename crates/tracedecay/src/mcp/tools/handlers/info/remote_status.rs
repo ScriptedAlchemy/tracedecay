@@ -6,7 +6,7 @@ use serde_json::Value;
 use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
 
 use crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1;
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use crate::mcp::tools::ToolResult;
 
 use super::super::support::tool_json;

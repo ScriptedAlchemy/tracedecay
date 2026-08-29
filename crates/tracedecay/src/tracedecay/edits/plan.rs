@@ -14,7 +14,7 @@ pub(in crate::tracedecay) use tracedecay_usecases::tracedecay::{
     PlannedSourceEditFile, capture_planned_source_edit, validate_planned_source_edit,
 };
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;
 use super::file_authority::{SourceEditFileAuthority, read_source_edit_candidate};

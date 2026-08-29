@@ -13,7 +13,7 @@ pub use tracedecay_runtime_core::storage::*;
 pub fn classify_registry_storage(
     project_root: &Path,
     profile_root: &Path,
-    store: &crate::global_db::StoreInstanceRecord,
+    store: &tracedecay_global_db::StoreInstanceRecord,
 ) -> Option<ProjectStorageLocation> {
     classify_registry_storage_fields(
         project_root,

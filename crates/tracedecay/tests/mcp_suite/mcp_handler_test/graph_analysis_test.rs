@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::errors::{Result as TraceDecayResult, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay::mcp::ToolResult;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
@@ -294,9 +294,9 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let tracedecay_dir = resolve_layout_for_current_profile(project)
         .unwrap()
         .data_root;
-    tracedecay::branch_meta::save_branch_meta(
+    tracedecay_runtime_core::branch_meta::save_branch_meta(
         &tracedecay_dir,
-        &tracedecay::branch_meta::BranchMeta::new("main"),
+        &tracedecay_runtime_core::branch_meta::BranchMeta::new("main"),
     )
     .unwrap();
 

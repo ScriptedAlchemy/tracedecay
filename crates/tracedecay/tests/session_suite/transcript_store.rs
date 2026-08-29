@@ -1,5 +1,5 @@
 use tempfile::TempDir;
-use tracedecay::global_db::ParseOffset;
+use tracedecay_global_db::ParseOffset;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_store::{TranscriptStore, TranscriptStoreError, TranscriptWriteBatch};
 use tracedecay_usecases::host_admission::HostAdmissionScope;

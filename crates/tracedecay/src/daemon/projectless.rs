@@ -4,7 +4,7 @@
 use serde_json::json;
 
 use crate::client_identity::DaemonClientIdentity;
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 use super::*;
@@ -317,7 +317,7 @@ async fn projectless_tools_call_response_with_connection(
         return match crate::mcp::tools::handle_projectless_admin_cli(
             arguments,
             &global_db,
-            crate::global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
+            tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
             &connection.client_identity.profile_root,
         )
         .await

@@ -94,7 +94,7 @@ fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
 
     guard
         .downgrade_to_shared_with(|| {
-            crate::lifecycle_lease::acquire_shared_for_profile(
+            tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
                 profile.path(),
                 "replacement restore regression",
             )
@@ -979,7 +979,7 @@ fn atomic_service_write_faults_preserve_the_forward_boundary() {
             &mut |step| {
                 observed.push(step);
                 if step == failed_step {
-                    Err(crate::errors::TraceDecayError::Config {
+                    Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: format!("injected {step:?} failure"),
                     })
                 } else {

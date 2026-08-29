@@ -33,7 +33,7 @@ use crate::daemon::session_retrieval::{
     DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
 };
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::{DaemonSessionRefreshService, DaemonWorkflowIndexReadService};
 use crate::mcp::tools::{SessionRefreshServiceOutcome, SessionRefreshServicePort};

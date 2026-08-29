@@ -2,7 +2,7 @@ use std::io::Write;
 
 use tempfile::TempDir;
 #[cfg(all(unix, not(target_os = "macos")))]
-use tracedecay::global_db::ParseOffset;
+use tracedecay_global_db::ParseOffset;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay_domain::{

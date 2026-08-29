@@ -1,9 +1,9 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use tracedecay::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 #[cfg(test)]
-use tracedecay::global_db::ProjectRegistryContext;
+use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay::project_registry::{ProjectRegistryView, render_project_registry_view};
 
 use crate::cli::ProjectsAction;
@@ -224,7 +224,7 @@ fn render_project_context_text(context: &ProjectRegistryContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay::global_db::{
+    use tracedecay_global_db::{
         CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectStoreContext,
         StoreArtifactRecord, StoreInstanceRecord,
     };

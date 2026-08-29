@@ -4,7 +4,7 @@ use super::*;
 async fn expire_all_releases_session_holder_graph_lease_before_registry_shutdown() {
     let temporary = tempfile::tempdir().expect("session-holder shutdown fixture");
     let profile_root = temporary.path().join("profile");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         79,
         "invocation session-holder shutdown",
@@ -47,12 +47,12 @@ async fn context_scout_registry_remounts_same_project_database_after_daemon_rest
     let database_path = temporary.path().join("graph.db");
     crate::daemon::store_runtime::register_registered_schema_installer();
     let authority =
-        crate::db::DatabaseAuthority::acquire_test(&database_path, "daemon Context Scout registry")
+        tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(&database_path, "daemon Context Scout registry")
             .unwrap();
     let database = Database::publish_test_runtime(
         &database_path,
         &authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
     )
     .await
     .unwrap()
@@ -119,7 +119,7 @@ async fn context_scout_retirement_preserves_same_project_in_another_profile() {
     let temporary = tempfile::tempdir().unwrap();
     let database_path = temporary.path().join("graph.db");
     crate::daemon::store_runtime::register_registered_schema_installer();
-    let authority = crate::db::DatabaseAuthority::acquire_test(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &database_path,
         "daemon Context Scout lifecycle",
     )
@@ -127,7 +127,7 @@ async fn context_scout_retirement_preserves_same_project_in_another_profile() {
     let database = Database::publish_test_runtime(
         &database_path,
         &authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
     )
     .await
     .unwrap()

@@ -8,7 +8,7 @@ use tracedecay_application::ApplicationResult;
 use crate::cli::WorkflowInvocationArgs;
 
 #[hotpath::measure(label = "cli.workflow.invoke", future = true)]
-pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay::errors::Result<()> {
+pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay_runtime_core::errors::Result<()> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.workflow.operation").set(&invocation.operation.operation_key());
     let body = read_request(&invocation.request_file)?;
@@ -20,7 +20,7 @@ pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay::error
     if invocation.json {
         print!("{}", workflow_json_line(&outcome)?);
     } else {
-        let outcome = outcome.map_err(|problem| tracedecay::errors::TraceDecayError::Config {
+        let outcome = outcome.map_err(|problem| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("{}: {}", problem.problem.code, problem.problem.message),
         })?;
         println!("Workflow {}", operation.route_segment().replace('-', " "));
@@ -34,7 +34,7 @@ fn workflow_json_line(outcome: &ApplicationResult<Value>) -> serde_json::Result<
     crate::cli::output::json::json_line(outcome)
 }
 
-fn read_request(path: &std::path::Path) -> tracedecay::errors::Result<Value> {
+fn read_request(path: &std::path::Path) -> tracedecay_runtime_core::errors::Result<Value> {
     let payload = if path == std::path::Path::new("-") {
         let mut payload = String::new();
         std::io::stdin().read_to_string(&mut payload)?;
@@ -42,7 +42,7 @@ fn read_request(path: &std::path::Path) -> tracedecay::errors::Result<Value> {
     } else {
         std::fs::read_to_string(path)?
     };
-    serde_json::from_str(&payload).map_err(|error| tracedecay::errors::TraceDecayError::Config {
+    serde_json::from_str(&payload).map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!(
             "Workflow request file {} is not valid JSON: {error}",
             path.display()

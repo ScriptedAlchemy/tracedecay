@@ -2,7 +2,7 @@ use super::*;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::daemon::{ProjectServerRequirement, project_server_requirement};
 #[cfg(unix)]
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 use std::process::Command;
 use tracedecay_jsonrpc::JsonRpcResponse;
 #[cfg(unix)]
@@ -1047,14 +1047,14 @@ async fn remote_project_deletion_stays_settling_until_transferred_reaper_joins()
         database
             .remote_deletion_tombstone(
                 profile_id,
-                crate::global_db::RemoteDeletionTarget::Project,
+                tracedecay_global_db::RemoteDeletionTarget::Project,
                 Some("proj_reaper_settling"),
             )
             .await
             .expect("read tombstone")
             .expect("tombstone"),
-        crate::global_db::RemoteDeletionTombstone {
-            cleanup: crate::global_db::RemoteDeletionCleanupState::Settling { .. },
+        tracedecay_global_db::RemoteDeletionTombstone {
+            cleanup: tracedecay_global_db::RemoteDeletionCleanupState::Settling { .. },
             ..
         }
     ));
@@ -1485,13 +1485,13 @@ async fn daemon_restart_resumes_account_tombstone_without_ordinary_admission() {
         .as_str()
         .to_owned();
     database
-        .record_remote_deletion_tombstone(crate::global_db::RemoteDeletionTombstone {
-            target: crate::global_db::RemoteDeletionTarget::Account,
+        .record_remote_deletion_tombstone(tracedecay_global_db::RemoteDeletionTombstone {
+            target: tracedecay_global_db::RemoteDeletionTarget::Account,
             profile_id,
             project_id: None,
             tombstone_id: "tombstone.restart-account".to_owned(),
             recorded_at_micros: 1,
-            cleanup: crate::global_db::RemoteDeletionCleanupState::Pending,
+            cleanup: tracedecay_global_db::RemoteDeletionCleanupState::Pending,
         })
         .await
         .expect("persist account tombstone");
@@ -1836,7 +1836,7 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
     let first = tasks
         .start(route.clone(), async move {
             first_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(crate::errors::TraceDecayError::Database {
+            Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
                 message: "session temporal receipts or cursor keys are mutable".to_string(),
                 operation: "ensure global database authority invariants".to_string(),
             })
@@ -1942,7 +1942,7 @@ async fn project_open_task_registry_caps_distinct_inflight_routes() {
         let claim = tasks
             .start(
                 project_open_test_route(&format!("bounded-{index}")),
-                std::future::pending::<crate::errors::Result<()>>(),
+                std::future::pending::<tracedecay_runtime_core::errors::Result<()>>(),
             )
             .await;
         assert!(
@@ -2063,8 +2063,8 @@ async fn project_open_failure_cache_is_bounded_separately() {
     );
 }
 
-fn authority_invariant_error(message: &str) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Database {
+fn authority_invariant_error(message: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Database {
         message: message.to_string(),
         operation: "ensure global database authority invariants".to_string(),
     }
@@ -2072,7 +2072,7 @@ fn authority_invariant_error(message: &str) -> crate::errors::TraceDecayError {
 
 #[test]
 fn deterministic_code_authority_conflicts_do_not_spin_project_warmup() {
-    let error = crate::errors::TraceDecayError::Database {
+    let error = tracedecay_runtime_core::errors::TraceDecayError::Database {
         message: "DuplicateCodeAuthority { shard_id: fixture }".to_string(),
         operation: "register code-shard authority".to_string(),
     };
@@ -2085,7 +2085,7 @@ fn deterministic_code_authority_conflicts_do_not_spin_project_warmup() {
 
 #[test]
 fn exhausted_code_runtime_capacity_retries_at_resource_cadence() {
-    let error = crate::errors::TraceDecayError::Database {
+    let error = tracedecay_runtime_core::errors::TraceDecayError::Database {
         message: "ProjectCodeBudgetExhausted { limit: 4 }".to_string(),
         operation: "open registered session runtime".to_string(),
     };
@@ -2167,7 +2167,7 @@ fn transient_authority_failures_stay_immediately_retryable() {
         None
     );
     assert_eq!(
-        super::super::project_open_retry_backoff(&crate::errors::TraceDecayError::Database {
+        super::super::project_open_retry_backoff(&tracedecay_runtime_core::errors::TraceDecayError::Database {
             message: "invalid committed observation authority JSON: trailing characters"
                 .to_string(),
             operation: "read observation".to_string(),
@@ -2188,7 +2188,7 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
     let rejected_state = match tasks
         .start(rejected.clone(), async move {
             rejected_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(crate::errors::TraceDecayError::Config {
+            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "identity cutover conflict: strict route invariant".to_string(),
             })
         })
@@ -2264,7 +2264,7 @@ async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
         .start_cancellable(route, move |cancellation| async move {
             task_started.notify_one();
             cancellation.cancelled().await;
-            Err(crate::errors::TraceDecayError::Config {
+            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "project open cancelled".to_string(),
             })
         })
@@ -2315,7 +2315,7 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
                 .send(())
                 .expect("publish safe unit completion");
             cancellation.cancelled().await;
-            Err(crate::errors::TraceDecayError::Config {
+            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "project open cancelled after safe unit".to_string(),
             })
         })
@@ -2417,12 +2417,12 @@ async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
         .start(unrelated.clone(), async move {
             started_tx
                 .send(())
-                .map_err(|()| crate::errors::TraceDecayError::Config {
+                .map_err(|()| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "unrelated open observer dropped".to_owned(),
                 })?;
             release_rx
                 .await
-                .map_err(|_| crate::errors::TraceDecayError::Config {
+                .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "unrelated open release dropped".to_owned(),
                 })?;
             Ok(())
@@ -2594,7 +2594,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 1, "portable-bootstrap-cache-test")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "portable-bootstrap-cache-test")
             .expect("daemon database scope");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
@@ -2970,7 +2970,7 @@ async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
                     open_polled_by_future.notify_one();
                     open_lifecycle.wait_for_draining().await;
                     open_won_by_future.store(true, std::sync::atomic::Ordering::Release);
-                    Err(crate::errors::TraceDecayError::Config {
+                    Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: "simultaneous warmup completion".to_string(),
                     })
                 },
@@ -3019,7 +3019,7 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     initialize_test_project(&project, &client_identity).await;
     let engine = test_daemon_engine_for_profile(&profile_root);
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 1, "mcp-bootstrap-cache-test")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "mcp-bootstrap-cache-test")
             .expect("daemon database scope");
     engine
         .store_administration
@@ -3168,7 +3168,7 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 1, "direct-warmup-test")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "direct-warmup-test")
             .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let handshake = DaemonHandshake {
@@ -3256,7 +3256,7 @@ async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication()
     let project_path = std::path::PathBuf::from("/projects/uncontended");
     let published = super::super::project_open_orchestration::wait_for_project_open_publication(
         &project_path,
-        async { Ok::<(), crate::errors::TraceDecayError>(()) },
+        async { Ok::<(), tracedecay_runtime_core::errors::TraceDecayError>(()) },
     )
     .await;
     assert!(
@@ -3266,7 +3266,7 @@ async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication()
 
     let warming = super::super::project_open_orchestration::wait_for_project_open_publication(
         &project_path,
-        std::future::pending::<crate::errors::Result<()>>(),
+        std::future::pending::<tracedecay_runtime_core::errors::Result<()>>(),
     )
     .await
     .expect_err("an uncontended warm-up must not pin the foreground request");
@@ -3742,7 +3742,7 @@ async fn production_composition_harness_reads_retained_profile_analytics_authori
     );
 
     let events = harness
-        .read_profile_analytics_events(&crate::global_db::AnalyticsEventQuery {
+        .read_profile_analytics_events(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("mcp".to_owned()),
             project_id: None,
             session_id: None,
@@ -3780,7 +3780,7 @@ async fn production_composition_harness_shutdown_allows_immediate_profile_reopen
     let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("reload isolated profile identity");
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 100, "production-composition-reopen")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 100, "production-composition-reopen")
             .expect("fresh daemon election");
     let registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(

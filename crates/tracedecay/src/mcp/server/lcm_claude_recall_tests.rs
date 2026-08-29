@@ -30,7 +30,7 @@ const SHARED_TERM: &str = "quicksilver";
 const UNIQUE_TERM: &str = "pangolin";
 
 fn git(root: &std::path::Path, args: &[&str]) {
-    let status = std::process::Command::new(crate::git::git_program())
+    let status = std::process::Command::new(tracedecay_runtime_core::git::git_program())
         .current_dir(root)
         .args(args)
         .status()

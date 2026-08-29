@@ -14,7 +14,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
 use crate::daemon_client::{DaemonInvocationExecutor, invocation_now_micros};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::tools::ToolResult;
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 

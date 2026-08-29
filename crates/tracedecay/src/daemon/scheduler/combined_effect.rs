@@ -19,7 +19,7 @@ use crate::daemon::automation_effect::{
     DeferredProblemSettlementRequest, DeferredRunSettlementRequest, DeferredSettlementOutcome,
     DeferredSettlementRequest,
 };
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use crate::tracedecay::TraceDecay;
 
 pub(super) enum CombinedEffectAdmission {
@@ -114,7 +114,7 @@ enum DeferredLegTerminal {
 
 fn failed_leg_terminal(
     record: Option<tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord>,
-    error: Option<crate::errors::TraceDecayError>,
+    error: Option<tracedecay_runtime_core::errors::TraceDecayError>,
     fallback_message: String,
 ) -> DeferredLegTerminal {
     match record {
@@ -124,7 +124,7 @@ fn failed_leg_terminal(
         })),
         None => DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
             error: error
-                .unwrap_or_else(|| crate::errors::TraceDecayError::Config {
+                .unwrap_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: fallback_message,
                 })
                 .into(),
@@ -167,7 +167,7 @@ fn deferred_settlement_request(
 fn collect_settlement_result(
     project_path: &Path,
     task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
-    first_error: &mut Option<crate::errors::TraceDecayError>,
+    first_error: &mut Option<tracedecay_runtime_core::errors::TraceDecayError>,
     result: Result<DeferredSettlementOutcome>,
 ) -> Option<DeferredSettlementOutcome> {
     match result {
@@ -256,7 +256,7 @@ async fn settle_single_replay_leg<Run>(
     engine: &DaemonEngine,
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
-    first_error: &mut Option<crate::errors::TraceDecayError>,
+    first_error: &mut Option<tracedecay_runtime_core::errors::TraceDecayError>,
     replay_completed: bool,
     executing_kind: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
     control: &AutomationRunControl,
@@ -363,7 +363,7 @@ pub(super) async fn run_combined_scheduler_effect(
     backend: &dyn tracedecay_agent_hosts::automation::backend::AgentTaskBackend,
     retrieval: &dyn tracedecay_agent_hosts::automation::runner::AutomationSessionRetrieval,
     options: CombinedReviewAutomationOptions,
-    first_error: &mut Option<crate::errors::TraceDecayError>,
+    first_error: &mut Option<tracedecay_runtime_core::errors::TraceDecayError>,
 ) -> CombinedEffectOutcome {
     let outcome = match admission {
         CombinedEffectAdmission::Conflict => {
@@ -530,7 +530,7 @@ async fn run_execute_pair(
     backend: &dyn tracedecay_agent_hosts::automation::backend::AgentTaskBackend,
     retrieval: &dyn tracedecay_agent_hosts::automation::runner::AutomationSessionRetrieval,
     options: CombinedReviewAutomationOptions,
-    first_error: &mut Option<crate::errors::TraceDecayError>,
+    first_error: &mut Option<tracedecay_runtime_core::errors::TraceDecayError>,
 ) -> CombinedEffectOutcome {
     let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
         memory,
@@ -776,7 +776,7 @@ async fn run_execute_pair(
                     error: error.into(),
                 })),
                 DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                    error: crate::errors::TraceDecayError::Config { message }.into(),
+                    error: tracedecay_runtime_core::errors::TraceDecayError::Config { message }.into(),
                 })),
                 PairResultOrder::ReflectorFirst,
                 PairResultMode::Handled,
@@ -1013,7 +1013,7 @@ pub(super) async fn prepare_combined_effects(
         | (PairMode::ConflictNoAbandon, _, AutomationEffectAdmission::Conflict) => {
             Ok(CombinedEffectAdmission::Conflict)
         }
-        _ => Err(crate::errors::TraceDecayError::Config {
+        _ => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "combined automation admission matrix was internally inconsistent".to_owned(),
         }),
     }
@@ -1170,7 +1170,7 @@ mod tests {
             }
         }
 
-        async fn mount_observability(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
+        async fn mount_observability(&self) -> tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
             let session_db = self
                 .memory
                 .store_runtime_registry()

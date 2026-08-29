@@ -9,8 +9,8 @@ use crate::common::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
-use tracedecay::branch_meta::BranchMeta;
-use tracedecay::global_db::StoreInstanceUpsert;
+use tracedecay_runtime_core::branch_meta::BranchMeta;
+use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
@@ -1706,14 +1706,14 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     write_repository_identity_marker(project.path(), "proj_cli").unwrap();
     std::fs::create_dir_all(profile_root(home.path())).unwrap();
 
-    let report = tracedecay::global_db::registry_maintenance::inspect_profile_store_orphans(
+    let report = tracedecay_global_db::registry_maintenance::inspect_profile_store_orphans(
         &profile_root(home.path()),
         tracedecay::tracedecay::current_timestamp(),
     );
     assert_eq!(report.plans.len(), 1, "{report:#?}");
     assert_eq!(
         report.plans[0].status,
-        tracedecay::global_db::registry_maintenance::RegistryOrphanRelinkStatus::Eligible,
+        tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkStatus::Eligible,
         "{report:#?}"
     );
 
@@ -2021,7 +2021,7 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let meta = tracedecay::branch_meta::load_branch_meta(&shard_root)
+    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
         .expect("branch add must publish tracking metadata in the profile shard");
     let entry = meta
         .branches
@@ -2117,7 +2117,7 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
         "branch remove must retire the exact raw branch tracking ref"
     );
     assert!(
-        !tracedecay::branch_meta::load_branch_meta(&shard_root)
+        !tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
             .expect("branch metadata after removal")
             .is_tracked("feature/new"),
         "branch remove must retire its metadata only after exact provenance cleanup is selected"

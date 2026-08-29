@@ -99,20 +99,20 @@ async fn seed_project_sessions_pending_convergence(
     std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
         .expect("session database directory");
     crate::daemon::store_runtime::register_registered_schema_installer();
-    let authority = crate::db::DatabaseAuthority::acquire_test(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &sessions_path,
         "seed production project-open convergence fixture",
     )
     .expect("project sessions fixture database authority");
-    let (database, _) = crate::db::Database::publish_registered_test_runtime_for_profile_identity(
+    let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_for_profile_identity(
         &sessions_path,
         &authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
-        crate::db::TestRuntimeProfileIdentityV1::new(
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1::new(
             identity.brain_id().clone(),
             identity.profile_id().clone(),
         ),
-        crate::db::TestDatabaseRuntimeScope::ProjectSessions {
+        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
             project_id: project_id.clone(),
         },
     )

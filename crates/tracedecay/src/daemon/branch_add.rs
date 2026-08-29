@@ -1,5 +1,5 @@
 use crate::branch::BranchAddOutcome;
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
 use std::path::Path;
@@ -416,7 +416,7 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
                 return Ok(BranchAddOutcome::Deferred);
             }
         };
-        let expected_source = crate::branch_meta::load_branch_meta(&data_root).and_then(|meta| {
+        let expected_source = tracedecay_runtime_core::branch_meta::load_branch_meta(&data_root).and_then(|meta| {
             meta.branches
                 .get(branch)
                 .and_then(|entry| entry.graph_source.clone())
@@ -450,7 +450,7 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
             rollback_failed_branch_tracking(&data_root, prepared.as_deref(), None, &error).await?;
             return Err(error);
         };
-        let publication = crate::branch_meta::publish_graph_source(
+        let publication = tracedecay_runtime_core::branch_meta::publish_graph_source(
             &data_root,
             branch,
             expected_source.as_ref(),
@@ -464,7 +464,7 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
             )
         });
         match publication {
-            Ok(crate::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(publication)) => {
+            Ok(tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(publication)) => {
                 match schedulers
                     .commit_serving_generation_installation(&canonical_worktree_root, installation)
                     .await
@@ -489,7 +489,7 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
                     }
                 }
             }
-            Ok(crate::branch_meta::BranchGraphSourcePublishOutcomeV1::AlreadyPublished(_)) => {
+            Ok(tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::AlreadyPublished(_)) => {
                 match schedulers
                     .commit_serving_generation_installation(&canonical_worktree_root, installation)
                     .await
@@ -508,7 +508,7 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
                     }
                 }
             }
-            Ok(crate::branch_meta::BranchGraphSourcePublishOutcomeV1::CompareAndSwapMiss {
+            Ok(tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::CompareAndSwapMiss {
                 observed: Some(observed),
             }) if observed.matches_draft(&source) => match schedulers
                 .commit_serving_generation_installation(&canonical_worktree_root, installation)
@@ -557,7 +557,7 @@ pub(crate) async fn capture_exact_branch_source(
     canonical_project_root: &Path,
     canonical_worktree_root: &Path,
     branch: &str,
-) -> Result<crate::branch_meta::BranchGraphSourceDraftV1, TraceDecayError> {
+) -> Result<tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1, TraceDecayError> {
     capture_exact_branch_source_inner(
         graph,
         schedulers,
@@ -578,7 +578,7 @@ fn capture_exact_branch_source_inner<'a>(
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = Result<crate::branch_meta::BranchGraphSourceDraftV1, TraceDecayError>,
+                Output = Result<tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1, TraceDecayError>,
             > + Send
             + 'a,
     >,
@@ -690,7 +690,7 @@ fn capture_exact_branch_source_inner<'a>(
                 ),
             ));
         }
-        Ok(crate::branch_meta::BranchGraphSourceDraftV1 {
+        Ok(tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
             project_id: project_id.to_owned(),
             repository_id: scope.repository_id.as_str().to_owned(),
             worktree_id: scope.worktree_id.as_str().to_owned(),
@@ -705,7 +705,7 @@ fn capture_exact_branch_source_inner<'a>(
 pub(crate) async fn await_exact_branch_generation(
     schedulers: &CodeIndexSchedulerRegistryV1,
     canonical_worktree_root: &Path,
-    source: &crate::branch_meta::BranchGraphSourceDraftV1,
+    source: &tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1,
 ) -> Result<Arc<crate::code_index::production::CodeIndexPublishedGenerationV1>, TraceDecayError> {
     await_exact_branch_generation_inner(schedulers, canonical_worktree_root, source).await
 }
@@ -714,7 +714,7 @@ pub(crate) async fn await_exact_branch_generation(
 fn await_exact_branch_generation_inner<'a>(
     schedulers: &'a CodeIndexSchedulerRegistryV1,
     canonical_worktree_root: &'a Path,
-    source: &'a crate::branch_meta::BranchGraphSourceDraftV1,
+    source: &'a tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<
@@ -811,7 +811,7 @@ fn await_exact_branch_generation_inner<'a>(
 
 fn generation_matches_branch_source(
     generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
-    source: &crate::branch_meta::BranchGraphSourceDraftV1,
+    source: &tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1,
 ) -> bool {
     let snapshot = generation.snapshot();
     generation.manifest().project_id.as_str() == source.project_id
@@ -837,12 +837,12 @@ fn generation_matches_branch_source(
 async fn rollback_failed_branch_tracking(
     data_root: &Path,
     prepared: Option<&crate::branch::PreparedBranchTracking>,
-    publication: Option<&crate::branch_meta::BranchGraphSourcePublicationV1>,
+    publication: Option<&tracedecay_runtime_core::branch_meta::BranchGraphSourcePublicationV1>,
     cause: &TraceDecayError,
 ) -> Result<(), TraceDecayError> {
     let publication_rolled_back = match publication {
         Some(publication) => {
-            match crate::branch_meta::rollback_graph_source_publication(data_root, publication)
+            match tracedecay_runtime_core::branch_meta::rollback_graph_source_publication(data_root, publication)
                 .map_err(|error| {
                     TraceDecayError::project_route(
                         BRANCH_TRACKING_FAILED,
@@ -852,8 +852,8 @@ async fn rollback_failed_branch_tracking(
                         ),
                     )
                 })? {
-                crate::branch_meta::BranchGraphSourceRollbackOutcomeV1::Restored => true,
-                crate::branch_meta::BranchGraphSourceRollbackOutcomeV1::NoMatch => false,
+                tracedecay_runtime_core::branch_meta::BranchGraphSourceRollbackOutcomeV1::Restored => true,
+                tracedecay_runtime_core::branch_meta::BranchGraphSourceRollbackOutcomeV1::NoMatch => false,
             }
         }
         None => true,

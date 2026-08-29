@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 /// Per-client profile identity sent in each daemon handshake.
 ///
@@ -22,7 +22,7 @@ impl DaemonClientIdentity {
                 message: "could not determine TraceDecay user data directory".to_string(),
             })?;
         let global_db_path =
-            crate::global_db::global_db_path().ok_or_else(|| TraceDecayError::Config {
+            tracedecay_global_db::global_db_path().ok_or_else(|| TraceDecayError::Config {
                 message: "could not determine TraceDecay global database path".to_string(),
             })?;
         Ok(Self {

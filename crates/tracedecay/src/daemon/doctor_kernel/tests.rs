@@ -156,15 +156,15 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
     let uninitialized_path = directory.path().join("uninitialized.db");
     let database_path = directory.path().join("registry.db");
     crate::daemon::store_runtime::register_registered_schema_installer();
-    let uninitialized_authority = crate::db::DatabaseAuthority::acquire_test(
+    let uninitialized_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &uninitialized_path,
         "doctor uninitialized authority audit fixture",
     )
     .expect("doctor authority audit database authority");
-    let (uninitialized, _) = crate::db::Database::publish_test_runtime(
+    let (uninitialized, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &uninitialized_path,
         &uninitialized_authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
     )
     .await
     .expect("open uninitialized doctor audit fixture");
@@ -175,16 +175,16 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
     );
     drop(uninitialized);
 
-    let authority = crate::db::DatabaseAuthority::acquire_test(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &database_path,
         "doctor registered authority audit fixture",
     )
     .expect("doctor registered audit database authority");
-    let (database, _) = crate::db::Database::publish_registered_test_runtime(
+    let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime(
         &database_path,
         &authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
-        crate::db::TestDatabaseRuntimeScope::ProfileSessions,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
     )
     .await
     .expect("install the registered authority schema");
@@ -441,7 +441,7 @@ fn retained_or_unreported_observation_history_is_not_absent() {
 
 #[test]
 fn refusal_censuses_merge_by_provider_and_reason() {
-    use crate::global_db::observation::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
+    use tracedecay_global_db::observation::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
 
     let merged = ingest_refusal_read_from_censuses(&[
         ObservationRefusalCensusV1::Observed {
@@ -488,7 +488,7 @@ fn refusal_censuses_merge_by_provider_and_reason() {
 
 #[test]
 fn one_unavailable_refusal_census_makes_the_merged_read_unknown() {
-    use crate::global_db::observation::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
+    use tracedecay_global_db::observation::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
 
     let merged = ingest_refusal_read_from_censuses(&[
         ObservationRefusalCensusV1::Observed {

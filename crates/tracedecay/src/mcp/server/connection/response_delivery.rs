@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use crate::mcp::server::McpServer;
 use crate::mcp::server::routing::SelectedProjectResponseLease;
 use crate::mcp::server::tool_errors::serialize_response_line;

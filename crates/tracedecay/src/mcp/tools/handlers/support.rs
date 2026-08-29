@@ -15,8 +15,8 @@ use tokio::sync::Semaphore;
 
 use super::super::ToolResult;
 use super::super::render;
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 
 const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);
 static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
@@ -359,7 +359,7 @@ where
 {
     items
         .into_iter()
-        .filter(|item| crate::path_scope::path_matches_scope(get_path(item), scope_prefix))
+        .filter(|item| tracedecay_runtime_core::path_scope::path_matches_scope(get_path(item), scope_prefix))
         .collect()
 }
 

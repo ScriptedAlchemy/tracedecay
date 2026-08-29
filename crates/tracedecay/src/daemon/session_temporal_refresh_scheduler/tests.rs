@@ -28,7 +28,7 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use tracedecay_usecases::host_admission::HostAdmissionScope;

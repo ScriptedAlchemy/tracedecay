@@ -201,7 +201,7 @@ const DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 1;
 
 /// Lookup identifiers needed outside receipt-state equality (session and
 /// watermark) stay bounded. Session ids are run through
-/// [`crate::privacy::protect_sensitive_structural_id`] so credential-shaped
+/// [`tracedecay_runtime_core::privacy::protect_sensitive_structural_id`] so credential-shaped
 /// values become stable digests while public ids remain byte-for-byte.
 /// Equality-only thread/tool/turn identifiers are hashed before persistence.
 const DURABLE_MAX_IDENTIFIER_BYTES: usize = 256;
@@ -256,7 +256,7 @@ fn durable_bound_required_str(value: &str, max_bytes: usize) -> Result<String, (
 }
 
 fn protect_optional_hook_structural_id(value: Option<&str>) -> Result<Option<String>, ()> {
-    crate::privacy::protect_optional_sensitive_structural_id(value).map_err(|_| ())
+    tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(value).map_err(|_| ())
 }
 
 fn protect_hook_route_structural_ids(
@@ -642,11 +642,11 @@ fn plan_linked_worktree_branch_add(
     cwd: &Path,
     project_root: &Path,
 ) -> Option<HookEventPlan> {
-    let worktree_root = crate::worktree::git_worktree_root(cwd)?;
+    let worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(cwd)?;
     // A linked worktree's git common dir lives outside its own working tree
     // (it points back at the main checkout's `.git`). In the main checkout the
     // common dir is `<root>/.git`, so the two paths match and we bail out.
-    let common_dir = crate::worktree::git_common_dir(&worktree_root)?;
+    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&worktree_root)?;
     if path_is_inside(&common_dir, &worktree_root) {
         return None;
     }
@@ -707,7 +707,7 @@ pub(crate) fn authorize_add_branch_at_root(
     let canonical = bounded
         .canonicalize()
         .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
-    let live_worktree_root = crate::worktree::git_worktree_root(&canonical)
+    let live_worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(&canonical)
         .and_then(|root| root.canonicalize().ok())
         .ok_or(AddBranchAtRootAuthError::Unauthorized)?;
     if live_worktree_root != canonical {
@@ -782,8 +782,8 @@ fn path_is_inside(path: &Path, root: &Path) -> bool {
 }
 
 fn git_roots_share_common_dir(a: &Path, b: &Path) -> bool {
-    let a_common = crate::worktree::git_common_dir(a);
-    let b_common = crate::worktree::git_common_dir(b);
+    let a_common = tracedecay_runtime_core::worktree::git_common_dir(a);
+    let b_common = tracedecay_runtime_core::worktree::git_common_dir(b);
     a_common
         .as_ref()
         .zip(b_common.as_ref())
@@ -1460,7 +1460,7 @@ mod tests {
     #[test]
     fn hook_boundary_protects_credential_ids_once_across_durable_receipt_joins() {
         let raw = ["AKIA", "SYNTHETIC", "CANARY", "6"].concat();
-        let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
+        let protected = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&raw).unwrap();
         // The sender-side wire shape the Hermes plugin emits; production only
         // deserializes these events.
         let params = serde_json::to_value(tracedecay_hooks::core_events::DaemonHookEvent {
@@ -1506,7 +1506,7 @@ mod tests {
             assert_eq!(actual, Some(protected.as_str()));
         }
         assert_eq!(
-            crate::privacy::protect_sensitive_structural_id(&protected).unwrap(),
+            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&protected).unwrap(),
             protected
         );
     }
