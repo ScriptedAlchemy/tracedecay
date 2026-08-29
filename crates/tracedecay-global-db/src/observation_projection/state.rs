@@ -665,6 +665,16 @@ async fn message_projection(
     provider: &str,
     message_id: &str,
 ) -> ProjectionStoreResult<SessionMessageProjection> {
+    if let Some(projection) = super::apply::derive_projection(observation)?
+        .messages()
+        .find(|projection| {
+            projection.message().provider == provider
+                && projection.message().message_id == message_id
+        })
+        .cloned()
+    {
+        return Ok(projection);
+    }
     derive_projection_with_alias(conn, observation)
         .await?
         .messages()
@@ -676,9 +686,28 @@ async fn message_projection(
         .ok_or(ProjectionStoreError::ProvenanceCollision)
 }
 
-async fn verify_rows(
+pub(in super::super) async fn verify_projection_rows(
     conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
+) -> ProjectionStoreResult<()> {
+    let session = projection.session();
+    let actual_session = read_session(conn, &session.provider, &session.session_id).await?;
+    let message = projection.message();
+    let actual_message = read_message(conn, &message.provider, &message.message_id).await?;
+    verify_projection_rows_from_records(
+        conn,
+        projection,
+        actual_session.as_ref(),
+        actual_message.as_ref(),
+    )
+    .await
+}
+
+pub(in super::super) async fn verify_projection_rows_from_records(
+    conn: &impl QueryExecutor,
+    projection: &SessionMessageProjection,
+    actual_session: Option<&SessionRecord>,
+    actual_message: Option<&SessionMessageRecord>,
 ) -> ProjectionStoreResult<()> {
     let session = projection.session();
     // Re-derived sessions still carry the observation's host spelling. Apply the
@@ -686,19 +715,14 @@ async fn verify_rows(
     // expansions (/var -> /private/var) and user symlink families compare equal
     // to the persisted canonical row without putting FS probing into reconcile.
     let expected = canonicalize_session_project_paths(session);
-    if !read_session(conn, &session.provider, &session.session_id)
-        .await?
-        .as_ref()
-        .is_some_and(|actual| session_rows_compatible(actual, &expected))
-    {
+    if !actual_session.is_some_and(|actual| session_rows_compatible(actual, &expected)) {
         return Err(ProjectionStoreError::OutputCollision {
             provider: session.provider.clone(),
             message_id: format!("session:{}", session.session_id),
         });
     }
     let message = projection.message();
-    let actual = read_message(conn, &message.provider, &message.message_id).await?;
-    let compatible = match actual.as_ref() {
+    let compatible = match actual_message {
         Some(actual) => {
             actual == message || protected_message_rows_compatible(conn, actual, message).await?
         }
@@ -737,7 +761,7 @@ pub(super) async fn verify_output_state(
     )
     .await?;
     verify_provenance(conn, &owner_projection).await?;
-    verify_rows(conn, &owner_projection).await
+    verify_projection_rows(conn, &owner_projection).await
 }
 
 /// Requested `(output_provider, output_message_id)` keys carried by one
@@ -755,6 +779,165 @@ const OUTPUT_AUTHORITY_BATCH_KEYS: usize = 256;
 pub(in super::super) struct ProjectionOutputAuthority {
     pub(in super::super) canonical_observation_id: String,
     pub(in super::super) canonical: DurableObservationV1,
+}
+
+pub(in super::super) struct ProjectionRowsBatch {
+    sessions: HashMap<(String, String), SessionRecord>,
+    messages: HashMap<(String, String), SessionMessageRecord>,
+}
+
+impl ProjectionRowsBatch {
+    pub(in super::super) fn session(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Option<&SessionRecord> {
+        self.sessions
+            .get(&(provider.to_owned(), session_id.to_owned()))
+    }
+
+    pub(in super::super) fn message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<&SessionMessageRecord> {
+        self.messages
+            .get(&(provider.to_owned(), message_id.to_owned()))
+    }
+}
+
+pub(in super::super) async fn read_projection_rows_batch(
+    conn: &impl QueryExecutor,
+    outputs: &BTreeSet<(String, String)>,
+) -> ProjectionStoreResult<ProjectionRowsBatch> {
+    let mut messages = HashMap::with_capacity(outputs.len());
+    let requested_keys = outputs.iter().collect::<Vec<_>>();
+    for chunk in requested_keys.chunks(OUTPUT_AUTHORITY_BATCH_KEYS) {
+        let requested = serde_json::to_string(
+            &chunk
+                .iter()
+                .map(|(provider, message_id)| {
+                    serde_json::json!({ "provider": provider, "message_id": message_id })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| storage("encode projected message request", error))?;
+        let mut rows = conn
+            .query(
+                "SELECT message.provider, message.message_id, message.session_id,
+                        message.role, message.timestamp, message.ordinal, message.text,
+                        message.kind, message.model, message.tool_names, message.source_path,
+                        message.source_offset, message.metadata_json
+                 FROM json_each(?1) AS requested
+                 CROSS JOIN session_messages AS message
+                 WHERE message.provider = json_extract(requested.value, '$.provider')
+                   AND message.message_id = json_extract(requested.value, '$.message_id')",
+                params![requested.as_str()],
+            )
+            .await
+            .map_err(|error| storage("read projected messages", error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage("read projected messages", error))?
+        {
+            macro_rules! cell {
+                ($index:literal) => {
+                    row.get($index)
+                        .map_err(|error| storage("decode projected messages", error))?
+                };
+            }
+            let message = SessionMessageRecord {
+                provider: cell!(0),
+                message_id: cell!(1),
+                session_id: cell!(2),
+                role: cell!(3),
+                timestamp: cell!(4),
+                ordinal: cell!(5),
+                text: cell!(6),
+                kind: cell!(7),
+                model: cell!(8),
+                tool_names: cell!(9),
+                source_path: cell!(10),
+                source_offset: cell!(11),
+                metadata_json: cell!(12),
+            };
+            messages.insert(
+                (message.provider.clone(), message.message_id.clone()),
+                message,
+            );
+        }
+    }
+
+    let session_keys = messages
+        .values()
+        .map(|message| (message.provider.clone(), message.session_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut sessions = HashMap::with_capacity(session_keys.len());
+    let requested_keys = session_keys.iter().collect::<Vec<_>>();
+    for chunk in requested_keys.chunks(OUTPUT_AUTHORITY_BATCH_KEYS) {
+        let requested = serde_json::to_string(
+            &chunk
+                .iter()
+                .map(|(provider, session_id)| {
+                    serde_json::json!({ "provider": provider, "session_id": session_id })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| storage("encode projected session request", error))?;
+        let mut rows = conn
+            .query(
+                "SELECT session.provider, session.session_id, session.project_key,
+                        session.project_path, session.title, session.started_at,
+                        session.ended_at, session.transcript_path, session.metadata_json,
+                        session.parent_session_id, session.is_subagent, session.agent_id,
+                        session.parent_tool_use_id
+                 FROM json_each(?1) AS requested
+                 CROSS JOIN sessions AS session
+                 WHERE session.provider = json_extract(requested.value, '$.provider')
+                   AND session.session_id = json_extract(requested.value, '$.session_id')",
+                params![requested.as_str()],
+            )
+            .await
+            .map_err(|error| storage("read projected sessions", error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage("read projected sessions", error))?
+        {
+            macro_rules! cell {
+                ($index:literal) => {
+                    row.get($index)
+                        .map_err(|error| storage("decode projected sessions", error))?
+                };
+                ($index:literal, $ty:ty) => {
+                    row.get::<$ty>($index)
+                        .map_err(|error| storage("decode projected sessions", error))?
+                };
+            }
+            let session = SessionRecord {
+                provider: cell!(0),
+                session_id: cell!(1),
+                project_key: cell!(2),
+                project_path: cell!(3),
+                title: cell!(4),
+                started_at: cell!(5),
+                ended_at: cell!(6),
+                transcript_path: cell!(7),
+                metadata_json: cell!(8),
+                parent_session_id: cell!(9),
+                is_subagent: cell!(10, i64) != 0,
+                agent_id: cell!(11),
+                parent_tool_use_id: cell!(12),
+            };
+            sessions.insert(
+                (session.provider.clone(), session.session_id.clone()),
+                session,
+            );
+        }
+    }
+
+    Ok(ProjectionRowsBatch { sessions, messages })
 }
 
 /// The batched ownership resolution behind [`read_output_authorities`].
@@ -777,13 +960,14 @@ fn output_authority_batch_sql() -> String {
                    provenance.output_message_id AS output_message_id,
                    MAX(provenance.message_created) AS projector_owned,
                    COUNT(*) AS owner_count
-            FROM observation_projection_provenance AS provenance
-            JOIN json_each(?2) AS requested
-              ON provenance.output_provider =
-                   json_extract(requested.value, '$.provider')
-             AND provenance.output_message_id =
-                   json_extract(requested.value, '$.message_id')
+            FROM json_each(?2) AS requested
+            CROSS JOIN observation_projection_provenance AS provenance
+              INDEXED BY idx_observation_projection_provenance_output
             WHERE provenance.projector_version = ?1
+              AND provenance.output_provider =
+                    json_extract(requested.value, '$.provider')
+              AND provenance.output_message_id =
+                    json_extract(requested.value, '$.message_id')
             GROUP BY provenance.projector_version, provenance.output_provider,
                      provenance.output_message_id
          ),
@@ -880,12 +1064,12 @@ pub(in super::super) async fn read_output_authorities(
     feature = "hotpath",
     hotpath::measure(label = "global_db.observation_state.verify.resolved_authority")
 )]
-pub(in super::super) async fn verify_resolved_output_authority(
+pub(in super::super) async fn resolve_output_projection(
     conn: &impl QueryExecutor,
     authority: &ProjectionOutputAuthority,
     derived: Option<(&str, &ObservationProjection)>,
     projection: &SessionMessageProjection,
-) -> ProjectionStoreResult<()> {
+) -> ProjectionStoreResult<SessionMessageProjection> {
     let message = projection.message();
     let owner_projection = match derived {
         Some((observation_id, effect)) if observation_id == authority.canonical_observation_id => {
@@ -908,8 +1092,7 @@ pub(in super::super) async fn verify_resolved_output_authority(
             .await?
         }
     };
-    verify_provenance(conn, &owner_projection).await?;
-    verify_rows(conn, &owner_projection).await
+    Ok(owner_projection)
 }
 
 pub(super) fn session_rows_compatible(actual: &SessionRecord, expected: &SessionRecord) -> bool {

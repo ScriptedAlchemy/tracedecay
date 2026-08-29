@@ -178,7 +178,7 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # (tracedecay/0.5.42-vector-index-durable, which stacks vector-index
 # restore-at-open, the arena multi-chunk
 # fix, streaming serialization + mmap compact open, and twelve
-# compact/overlay/close correctness fixes on upstream v0.5.42 rev 3bc8911).
+# compact/overlay/close correctness fixes plus transaction-bounded WAL recovery).
 # The published crates carry a tiered-storage arena whose `HotVersionRef` can
 # only address a single 1 MiB chunk, which caps an epoch near 32 Ki node
 # records and then panics; the fork spans epochs across chunks and types the
@@ -186,8 +186,8 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # resolves sibling crates by path, so every grafeo crate must come from the
 # same fork rev — a mixed registry/git graph would build two type-incompatible
 # instances of the unpatched crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "5fe4c6d3db4a011ee9f0cb8889d89332e53851ed" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "5fe4c6d3db4a011ee9f0cb8889d89332e53851ed" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "5fe4c6d3db4a011ee9f0cb8889d89332e53851ed" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "5fe4c6d3db4a011ee9f0cb8889d89332e53851ed" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "5fe4c6d3db4a011ee9f0cb8889d89332e53851ed" }

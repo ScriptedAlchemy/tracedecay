@@ -46,6 +46,7 @@ impl CodexContextState {
         }
     }
 
+    #[hotpath::measure(label = "sessions.hosts.codex.scan_prior")]
     pub(super) fn scan_prior(path: &Path, before_offset: u64, meta: &CodexMeta) -> Self {
         if before_offset == 0 {
             return Self::from_meta(meta);
