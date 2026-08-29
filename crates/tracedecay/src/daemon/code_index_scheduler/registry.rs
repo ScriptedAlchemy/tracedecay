@@ -3551,7 +3551,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 "query authority scope does not match the mounted worktree".to_owned(),
             ));
         }
-        if worktree.query_activation_revision.is_some() {
+        // The committed fence forbids a standalone mount from replacing an
+        // installed committed authority pair. While the committed activation
+        // is still deferred (fence set, no authority installed — e.g. a
+        // cold-open restore waiting for semantic runtime readiness), the
+        // checked-in core exact/lexical/graph authority must stay mountable;
+        // a later successful committed install atomically replaces it.
+        if worktree.query_activation_revision.is_some() && worktree.query_authority.is_some() {
             return Err(CodeIndexSchedulerErrorV1::Identity(
                 "standalone query authority cannot replace a committed authority pair".to_owned(),
             ));
