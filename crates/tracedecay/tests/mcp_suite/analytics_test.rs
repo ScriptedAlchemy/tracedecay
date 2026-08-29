@@ -11,11 +11,11 @@ use crate::support::{
     production_composition_fixture, real_mcp_server, setup_empty_project,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay_global_db::AnalyticsEventInsert;
-#[cfg(feature = "test-transport")]
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::tracedecay::current_timestamp;
+#[cfg(feature = "test-transport")]
+use tracedecay_global_db::AnalyticsEventInsert;
 
 #[cfg(feature = "test-transport")]
 fn tool_call_event(

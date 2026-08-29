@@ -308,9 +308,12 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     };
 
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 43, "sealed code publication")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        43,
+        "sealed code publication",
+    )
+    .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
@@ -664,9 +667,12 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
         generations_root.join(format!("read-bundle-{digest_hex}.interactive-catalog.bin"));
 
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 44, "sealed read bundle")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        44,
+        "sealed read bundle",
+    )
+    .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
@@ -1094,9 +1100,12 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     };
 
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 47, "concurrent code publication")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        47,
+        "concurrent code publication",
+    )
+    .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");

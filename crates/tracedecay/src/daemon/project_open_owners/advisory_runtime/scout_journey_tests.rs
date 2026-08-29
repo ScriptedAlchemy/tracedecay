@@ -194,9 +194,11 @@ async fn test_scout_owner(
 ) -> Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1> {
     crate::daemon::store_runtime::register_registered_schema_installer();
     let database_path = temporary.path().join("edit-stop-feedback.db");
-    let database_authority =
-        tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(&database_path, "edit stop feedback")
-            .expect("database authority");
+    let database_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+        &database_path,
+        "edit stop feedback",
+    )
+    .expect("database authority");
     let database = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &database_path,
         &database_authority,
@@ -217,7 +219,7 @@ async fn test_scout_owner(
 
 #[tokio::test]
 async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_supersession() {
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationConfig};
+    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
 
     let temporary = tempfile::tempdir().expect("temporary directory");
     let model_config = AutomationConfig {
@@ -430,7 +432,7 @@ async fn stock_disabled_configuration_produces_nothing() {
     install_project_open_context_scout_configuration(
         owner.as_ref(),
         pin,
-        &tracedecay_agent_hosts::automation::config::AutomationConfig::default(),
+        &tracedecay_automation_runtime::automation::config::AutomationConfig::default(),
     )
     .await
     .expect("install disabled Scout configuration");

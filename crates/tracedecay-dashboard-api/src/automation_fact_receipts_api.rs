@@ -9,7 +9,7 @@ use super::{DashboardHttpRequestControlV1, DashboardState};
 use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_code};
 use crate::read_model::DashboardDomainStateV1;
 use crate::tracedecay::facts::memory_application_for_db;
-use tracedecay_agent_hosts::automation::automatic_facts::{
+use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactReceipt, AutomaticFactState, list_automatic_fact_receipts,
     load_automatic_fact_receipt,
 };

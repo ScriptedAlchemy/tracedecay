@@ -207,7 +207,8 @@ pub(crate) async fn handle_status(
         .unwrap_or_else(|_| json!({}));
         if server_stats.is_some() {
             storage_health["daemon_owner_pid"] = json!(std::process::id());
-            storage_health["daemon_generation"] = json!(tracedecay_runtime_core::runtime_identity::process_run_id());
+            storage_health["daemon_generation"] =
+                json!(tracedecay_runtime_core::runtime_identity::process_run_id());
         }
         output["storage_health"] = storage_health;
     }
@@ -334,19 +335,18 @@ fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Val
         .copied()
         .filter(|provider| !observed.iter().any(|observed| observed == provider))
         .collect::<Vec<_>>();
-    let coverage_incomplete =
-        ingest.provider_coverage.iter().any(|coverage| {
-            coverage.state != tracedecay_global_db::SessionProviderCoverageState::Complete
-        }) || observed.iter().any(|provider| {
-            tracedecay_sessions::runtime::SessionProvider::parse(provider).is_some_and(|provider| {
-                provider.writes_typed_history_coverage()
-                    && !ingest.provider_coverage.iter().any(|coverage| {
-                        coverage.provider == provider.id()
-                            && coverage.state
-                                == tracedecay_global_db::SessionProviderCoverageState::Complete
-                    })
-            })
-        });
+    let coverage_incomplete = ingest.provider_coverage.iter().any(|coverage| {
+        coverage.state != tracedecay_global_db::SessionProviderCoverageState::Complete
+    }) || observed.iter().any(|provider| {
+        tracedecay_sessions::runtime::SessionProvider::parse(provider).is_some_and(|provider| {
+            provider.writes_typed_history_coverage()
+                && !ingest.provider_coverage.iter().any(|coverage| {
+                    coverage.provider == provider.id()
+                        && coverage.state
+                            == tracedecay_global_db::SessionProviderCoverageState::Complete
+                })
+        })
+    });
     let any_provider_available = ingest.provider_coverage.iter().any(|coverage| {
         coverage.state != tracedecay_global_db::SessionProviderCoverageState::Unavailable
     });
@@ -506,11 +506,11 @@ pub(crate) fn handle_active_project(
 mod tests {
     use std::sync::Arc;
 
-    use tracedecay_global_db::{
-        SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
-    };
     use crate::runtime_telemetry::{
         GenerationCensusReader, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
+    };
+    use tracedecay_global_db::{
+        SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     };
 
     use super::{graph_statistics_value, historical_session_catch_up_state};

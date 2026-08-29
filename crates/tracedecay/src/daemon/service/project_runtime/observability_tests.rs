@@ -584,7 +584,10 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             .expect("restarted stream"),
         &BTreeSet::from([1])
     );
-    let process_prefix = format!("daemon:{}:", tracedecay_runtime_core::runtime_identity::process_run_id());
+    let process_prefix = format!(
+        "daemon:{}:",
+        tracedecay_runtime_core::runtime_identity::process_run_id()
+    );
     assert!(
         streams
             .keys()

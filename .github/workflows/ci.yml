@@ -185,6 +185,8 @@ jobs:
 
       - name: Check release version drift
         run: scripts/check-release-drift.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   test:
     name: Test ${{ matrix.name }}

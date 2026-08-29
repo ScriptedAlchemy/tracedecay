@@ -106,7 +106,9 @@ impl QuiescedDaemonLifecycle {
     /// lifecycle lease to release before taking exclusive ownership.
     pub fn acquire_with_timeout(operation: &str, timeout: Duration) -> Result<Self> {
         Self::acquire_with(operation, || {
-            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_with_timeout(operation, timeout)
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_with_timeout(
+                operation, timeout,
+            )
         })
     }
 
@@ -141,7 +143,9 @@ impl QuiescedDaemonLifecycle {
         }
     }
 
-    pub fn lifecycle_lease(&self) -> Result<&tracedecay_runtime_core::lifecycle_lease::LifecycleLease> {
+    pub fn lifecycle_lease(
+        &self,
+    ) -> Result<&tracedecay_runtime_core::lifecycle_lease::LifecycleLease> {
         self.lifecycle_lease
             .as_ref()
             .ok_or_else(|| TraceDecayError::Config {
@@ -203,13 +207,16 @@ impl QuiescedDaemonLifecycle {
 
     fn downgrade_to_shared(&mut self) -> Result<()> {
         self.downgrade_to_shared_with(|| {
-            tracedecay_runtime_core::lifecycle_lease::acquire_shared_blocking("daemon state restore")
+            tracedecay_runtime_core::lifecycle_lease::acquire_shared_blocking(
+                "daemon state restore",
+            )
         })
     }
 
     fn downgrade_to_shared_with(
         &mut self,
-        acquire_shared: impl FnOnce() -> Result<tracedecay_runtime_core::lifecycle_lease::LifecycleLease>,
+        acquire_shared: impl FnOnce()
+            -> Result<tracedecay_runtime_core::lifecycle_lease::LifecycleLease>,
     ) -> Result<()> {
         if self
             .lifecycle_lease
@@ -1027,7 +1034,8 @@ fn restore_installed_service_after_failed_acquire(
     if !previous_state.is_running() {
         return Ok(());
     }
-    let _lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_shared_blocking("daemon state restore")?;
+    let _lifecycle_lease =
+        tracedecay_runtime_core::lifecycle_lease::acquire_shared_blocking("daemon state restore")?;
     restore_installed_service_after_update(previous_state)
 }
 
@@ -1039,8 +1047,9 @@ pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
                 message: "cannot uninstall the daemon service with --no-stop while the managed daemon is running; stop it first or omit --no-stop".to_string(),
             });
         }
-        let _lifecycle_lease =
-            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive("daemon service uninstall --no-stop")?;
+        let _lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive(
+            "daemon service uninstall --no-stop",
+        )?;
         verify_installed_service_quiesced_under_lease()?;
         return uninstall_service_under_lease(false);
     }

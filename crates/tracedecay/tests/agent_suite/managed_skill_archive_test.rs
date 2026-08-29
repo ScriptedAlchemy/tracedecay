@@ -1,4 +1,4 @@
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
     ManagedSupportFile, SkillInstallTarget, apply_managed_skill_archive, create_managed_skill,
     load_managed_skill, managed_skill_dir, set_managed_skill_pinned,

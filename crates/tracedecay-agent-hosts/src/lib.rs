@@ -1,16 +1,9 @@
-//! Agent host integrations (`agents`) and self-improvement automation
-//! (`automation`) for TraceDecay.
+//! Agent host integrations (`agents`) for TraceDecay.
 //!
-//! These two subsystems are mutually recursive — `agents` reaches into
-//! `automation` for skill/memory installation targets and `automation` reaches
-//! back into `agents` for host discovery and bundle composition — so they are
-//! extracted from the root crate as a single unit. Inside this crate the
-//! former `crate::agents::*` / `crate::automation::*` paths keep resolving
-//! unchanged, which is why the module names are preserved verbatim.
-//!
-//! The root crate calls the extracted automation authority directly through
-//! `tracedecay_agent_hosts::automation`; it does not maintain an automation
-//! compatibility facade.
+//! Self-improvement automation lives in `tracedecay-automation-runtime`.
+//! Host installers call that crate for skill-target installation; automation
+//! calls back through `tracedecay_automation_runtime::automation::host_io`
+//! (registered by [`register_automation_host_io`]).
 //!
 //! ## Registered ports
 //!
@@ -54,11 +47,10 @@
 #[cfg(test)]
 pub(crate) fn register_test_schema_installer() {
     tracedecay_global_db::register_test_schema_installer();
+    register_automation_host_io();
 }
 
 pub mod agents;
-pub mod analytics;
-pub mod automation;
 pub mod hooks;
 pub mod native_integration;
 pub mod ports;
@@ -67,8 +59,6 @@ pub mod shell;
 pub mod tool_name;
 
 pub use product_version::PRODUCT_VERSION;
-pub(crate) use tracedecay_usecases as application;
-pub(crate) use tracedecay_usecases::request_identity;
 pub(crate) use tracedecay_usecases::user_config;
 
 // Kernel shims. `tracedecay-runtime-core` owns the substrate these two
@@ -76,16 +66,79 @@ pub(crate) use tracedecay_usecases::user_config;
 // crate's root keeps every historical `crate::<module>::…` path in the moved
 // code resolving verbatim, exactly as the root crate's `src/<module>.rs` shims
 // do on the other side of the split.
-pub(crate) use tracedecay_runtime_core::{
-    branch, config, db, errors, memory, privacy, runtime_identity, storage, store, worktree,
-};
+pub(crate) use tracedecay_runtime_core::{branch, config, db, errors, storage, worktree};
 
 /// Kernel-owned slice of the former root `tracedecay` façade module.
-///
-/// Only `current_timestamp` moved down into the kernel; the `TraceDecay`
-/// orchestrator itself stays in the root crate and reaches this crate through
-/// [`ports::ProjectRuntime`].
 pub(crate) mod tracedecay {
-    pub(crate) use crate::ports::project_runtime::TraceDecay;
     pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
+}
+
+/// Registers the host-install surface automation used to call on `agents`.
+///
+/// Idempotent. The composition root and this crate's test installer both call
+/// it so managed-skill export, host-config writes, and plugin-bundle files
+/// keep working after the automation split.
+pub fn register_automation_host_io() {
+    use std::path::{Path, PathBuf};
+
+    use tracedecay_automation_runtime::automation::host_io::{
+        HostIoRegistration, ManagedSkillExportReport, PluginFile,
+    };
+
+    fn export_to_agents(home: &Path, profile_root: &Path) -> Vec<ManagedSkillExportReport> {
+        crate::agents::export_managed_skills_to_agents(home, profile_root)
+            .into_iter()
+            .map(|report| ManagedSkillExportReport {
+                agent: report.agent,
+                exports: report.exports,
+                error: report.error,
+            })
+            .collect()
+    }
+
+    fn export_to_agent_hosts(
+        home: &Path,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Vec<ManagedSkillExportReport> {
+        crate::agents::export_managed_skills_to_agent_hosts(home, project_root, profile_root)
+            .into_iter()
+            .map(|report| ManagedSkillExportReport {
+                agent: report.agent,
+                exports: report.exports,
+                error: report.error,
+            })
+            .collect()
+    }
+
+    fn codex_agent_files() -> &'static [PluginFile] {
+        use std::sync::OnceLock;
+        static FILES: OnceLock<Vec<PluginFile>> = OnceLock::new();
+        FILES
+            .get_or_init(|| {
+                crate::agents::plugin_bundle::codex_agent_files()
+                    .iter()
+                    .map(|file| PluginFile {
+                        relative: file.relative,
+                        contents: file.contents,
+                    })
+                    .collect()
+            })
+            .as_slice()
+    }
+
+    fn with_write_intents(root: PathBuf, effect: &mut dyn FnMut()) {
+        crate::agents::with_host_config_write_intents(root, effect);
+    }
+
+    tracedecay_automation_runtime::automation::host_io::register(HostIoRegistration {
+        export_to_agents,
+        export_to_agent_hosts,
+        write_text: crate::agents::safe_write_text_file,
+        write_json: crate::agents::safe_write_json_file,
+        remove_host_file: crate::agents::safe_remove_host_file,
+        resolve_on_path: crate::agents::host_cli::resolve_on_path,
+        codex_agent_files,
+        with_write_intents,
+    });
 }

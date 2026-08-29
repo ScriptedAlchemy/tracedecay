@@ -8,7 +8,7 @@ use std::sync::{
 
 use serde_json::json;
 
-use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[cfg(any(unix, test))]

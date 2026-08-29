@@ -5,7 +5,7 @@ use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-pub(super) async fn await_bound_graph_runtime(
+pub(crate) async fn await_bound_graph_runtime(
     database: &Database,
     operation: &'static str,
 ) -> Result<VerifiedGraphRuntimeWeakProxyV1> {

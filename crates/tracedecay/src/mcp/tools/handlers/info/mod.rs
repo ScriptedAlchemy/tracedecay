@@ -45,13 +45,13 @@ use tracedecay_usecases::context::markdown_sections::{
     SectionEnrichment, is_markdown_file, section_summary_lines,
 };
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
-use crate::path_tree::format_compact_annotated_path_list;
+use tracedecay_mcp::path_tree::format_compact_annotated_path_list;
 use crate::project_registry::{ProjectRegistryView, render_project_registry_view};
 use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::NodeKind;
+use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::context::read_modes::{LineRange, ReadMode};
 use tracedecay_usecases::context::source_read::{
     SourceReadRequest, read_source, resolve_indexed_source_file,
@@ -63,7 +63,7 @@ use self::verified::{
 };
 
 use super::super::ToolResult;
-use super::super::definitions;
+use tracedecay_mcp::tools::definitions;
 use super::super::render::{self, Md};
 use super::project_registry::{
     ProjectRegistryContextCommand, ProjectRegistryContextOutcome, ProjectRegistryListingCommand,

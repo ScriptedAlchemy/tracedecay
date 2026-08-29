@@ -127,7 +127,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "sessions.ingest.user.codex", future = true)]
     async fn run_codex(self) -> ProviderRunOutcome {
         let stored = match read_codex_discovery_frontier(self.store).await {
             Ok(frontier) => frontier,
@@ -246,6 +246,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         }
     }
 
+    #[hotpath::measure(label = "sessions.ingest.user.cursor", future = true)]
     async fn run_cursor(self) -> ProviderRunOutcome {
         cursor_provider_run_outcome(
             try_ingest_user_cursor_sessions_with_db_bounded(
@@ -258,6 +259,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         )
     }
 
+    #[hotpath::measure(label = "sessions.ingest.user.hermes", future = true)]
     async fn run_hermes(self) -> ProviderRunOutcome {
         let outcome = hermes::ingest_user_sessions_capped_with_admission(
             self.facade,
@@ -273,6 +275,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         )
     }
 
+    #[hotpath::measure(label = "sessions.ingest.user.claude", future = true)]
     async fn run_claude(self) -> UserProviderRunResult {
         match claude_observation::ingest_user_sessions_with_admission(
             self.profile_root,
@@ -312,6 +315,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         }
     }
 
+    #[hotpath::measure(label = "sessions.ingest.user.kiro", future = true)]
     async fn run_kiro(self) -> ProviderRunOutcome {
         let Some(source) = kiro::KiroSource::new() else {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
@@ -349,6 +353,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         }
     }
 
+    #[hotpath::measure(label = "sessions.ingest.user.kimi", future = true)]
     async fn run_kimi(self) -> ProviderRunOutcome {
         let Some(source) = kimi::KimiSource::new() else {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
@@ -409,6 +414,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         }
     }
 
+    #[hotpath::measure(label = "sessions.ingest.user.opencode", future = true)]
     async fn run_opencode(self) -> ProviderRunOutcome {
         let Some(source) = opencode::OpenCodeSource::new_for_user(self.roots.to_vec()) else {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
@@ -472,6 +478,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         }
     }
 
+    #[hotpath::measure(label = "sessions.ingest.user.cline_like", future = true)]
     async fn run_cline_like(self) -> ProviderRunOutcome {
         let source = match self.candidate {
             SessionProvider::Cline => cline_like::ClineLikeSource::cline(),
@@ -515,6 +522,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         }
     }
 
+    #[hotpath::measure(label = "sessions.ingest.user.vibe", future = true)]
     async fn run_vibe(self) -> ProviderRunOutcome {
         let Some(source) = vibe::VibeSource::new() else {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);

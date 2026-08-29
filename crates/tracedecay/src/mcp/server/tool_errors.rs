@@ -2,10 +2,10 @@
 
 use serde_json::{Value, json};
 
-use tracedecay_runtime_core::errors::TraceDecayError;
 use crate::mcp::response_handles::RESPONSE_RETRIEVE_TOOL;
 use crate::mcp::tools::ToolResult;
 use crate::mcp::transport::{ErrorCode, JsonRpcResponse};
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 fn plain_text_tool_failure(text: &str) -> bool {
     text.starts_with("git error:") || text.starts_with("git diff failed:")

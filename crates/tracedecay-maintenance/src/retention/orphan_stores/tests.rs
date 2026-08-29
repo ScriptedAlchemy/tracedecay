@@ -5,17 +5,20 @@ use std::time::{Duration, Instant};
 use super::quarantine::{QuarantineRecoveryOutcome, recover_existing_store_quarantine};
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_global_db::tests::RegisteredGlobalDbTestRuntime;
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
 };
-use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 const DAY: i64 = 24 * 60 * 60;
 
 async fn open_registered_db(
     profile_root: &Path,
-) -> (RegisteredGlobalDbTestRuntime, tracedecay_global_db::RegisteredGlobalDbLeaseV1) {
+) -> (
+    RegisteredGlobalDbTestRuntime,
+    tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+) {
     // `create_dir_all` in the callers honours the ambient umask, so under a
     // group-writable umask (0002) the profile root lands at 0775 and profile
     // identity refuses it. A real profile root is always 0700; make the
@@ -182,7 +185,9 @@ fn malformed_manifest_bytes_mark_the_census_entry_unverifiable() {
 
     // Exercise the same parse the census performs, so the fixture proves the
     // production decode path — not a hand-set flag — yields unverifiable.
-    let bytes = std::fs::read(data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME)).unwrap();
+    let bytes =
+        std::fs::read(data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME))
+            .unwrap();
     let parsed = serde_json::from_slice::<StoreManifest>(&bytes).ok();
     assert!(parsed.is_none(), "fixture manifest must be unparseable");
 
@@ -590,7 +595,10 @@ async fn registered_collection_refuses_same_second_directory_replacement() {
     let displaced = profile_root.join("displaced-store");
     std::fs::rename(&data_root, &displaced).unwrap();
     std::fs::create_dir_all(&data_root).unwrap();
-    for name in ["graph.db", tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME] {
+    for name in [
+        "graph.db",
+        tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME,
+    ] {
         let source = displaced.join(name);
         let target = data_root.join(name);
         std::fs::copy(&source, &target).unwrap();
@@ -2486,7 +2494,9 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     let dir = profile_root.join("projects").join("proj_ghost_with_memory");
     std::fs::create_dir_all(&dir).unwrap();
     {
-        let connection = rusqlite::Connection::open(dir.join(tracedecay_runtime_core::config::DB_FILENAME)).unwrap();
+        let connection =
+            rusqlite::Connection::open(dir.join(tracedecay_runtime_core::config::DB_FILENAME))
+                .unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
@@ -2528,7 +2538,9 @@ mod durable_inventory {
             data_root: project_root,
             graph_db_relpath: PathBuf::from(graph_db_relpath),
             sessions_db_relpath: PathBuf::from("sessions.db"),
-            branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
+            branch_meta_relpath: PathBuf::from(
+                tracedecay_runtime_core::storage::BRANCH_META_FILENAME,
+            ),
         };
         serde_json::to_vec(&manifest).unwrap()
     }

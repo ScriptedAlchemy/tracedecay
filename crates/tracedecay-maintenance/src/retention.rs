@@ -255,7 +255,11 @@ pub async fn prune_global_retention(
     Ok(reports)
 }
 
-fn retention_error(table: &str, op: &str, err: &tracedecay_runtime_core::db::engine::Error) -> TraceDecayError {
+fn retention_error(
+    table: &str,
+    op: &str,
+    err: &tracedecay_runtime_core::db::engine::Error,
+) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!("retention {op} on '{table}' failed: {err}"),
         operation: format!("retention::{op}"),

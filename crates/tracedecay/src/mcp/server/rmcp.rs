@@ -41,11 +41,13 @@ pub(crate) struct RmcpSelectedProjectResponseAuthority {
 impl RmcpSelectedProjectResponseAuthority {
     fn request_key(id: &Value) -> tracedecay_runtime_core::errors::Result<String> {
         if id.is_null() {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                "project_route_unavailable",
-                true,
-                "selected RMCP response has no request identity",
-            ));
+            return Err(
+                tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                    "project_route_unavailable",
+                    true,
+                    "selected RMCP response has no request identity",
+                ),
+            );
         }
         serde_json::to_string(id).map_err(|error| {
             tracedecay_runtime_core::errors::TraceDecayError::project_route(
@@ -70,11 +72,13 @@ impl RmcpSelectedProjectResponseAuthority {
             )
         })?;
         if leases.contains_key(&key) {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                "project_route_unavailable",
-                true,
-                "selected RMCP response identity is already awaiting transport delivery",
-            ));
+            return Err(
+                tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                    "project_route_unavailable",
+                    true,
+                    "selected RMCP response identity is already awaiting transport delivery",
+                ),
+            );
         }
         leases.insert(key, lease);
         Ok(())
@@ -83,7 +87,8 @@ impl RmcpSelectedProjectResponseAuthority {
     pub(crate) fn take(
         &self,
         id: Option<&Value>,
-    ) -> tracedecay_runtime_core::errors::Result<Option<super::routing::SelectedProjectResponseLease>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<super::routing::SelectedProjectResponseLease>>
+    {
         let Some(id) = id else {
             return Ok(None);
         };

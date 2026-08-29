@@ -8,6 +8,10 @@ use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::*;
 use crate::daemon_contract::DaemonInvocationPayload;
 
+type ProjectOwnerAwaitFutureV1<'a, T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,
+>;
+
 fn report_profile_host_admission_bootstrap_status(
     status: Option<ProfileHostAdmissionBootstrapStatus>,
 ) {
@@ -528,9 +532,7 @@ pub(super) async fn await_project_owner_or_disconnect<T: Send>(
 fn await_project_owner_or_disconnect_inner<'a, T, O>(
     transport: &'a mut (impl McpTransport + Send),
     open: O,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,
->
+) -> ProjectOwnerAwaitFutureV1<'a, T>
 where
     T: Send,
     O: std::future::Future<Output = Result<T>> + Send + 'a,

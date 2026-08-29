@@ -44,7 +44,11 @@ fn write_control() -> FactWriteControl {
     )
 }
 
-async fn add_fact(database: &tracedecay_runtime_core::db::Database, owner: &FactOwnerV1, label: &str) {
+async fn add_fact(
+    database: &tracedecay_runtime_core::db::Database,
+    owner: &FactOwnerV1,
+    label: &str,
+) {
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(database))
         .expect("owner-bound memory application");
     let actor = ActorId::new("actor.graph-shutdown-contract").expect("contract actor identity");
@@ -95,9 +99,12 @@ async fn healthy_shutdown_joins_workers_then_closes_every_retained_graph_without
     let profile_root = temp.path().join("profile");
     let project_id = ProjectId::new("project.graph-shutdown-contract").expect("project id");
     let project_root = enrolled_root(temp.path(), &project_id);
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 53, "graph shutdown contract")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        53,
+        "graph shutdown contract",
+    )
+    .expect("daemon database scope");
 
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -167,9 +174,12 @@ async fn terminal_shutdown_refuses_an_in_flight_project_owner_transition() {
     let temp = TempDir::new().expect("shutdown transition fixture root");
     let profile_root = temp.path().join("profile");
     let project_id = ProjectId::new("project.graph-shutdown-transition").expect("project id");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 59, "graph shutdown transition")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        59,
+        "graph shutdown transition",
+    )
+    .expect("daemon database scope");
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
