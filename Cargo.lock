@@ -6392,7 +6392,6 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-domain",
  "tracedecay-graph-db",
- "tracedecay-lsp",
  "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
