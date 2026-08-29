@@ -87,11 +87,9 @@ mod host_admission_test;
 pub mod mcp;
 pub mod monitor;
 mod path_tree;
-pub mod profile_backup;
 pub mod profile_registry_maintenance;
 pub mod project_registry;
 pub mod resolution;
-pub mod retention;
 mod runtime_ports;
 pub use runtime_ports::register_runtime_ports;
 #[cfg(test)]

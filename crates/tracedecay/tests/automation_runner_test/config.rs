@@ -93,7 +93,7 @@ fn production_automation_contracts_use_leaf_owned_type_identity() {
         TypeId::of::<tracedecay_automation::backend::AgentTaskKind>(),
     );
     assert_eq!(
-        TypeId::of::<tracedecay::retention::RetentionConfig>(),
+        TypeId::of::<tracedecay_maintenance::retention::RetentionConfig>(),
         TypeId::of::<tracedecay_automation::config::RetentionConfig>(),
     );
 }

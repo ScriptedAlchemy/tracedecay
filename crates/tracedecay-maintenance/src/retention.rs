@@ -243,7 +243,7 @@ where
 }
 
 /// Applies global-database retention in one registered write transaction.
-#[hotpath::measure(label = "retention.prune.global", future = true)]
+#[hotpath::measure(label = "maintenance.retention.prune_global", future = true)]
 pub async fn prune_global_retention(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &RetentionConfig,

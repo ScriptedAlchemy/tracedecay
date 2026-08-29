@@ -260,7 +260,7 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// Filesystem sizing, `SQLite` family copy, and per-store probes run on the
 /// blocking pool so this CLI path matches the daemon-paged sibling and does
 /// not stall the async runtime.
-#[hotpath::measure(label = "retention.storage.report", future = true)]
+#[hotpath::measure(label = "maintenance.storage_report.build", future = true)]
 pub async fn build_storage_report(
     profile_root: &Path,
 ) -> tracedecay_runtime_core::errors::Result<StorageReport> {
@@ -406,8 +406,8 @@ fn sample_registered_storage(
 /// authority. Registered projects and top-level profile directories are
 /// separate cursor phases so neither the registry query nor the filesystem
 /// census performs an unbounded profile-wide scan.
-#[hotpath::measure(label = "retention.storage.report_page", future = true)]
-pub(crate) async fn build_storage_report_page_from_registered_global_db(
+#[hotpath::measure(label = "maintenance.storage_report.build_page", future = true)]
+pub async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
     global_db: &tracedecay_global_db::RegisteredGlobalDb,
     cursor: Option<&str>,
@@ -594,14 +594,14 @@ pub async fn build_project_storage_report_from_daemon(
 /// [`build_project_storage_report_from_daemon`] — pass `None` and the
 /// retention dry run reports itself unavailable rather than planning against
 /// an unproven protection set.
-#[hotpath::measure(label = "retention.storage.project_report")]
+#[hotpath::measure(label = "maintenance.storage_report.project")]
 pub fn build_project_storage_report(
     profile_root: &Path,
     project_id: &str,
     canonical_root: &Path,
     vector_readable_sources: Option<BTreeSet<CodeGenerationId>>,
 ) -> tracedecay_runtime_core::errors::Result<StorageReport> {
-    crate::storage::validate_project_id(project_id).map_err(|message| {
+    tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
         tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: message.to_owned(),
         }
@@ -642,7 +642,7 @@ fn append_project_report(
     code_generation_retention_availability: &mut Vec<CodeGenerationRetentionAvailabilityEntry>,
 ) -> tracedecay_runtime_core::errors::Result<()> {
     let data_root = profile_root.join("projects").join(project_id);
-    let graph_db_path = data_root.join(crate::config::DB_FILENAME);
+    let graph_db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     if let Some(entry) = sample_store_size(&graph_db_path) {
         stores.push(StoreSizeReportEntry {
             project_id: project_id.to_owned(),
@@ -887,7 +887,9 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if crate::storage::validate_project_id(&name).is_err() || registered_ids.contains(&name) {
+        if tracedecay_runtime_core::storage::validate_project_id(&name).is_err()
+            || registered_ids.contains(&name)
+        {
             continue;
         }
         count += 1;
@@ -901,6 +903,7 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
 /// Count every regular file under a profile root without following symlinks.
 /// Failures remain visible as a partial lower bound instead of a successful
 /// zero-size family.
+#[hotpath::measure(label = "maintenance.storage_report.scan_profile_size")]
 pub(crate) fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
     fn walk(path: &Path, total_bytes: &mut u64, unavailable_entry_count: &mut usize) {
         let entries = match std::fs::read_dir(path) {
@@ -1097,8 +1100,10 @@ mod tests {
     fn seed_graph_db(profile_root: &Path, project_id: &str) {
         let data_root = profile_root.join("projects").join(project_id);
         std::fs::create_dir_all(&data_root).unwrap();
-        let connection =
-            rusqlite::Connection::open(data_root.join(crate::config::DB_FILENAME)).unwrap();
+        let connection = rusqlite::Connection::open(
+            data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
+        )
+        .unwrap();
         connection
             .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
             .unwrap();
@@ -1272,7 +1277,7 @@ mod tests {
         let graph_db = profile_root
             .join("projects")
             .join("proj_a")
-            .join(crate::config::DB_FILENAME);
+            .join(tracedecay_runtime_core::config::DB_FILENAME);
         let before = std::fs::metadata(&graph_db).unwrap().modified().unwrap();
 
         let report = build_storage_report(&profile_root).await.unwrap();
@@ -1315,7 +1320,11 @@ mod tests {
         let data_root = profile_root.join("projects").join("proj_a");
         std::fs::create_dir_all(&data_root).unwrap();
         // Not a SQLite database at all.
-        std::fs::write(data_root.join(crate::config::DB_FILENAME), vec![9u8; 4096]).unwrap();
+        std::fs::write(
+            data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
+            vec![9u8; 4096],
+        )
+        .unwrap();
 
         let report = build_storage_report(&profile_root).await.unwrap();
 

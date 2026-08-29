@@ -47,8 +47,8 @@ use quarantine::{
     QuarantineRegistryFenceV1, QuarantineStoreOutcome, QuarantinedStore,
     quarantine_store_for_verified_collection_controlled, recover_existing_store_quarantine,
 };
-pub(crate) use unregistered_page::UnregisteredSweepCompletionV1;
-pub(crate) use unregistered_page::{
+pub use unregistered_page::UnregisteredSweepCompletionV1;
+pub use unregistered_page::{
     DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
     UnregisteredStoreSweepRequestV1, sweep_unregistered_store_page,
 };
@@ -751,7 +751,7 @@ fn reconcile_existing_quarantine(
 /// Executes registered collection in two phases: expensive inspection and a
 /// same-parent quarantine run without a writer; a short final transaction then
 /// retires the exact registry row before irreversible quarantine deletion.
-pub(crate) async fn execute_registered_collection(
+pub async fn execute_registered_collection(
     db: &RegisteredGlobalDb,
     plan: &CollectionPlan,
     profile_root: &Path,
@@ -760,7 +760,7 @@ pub(crate) async fn execute_registered_collection(
         .await
 }
 
-#[hotpath::measure(label = "retention.orphan.collect.registered", future = true)]
+#[hotpath::measure(label = "maintenance.orphan_stores.collect_registered", future = true)]
 pub(crate) async fn execute_registered_collection_controlled(
     db: &RegisteredGlobalDb,
     plan: &CollectionPlan,
@@ -844,7 +844,7 @@ pub(crate) async fn execute_registered_collection_controlled(
 
         let manifest_path = finding
             .data_root
-            .join(crate::storage::STORE_MANIFEST_FILENAME);
+            .join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let current_manifest = match read_regular_file(&manifest_path) {
             RegularFileSnapshot::Bytes(bytes) => Some(bytes),
             RegularFileSnapshot::Missing => None,
@@ -1326,13 +1326,14 @@ fn durable_database_inventory(
     let Some(bytes) = manifest_bytes else {
         return DurableDatabaseInventoryV1::Unverifiable;
     };
-    let manifest = match serde_json::from_slice::<crate::storage::StoreManifest>(bytes) {
-        Ok(manifest) => manifest,
-        Err(_) if control.completion().is_some() => {
-            return DurableDatabaseInventoryV1::Interrupted;
-        }
-        Err(_) => return DurableDatabaseInventoryV1::Unverifiable,
-    };
+    let manifest =
+        match serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes) {
+            Ok(manifest) => manifest,
+            Err(_) if control.completion().is_some() => {
+                return DurableDatabaseInventoryV1::Interrupted;
+            }
+            Err(_) => return DurableDatabaseInventoryV1::Unverifiable,
+        };
     if control.completion().is_some() {
         return DurableDatabaseInventoryV1::Interrupted;
     }
@@ -1741,8 +1742,8 @@ pub(crate) fn dir_size_bytes_controlled(
 /// Build the on-disk store census from the registry. Reads manifests and sizes
 /// directories but never mutates. Only profile-sharded stores are considered;
 /// other storage modes are not laid out under the profile root here.
-#[hotpath::measure(label = "retention.orphan.census", future = true)]
-pub(crate) async fn build_store_census(
+#[hotpath::measure(label = "maintenance.orphan_stores.census", future = true)]
+pub async fn build_store_census(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
 ) -> tracedecay_runtime_core::errors::Result<Vec<StoreCensusEntry>> {
@@ -1757,13 +1758,13 @@ pub(crate) async fn build_store_census(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct StoreCensusPageV1 {
-    pub(crate) entries: Vec<StoreCensusEntry>,
-    pub(crate) next_cursor: Option<String>,
+pub struct StoreCensusPageV1 {
+    pub entries: Vec<StoreCensusEntry>,
+    pub next_cursor: Option<String>,
 }
 
-#[hotpath::measure(label = "retention.orphan.census_page", future = true)]
-pub(crate) async fn build_store_census_page(
+#[hotpath::measure(label = "maintenance.orphan_stores.census_page", future = true)]
+pub async fn build_store_census_page(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     after_project_id: Option<&str>,
@@ -1904,14 +1905,14 @@ struct CheapStoreInspect {
 }
 
 fn inspect_store_leaf_cheap_sync(profile_root: &Path, data_root: &Path) -> CheapStoreInspect {
-    let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+    let manifest_path = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
     let expected_manifest_bytes = match read_regular_file(&manifest_path) {
         RegularFileSnapshot::Bytes(bytes) => Some(bytes),
         RegularFileSnapshot::Missing | RegularFileSnapshot::Unverifiable => None,
     };
-    let parsed_manifest = expected_manifest_bytes
-        .as_deref()
-        .map(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok());
+    let parsed_manifest = expected_manifest_bytes.as_deref().map(|bytes| {
+        serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes).ok()
+    });
     let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
     let manifest_root = parsed_manifest
         .flatten()
@@ -1938,14 +1939,15 @@ async fn inspect_store_leaf_cheap(
         if control.completion().is_some() {
             return Ok(None);
         }
-        let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+        let manifest_path =
+            data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let expected_manifest_bytes = match read_regular_file(&manifest_path) {
             RegularFileSnapshot::Bytes(bytes) => Some(bytes),
             RegularFileSnapshot::Missing | RegularFileSnapshot::Unverifiable => None,
         };
-        let parsed_manifest = expected_manifest_bytes
-            .as_deref()
-            .map(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok());
+        let parsed_manifest = expected_manifest_bytes.as_deref().map(|bytes| {
+            serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes).ok()
+        });
         let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
         let manifest_root = parsed_manifest
             .flatten()
@@ -2107,7 +2109,7 @@ pub(crate) async fn sweep_orphan_stores(
 // the on-disk payload it pointed at. The owner's audit measured this class at
 // 322 directories / 655 MB in one profile. This section is a bottom-up
 // counterpart: scan `profile_root/projects/*` (the layout every
-// profile-sharded store uses, see [`crate::storage::profile_sharded_data_root`])
+// profile-sharded store uses, see [`tracedecay_runtime_core::storage::profile_sharded_data_root`])
 // and flag any leaf directory whose name is not a currently-registered
 // `project_id`.
 
@@ -2122,18 +2124,18 @@ pub struct UnregisteredStoreFinding {
     pub age_secs: i64,
     pub size_bytes: u64,
     /// Payload mtime fence captured at census time; re-verified before delete.
-    pub(crate) expected_payload_mtime_secs: i64,
+    pub expected_payload_mtime_secs: i64,
     /// Stable data-root generation captured with the inspection finding.
-    pub(crate) expected_data_root_fence: StoreDirectoryFence,
+    pub expected_data_root_fence: StoreDirectoryFence,
     /// Exact no-follow inventory/content identity captured at census time.
-    pub(crate) expected_content_fence: StoreContentFence,
+    pub expected_content_fence: StoreContentFence,
 }
 
 /// Test-only one-page census convenience. Production callers use
 /// [`sweep_unregistered_store_page`] and persist its cursor between bounded
 /// daemon admissions.
 #[cfg(test)]
-pub(crate) async fn census_unregistered_project_dirs(
+pub async fn census_unregistered_project_dirs(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     now: i64,
@@ -2216,7 +2218,10 @@ pub(crate) async fn execute_unregistered_collection(
     .await
 }
 
-#[hotpath::measure(label = "retention.orphan.collect.unregistered", future = true)]
+#[hotpath::measure(
+    label = "maintenance.orphan_stores.collect_unregistered",
+    future = true
+)]
 pub(crate) async fn execute_unregistered_collection_controlled(
     db: &RegisteredGlobalDb,
     plan: &UnregisteredCollectionPlan,
@@ -2243,7 +2248,8 @@ pub(crate) async fn execute_unregistered_collection_controlled(
             .join("projects")
             .join(&finding.project_dir_name);
         if expected != finding.data_root
-            || crate::storage::validate_project_id(&finding.project_dir_name).is_err()
+            || tracedecay_runtime_core::storage::validate_project_id(&finding.project_dir_name)
+                .is_err()
         {
             outcome.errors.push(CollectionFailure {
                 store_id: finding.project_dir_name.clone(),
@@ -2326,7 +2332,7 @@ pub(crate) async fn execute_unregistered_collection_controlled(
         // `.db` family is inspected directly and remains fail-closed on error.
         let manifest_path = finding
             .data_root
-            .join(crate::storage::STORE_MANIFEST_FILENAME);
+            .join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let durable_check = match read_regular_file(&manifest_path) {
             RegularFileSnapshot::Bytes(manifest_bytes) => {
                 // An unregistered store has no registry graph scopes by
@@ -2623,8 +2629,8 @@ fn collect_sqlite_candidates(
 /// [`sweep_unregistered_store_page`] directly so it can persist the returned
 /// cursor across maintenance cadences; Doctor deliberately receives one
 /// bounded preview rather than a hidden full-profile traversal.
-#[hotpath::measure(label = "retention.orphan.sweep_unregistered", future = true)]
-pub(crate) async fn sweep_unregistered_stores(
+#[hotpath::measure(label = "maintenance.orphan_stores.sweep_unregistered", future = true)]
+pub async fn sweep_unregistered_stores(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     retention_secs: i64,

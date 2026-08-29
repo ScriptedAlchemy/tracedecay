@@ -379,7 +379,7 @@ async fn dispatch_admin_cli(
                                 .to_owned(),
                         });
                     }
-                    crate::retention::storage_report::build_project_storage_report_from_daemon(
+                    tracedecay_maintenance::retention::storage_report::build_project_storage_report_from_daemon(
                         profile_root,
                         &project_id,
                         &project_root,
@@ -387,7 +387,7 @@ async fn dispatch_admin_cli(
                     .await?
                 }
                 (None, None) => {
-                    crate::retention::storage_report::build_storage_report_page_from_registered_global_db(
+                    tracedecay_maintenance::retention::storage_report::build_storage_report_page_from_registered_global_db(
                         profile_root,
                         global_db,
                         cursor.as_deref(),

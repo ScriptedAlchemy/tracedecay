@@ -672,12 +672,15 @@ pub fn storage_family_read(findings: Vec<DoctorStorageFindingV1>) -> DoctorStora
 }
 
 fn orphan_store_findings_from_census(
-    census: &[crate::retention::orphan_stores::StoreCensusEntry],
+    census: &[tracedecay_maintenance::retention::orphan_stores::StoreCensusEntry],
     retention_secs: i64,
     now: i64,
 ) -> DoctorStorageFamilyReadV1 {
-    let classified = crate::retention::orphan_stores::classify_stores(census, now);
-    let plan = crate::retention::orphan_stores::plan_collection(classified, retention_secs);
+    let classified = tracedecay_maintenance::retention::orphan_stores::classify_stores(census, now);
+    let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
+        classified,
+        retention_secs,
+    );
     storage_family_read(
         plan.collect
             .iter()
@@ -700,7 +703,7 @@ pub async fn collect_unregistered_store_findings(
     retention_secs: i64,
     now: i64,
 ) -> DoctorStorageFamilyReadV1 {
-    let report = crate::retention::orphan_stores::sweep_unregistered_stores(
+    let report = tracedecay_maintenance::retention::orphan_stores::sweep_unregistered_stores(
         global_db,
         profile_root,
         retention_secs,
@@ -927,13 +930,13 @@ async fn collect_over_budget_store_findings(
 }
 
 fn incident_debris_findings_from_census(
-    census: &[crate::retention::orphan_stores::StoreCensusEntry],
+    census: &[tracedecay_maintenance::retention::orphan_stores::StoreCensusEntry],
     profile_root: &Path,
     observed_at_secs: i64,
 ) -> DoctorStorageFamilyReadV1 {
     let mut findings = Vec::new();
     for entry in census {
-        let Ok(scan) = crate::retention::incident_debris::scan_incident_debris(
+        let Ok(scan) = tracedecay_maintenance::retention::incident_debris::scan_incident_debris(
             entry,
             profile_root,
             observed_at_secs,
@@ -1399,7 +1402,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     return (None, DoctorStorageFamilyReadV1::Unknown);
                 }
                 let (registered_census, unregistered) = tokio::join!(
-                    crate::retention::orphan_stores::build_store_census(
+                    tracedecay_maintenance::retention::orphan_stores::build_store_census(
                         registry.as_ref(),
                         &profile_root,
                     ),

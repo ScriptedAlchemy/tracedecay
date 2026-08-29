@@ -137,6 +137,7 @@ struct VerifiedCompleteProfileBackup {
     manifest_sha256: String,
 }
 
+#[hotpath::measure(label = "maintenance.profile_backup.create")]
 pub fn create_complete_profile_backup(
     profile_root: &Path,
     backup_parent: &Path,
@@ -208,6 +209,7 @@ pub fn create_complete_profile_backup(
     Ok(final_root)
 }
 
+#[hotpath::measure(label = "maintenance.profile_backup.rehearse")]
 pub fn rehearse_complete_profile_backup(
     backup_root: &Path,
     restore_root: &Path,
@@ -678,6 +680,7 @@ pub fn load_and_verify_backup(
     Ok(load_verified_backup(backup_root)?.manifest)
 }
 
+#[hotpath::measure(label = "maintenance.profile_backup.verify")]
 fn load_verified_backup(
     backup_root: &Path,
 ) -> Result<VerifiedCompleteProfileBackup, ProfileBackupError> {

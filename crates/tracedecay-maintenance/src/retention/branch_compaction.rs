@@ -1,6 +1,6 @@
 //! Free-page compaction for tracked branch databases (plan 38 §6).
 //!
-//! [`crate::daemon::git_watch::store_maintenance::run_project_compaction`] and
+//! Daemon `git_watch::store_maintenance::run_project_compaction` and
 //! `run_global_compaction` already compact the live graph store and
 //! `global.db` off the hot path, through the daemon's writer-actor runtime.
 //! Every *other* tracked branch gets its own `SQLite` family under
@@ -43,13 +43,43 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
+use serde::{Deserialize, Serialize};
 use tracedecay_application::storage::compaction::CompactionTriggerPolicyV1;
 use tracedecay_application::storage::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1};
 use tracedecay_application::storage::telemetry::StoreSizeSampleV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_runtime_core::sqlite_read_snapshot::{BOUNDED_PROBE_BUSY_TIMEOUT, pragma_u64};
 
-use crate::config::CompactionThresholdConfig;
+/// Incremental-vacuum compaction trigger consumed by this pass and by daemon
+/// owner config. Threads [`CompactionTriggerPolicyV1`] through configured
+/// thresholds: the pass samples a store's free-page ratio and, when this
+/// threshold is met, runs a bounded incremental vacuum off the hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CompactionThresholdConfig {
+    /// Free-page ratio at or above which an incremental vacuum is scheduled.
+    pub free_page_ratio_threshold: f64,
+    /// Minimum reclaimable free bytes below which compaction is not worth it.
+    #[serde(default)]
+    pub minimum_reclaimable_bytes: u64,
+    /// Upper bound on freelist pages reclaimed per tick, keeping each vacuum
+    /// bounded and off the hot path.
+    #[serde(default = "default_compaction_max_pages_per_tick")]
+    pub max_pages_per_tick: u32,
+}
+
+fn default_compaction_max_pages_per_tick() -> u32 {
+    1024
+}
+
+impl Default for CompactionThresholdConfig {
+    fn default() -> Self {
+        Self {
+            free_page_ratio_threshold: 0.25,
+            minimum_reclaimable_bytes: 64 * 1024 * 1024,
+            max_pages_per_tick: default_compaction_max_pages_per_tick(),
+        }
+    }
+}
 
 /// `PRAGMA auto_vacuum` mode in which `incremental_vacuum` actually reclaims
 /// pages. `0` is `NONE` and `1` is `FULL`; only `2` (`INCREMENTAL`) responds.
@@ -119,6 +149,7 @@ pub struct BranchCompactionReport {
 /// not corrupt anything (`SQLite` locking is sound across processes) but it
 /// would put this pass in contention with the daemon's own writer actor over
 /// the one file it was written to stay away from.
+#[hotpath::measure(label = "maintenance.branch_compaction.select")]
 pub fn select_branch_db_candidates(
     tracedecay_dir: &Path,
     meta: &tracedecay_runtime_core::branch_meta::BranchMeta,
@@ -155,7 +186,7 @@ pub fn select_branch_db_candidates(
 /// Runs bounded incremental-vacuum compaction over every candidate whose
 /// free-page ratio crosses `config`'s threshold. Each file is handled
 /// independently: one busy or failing file never blocks the rest.
-#[hotpath::measure(label = "retention.branch.compact")]
+#[hotpath::measure(label = "maintenance.branch_compaction.compact")]
 pub fn compact_branch_databases(
     candidates: &[BranchDbCandidate],
     config: &CompactionThresholdConfig,
@@ -325,7 +356,7 @@ mod tests {
         branches.insert(
             "main".to_string(),
             tracedecay_runtime_core::branch_meta::BranchEntry {
-                db_file: crate::config::DB_FILENAME.to_string(),
+                db_file: tracedecay_runtime_core::config::DB_FILENAME.to_string(),
                 parent: None,
                 created_at: "0".to_string(),
                 last_synced_at: "0".to_string(),
@@ -348,7 +379,9 @@ mod tests {
             default_branch: "main".to_string(),
             branches,
         };
-        let active = dir.path().join(crate::config::DB_FILENAME);
+        let active = dir
+            .path()
+            .join(tracedecay_runtime_core::config::DB_FILENAME);
         let candidates = select_branch_db_candidates(dir.path(), &meta, &active);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].branch, "feature");
@@ -504,7 +537,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real");
         std::fs::create_dir_all(&real).unwrap();
-        std::fs::write(real.join(crate::config::DB_FILENAME), b"").unwrap();
+        std::fs::write(real.join(tracedecay_runtime_core::config::DB_FILENAME), b"").unwrap();
 
         let linked = dir.path().join("linked");
         #[cfg(unix)]
@@ -516,7 +549,7 @@ mod tests {
         branches.insert(
             "main".to_string(),
             tracedecay_runtime_core::branch_meta::BranchEntry {
-                db_file: crate::config::DB_FILENAME.to_string(),
+                db_file: tracedecay_runtime_core::config::DB_FILENAME.to_string(),
                 parent: None,
                 created_at: "0".to_string(),
                 last_synced_at: "0".to_string(),
@@ -531,8 +564,11 @@ mod tests {
 
         // The mounted handle names the file through `real/`; branch-meta
         // rebuilds it through the symlinked `linked/`.
-        let candidates =
-            select_branch_db_candidates(&linked, &meta, &real.join(crate::config::DB_FILENAME));
+        let candidates = select_branch_db_candidates(
+            &linked,
+            &meta,
+            &real.join(tracedecay_runtime_core::config::DB_FILENAME),
+        );
 
         assert!(
             candidates.is_empty(),

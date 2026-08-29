@@ -1390,7 +1390,7 @@ fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
 
 fn global_table_retention_config(
     config: &crate::config::RetentionConfig,
-) -> crate::retention::RetentionConfig {
+) -> tracedecay_maintenance::retention::RetentionConfig {
     let (session_messages_days, lcm_raw_messages_days) = if config.session_lcm.enabled {
         (
             config.session_lcm.dedupe_projected_after_days,
@@ -1399,7 +1399,7 @@ fn global_table_retention_config(
     } else {
         (None, None)
     };
-    crate::retention::RetentionConfig {
+    tracedecay_maintenance::retention::RetentionConfig {
         // The root retention tree has no analytics-event window. Disabling
         // this legacy table is the only mapping that does not invent policy.
         analytics_events_days: None,
@@ -1423,7 +1423,12 @@ async fn maybe_run_global_retention(
     let global_config = global_table_retention_config(config);
     let Some(retention) = administration
         .try_with_writer(|| async {
-            crate::retention::prune_global_retention(database, &global_config, now_secs).await
+            tracedecay_maintenance::retention::prune_global_retention(
+                database,
+                &global_config,
+                now_secs,
+            )
+            .await
         })
         .await
     else {

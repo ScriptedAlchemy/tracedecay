@@ -173,7 +173,7 @@ fn interrupted_remove_error() -> std::io::Error {
 /// Atomically moves `data_root` to a unique sibling, persists a prepared
 /// journal, then proves its exact content inventory. The caller performs the
 /// short registry transaction only after this potentially expensive hashing.
-#[hotpath::measure(label = "retention.orphan.quarantine.apply")]
+#[hotpath::measure(label = "maintenance.orphan_stores.quarantine")]
 pub(super) fn quarantine_store_for_verified_collection_controlled(
     profile_root: &Path,
     data_root: &Path,
@@ -471,7 +471,7 @@ pub(super) fn recover_existing_store_quarantine(
 /// Returns the original project id encoded in an orphan-store quarantine name.
 pub(super) fn quarantined_project_id(name: &str) -> Option<String> {
     let project_id = quarantine_original_name(name)?;
-    crate::storage::validate_project_id(project_id).ok()?;
+    tracedecay_runtime_core::storage::validate_project_id(project_id).ok()?;
     Some(project_id.to_owned())
 }
 

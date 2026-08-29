@@ -47,6 +47,7 @@ hotpath = [
     "tracedecay-hooks/hotpath",
     "tracedecay-host-integration/hotpath",
     "tracedecay-lsp/hotpath",
+    "tracedecay-maintenance/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-sessions/hotpath",
@@ -65,6 +66,7 @@ hotpath-alloc = [
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-host-integration/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-maintenance/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
@@ -83,6 +85,7 @@ hotpath-cpu = [
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-host-integration/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-maintenance/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
@@ -169,6 +172,7 @@ tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
