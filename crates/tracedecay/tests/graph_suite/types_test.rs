@@ -1,4 +1,7 @@
-use tracedecay::types::*;
+use tracedecay_domain::code_intelligence::{
+    BuildContextOptions, Edge, EdgeKind, ExtractionResult, Node, NodeKind, OutputFormat,
+    TraversalDirection, TraversalOptions, UnresolvedRef, Visibility, generate_node_id,
+};
 
 fn make_node(id: &str, name: &str) -> Node {
     Node {

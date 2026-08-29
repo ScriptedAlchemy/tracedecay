@@ -13,7 +13,7 @@ use crate::context::{
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::path_tree::format_compact_path_list;
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
-use crate::types::{EdgeKind, NodeKind};
+use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 
 pub(super) const GRAPH_RELATION_READ_LIMIT: usize = 50_000;
 

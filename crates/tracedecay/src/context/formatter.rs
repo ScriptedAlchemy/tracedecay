@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use crate::types::TaskContext;
+use tracedecay_domain::code_intelligence::TaskContext;
 
 pub(crate) const CODE_CONTEXT_HEADING: &str = "## Code Context";
 pub(crate) const CONTEXT_MEMORY_MATCHES_HEADING: &str = "### Memory Matches";
@@ -192,7 +192,7 @@ fn markdown_fence_language(file_path: &str) -> &'static str {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::types::*;
+    use tracedecay_domain::code_intelligence::{CodeBlock, Node, NodeKind, Subgraph, Visibility};
 
     fn make_test_context() -> TaskContext {
         TaskContext {

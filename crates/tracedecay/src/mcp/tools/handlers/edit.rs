@@ -555,7 +555,7 @@ pub(super) async fn handle_rename_symbol(
 
 /// Human-readable markdown for a move result: the outcome line, applied
 /// imports, the impact report (the centerpiece), and the preview diff.
-fn move_result_md(result: &crate::types::MoveResult) -> String {
+fn move_result_md(result: &tracedecay_application::source_edit::MoveResult) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let verb = if result.dry_run {
@@ -631,7 +631,7 @@ mod tests {
 
     use super::*;
     use crate::tracedecay::TraceDecayOpenOptions;
-    use crate::types::EditResult;
+    use tracedecay_application::source_edit::EditResult;
     use tracedecay_application::source_edit::{
         SourceEditSurfaceOutcomeV1, SourceEditSurfaceResultV1,
     };

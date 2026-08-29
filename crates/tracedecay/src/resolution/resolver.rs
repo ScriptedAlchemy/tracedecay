@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
 
-use crate::types::*;
+use tracedecay_domain::code_intelligence::{
+    Edge, EdgeKind, Node, NodeKind, ResolutionResult, ResolvedRef, UnresolvedRef, Visibility,
+};
 
 /// Names that are too common to resolve across files reliably.
 /// These are standard library types, trait methods, and ubiquitous constructors

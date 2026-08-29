@@ -12,7 +12,7 @@
 //! without the mock, and without a source copy that can silently drift from
 //! the crate it was copied out of.
 
-use tracedecay::types::{Edge, EdgeKind, ExtractionResult, Node, NodeKind};
+use tracedecay_domain::code_intelligence::{Edge, EdgeKind, ExtractionResult, Node, NodeKind};
 use tracedecay_code_extraction::{JavaExtractor, KotlinExtractor, LanguageExtractor};
 
 /// 0-based tree-sitter row of the first source line containing `needle`.

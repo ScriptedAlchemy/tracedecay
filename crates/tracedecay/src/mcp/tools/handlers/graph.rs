@@ -22,7 +22,7 @@ use tracedecay_domain::{ExactClass, RelationEdgeKindV1};
 use crate::context::CONTEXT_SEEN_NODE_IDS_LABEL;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
-use crate::types::{EdgeKind, NodeKind};
+use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};

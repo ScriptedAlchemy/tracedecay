@@ -58,7 +58,7 @@ use tracedecay_lsp::analyzer::broker::{
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
-use crate::types::NodeKind;
+use tracedecay_domain::code_intelligence::NodeKind;
 
 use super::super::ToolResult;
 use super::super::render;

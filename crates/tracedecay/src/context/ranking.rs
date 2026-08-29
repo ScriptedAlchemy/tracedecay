@@ -1,4 +1,4 @@
-use crate::types::{NodeKind, SearchResult, Visibility};
+use tracedecay_domain::code_intelligence::{NodeKind, SearchResult, Visibility};
 
 /// Boost factor based on node kind.
 pub fn kind_boost(kind: &NodeKind) -> f64 {
@@ -107,7 +107,7 @@ pub fn rerank_candidates(candidates: &mut [SearchResult]) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::types::Node;
+    use tracedecay_domain::code_intelligence::Node;
 
     fn make_result(kind: NodeKind, vis: Visibility, path: &str, score: f64) -> SearchResult {
         SearchResult {

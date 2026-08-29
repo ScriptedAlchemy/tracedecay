@@ -12,7 +12,7 @@ use same_file::Handle;
 use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use crate::types::*;
+use tracedecay_application::source_edit::{EditResult, InsertResult, MultiEditResult};
 
 use super::super::TraceDecay;
 

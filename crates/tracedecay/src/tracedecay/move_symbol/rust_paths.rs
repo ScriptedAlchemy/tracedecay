@@ -5,7 +5,7 @@
 
 use tree_sitter::Parser;
 
-use crate::types::{NodeKind, Visibility};
+use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
 
 /// Item kinds that a `use` statement can bring into scope — the ones a moved
 /// body could depend on across a module boundary.

@@ -26,7 +26,7 @@ fn assert_ready_verified_generation(body: &Value) {
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::tracedecay::TraceDecay;
-use tracedecay::types::{Edge, EdgeKind, FileRecord, Node, NodeKind, Visibility};
+use tracedecay_domain::code_intelligence::{Edge, EdgeKind, FileRecord, Node, NodeKind, Visibility};
 use tracedecay_application::{
     CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestAdmission, RequestContext,
     ResolvedScope,

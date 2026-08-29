@@ -24,7 +24,7 @@ use crate::graph::health::{
     dependency_depth, depth_score, dsm_clusters, gini_coefficient, gini_label,
 };
 use crate::tracedecay::TraceDecay;
-use crate::types::NodeKind;
+use tracedecay_domain::code_intelligence::NodeKind;
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};

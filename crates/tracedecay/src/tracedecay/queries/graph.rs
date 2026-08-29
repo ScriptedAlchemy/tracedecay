@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracedecay_runtime_core::errors::Result;
 use crate::graph::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
-use crate::types::NodeKind;
+use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_application::RequestContext;
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{

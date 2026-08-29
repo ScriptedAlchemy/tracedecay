@@ -28,7 +28,7 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::PrivateStoreIo;
-use tracedecay::types::{Node, NodeKind, Visibility};
+use tracedecay_domain::code_intelligence::{Node, NodeKind, Visibility};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::host_admission::{HostAdmissionOutcome, HostAdmissionScope};
 
