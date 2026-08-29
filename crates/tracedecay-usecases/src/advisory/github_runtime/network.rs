@@ -19,6 +19,9 @@ use super::dto::{
     GraphQlCommentPageNodeV1, GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1,
     RestReviewV1, valid_full_git_oid,
 };
+use super::protocol::{
+    GitHubLinkPageScopeV1, header, link_next_page, rate_limit_checkpoint, retry_after_at,
+};
 use super::{
     GitHubGraphQlReadRequestV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkOutcomeV1,
     GitHubReadNetworkResponseV1, GitHubReadNetworkStatusV1, GitHubReadOnlyNetworkAuthorityV1,
@@ -83,6 +86,7 @@ query TraceDecayGitHubReviewThreads(
 const MAX_REVIEW_ITEMS_V1: usize = 2_000;
 const MAX_NESTED_COMMENT_PAGES_V1: usize = 20;
 const MAX_REVIEW_SCAN_PAGES_V1: u32 = 20;
+const GITHUB_REVIEW_REST_PAGE_SIZE_V1: usize = 100;
 const MAX_CI_RESPONSE_BYTES_V1: usize = 2 * 1024 * 1024;
 const MAX_GITHUB_READ_DURATION_V1: Duration = Duration::from_secs(15);
 
@@ -857,14 +861,16 @@ impl GitHubReadOnlyClientV1 {
         let Some(page) = page_from_cursor(request.resume.cursor.as_ref()) else {
             return GitHubReadNetworkOutcomeV1::Unavailable;
         };
-        let suffix = match request.descriptor.operation {
-            GitHubReviewReadOperationV1::RestGetPullRequest => String::new(),
-            GitHubReviewReadOperationV1::RestListPullRequestReviews => {
-                format!("/reviews?per_page=100&page={page}")
-            }
-            GitHubReviewReadOperationV1::RestListPullRequestReviewComments => {
-                format!("/comments?per_page=100&page={page}")
-            }
+        let (suffix, link_page) = match request.descriptor.operation {
+            GitHubReviewReadOperationV1::RestGetPullRequest => (String::new(), None),
+            GitHubReviewReadOperationV1::RestListPullRequestReviews => (
+                format!("/reviews?per_page={GITHUB_REVIEW_REST_PAGE_SIZE_V1}&page={page}"),
+                Some(page),
+            ),
+            GitHubReviewReadOperationV1::RestListPullRequestReviewComments => (
+                format!("/comments?per_page={GITHUB_REVIEW_REST_PAGE_SIZE_V1}&page={page}"),
+                Some(page),
+            ),
             GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads => {
                 return GitHubReadNetworkOutcomeV1::Unavailable;
             }
@@ -886,6 +892,7 @@ impl GitHubReadOnlyClientV1 {
                 .then_some(request.resume.etag.as_ref())
                 .flatten(),
             GitHubReadPermissionV1::PullRequests,
+            link_page,
         );
         if !request_context_admitted(context)
             || matches!(
@@ -1216,6 +1223,7 @@ impl GitHubReadOnlyClientV1 {
         url: &str,
         etag: Option<&GitHubReviewEtagV1>,
         permission: GitHubReadPermissionV1,
+        link_page: Option<u32>,
     ) -> HttpResponseV1 {
         let authorization = self
             .credential
@@ -1239,7 +1247,16 @@ impl GitHubReadOnlyClientV1 {
         // (and 304 etag-cache validation) after that send.
         let response = request.call();
         hotpath::measure_block!("usecases.github_network.rest_get", {
-            decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+            decode_ureq_response(
+                response,
+                MAX_GITHUB_READ_RESPONSE_BYTES_V1,
+                link_page.map(|current_page| GitHubLinkPageScopeV1 {
+                    rest_base_uri: &self.config.rest_base_uri,
+                    endpoint: url,
+                    current_page,
+                    page_size: GITHUB_REVIEW_REST_PAGE_SIZE_V1,
+                }),
+            )
         })
     }
 
@@ -1260,8 +1277,10 @@ impl GitHubReadOnlyClientV1 {
             request = request.header("Authorization", authorization.as_str());
         }
         let response = request.send_json(payload);
+        // GraphQL pagination is cursor-based inside the response body; a Link
+        // header on this route is never a continuation and is not consulted.
         hotpath::measure_block!("usecases.github_network.graphql_post", {
-            decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+            decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1, None)
         })
     }
 }
@@ -1349,8 +1368,10 @@ impl GitHubCiReadOnlyClientV1 {
             request = request.header("If-None-Match", etag.as_str());
         }
         let response = request.call();
+        // CI paging is driven by the caller's explicit page parameter and
+        // bounded page counts; the provider Link header is not consulted.
         hotpath::measure_block!("usecases.github_network.ci_get", {
-            decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+            decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1, None)
         })
     }
 
@@ -1767,6 +1788,7 @@ fn network_failure(failure: HttpResponseV1) -> GitHubReadNetworkOutcomeV1 {
 fn decode_ureq_response(
     response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     maximum: usize,
+    link_scope: Option<GitHubLinkPageScopeV1<'_>>,
 ) -> HttpResponseV1 {
     let Ok(mut response) = response else {
         return HttpResponseV1::Unavailable;
@@ -1776,7 +1798,13 @@ fn decode_ureq_response(
         200 => {
             let etag = header(response.headers(), "etag")
                 .and_then(|value| GitHubReviewEtagV1::new(value).ok());
-            let next_page = next_page(response.headers());
+            let next_page = match link_scope {
+                Some(scope) => match link_next_page(response.headers(), &scope) {
+                    Ok(next_page) => next_page,
+                    Err(()) => return HttpResponseV1::Unavailable,
+                },
+                None => None,
+            };
             let Ok(body) = hotpath::measure_block!("usecases.github_network.body_decode", {
                 response
                     .body_mut()
@@ -1864,34 +1892,6 @@ fn page_from_cursor(cursor: Option<&GitHubReviewCursorV1>) -> Option<u32> {
     }
 }
 
-fn next_page(headers: &ureq::http::HeaderMap) -> Option<u32> {
-    let link = header(headers, "link")?;
-    let next = link
-        .split(',')
-        .find(|entry| entry.contains("rel=\"next\""))?;
-    let url = next.split_once('<')?.1.split_once('>')?.0;
-    Url::parse(url)
-        .ok()?
-        .query_pairs()
-        .find_map(|(key, value)| (key == "page").then(|| value.parse::<u32>().ok()).flatten())
-}
-
-fn rate_limit_checkpoint(
-    headers: &ureq::http::HeaderMap,
-) -> Option<GitHubReviewRateLimitCheckpointV1> {
-    let checkpoint = GitHubReviewRateLimitCheckpointV1 {
-        limit: header(headers, "x-ratelimit-limit")?.parse().ok()?,
-        remaining: header(headers, "x-ratelimit-remaining")?.parse().ok()?,
-        reset_at: UtcMicros(
-            header(headers, "x-ratelimit-reset")?
-                .parse::<i64>()
-                .ok()?
-                .checked_mul(1_000_000)?,
-        ),
-    };
-    checkpoint.validate().is_ok().then_some(checkpoint)
-}
-
 fn retry_after_checkpoint(
     primary: Option<&GitHubReviewRateLimitCheckpointV1>,
     retry_at: Option<UtcMicros>,
@@ -1904,19 +1904,6 @@ fn retry_after_checkpoint(
         reset_at,
     };
     checkpoint.validate().is_ok().then_some(checkpoint)
-}
-
-fn retry_after_at(headers: &ureq::http::HeaderMap) -> Option<UtcMicros> {
-    const MAX_RETRY_AFTER_SECONDS_V1: i64 = 24 * 60 * 60;
-    let delay_seconds = header(headers, "retry-after")?.parse::<i64>().ok()?;
-    if !(0..=MAX_RETRY_AFTER_SECONDS_V1).contains(&delay_seconds) {
-        return None;
-    }
-    Some(UtcMicros(
-        now_micros()
-            .0
-            .checked_add(delay_seconds.checked_mul(1_000_000)?)?,
-    ))
 }
 
 fn merge_rate_limit(
@@ -1939,13 +1926,6 @@ fn parse_bounded<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     (bytes.len() <= MAX_GITHUB_READ_RESPONSE_BYTES_V1)
         .then(|| serde_json::from_slice(bytes).ok())
         .flatten()
-}
-
-fn header(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }
 
 fn valid_path_segment(value: &str) -> bool {
@@ -2214,6 +2194,7 @@ mod tests {
             &format!("http://{address}/fixture"),
             None,
             GitHubReadPermissionV1::PullRequests,
+            None,
         );
         server.join().unwrap()
     }
@@ -2255,6 +2236,7 @@ mod tests {
             &format!("http://{address}/fixture"),
             None,
             GitHubReadPermissionV1::PullRequests,
+            None,
         );
         server.join().unwrap();
 

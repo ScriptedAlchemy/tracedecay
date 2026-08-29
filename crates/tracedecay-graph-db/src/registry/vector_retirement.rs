@@ -283,6 +283,16 @@ fn summarize_page(
     )
 }
 
+/// Summarize census records through the acted-on cursor.
+///
+/// Store pages are XOR-valid: a terminal page carries `complete_receipt` and
+/// no continuation. When the action is the last record of that page,
+/// [`continuation_after_action`] is `None` and `..=action_index` covers every
+/// record, so this keeps `page.complete_receipt` — the same semantics
+/// [`summarize_page`] already has for non-action pages. A live/configured
+/// `Retained` head then records as Observed instead of looking like an
+/// incomplete census. A remaining continuation is a partial page, so the
+/// receipt stays unset.
 fn summarize_through_action(
     page: &tracedecay_store::SemanticVectorStageCensusPage,
     cursor: &SemanticVectorStageCensusCursor,
@@ -296,10 +306,16 @@ fn summarize_through_action(
             message: "semantic vector retention action escaped its census page".to_owned(),
         });
     };
+    let continuation = continuation_after_action(page, cursor);
+    let complete_receipt = if continuation.is_none() {
+        page.complete_receipt.clone()
+    } else {
+        None
+    };
     Ok(summarize_records(
         &page.records[..=action_index],
-        continuation_after_action(page, cursor),
-        None,
+        continuation,
+        complete_receipt,
         page,
     ))
 }
@@ -609,5 +625,242 @@ fn converge_retired_cleanup(
         }
         GraphRetiredReplayCleanupFinalizeOutcomeV1::Conflict
         | GraphRetiredReplayCleanupFinalizeOutcomeV1::Missing => Err(GraphDbError::Conflict),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::{VectorGenerationIdV1, canonical_sha256};
+    use tracedecay_store::{
+        GraphDependencyGenerationIdentityV1, GraphGenerationIdV1, GraphNamespaceV1,
+        GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
+        GraphPublicationKeyV1, SemanticEmbeddingProjectionDigestV1, SemanticModelArtifactDigestV1,
+        SemanticPrivacyDomainDigestV1, SemanticProjectionManifestDigestV1, SemanticVectorBuildId,
+        SemanticVectorCheckpointDigest, SemanticVectorChunkManifestDigest,
+        SemanticVectorCodeScopeHash, SemanticVectorPlanDigest, SemanticVectorProjectCensusReceipt,
+        SemanticVectorReconstructionRecipe, SemanticVectorSourceDependencyV1,
+        SemanticVectorSourceGenerationId, SemanticVectorSourceManifestDigest,
+        SemanticVectorStageCensusCounts, SemanticVectorStageCensusCursor,
+        SemanticVectorStageCensusPage, SemanticVectorStageCensusRecord,
+        SemanticVectorStageCensusRevision, SemanticVectorStageKey, SemanticVectorStagePlan,
+        SemanticVectorStageRecord, SemanticVectorStageState, SemanticVectorWriterFence,
+        StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
+    };
+
+    use super::summarize_through_action;
+
+    fn fixture_shard() -> StoreShardIdV1 {
+        StoreShardIdV1::project(
+            tracedecay_store::BrainId::new("brain.vector-retirement").unwrap(),
+            tracedecay_store::UserProfileId::new("profile.vector-retirement").unwrap(),
+            tracedecay_store::ProjectId::new("project.vector-retirement").unwrap(),
+        )
+    }
+
+    fn fixture_revision() -> SemanticVectorStageCensusRevision {
+        SemanticVectorStageCensusRevision::new(3).unwrap()
+    }
+
+    fn sha256_repeat(digit: char) -> String {
+        format!("sha256:{}", digit.to_string().repeat(64))
+    }
+
+    fn dummy_stage(state: SemanticVectorStageState) -> SemanticVectorStageRecord {
+        let shard_id = fixture_shard();
+        let projection = GraphProjectionIdentityV1 {
+            shard_id: shard_id.clone(),
+            namespace: GraphNamespaceV1::new("semantic-vector").unwrap(),
+            projection: GraphProjectionIdV1::new("chunks").unwrap(),
+        };
+        SemanticVectorStageRecord {
+            plan: SemanticVectorStagePlan {
+                key: SemanticVectorStageKey {
+                    projection: projection.clone(),
+                    build_id: SemanticVectorBuildId::new("build.fixture").unwrap(),
+                    plan_digest: SemanticVectorPlanDigest::new(sha256_repeat('1')).unwrap(),
+                },
+                semantic_generation_id: VectorGenerationIdV1::new(
+                    canonical_sha256(&"generation.fixture").unwrap(),
+                ),
+                base_generation: None,
+                publication_key: GraphPublicationKeyV1::new(
+                    projection.clone(),
+                    GraphGenerationIdV1::new("generation.fixture").unwrap(),
+                    GraphPublicationIdempotencyKeyV1::new("publication.fixture").unwrap(),
+                ),
+                source_scope: shard_id.clone(),
+                code_scope_hash: SemanticVectorCodeScopeHash::new("a".repeat(64)).unwrap(),
+                source_generation: SemanticVectorSourceGenerationId::new("source.generation")
+                    .unwrap(),
+                source_dependency: SemanticVectorSourceDependencyV1 {
+                    generation: GraphDependencyGenerationIdentityV1::new(
+                        projection,
+                        GraphGenerationIdV1::new("source.graph").unwrap(),
+                    ),
+                    idempotency_key: GraphPublicationIdempotencyKeyV1::new("source.publication")
+                        .unwrap(),
+                },
+                recipe: SemanticVectorReconstructionRecipe {
+                    source_manifest_digest: SemanticVectorSourceManifestDigest::new(sha256_repeat(
+                        '2',
+                    ))
+                    .unwrap(),
+                    embedding_projection_digest: SemanticEmbeddingProjectionDigestV1::new(
+                        sha256_repeat('3'),
+                    )
+                    .unwrap(),
+                    embedding_dimension: 8,
+                    model_artifact_digest: SemanticModelArtifactDigestV1::new(sha256_repeat('4'))
+                        .unwrap(),
+                    projection_manifest_digest: SemanticProjectionManifestDigestV1::new(
+                        sha256_repeat('5'),
+                    )
+                    .unwrap(),
+                    privacy_domain_digest: SemanticPrivacyDomainDigestV1::new(sha256_repeat('6'))
+                        .unwrap(),
+                    privacy_key_epoch: 1,
+                    expected_chunk_manifest_digest: SemanticVectorChunkManifestDigest::new(
+                        sha256_repeat('7'),
+                    )
+                    .unwrap(),
+                },
+                expected_chunk_count: 0,
+                expected_prior_verified_head: None,
+                initial_checkpoint_digest: SemanticVectorCheckpointDigest::new(sha256_repeat('8'))
+                    .unwrap(),
+                writer_fence: SemanticVectorWriterFence {
+                    binding: StoreRuntimeBindingV1::new(
+                        shard_id,
+                        StoreIncarnationV1::new(1).unwrap(),
+                        StoreAuthorityEpochV1::new(1).unwrap(),
+                    ),
+                },
+            },
+            state,
+            next_ordinal: 1,
+            checkpoint_digest: SemanticVectorCheckpointDigest::new(sha256_repeat('8')).unwrap(),
+            recorded_chunk_count: 0,
+            applied_ordinal: None,
+            applied_receipt_digest: None,
+            applied_checkpoint_digest: None,
+            applied_graph_batch_digest: None,
+            publication_intent: None,
+        }
+    }
+
+    fn census_record(
+        after_stage_id: u64,
+        counts: SemanticVectorStageCensusCounts,
+        label: &str,
+    ) -> SemanticVectorStageCensusRecord {
+        let cursor = SemanticVectorStageCensusCursor::new(
+            fixture_shard(),
+            None,
+            fixture_revision(),
+            after_stage_id,
+            counts,
+            canonical_sha256(&label).unwrap(),
+        )
+        .unwrap();
+        SemanticVectorStageCensusRecord {
+            cursor,
+            stage: dummy_stage(SemanticVectorStageState::Published),
+        }
+    }
+
+    fn receipt_for(record: &SemanticVectorStageCensusRecord) -> SemanticVectorProjectCensusReceipt {
+        SemanticVectorProjectCensusReceipt {
+            shard_id: fixture_shard(),
+            revision: fixture_revision(),
+            counts: record.cursor.counts,
+            record_digest: record.cursor.record_digest.clone(),
+        }
+    }
+
+    #[test]
+    fn summarize_through_action_keeps_receipt_on_terminal_page() {
+        let first = census_record(
+            1,
+            SemanticVectorStageCensusCounts {
+                pending: 0,
+                ready: 0,
+                published: 1,
+                cancelled: 0,
+            },
+            "first",
+        );
+        let last = census_record(
+            2,
+            SemanticVectorStageCensusCounts {
+                pending: 0,
+                ready: 0,
+                published: 2,
+                cancelled: 0,
+            },
+            "last",
+        );
+        let receipt = receipt_for(&last);
+        let page = SemanticVectorStageCensusPage {
+            shard_id: fixture_shard(),
+            projection: None,
+            revision: fixture_revision(),
+            records: vec![first, last.clone()],
+            continuation: None,
+            complete_receipt: Some(receipt.clone()),
+        };
+        let census = summarize_through_action(&page, &last.cursor).expect("action on last record");
+        assert_eq!(census.complete_receipt.as_ref(), Some(&receipt));
+        assert_eq!(census.continuation, None);
+        assert_eq!(census.published, 2);
+    }
+
+    #[test]
+    fn summarize_through_action_omits_receipt_when_continuation_remains() {
+        let first = census_record(
+            1,
+            SemanticVectorStageCensusCounts {
+                pending: 0,
+                ready: 0,
+                published: 1,
+                cancelled: 0,
+            },
+            "first",
+        );
+        let last = census_record(
+            2,
+            SemanticVectorStageCensusCounts {
+                pending: 0,
+                ready: 0,
+                published: 2,
+                cancelled: 0,
+            },
+            "last",
+        );
+        let terminal = SemanticVectorStageCensusPage {
+            shard_id: fixture_shard(),
+            projection: None,
+            revision: fixture_revision(),
+            records: vec![first.clone(), last.clone()],
+            continuation: None,
+            complete_receipt: Some(receipt_for(&last)),
+        };
+        let prefix =
+            summarize_through_action(&terminal, &first.cursor).expect("action on prefix record");
+        assert_eq!(prefix.complete_receipt, None);
+        assert_eq!(prefix.continuation, Some(first.cursor.clone()));
+        assert_eq!(prefix.published, 1);
+
+        let paging = SemanticVectorStageCensusPage {
+            shard_id: fixture_shard(),
+            projection: None,
+            revision: fixture_revision(),
+            records: vec![last.clone()],
+            continuation: Some(last.cursor.clone()),
+            complete_receipt: None,
+        };
+        let continued =
+            summarize_through_action(&paging, &last.cursor).expect("action on paging tail");
+        assert_eq!(continued.complete_receipt, None);
+        assert_eq!(continued.continuation, Some(last.cursor));
     }
 }

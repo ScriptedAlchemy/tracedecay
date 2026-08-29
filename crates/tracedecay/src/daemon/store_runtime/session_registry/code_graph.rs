@@ -1579,7 +1579,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             Ok(true) => return,
             Ok(false) => {}
             Err(error) => {
-                tracing::debug!(
+                tracing::warn!(
                     event = "code_graph_shard_registration_probe_failed",
                     shard = ?project_shard,
                     error = %error,
@@ -1607,7 +1607,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 drop(target);
             }
             Err(error) => {
-                tracing::debug!(
+                tracing::warn!(
                     event = "code_graph_shard_reattach_failed",
                     shard = ?project_shard,
                     error = %error,

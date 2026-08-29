@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::retrieval::grep_analysis::{
@@ -24,7 +23,7 @@ use tracedecay_application::{
     ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
     EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
     OpaqueCursor, OperationBudgetUsage, PageCursor, PageState, RequestAdmission, RequestContext,
-    ResolvedScope, RetrievalEvidence, TemporalState,
+    ResolvedScope, RetrievalEvidence, TemporalState, now_micros,
 };
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
@@ -450,12 +449,7 @@ fn coverage(files_scanned: u64, returned: u64, truncated: bool) -> PrimitiveCove
 }
 
 fn now_observed() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            duration.as_micros().min(i64::MAX as u128) as i64
-        });
-    UtcMicros(micros)
+    now_micros()
 }
 
 #[hotpath::measure(label = "usecases.primitives.open_graph", future = true)]

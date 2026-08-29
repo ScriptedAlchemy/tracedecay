@@ -39,6 +39,7 @@ base64 = "0.22"
 hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 thiserror = "2"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }

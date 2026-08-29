@@ -845,6 +845,44 @@ fn configuration_preview(
     ))
 }
 
+/// Field-level validation copy for the wire diagnostic.
+///
+/// Only static/field labels and punctuation used by `DomainError` /
+/// `ConfigurationError::validation_message` constructors are admitted. Paths,
+/// quoted model ids, and other caller-supplied text are dropped so the
+/// diagnostic stays a `SafeDiagnostic`.
+fn safe_configuration_validation_message(reason: &str) -> String {
+    const PREFIX: &str = "The configuration request is invalid: ";
+    const GENERIC: &str = "The configuration request is invalid";
+    const MAX_REASON_BYTES: usize = 512 - PREFIX.len();
+    if !is_safe_configuration_validation_reason(reason) {
+        return GENERIC.to_owned();
+    }
+    let mut bounded = reason;
+    if bounded.len() > MAX_REASON_BYTES {
+        bounded = match bounded.get(..MAX_REASON_BYTES) {
+            Some(slice) => slice,
+            None => return GENERIC.to_owned(),
+        };
+        while !bounded.is_char_boundary(bounded.len()) {
+            bounded = &bounded[..bounded.len() - 1];
+        }
+    }
+    format!("{PREFIX}{bounded}")
+}
+
+fn is_safe_configuration_validation_reason(reason: &str) -> bool {
+    !reason.is_empty()
+        && reason.len() <= 512
+        && reason.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    ' ' | '.' | '_' | '-' | ':' | ',' | '[' | ']' | '(' | ')'
+                )
+        })
+}
+
 fn invalid_configuration_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -880,9 +918,22 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
                 message: "The configuration preview is stale".to_owned(),
             })
         }
-        ConfigurationError::PolicyWideningForbidden | ConfigurationError::Validation(_) => {
-            invalid_configuration_request()
-        }
+        ConfigurationError::PolicyWideningForbidden => ApplicationProblem::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: "configuration.policy_widening_forbidden".to_owned(),
+                message: "Configuration policy widening is forbidden".to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        },
+        ConfigurationError::Validation(reason) => ApplicationProblem::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: "configuration.invalid_request".to_owned(),
+                message: safe_configuration_validation_message(&reason),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        },
         ConfigurationError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "configuration.unavailable".to_owned(),
             message: "The configuration authority is unavailable".to_owned(),
@@ -981,6 +1032,53 @@ mod terminal_problem_tests {
         assert_eq!(
             legal_actions,
             vec![tracedecay_application::LegalAction::Reset]
+        );
+    }
+
+    #[test]
+    fn configuration_problem_distinguishes_policy_widening_from_validation() {
+        let widening = configuration_problem(ConfigurationError::PolicyWideningForbidden);
+        let ApplicationProblem::InvalidRequest {
+            diagnostic: widening_diagnostic,
+            ..
+        } = widening
+        else {
+            panic!("policy widening must stay invalid_request");
+        };
+        assert_eq!(
+            widening_diagnostic.code,
+            "configuration.policy_widening_forbidden"
+        );
+        assert_eq!(
+            widening_diagnostic.message,
+            "Configuration policy widening is forbidden"
+        );
+
+        let validation = configuration_problem(ConfigurationError::validation(
+            tracedecay_domain::DomainError::NonCanonical {
+                field: "configuration text value",
+            },
+        ));
+        let ApplicationProblem::InvalidRequest {
+            diagnostic: validation_diagnostic,
+            ..
+        } = validation
+        else {
+            panic!("validation must stay invalid_request");
+        };
+        assert_eq!(validation_diagnostic.code, "configuration.invalid_request");
+        assert_ne!(validation_diagnostic.message, widening_diagnostic.message);
+        assert!(
+            validation_diagnostic
+                .message
+                .contains("configuration text value"),
+            "validation diagnostic must surface the safe field label, got {}",
+            validation_diagnostic.message
+        );
+        assert!(
+            !validation_diagnostic.message.contains('/')
+                && !validation_diagnostic.message.contains('\\'),
+            "validation diagnostic must not carry a path"
         );
     }
 }

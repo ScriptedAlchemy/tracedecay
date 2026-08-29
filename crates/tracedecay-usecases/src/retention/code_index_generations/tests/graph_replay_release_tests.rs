@@ -258,7 +258,9 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
         "the pool copy must exist before the release event can become durable"
     );
 
-    // Retention: the receipt and its release event become durable.
+    // Retention: the receipt and its release event become durable, in the
+    // same order the production executor uses (events before receipt).
+    graph_replay_release::write_events(store.path(), &receipt).expect("write release events");
     write_receipt(store.path(), &receipt).expect("write durable receipt");
     let page = code_generation_graph_replay_release_page(store.path(), None)
         .expect("read durable release event");

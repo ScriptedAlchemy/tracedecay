@@ -123,7 +123,7 @@ impl GitHubReadOnlyClientV1 {
             "compare",
             comparison.as_str(),
         ]);
-        let response = self.get(url.as_str(), None, GitHubReadPermissionV1::PullRequests);
+        let response = self.get(url.as_str(), None, GitHubReadPermissionV1::PullRequests, None);
         if !super::request_context_admitted(context) {
             return None;
         }

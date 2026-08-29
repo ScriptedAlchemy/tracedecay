@@ -1284,15 +1284,7 @@ impl ConfigurationValueV1 {
         match self {
             Self::Boolean(_) | Self::Unsigned(_) => Ok(()),
             Self::CodeIndexWorkerSelection(selection) => selection.validate(),
-            Self::Text(value) => {
-                if is_canonical_text(value) {
-                    Ok(())
-                } else {
-                    Err(DomainError::NonCanonical {
-                        field: "configuration text value",
-                    })
-                }
-            }
+            Self::Text(value) => validate_configuration_text_value(value),
             Self::StringList(values) => {
                 for value in values {
                     validate_canonical_label(value, "configuration text list value")?;
@@ -1327,6 +1319,17 @@ impl ConfigurationValueV1 {
     }
 }
 
+fn validate_configuration_text_value(value: &str) -> Result<(), DomainError> {
+    const FIELD: &str = "configuration text value";
+    if value.is_empty() {
+        return Err(DomainError::Empty { field: FIELD });
+    }
+    if !is_canonical_text(value) {
+        return Err(DomainError::NonCanonical { field: FIELD });
+    }
+    Ok(())
+}
+
 fn ensure_strict_order<'a, T: Ord + 'a>(
     values: impl Iterator<Item = &'a T>,
     field: &'static str,
@@ -1336,6 +1339,46 @@ fn ensure_strict_order<'a, T: Ord + 'a>(
         return Err(DomainError::NonCanonical { field });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod configuration_text_value_tests {
+    use super::ConfigurationValueV1;
+    use crate::research::DomainError;
+
+    #[test]
+    fn text_values_are_canonical_but_not_identity_bounded() {
+        assert!(
+            ConfigurationValueV1::Text("a".repeat(16 * 1024))
+                .validate()
+                .is_ok()
+        );
+
+        assert_eq!(
+            ConfigurationValueV1::Text(String::new()).validate(),
+            Err(DomainError::Empty {
+                field: "configuration text value",
+            })
+        );
+        assert_eq!(
+            ConfigurationValueV1::Text(" leading".to_owned()).validate(),
+            Err(DomainError::NonCanonical {
+                field: "configuration text value",
+            })
+        );
+        assert_eq!(
+            ConfigurationValueV1::Text("trailing ".to_owned()).validate(),
+            Err(DomainError::NonCanonical {
+                field: "configuration text value",
+            })
+        );
+        assert_eq!(
+            ConfigurationValueV1::Text("has\ncontrol".to_owned()).validate(),
+            Err(DomainError::NonCanonical {
+                field: "configuration text value",
+            })
+        );
+    }
 }
 
 /// One registered setting definition. The registry owns the definition;

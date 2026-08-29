@@ -11,7 +11,10 @@ use tempfile::TempDir;
 
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
-use crate::daemon::maintenance::{SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry};
+use crate::daemon::maintenance::{
+    SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
+    StoreTelemetrySamplingRegistry,
+};
 use crate::tracedecay::TraceDecay;
 use tracedecay_usecases::retention::code_index_generations::{
     DurableGenerationIndexEntryV1, DurablePublicationPointerV1, durable_generation_index_digest,
@@ -199,7 +202,10 @@ fn record_paging_census(observations: &StoreTelemetrySamplingRegistry, project_r
         continuation: Some(cursor),
         action: tracedecay_graph_db::SemanticVectorRetentionAction::None,
     };
-    assert!(observations.record_semantic_vector_retention_census(project_root, &census));
+    assert_eq!(
+        observations.record_semantic_vector_retention_census(project_root, &census),
+        SemanticVectorRetentionCensusOutcome::Accepted
+    );
     assert_eq!(
         observations.semantic_vector_retention_read(project_root),
         SemanticVectorRetentionReadV1::Scanning

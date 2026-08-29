@@ -12,8 +12,9 @@
 //!
 //! The cache lives in the same SQLite database as the code graph.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
+use tracedecay_application::now_micros;
 use tracedecay_domain::canonical_json_value;
 use tracedecay_domain::canonical_text::sha256_hex;
 
@@ -214,9 +215,7 @@ pub(crate) async fn put_write(db: &Database, write: ReadCacheWrite<'_>) -> Resul
 }
 
 fn unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+    now_micros().0 / 1_000_000
 }
 
 /// Reads a file's modification time, normalised to nanoseconds since the
