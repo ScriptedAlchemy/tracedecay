@@ -34,7 +34,7 @@ use tracedecay_usecases::observation::ObservationCancellation;
 /// `#[cfg(test)] pub(crate)`, so it cannot be reused from here.
 fn ensure_background_cpu_authority() {
     use std::num::NonZeroUsize;
-    use tracedecay_runtime_core::background_cpu::{
+    use tracedecay_private_fs::background_cpu::{
         install_process_background_cpu, process_background_cpu,
     };
 

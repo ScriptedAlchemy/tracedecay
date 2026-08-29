@@ -32,7 +32,7 @@ use tracedecay_domain::{
     ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
-use tracedecay_runtime_core::background_cpu::{
+use tracedecay_private_fs::background_cpu::{
     install_process_background_cpu, process_background_cpu,
 };
 use tracedecay_runtime_core::privacy::{

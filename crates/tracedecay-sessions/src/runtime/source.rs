@@ -972,7 +972,7 @@ fn stable_jsonl_file_id(
     }
     #[cfg(windows)]
     {
-        if let Ok(information) = tracedecay_runtime_core::windows_file::information(file) {
+        if let Ok(information) = tracedecay_private_fs::windows_file::information(file) {
             hasher.update(information.volume_serial_number.to_le_bytes());
             hasher.update(information.file_index.to_le_bytes());
         } else {

@@ -15,7 +15,7 @@ use std::sync::{
 use tracedecay_domain::configuration::{
     CodeIndexWorkerLimitingReasonV1, CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1,
 };
-use tracedecay_runtime_core::background_cpu::{
+use tracedecay_private_fs::background_cpu::{
     BackgroundCpuInstallErrorV1, install_process_background_cpu, process_background_cpu,
 };
 

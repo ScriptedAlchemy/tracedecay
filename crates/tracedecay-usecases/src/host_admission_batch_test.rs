@@ -14,7 +14,7 @@ use tracedecay_domain::{
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
-use tracedecay_runtime_core::background_cpu::{
+use tracedecay_private_fs::background_cpu::{
     ProcessBackgroundCpuV1, install_process_background_cpu, process_background_cpu,
 };
 use tracedecay_runtime_core::privacy::{

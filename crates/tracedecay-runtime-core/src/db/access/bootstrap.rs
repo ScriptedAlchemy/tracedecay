@@ -26,7 +26,7 @@ pub(super) fn reject_hard_linked_database(path: &Path) -> Result<()> {
 pub fn windows_hard_link_count(path: &Path) -> Result<u32> {
     let file = std::fs::File::open(path)
         .map_err(|error| access_io_error("inspect database links", path, &error))?;
-    crate::windows_file::information(&file)
+    tracedecay_private_fs::windows_file::information(&file)
         .map(|information| information.number_of_links)
         .map_err(|error| access_io_error("inspect database links", path, &error))
 }

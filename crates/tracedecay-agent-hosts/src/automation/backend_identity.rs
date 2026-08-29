@@ -208,7 +208,7 @@ fn opened_file_revision(_file: &File, metadata: &Metadata) -> Option<OpenedFileR
 
 #[cfg(windows)]
 fn opened_file_revision(file: &File, metadata: &Metadata) -> Option<OpenedFileRevision> {
-    let information = tracedecay_runtime_core::windows_file::information(file).ok()?;
+    let information = tracedecay_private_fs::windows_file::information(file).ok()?;
     let len = metadata.len();
     let (mtime_secs, mtime_nanos) = windows_opened_mtime(metadata)?;
     Some(OpenedFileRevision {

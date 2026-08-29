@@ -127,7 +127,7 @@ fn jsonl_native_file_identity(
     file: &std::fs::File,
     _metadata: &std::fs::Metadata,
 ) -> Option<JsonlNativeFileIdentity> {
-    let information = tracedecay_runtime_core::windows_file::information(file).ok()?;
+    let information = tracedecay_private_fs::windows_file::information(file).ok()?;
     Some(JsonlNativeFileIdentity {
         volume_serial_number: information.volume_serial_number,
         file_index: information.file_index,

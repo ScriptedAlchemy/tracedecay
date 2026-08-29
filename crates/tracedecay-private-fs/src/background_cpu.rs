@@ -300,9 +300,9 @@ impl ProcessBackgroundCpuV1 {
 }
 
 fn record_state(state: &BackgroundCpuStateV1, width: NonZeroUsize) {
-    hotpath::gauge!("runtime_core.background_cpu.width").set(width.get());
-    hotpath::gauge!("runtime_core.background_cpu.active_units").set(state.active_units);
-    hotpath::gauge!("runtime_core.background_cpu.waiting_work_units").set(waiting_units(state));
+    hotpath::gauge!("private_fs.background_cpu.width").set(width.get());
+    hotpath::gauge!("private_fs.background_cpu.active_units").set(state.active_units);
+    hotpath::gauge!("private_fs.background_cpu.waiting_work_units").set(waiting_units(state));
 }
 
 fn waiting_units(state: &BackgroundCpuStateV1) -> usize {
