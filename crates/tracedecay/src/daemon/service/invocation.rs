@@ -144,10 +144,10 @@ use tracedecay_usecases::semantic_runtime::{
 // Re-exported so daemon-internal call sites can keep naming the contract
 // through `service::invocation::`.
 #[cfg(test)]
-pub(crate) use crate::daemon_contract::{
+pub(crate) use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, parse_daemon_invocation_request,
 };
-pub(crate) use crate::daemon_contract::{
+pub(crate) use tracedecay_daemon_protocol::{
     DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,

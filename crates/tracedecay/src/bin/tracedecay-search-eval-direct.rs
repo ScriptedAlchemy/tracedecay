@@ -4,10 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
-use tracedecay::daemon::DaemonHandshake;
-use tracedecay::daemon_client::{
-    DaemonInvocationClient, SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
-};
+use tracedecay_daemon_protocol::SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS;
 use tracedecay::search_eval::{
     DirectEvaluationStatusV1, DirectWorkloadSummaryV1, GenerateCandidateOutputsOptions,
     SearchEvalError, compare_default_direct, compare_direct, generate_candidate_outputs,
@@ -243,11 +240,11 @@ fn evaluate_and_publish(project_root: PathBuf, evaluated_profile_id: String) -> 
     hotpath::tokio_runtime!(runtime.handle());
     runtime.block_on(async move {
         let handshake =
-            match DaemonHandshake::for_current_client(Some(project_root), None, false, false) {
+            match tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false) {
                 Ok(handshake) => handshake,
                 Err(error) => return invalid("evaluate_and_publish", error),
             };
-        let client = match DaemonInvocationClient::for_current(handshake) {
+        let client = match tracedecay::daemon::invocation_client_for_current(handshake) {
             Ok(client) => client,
             Err(error) => return invalid("evaluate_and_publish", error),
         };
@@ -280,11 +277,11 @@ fn qualify_native(
     hotpath::tokio_runtime!(runtime.handle());
     runtime.block_on(async move {
         let handshake =
-            match DaemonHandshake::for_current_client(Some(project_root), None, false, false) {
+            match tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false) {
                 Ok(handshake) => handshake,
                 Err(error) => return invalid("qualify_native", error),
             };
-        let client = match DaemonInvocationClient::for_current(handshake) {
+        let client = match tracedecay::daemon::invocation_client_for_current(handshake) {
             Ok(client) => client,
             Err(error) => return invalid("qualify_native", error),
         };

@@ -6,7 +6,7 @@ use super::{
 };
 
 impl DaemonInvocationResponse {
-    pub(crate) fn problem(request_id: impl Into<String>, problem: DaemonInvocationProblem) -> Self {
+    pub fn problem(request_id: impl Into<String>, problem: DaemonInvocationProblem) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: DAEMON_INVOCATION_REVISION,
@@ -15,7 +15,7 @@ impl DaemonInvocationResponse {
         }
     }
 
-    pub(crate) fn application_problem(
+    pub fn application_problem(
         request_id: impl Into<String>,
         problem: ApplicationProblem,
     ) -> Self {
@@ -27,7 +27,7 @@ impl DaemonInvocationResponse {
         }
     }
 
-    pub(crate) fn retained_application_problem(
+    pub fn retained_application_problem(
         request_id: impl Into<String>,
         scope: ResolvedScope,
         problem: ApplicationProblem,

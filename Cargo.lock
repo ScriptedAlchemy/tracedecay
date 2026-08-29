@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=84f0650fbe0a4c7c4214d8c854058cb008c9e3c2#84f0650fbe0a4c7c4214d8c854058cb008c9e3c2"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2744,7 +2744,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=84f0650fbe0a4c7c4214d8c854058cb008c9e3c2#84f0650fbe0a4c7c4214d8c854058cb008c9e3c2"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2764,7 +2764,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=84f0650fbe0a4c7c4214d8c854058cb008c9e3c2#84f0650fbe0a4c7c4214d8c854058cb008c9e3c2"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2789,7 +2789,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=84f0650fbe0a4c7c4214d8c854058cb008c9e3c2#84f0650fbe0a4c7c4214d8c854058cb008c9e3c2"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2811,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=84f0650fbe0a4c7c4214d8c854058cb008c9e3c2#84f0650fbe0a4c7c4214d8c854058cb008c9e3c2"
 dependencies = [
  "bincode",
  "byteorder",
@@ -5916,6 +5916,7 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-daemon-protocol",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -6124,6 +6125,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-hooks",
@@ -6133,6 +6135,7 @@ dependencies = [
  "tracedecay-mcp",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracedecay-sdk",
  "tracedecay-sessions",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
@@ -6184,6 +6187,31 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tree-sitter",
+]
+
+[[package]]
+name = "tracedecay-daemon-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "hotpath",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracedecay-agent-hosts",
+ "tracedecay-api",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tracedecay-lsp",
+ "tracedecay-mcp",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-search-eval",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
 ]
 
 [[package]]

@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 use serde_json::json;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
-use tracedecay::client_identity::DaemonClientIdentity;
+use tracedecay_daemon_protocol::DaemonClientIdentity;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use tracedecay::daemon::{DaemonHandshake, call_tool};
 use tracedecay::store::GlobalDbObservationStore;

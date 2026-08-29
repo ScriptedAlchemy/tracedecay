@@ -566,7 +566,7 @@ mod doctor_runtime_route_tests {
         cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
         serve_core_doctor_runtime_request,
     };
-    use crate::client_identity::DaemonClientIdentity;
+    use tracedecay_daemon_protocol::DaemonClientIdentity;
     use crate::daemon::{DaemonHandshake, DaemonLifecycle, StoreAdministration};
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;

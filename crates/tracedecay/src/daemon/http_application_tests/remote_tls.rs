@@ -784,9 +784,9 @@ async fn remote_tls_listener_serves_only_remote_routes_and_isolates_credential_a
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
     let endpoint =
-        crate::daemon::transport::DaemonEndpoint::Unix(profile_root.join("remote-tls.sock"));
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-tls.sock"));
     #[cfg(not(unix))]
-    let endpoint = crate::daemon::transport::default_loopback_endpoint();
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
     let daemon_authority =
         crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
@@ -907,9 +907,9 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     let profile_root = temporary.path().join("admission-profile");
     #[cfg(unix)]
     let daemon_endpoint =
-        crate::daemon::transport::DaemonEndpoint::Unix(profile_root.join("remote-tls.sock"));
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-tls.sock"));
     #[cfg(not(unix))]
-    let daemon_endpoint = crate::daemon::transport::default_loopback_endpoint();
+    let daemon_endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
     let daemon_authority =
         crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &daemon_endpoint, "test")
             .expect("daemon authority");

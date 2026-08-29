@@ -145,7 +145,7 @@ fn search_budget(
     deadline: Option<&tracedecay_application::Deadline>,
 ) -> Result<Duration> {
     match deadline {
-        Some(deadline) => crate::daemon_client::deadline_remaining(deadline)
+        Some(deadline) => tracedecay_daemon_protocol::deadline_remaining(deadline)
             .map(|remaining| remaining.min(SEARCH_SCAN_CEILING))
             .filter(|remaining| !remaining.is_zero())
             .ok_or_else(|| {

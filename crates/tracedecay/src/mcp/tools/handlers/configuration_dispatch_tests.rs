@@ -20,7 +20,7 @@ struct UnavailableEffectExecutor {
         Vec<(
             crate::application_surface::ApplicationSurfaceOperation,
             Value,
-            crate::daemon_client::InvocationCancellationPolicy,
+            tracedecay_daemon_protocol::InvocationCancellationPolicy,
         )>,
     >,
 }
@@ -50,22 +50,22 @@ impl tracedecay_application::ApplicationInvocationExecutor for UnavailableEffect
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for UnavailableEffectExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectExecutor {
     fn invoke_controlled(
         &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
+        request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         _deadline: tracedecay_application::Deadline,
         _cancellation: tracedecay_application::CancellationSignal,
-        policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
-            crate::daemon_contract::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
         self.invocations.fetch_add(1, Ordering::SeqCst);
-        if let crate::daemon_contract::DaemonInvocationPayload::Configuration {
+        if let tracedecay_daemon_protocol::DaemonInvocationPayload::Configuration {
             surface_operation,
             request,
             ..
@@ -77,7 +77,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for UnavailableEffectExecuto
                 policy,
             ));
         }
-        Box::pin(async { Err(crate::daemon_client::DaemonInvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
     fn observe_feedback(
@@ -85,10 +85,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for UnavailableEffectExecuto
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_runtime_core::errors::Result<()>,
-    > {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -274,7 +271,7 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
         assert_eq!(actual_operation, expected_operation);
         assert_eq!(
             policy,
-            &crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect
+            &tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect
         );
         assert_eq!(request["request"]["idempotency_key"], *idempotency_key);
     }
@@ -386,7 +383,7 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
         assert_eq!(actual_operation, &expected_operation);
         assert_eq!(
             policy,
-            &crate::daemon_client::InvocationCancellationPolicy::ReadOnly
+            &tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly
         );
         assert!(request["request"].is_object());
         assert!(request["request"].get("idempotency_key").is_none());

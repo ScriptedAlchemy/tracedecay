@@ -34,7 +34,7 @@ use super::{
     resolve_application_binding, resolve_application_surface_dispatch,
     resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
-use crate::daemon_client::RequestedOutputFormat;
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_usecases::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1,
 };
@@ -82,7 +82,7 @@ fn operation_context(project_id: &ProjectId) -> RequestContext {
 #[test]
 fn daemon_reset_problem_preserves_reset_terminal_contract() {
     let problem =
-        invocation_problem(crate::daemon_contract::DaemonInvocationProblem::ResetRequired)
+        invocation_problem(tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired)
             .expect("canonical reset problem");
     let ApplicationProblem::ResetRequired {
         retry,
@@ -113,7 +113,7 @@ fn handoff_http_descriptors_match_every_executable_manifest_route() {
 #[test]
 fn every_http_exposed_operation_resolves_from_the_canonical_catalog() {
     let catalog = super::application_surface_catalog_ref().expect("application catalog");
-    let resolver = crate::daemon_client::CatalogBindingResolver::new(catalog);
+    let resolver = tracedecay_daemon_protocol::CatalogBindingResolver::new(catalog);
 
     for operation in tracedecay_api::HttpApplicationOperation::ALL {
         if operation.is_http_exposed() {
@@ -280,7 +280,7 @@ async fn http_context_caps_caller_deadline_at_the_transport_budget() {
 #[test]
 fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
     let catalog = super::application_surface_catalog().expect("application catalog");
-    let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
+    let resolver = tracedecay_daemon_protocol::CatalogBindingResolver::new(&catalog);
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
         tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
     )
@@ -295,10 +295,10 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
             tracedecay_tool_catalog::BindingSurface::Http,
         ] {
             assert!(
-                crate::daemon_client::BindingResolver::resolve_binding(
+                tracedecay_daemon_protocol::BindingResolver::resolve_binding(
                     &resolver,
                     surface,
-                    &crate::daemon_client::BindingResolution {
+                    &tracedecay_daemon_protocol::BindingResolution {
                         profile_id: profile_id.clone(),
                         operation: tracedecay_tool_catalog::SurfaceOperationName::new(name)
                             .expect("operation"),
@@ -365,7 +365,7 @@ fn dashboard_configuration_dispatch_preserves_http_application_semantics() {
 #[test]
 fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
     let catalog = super::application_surface_catalog().expect("application catalog");
-    let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
+    let resolver = tracedecay_daemon_protocol::CatalogBindingResolver::new(&catalog);
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
         tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
     )
@@ -389,10 +389,10 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
             ][..]
         };
         for &(surface, surface_name) in expected_surfaces {
-            let binding = crate::daemon_client::BindingResolver::resolve_binding(
+            let binding = tracedecay_daemon_protocol::BindingResolver::resolve_binding(
                 &resolver,
                 surface,
-                &crate::daemon_client::BindingResolution {
+                &tracedecay_daemon_protocol::BindingResolution {
                     profile_id: resolution_profile.clone(),
                     operation: operation_name.clone(),
                     protocol_revision: APPLICATION_PROTOCOL_REVISION,
@@ -434,7 +434,7 @@ fn root_surface_operation_authority_is_the_http_catalog_authority() {
 #[test]
 fn health_delta_has_cli_mcp_http_parity_and_one_typed_request() {
     let catalog = super::application_surface_catalog().expect("application catalog");
-    let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
+    let resolver = tracedecay_daemon_protocol::CatalogBindingResolver::new(&catalog);
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
         tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
     )
@@ -444,10 +444,10 @@ fn health_delta_has_cli_mcp_http_parity_and_one_typed_request() {
         (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
         (tracedecay_tool_catalog::BindingSurface::Http, "http"),
     ] {
-        let binding = crate::daemon_client::BindingResolver::resolve_binding(
+        let binding = tracedecay_daemon_protocol::BindingResolver::resolve_binding(
             &resolver,
             surface,
-            &crate::daemon_client::BindingResolution {
+            &tracedecay_daemon_protocol::BindingResolution {
                 profile_id: profile_id.clone(),
                 operation: tracedecay_tool_catalog::SurfaceOperationName::new("health_delta")
                     .expect("operation"),
@@ -1035,8 +1035,8 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
     let normalization_revision =
         QueryNormalizationRevision::new("normalization.daemon-owned-test.v1")
             .expect("normalization revision");
-    let PrimitiveRequest::SymbolSearch(symbol_search) = symbol_search
-        .into_primitive(
+    let PrimitiveRequest::SymbolSearch(symbol_search) = crate::application_surface::primitive_code_into_primitive(
+        symbol_search,
             sanitizer_revision.clone(),
             normalization_revision.clone(),
             PageRequest::first(25).expect("page"),

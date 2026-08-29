@@ -89,6 +89,7 @@ pub mod workflow_runtime;
 pub mod workflow_synthesis;
 
 mod error;
+pub mod surface_contracts;
 mod surface_binding;
 
 pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
@@ -111,7 +112,7 @@ pub use configuration::{
     SettingSummary, configuration_executable_binding_registry,
     configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
     configuration_surface_operation, configuration_surface_request_schema,
-    configuration_surface_result_schema,
+    configuration_surface_result_schema, configuration_wire_request_from_invocation_payload,
 };
 pub use configuration_wire::{ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1};
 pub use context::{
@@ -315,6 +316,14 @@ pub use source_edit::{
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };
 pub use source_edit_rollback::{SourceEditRollbackRequestV1, source_edit_rollback_operation};
+pub use surface_contracts::{
+    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCallersSurfaceRequest,
+    CodeCalleesSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
+    CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
+    NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
+};
 pub use storage::{
     CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,

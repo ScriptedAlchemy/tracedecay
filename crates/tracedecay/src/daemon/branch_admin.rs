@@ -1944,7 +1944,7 @@ mod tests {
         assert!(error.project_route_context().is_none());
         assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
 
-        let client_identity = crate::client_identity::DaemonClientIdentity {
+        let client_identity = tracedecay_daemon_protocol::DaemonClientIdentity {
             profile_root: temp.path().to_path_buf(),
             global_db_path: temp.path().join("global.db"),
         };

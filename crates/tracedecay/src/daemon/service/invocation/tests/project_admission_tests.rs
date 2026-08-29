@@ -48,8 +48,8 @@ async fn project_quiescence_denies_semantic_and_git_cached_routes() {
             CancellationContext::active("cancel.quiesced-semantic").expect("cancellation"),
         ),
         DaemonInvocationRequest {
-            protocol: crate::daemon_contract::DAEMON_INVOCATION_PROTOCOL.to_owned(),
-            revision: crate::daemon_contract::DAEMON_INVOCATION_REVISION,
+            protocol: tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
             request_id: "request.quiesced-git".to_owned(),
             delivery_route: None,
             payload: DaemonInvocationPayload::GitRead {

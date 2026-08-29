@@ -495,10 +495,10 @@ impl ProjectionProvenanceRow {
                             provenance.retrieval_anchor_id, provenance.receipt_id,
                             provenance.output_provider, provenance.output_message_id,
                             provenance.output_digest, provenance.message_created
-                     FROM observation_projection_provenance AS provenance
-                     JOIN json_each(?2) AS requested
-                       ON provenance.observation_id = requested.value
-                     WHERE provenance.projector_version = ?1",
+                     FROM json_each(?2) AS requested
+                     CROSS JOIN observation_projection_provenance AS provenance
+                     WHERE provenance.projector_version = ?1
+                       AND provenance.observation_id = requested.value",
                     params![SESSION_MESSAGE_PROJECTOR_VERSION, requested.as_str()],
                 )
                 .await
@@ -688,6 +688,7 @@ struct ResolvedOutputAuthority {
     authorities: HashMap<(String, String), ProjectionOutputAuthority>,
     creators: HashMap<(String, String), i64>,
     provenance: HashMap<(String, i64), ProjectionProvenanceRow>,
+    projection_rows: crate::observation_projection::ProjectionRowsBatch,
 }
 
 impl ResolvedOutputAuthority {
@@ -794,11 +795,36 @@ async fn validate_message_projection_row(
     // owner for every observation so a superseded creator is audited against
     // the projection that actually owns the row.
     let authority = resolved.authority(&message.provider, &message.message_id)?;
-    crate::observation_projection::verify_resolved_output_authority(
+    let owner_projection = crate::observation_projection::resolve_output_projection(
         conn,
         authority,
         Some((observation_id, effect)),
         projection,
+    )
+    .await
+    .map_err(|error| {
+        authority_violation(format!(
+            "projection output rows disagree with deterministic output: {error}"
+        ))
+    })?;
+    let Some(owner_provenance) = resolved.provenance_row(
+        &authority.canonical_observation_id,
+        i64::from(owner_projection.output_ordinal()),
+    ) else {
+        return Ok(false);
+    };
+    validate_provenance_row(owner_provenance, &owner_projection)?;
+    let owner_session = owner_projection.session();
+    let owner_message = owner_projection.message();
+    crate::observation_projection::verify_projection_rows_from_records(
+        conn,
+        &owner_projection,
+        resolved
+            .projection_rows
+            .session(&owner_session.provider, &owner_session.session_id),
+        resolved
+            .projection_rows
+            .message(&owner_message.provider, &owner_message.message_id),
     )
     .await
     .map_err(|error| {
@@ -1039,20 +1065,33 @@ async fn resolve_output_authority(
     effects: &[ObservationProjection],
 ) -> tracedecay_runtime_core::errors::Result<ResolvedOutputAuthority> {
     let outputs = requested_outputs(effects);
-    let observation_ids = observations
+    let authorities = crate::observation_projection::read_output_authorities(conn, &outputs)
+        .await
+        .map_err(|error| {
+            authority_violation(format!(
+                "projection output rows disagree with deterministic output: {error}"
+            ))
+        })?;
+    let mut observation_ids = observations
         .iter()
         .map(|observation| observation.observation_id().as_str().to_owned())
         .collect::<BTreeSet<_>>();
+    observation_ids.extend(
+        authorities
+            .values()
+            .map(|authority| authority.canonical_observation_id.clone()),
+    );
     Ok(ResolvedOutputAuthority {
-        authorities: crate::observation_projection::read_output_authorities(conn, &outputs)
+        authorities,
+        creators: ProjectionOutputOwnership::load_batch(conn, &outputs).await?,
+        provenance: ProjectionProvenanceRow::load_batch(conn, &observation_ids).await?,
+        projection_rows: crate::observation_projection::read_projection_rows_batch(conn, &outputs)
             .await
             .map_err(|error| {
                 authority_violation(format!(
                     "projection output rows disagree with deterministic output: {error}"
                 ))
             })?,
-        creators: ProjectionOutputOwnership::load_batch(conn, &outputs).await?,
-        provenance: ProjectionProvenanceRow::load_batch(conn, &observation_ids).await?,
     })
 }
 
@@ -2278,6 +2317,16 @@ mod tests {
                 .filter(|sql| sql.contains(needle))
                 .count()
         }
+
+        fn statement_containing(&self, needle: &str) -> String {
+            self.statements
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|sql| sql.contains(needle))
+                .cloned()
+                .unwrap_or_else(|| panic!("no captured statement contained {needle:?}"))
+        }
     }
 
     impl<T: QueryExecutor> QueryExecutor for CountingSnapshot<'_, T> {
@@ -2296,7 +2345,7 @@ mod tests {
     async fn seed_projected_messages(
         runtime: &crate::tests::harness::HostAdmissionTestRuntimeV1,
         count: usize,
-    ) {
+    ) -> Vec<DurableObservationV1> {
         use tracedecay_domain::{
             CanonicalMessageRoleV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
             CanonicalObservationRelationsV1, ObservationSourceCursorV1, ProjectionGenerationId,
@@ -2316,6 +2365,7 @@ mod tests {
             ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
                 .unwrap();
         let mut expected_cursor: Option<ObservationSourceCursorV1> = None;
+        let mut observations = Vec::with_capacity(count);
         for index in 0..count {
             let record_id = format!("record.audit-batch-{index}");
             let record = ObservationId::new(record_id.clone()).unwrap();
@@ -2401,7 +2451,9 @@ mod tests {
                 .await
                 .unwrap();
             expected_cursor = Some(next_cursor);
+            observations.push(observation);
         }
+        observations
     }
 
     /// The audit's message path must stay correct while resolving each chunk's
@@ -2417,7 +2469,7 @@ mod tests {
         let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
             .unwrap();
-        seed_projected_messages(&runtime, OBSERVATIONS).await;
+        let observations = seed_projected_messages(&runtime, OBSERVATIONS).await;
 
         let database = runtime
             .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
@@ -2445,12 +2497,127 @@ mod tests {
             1,
             "provenance rows must be read once per page"
         );
+        assert_eq!(
+            counting.issued(
+                "SELECT retrieval_anchor_id, receipt_id, output_provider, output_message_id",
+            ),
+            0,
+            "canonical-owner provenance must reuse the page authority instead of reading per output"
+        );
+        assert_eq!(
+            counting.issued("FROM sessions WHERE provider = ?1 AND session_id = ?2"),
+            0,
+            "projected sessions must reuse the page authority instead of reading per output"
+        );
+        assert_eq!(
+            counting.issued("FROM session_messages WHERE provider = ?1 AND message_id = ?2"),
+            0,
+            "projected messages must reuse the page authority instead of reading per output"
+        );
+
+        let authority_sql =
+            counting.statement_containing("MAX(provenance.message_created) AS projector_owned");
+        let requested = serde_json::to_string(&[serde_json::json!({
+            "provider": "codex",
+            "message_id": "message.record.audit-batch-0"
+        })])
+        .unwrap();
+        let mut rows = snapshot
+            .query(
+                &format!("EXPLAIN QUERY PLAN {authority_sql}"),
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, requested],
+            )
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            plan.push(row.get::<String>(3).unwrap());
+        }
+        assert!(
+            plan.iter().any(|detail| {
+                detail.contains("idx_observation_projection_provenance_output")
+                    && detail.contains(
+                        "projector_version=? AND output_provider=? AND output_message_id=?",
+                    )
+            }),
+            "authority lookup must seek each requested output through the exact index: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|detail| {
+                detail.contains("idx_observation_projection_provenance_output")
+                    && detail.ends_with("(projector_version=?)")
+            }),
+            "authority lookup regressed to a projector-wide provenance scan: {plan:?}"
+        );
+
+        let provenance_sql = counting
+            .statement_containing("SELECT provenance.observation_id, provenance.output_ordinal");
+        let requested = serde_json::to_string(&["observation.audit-batch-0"]).unwrap();
+        let mut rows = snapshot
+            .query(
+                &format!("EXPLAIN QUERY PLAN {provenance_sql}"),
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, requested],
+            )
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            plan.push(row.get::<String>(3).unwrap());
+        }
+        assert!(
+            plan.iter().any(|detail| {
+                detail.contains("observation_projection_provenance")
+                    && detail.contains("projector_version=? AND observation_id=?")
+            }),
+            "provenance lookup must seek each requested observation: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|detail| {
+                detail.contains("observation_projection_provenance")
+                    && detail.ends_with("(projector_version=?)")
+            }),
+            "provenance lookup regressed to a projector-wide scan: {plan:?}"
+        );
         // The per-row baseline this replaced spent fifteen reads on every
         // projected message; the batched path must stay comfortably under ten.
         let queries = counting.queries.load(Ordering::Relaxed);
         assert!(
             queries < OBSERVATIONS * 10,
             "projection audit issued {queries} queries for {OBSERVATIONS} projected messages"
+        );
+
+        let effect = crate::observation_projection::derive_projection(&observations[0]).unwrap();
+        let projection = effect.message().expect("seeded message projection");
+        let message = projection.message();
+        let requested = BTreeSet::from([(message.provider.clone(), message.message_id.clone())]);
+        let authority =
+            crate::observation_projection::read_output_authorities(&snapshot, &requested)
+                .await
+                .unwrap();
+        let authority = authority
+            .get(&(message.provider.clone(), message.message_id.clone()))
+            .expect("seeded output authority");
+        let verification = CountingSnapshot::new(&snapshot);
+        let owner_projection = crate::observation_projection::resolve_output_projection(
+            &verification,
+            authority,
+            None,
+            projection,
+        )
+        .await
+        .unwrap();
+        crate::observation_projection::verify_projection_rows(&verification, &owner_projection)
+            .await
+            .unwrap();
+        assert_eq!(
+            verification.issued("SELECT reason FROM observation_projection_dispositions"),
+            0,
+            "an unaliased retained message must not re-query its disposition"
+        );
+        assert_eq!(
+            verification.issued("FROM observation_projection_aliases"),
+            0,
+            "an unaliased retained message must not re-query its alias"
         );
     }
 
@@ -2516,6 +2683,12 @@ mod tests {
             .unwrap(),
             creators,
             provenance: HashMap::new(),
+            projection_rows: crate::observation_projection::read_projection_rows_batch(
+                &connection,
+                &requested,
+            )
+            .await
+            .unwrap(),
         };
 
         let contested = resolved

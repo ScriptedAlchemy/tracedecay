@@ -8,7 +8,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::UtcMicros;
 
-use crate::daemon_contract::DaemonInvocationProblem;
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
 use super::super::super::current_micros;
 use super::super::workflow_run_control::workflow_run_storage_problem;
