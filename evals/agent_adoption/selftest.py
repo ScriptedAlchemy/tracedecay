@@ -452,7 +452,7 @@ def test_hint_signature_drift():
     if real:
         with open(real, errors="replace") as f:
             real_drift = grade.hint_signature_drift(f.read())
-        check("hints: no drift vs src/hooks/tool_hints.rs",
+        check("hints: no drift vs crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs",
               real_drift == [], f"drifted: {real_drift}")
         # And the CLI mode agrees.
         rc = subprocess.run(
