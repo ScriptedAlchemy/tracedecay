@@ -1,7 +1,7 @@
 //! Root adapter for workflow-index storage.
 
 use std::borrow::Borrow;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 use std::path::Path;
 
 use tracedecay_domain::ProjectId;
@@ -14,7 +14,7 @@ use tracedecay_sessions::runtime::workflow_index::{
     WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent,
     upsert_run,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::workflow_ingest::{
     WorkflowIngestStats, ingest_workflow_runs_with_sink,
 };
@@ -126,7 +126,7 @@ where
     /// Ingest sweep against an explicit Claude `projects` directory, so callers
     /// that already resolved (or must isolate) that root do not re-derive it
     /// from the operator's real home.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub async fn ingest_workflow_runs_from(
         &self,
         project_id: &ProjectId,

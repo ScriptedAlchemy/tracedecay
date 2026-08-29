@@ -334,7 +334,7 @@ impl FixedGitIndexRunner {
         self.apply_hunks(lock, preview, patches, HunkDirectionV1::IndexToHead, true)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn write_tree(&self) -> Result<GitOidV1, NativeGitIndexError> {
         self.ensure_index_unlocked()?;
         let output = self.run_git("write-tree", &["write-tree"])?;
@@ -343,7 +343,7 @@ impl FixedGitIndexRunner {
 
     /// Compute the candidate tree against an isolated index and object
     /// quarantine. Preview never writes the repository index or object store.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn preview_candidate_tree(
         &self,
         patches: &[ValidatedIndexPatch],
