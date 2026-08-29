@@ -6255,10 +6255,11 @@ async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
                 .expect("mount worktree")
         );
     }
-    // Let both workers publish their initial generation so neither scheduler is
-    // mid-reconcile when the test grabs a lock.
+    // Let both workers seat their complete serving generation so neither
+    // scheduler is mid-reconcile when the test grabs a lock. Publication now
+    // broadcasts before graph seating; `latest_complete_fresh` needs the seat.
     for fixture in [&slow, &fast] {
-        let _ = wait_for_initial_generation(&registry, fixture.path()).await;
+        let _ = wait_for_live_complete_generation(&registry, fixture.path()).await;
     }
 
     // Hold the slow worktree's scheduler lock on a dedicated thread to model a
@@ -6323,7 +6324,12 @@ async fn busy_worktree_serves_last_complete_generation_without_waiting() {
         )
         .await
         .expect("mount worktree");
-    let expected = wait_for_initial_generation(&registry, fixture.path()).await;
+    let expected = wait_for_live_complete_generation(&registry, fixture.path())
+        .await
+        .generation
+        .manifest()
+        .generation_id
+        .clone();
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
@@ -7427,11 +7433,8 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         )
         .await
         .expect("mount daemon-owned scheduler");
-    let generation = wait_for_initial_generation(&registry, fixture.path()).await;
-    let latest = registry
-        .latest_complete_fresh(fixture.path())
-        .await
-        .expect("mounted generation");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation = latest.generation.manifest().generation_id.clone();
     assert_eq!(latest.generation.manifest().generation_id, generation);
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
@@ -8422,7 +8425,12 @@ async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
         )
         .await
         .expect("mount scheduler");
-    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+    let initial = wait_for_live_complete_generation(&registry, fixture.path())
+        .await
+        .generation
+        .manifest()
+        .generation_id
+        .clone();
 
     let first = registry.semantic_mcp_abstention(fixture.path()).await;
     assert_eq!(first.code_generation.as_deref(), Some(initial.as_str()));
@@ -8436,6 +8444,23 @@ async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
     // the rebuild that seals it onto whichever request arrived first.
     let _ = registry.semantic_mcp_abstention(fixture.path()).await;
     wait_for_generation_change(&registry, fixture.path(), &initial).await;
+    // Publication is not the sealed serving seat. Abstention reports the
+    // seated generation, so wait for that seat to advance.
+    let serving_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_some_and(|latest| latest.generation.manifest().generation_id != initial)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= serving_deadline,
+            "edited generation never seated for semantic abstention"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let refreshed = registry.semantic_mcp_abstention(fixture.path()).await;
     assert_ne!(refreshed.code_generation.as_deref(), Some(initial.as_str()));
     assert_eq!(
@@ -8493,11 +8518,8 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
         )
         .await
         .expect("mount scheduler");
-    let generation = wait_for_initial_generation(&registry, fixture.path()).await;
-    let latest = registry
-        .latest_complete_fresh(fixture.path())
-        .await
-        .expect("latest generation");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation = latest.generation.manifest().generation_id.clone();
     let operation =
         callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
     let context = application_context(
@@ -8866,12 +8888,13 @@ async fn pinned_generation_from_another_worktree_is_unavailable() {
         )
         .await
         .expect("mount requester worktree");
-    let owner_generation = wait_for_initial_generation(&registry, owner.path()).await;
-    wait_for_initial_generation(&registry, requester.path()).await;
-    let requester_latest = registry
-        .latest_complete_fresh(requester.path())
+    let owner_generation = wait_for_live_complete_generation(&registry, owner.path())
         .await
-        .expect("requester generation");
+        .generation
+        .manifest()
+        .generation_id
+        .clone();
+    let requester_latest = wait_for_live_complete_generation(&registry, requester.path()).await;
     let operation =
         callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
     let context = application_context(
@@ -8917,11 +8940,8 @@ async fn symbol_search_is_generation_bound_and_uses_mounted_authority() {
         )
         .await
         .expect("mount worktree");
-    let generation = wait_for_initial_generation(&registry, fixture.path()).await;
-    let latest = registry
-        .latest_complete_fresh(fixture.path())
-        .await
-        .expect("latest generation");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation = latest.generation.manifest().generation_id.clone();
     let operation =
         callable_code_operation(CallableCodeOperationKind::SymbolSearch).expect("operation");
     let context = application_context(
@@ -9089,12 +9109,8 @@ async fn pinned_query_bypasses_freshness_resolution() {
         )
         .await
         .expect("mount daemon-owned scheduler");
-    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
-
-    let latest = registry
-        .latest_complete_fresh(fixture.path())
-        .await
-        .expect("mounted generation");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let initial = latest.generation.manifest().generation_id.clone();
     assert_eq!(latest.generation.manifest().generation_id, initial);
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
@@ -11125,15 +11141,19 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
 
     let publication_deadline = std::time::Instant::now() + Duration::from_secs(10);
     let generation_b = loop {
-        let durable = {
-            let scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            scheduler
+        let durable = match scheduler.try_lock() {
+            Ok(scheduler) => scheduler
                 .publication
                 .read_publication_pointer()
                 .expect("read durable active pointer")
-                .map(|pointer| pointer.generation_id)
+                .map(|pointer| pointer.generation_id),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned
+                .into_inner()
+                .publication
+                .read_publication_pointer()
+                .expect("read durable active pointer")
+                .map(|pointer| pointer.generation_id),
         };
         if let Some(durable) = durable
             && durable != generation_a.as_str()
@@ -11144,22 +11164,30 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             std::time::Instant::now() <= publication_deadline,
             "changed graph-off source never published durable generation B"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     };
 
     let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
     let progress_b = loop {
-        let progress = {
-            let scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let progress = scheduler.build_progress_slot();
-            let progress = progress
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (progress.owner_epoch, progress.snapshot())
+        let progress = match scheduler.try_lock() {
+            Ok(scheduler) => {
+                let progress = scheduler.build_progress_slot();
+                let progress = progress
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Some((progress.owner_epoch, progress.snapshot()))
+            }
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                let scheduler = poisoned.into_inner();
+                let progress = scheduler.build_progress_slot();
+                let progress = progress
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Some((progress.owner_epoch, progress.snapshot()))
+            }
         };
-        if let (owner_epoch, Some(progress)) = progress
+        if let Some((owner_epoch, Some(progress))) = progress
             && progress.generation_id == generation_b.as_str()
             && progress.committed_pages > 0
         {
@@ -11170,7 +11198,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             std::time::Instant::now() <= progress_deadline,
             "durable generation B never acquired advancing text authority"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     };
     assert!(progress_b.progress_epoch > 0);
     assert_eq!(
@@ -11903,7 +11931,12 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
         )
         .await
         .expect("mount");
-    let expected = wait_for_initial_generation(&registry, fixture.path()).await;
+    let expected = wait_for_live_complete_generation(&registry, fixture.path())
+        .await
+        .generation
+        .manifest()
+        .generation_id
+        .clone();
     let before_receipts = registry.event_to_ready_receipts().len();
 
     let scheduler = registry

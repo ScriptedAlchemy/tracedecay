@@ -2831,12 +2831,6 @@ impl CodeIndexSchedulerRegistryV1 {
                         evidence,
                     );
                 }
-                // Source reconciliation is complete: release the public
-                // freshness guard and the background-reconcile admission
-                // permit before HeadOpening / graph work. Holding either
-                // through those phases reports a just-published current
-                // generation as refreshing and serializes sibling stores.
-                drop(_reconcile_pass);
                 if let Ok(Ok(outcome)) = &source_result {
                     Self::record_source_reconcile_observation(
                         worker_index_observability.get(),
@@ -2845,6 +2839,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         started_micros,
                     );
                 }
+                // Source reconciliation is complete: release the background
+                // admission permit before HeadOpening / graph work so sibling
+                // stores can start. Keep `_reconcile_pass` through seating —
+                // dropping it made `reconcile_in_progress` lie while this
+                // worker still owned graph try_lock, which deadlocked tests
+                // that hold the scheduler mutex and wait for that flag.
                 drop(_background_reconcile_admission);
                 // A publication must first reopen and finish its own
                 // lightweight text owner: publication moved the durable
