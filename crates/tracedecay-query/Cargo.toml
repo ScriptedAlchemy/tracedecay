@@ -15,7 +15,11 @@ hmac = "0.13.0"
 hotpath.workspace = true
 rayon = "1"
 roaring = { version = "=0.11.4", default-features = false }
-rusqlite = { workspace = true, features = ["functions"] }
+# Lexical artifact finalization installs a SQLite progress_handler, and
+# receipt-verification tests install an authorizer. Both APIs live behind
+# rusqlite's `hooks` feature and must be selected here; they are not part
+# of the workspace rusqlite baseline.
+rusqlite = { workspace = true, features = ["functions", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
