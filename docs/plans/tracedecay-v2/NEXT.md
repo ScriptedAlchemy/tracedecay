@@ -1,23 +1,73 @@
 # V2 RC reboot handoff
 
-**Status:** active product delivery; local reboot recovery, the live Work
-product journey, and the verified dashboard code-graph cutover are complete as
-of 2026-08-09. Checkpoints below are current through the 2026-08-14 window,
-including the typed delivery-evidence slice, external TLS listener
-hardening, the runtime-identity ABA repair, the automation
-scheduler/settlement hardening wave, the dashboard work-surface TaskSession
-journey, markdown lite-index admission, and the cargo+npm unmounted-files
-audit.
+**Status:** active product delivery. The newest outcomes are the 2026-08-29
+landing-wave section immediately below; the older checkpoints are current
+through the 2026-08-14 window, including the typed delivery-evidence slice,
+external TLS listener hardening, the runtime-identity ABA repair, the
+automation scheduler/settlement hardening wave, the dashboard work-surface
+TaskSession journey, markdown lite-index admission, and the cargo+npm
+unmounted-files audit.
 
 `00-plan-set-index.md` remains the sole roadmap and acceptance authority. This
 file is the current operational handoff updated from direct branch, test, and
 live-daemon evidence. Resume from this file and the current branch; do not
 reconstruct intent from commit subjects alone.
 
+## 2026-08-29 landing wave outcomes
+
+All on `origin/codex/tracedecay-total-redesign-plan-reopened` (PR #707):
+
+- Scheduler cluster repair landed consolidated in `e08eab0dd6`: early
+  publish with serving-seat wait, lock-park remount, graph-off
+  memory-pressure rebuilds, bounded activation, ready abstain, lock-free
+  reconcile slot, publication identity, text-head reopen, and label-move
+  CAS. The focused scheduler slice stood at 161 passed / 2 failed at
+  consolidation; both residual failures were repaired by landed follow-ups
+  (git-witness resample, serving-slot retirement without wiping text
+  latest, incremental graph-off rebuilds under memory pressure through
+  `cc665a7046`).
+- Streaming sealed seat: committed-WAL recovery streams instead of
+  materializing (`fe3bf7ea59`); peak RSS 7.56 GiB vs the 27.3 GiB
+  old-binary control (`e08eab0dd6`).
+- Grafeo checkpoints are crash-atomic: generations write out of place and
+  commit with an authenticated header flip, so a kill at any byte leaves
+  the store openable at the prior generation with WAL replay intact
+  (`f7ff1ab8f4`); torn checkpoints in-place were the byte-level mechanism
+  behind the GRAFEO-X001 catalog CRC mismatch. The catalog format-version
+  guard is pinned (`a7f56eadc0`), and the fractured fork lineage is
+  reintegrated at pin `aa1d25eeb9` including persisted-HNSW restoration on
+  open — `vector_index_status` is Available after reopen, the new
+  `torn_vector_checkpoint` suite kills the checkpoint at every injection
+  point over a populated HNSW index and reopens serving search, and
+  `tracedecay-graph-db --all-features` passed 272/272 (`56d03e9198`).
+- Publication close-skip: `GrafeoDB::close` skips the checkpoint when the
+  container is already current, so a read-only session no longer rewrites
+  the whole accumulated store; torn-container detection types truncated
+  stores as Corrupt instead of Unavailable, and the multi-chunk arena fix
+  dropped by the fork rebuild (tiered-storage panic near 32Ki records) is
+  restored (`c5ae9eee84`).
+- PR #748 is absorbed into #707 (`25da3fa9c6` plus follow-ups
+  `0bd3545e2a`, `7cca98da41`, `1f18f07ceb`): the landed #707 semantic
+  status mechanism is kept, #748 test contracts and linked-activation
+  redundancy authority are ported, and its caller-less accessor dropped.
+- The durable Ready receipt is reattached after remount (`33c90bfbad`).
+- Redundancy spans validate in sanitized coordinates (`90fa8bb1c6`):
+  spans are extracted on privacy-sanitized bytes, so validating them
+  against raw file bytes refused frozen clones as stale; span checks and
+  fingerprints now share the sanitizer's coordinate space while genuine
+  shrinkage still refuses typed.
+- Status reads serve the cached background process sample instead of
+  forcing a fresh sample per request (`f86a316cb3`).
+- Transport phases are spanned: daemon wire decode and response
+  write-back (`cc593e35f1`), LSP outbound frame queue-wait and ack
+  latency (`d90d6c4f36`), and automation/MCP span gaps closed under
+  dotted labels (`bef63eb91b`, `fb224d9153`).
+
 ## Resume invariants
 
-- Branch: `codex/tracedecay-total-redesign-plan` is the current delivery
-  branch. `codex/final-v2-closeout` briefly carried the tip on 2026-08-12 but
+- Branch: `codex/tracedecay-total-redesign-plan-reopened` (PR #707) is the
+  current delivery branch, superseding `codex/tracedecay-total-redesign-plan`.
+  `codex/final-v2-closeout` briefly carried the tip on 2026-08-12 but
   work resumed on the redesign-plan branch; as of 2026-08-13 the closeout
   branch is a strict ancestor of the redesign-plan tip (38 commits behind, 0
   ahead) and must not be treated as current.
