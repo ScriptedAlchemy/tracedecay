@@ -59,8 +59,8 @@ For literal strings, regexes, and config keys inside indexed code, use
 `tracedecay_grep`; reserve `tracedecay_search` for symbol names and
 `tracedecay_context` for concept-level discovery.
 
-The 17 shared skills ship in the standard `SKILL.md` format under `skills/`.
-The 13 workflow slash commands ship as Markdown with YAML frontmatter under
+The shared skills ship in the standard `SKILL.md` format under `skills/`.
+The shared workflow slash commands ship as Markdown with YAML frontmatter under
 `commands/` and are namespaced by the plugin id: `/tracedecay:map-architecture`,
 `/tracedecay:check-health`, `/tracedecay:review-diff`, and so on. Text typed
 after the command replaces `$ARGUMENTS` in the command body.
