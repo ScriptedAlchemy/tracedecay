@@ -279,7 +279,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
-    use tracedecay_runtime_core::background_cpu::install_process_background_cpu;
+    use tracedecay_private_fs::background_cpu::install_process_background_cpu;
 
     use super::*;
 

@@ -5,9 +5,10 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 
 use crate::global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_sessions::runtime::lcm::{
-    LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSessionBoundaryRequest,
-    LcmSessionBoundaryResponse, LcmSummarizerMode,
+    LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSummarizerMode,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_sessions::runtime::lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
 
 const LCM_EFFECT_CEILING: Duration = Duration::from_secs(30);
 const LCM_EFFECT_WORK_LIMIT: usize = 4_096;
@@ -187,6 +188,7 @@ impl DaemonLcmEffectService {
             .await
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn session_boundary(
         &self,
         request: LcmSessionBoundaryRequest,

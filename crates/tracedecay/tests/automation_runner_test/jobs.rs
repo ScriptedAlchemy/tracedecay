@@ -417,9 +417,17 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
         .join("user-job-run-1.md");
     let delivered = fs::read_to_string(&output_path).unwrap();
     assert_eq!(delivered, "# Digest\n\nNothing changed today.");
-    assert_eq!(
-        run.report["delivery"]["path"],
-        json!(output_path.display().to_string())
+    assert_eq!(run.report["delivery"]["mode"], json!("file"));
+    assert!(
+        run.report["delivery"].get("path").is_none(),
+        "delivery reports keep only the target digest, not the filesystem path"
+    );
+    let target_digest = run.report["delivery"]["target_digest"]
+        .as_str()
+        .expect("file delivery must publish a target digest");
+    assert!(
+        target_digest.starts_with("sha256:") && target_digest.len() == "sha256:".len() + 64,
+        "file delivery digest must be a sha256 hex: {target_digest}"
     );
 
     // Ledger recording under user_job:<id> with the standard artifact chain.

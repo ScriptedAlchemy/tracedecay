@@ -17,7 +17,8 @@ use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, UserProfileId, 
 use url::Url;
 
 use super::protocol::{
-    GitHubLinkPageScopeV1, link_next_page, rate_limit_checkpoint, retry_after_at,
+    GitHubLinkPageScopeV1, InvalidGitHubLinkContinuationV1, link_next_page, rate_limit_checkpoint,
+    retry_after_at,
 };
 use super::{
     GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
@@ -353,7 +354,12 @@ impl ProjectGitHubReleaseReadAuthorityV1 {
                 },
             ) {
                 Ok(next_page) => next_page,
-                Err(()) => return ProjectGitHubReleaseReadOutcomeV1::Unavailable,
+                // Same fail-closed choice as the review/comment transport: a
+                // rejected Link header taints the exchange, so this page body
+                // is discarded. `link_next_page` traces the rejection.
+                Err(InvalidGitHubLinkContinuationV1) => {
+                    return ProjectGitHubReleaseReadOutcomeV1::Unavailable;
+                }
             };
             let Ok(body) = response
                 .body_mut()

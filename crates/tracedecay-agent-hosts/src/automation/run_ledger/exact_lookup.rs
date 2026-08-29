@@ -473,6 +473,22 @@ pub(super) fn scan_jsonl_row(
     path: &Path,
     line: Range<u64>,
 ) -> Result<Option<RunLedgerRowProjection>> {
+    let Some(row) = scan_jsonl_row_projection(file, path, line)? else {
+        return Ok(None);
+    };
+    validate_ledger_row_semantics(&row)?;
+    Ok(Some(row))
+}
+
+/// Projects identity fields and validates JSON shape without timestamp
+/// semantics. Unreadable JSON, blank lines, and incomplete identity objects
+/// stay skippable; callers that need a standing completion instant still call
+/// [`validate_ledger_row_semantics`].
+pub(super) fn scan_jsonl_row_projection(
+    file: &std::fs::File,
+    path: &Path,
+    line: Range<u64>,
+) -> Result<Option<RunLedgerRowProjection>> {
     // A blank/whitespace-only span is not corruption: consecutive newlines
     // (a trailing blank line, an operator edit, or a legacy writer) are
     // benign and must be skipped rather than treated as a fatal error.
@@ -482,7 +498,6 @@ pub(super) fn scan_jsonl_row(
         return Ok(None);
     };
     validate_jsonl_row_schema(file, path, &row.span)?;
-    validate_ledger_row_semantics(&row)?;
     Ok(Some(row))
 }
 

@@ -1282,6 +1282,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// The typed project id and enrollment roots authorize the resolver; the
     /// returned database remains cached so migration and live use share one
     /// writer authority.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn project_memory(
         &self,
         project_id: ProjectId,

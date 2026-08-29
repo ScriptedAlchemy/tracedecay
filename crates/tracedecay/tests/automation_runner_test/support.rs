@@ -4,7 +4,8 @@ mod fixtures;
 
 pub(crate) use fixtures::{
     SeedSessionMessage, SeededDuplicateFacts, fact_exists, fixture_open_options, init_project,
-    read_artifact, seed_duplicate_facts, seed_session_message_in_db,
+    read_artifact, seed_duplicate_facts, seed_project_session_activity,
+    seed_project_session_activity_at, seed_session_message_in_db,
 };
 #[cfg(feature = "test-transport")]
 pub(crate) use fixtures::{

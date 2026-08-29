@@ -4,28 +4,63 @@
 //! prompt files publish only after the exact source snapshot remains valid.
 
 use std::cell::RefCell;
-use std::fs::File;
 use std::path::Path;
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use fs2::FileExt;
+use same_file::Handle;
 use tracedecay_domain::canonical_text::sha256_hex;
 
 use super::HostFileMetadataIdentityV1;
 use crate::errors::{Result, TraceDecayError};
 
-/// Stable sibling lock held across host-file observation, intent, and rename.
-struct HostFileWriteLock(File);
+/// Sibling lock held across host-file observation, intent, and rename.
+///
+/// The lock file is transient: the holder unlinks it while still holding the
+/// exclusive lock, so host-owned directories (a user's project root, a plugin
+/// install dir) are not littered with lock artifacts and uninstall can remove
+/// a tracedecay-owned directory completely. Only the exclusive holder may
+/// unlink; a waiter that acquired the orphaned inode detects the identity
+/// mismatch in `lock_host_file_write` and retries on a fresh entry.
+pub(super) struct HostFileWriteLock {
+    directory: Dir,
+    lock_name: String,
+    handle: Handle,
+}
 
 impl Drop for HostFileWriteLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
+        // Unlink before releasing: removing the entry after unlock would let
+        // two late waiters lock different inodes for the same host file.
+        // The lock handle is opened with FILE_SHARE_DELETE on Windows so this
+        // unlink can succeed while the exclusive lock is still held. Cleanup
+        // is best-effort; a failure is traced rather than swallowed.
+        if let Err(error) = self.directory.remove_file(&self.lock_name) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    lock_name = %self.lock_name,
+                    error = %error,
+                    "host config lock file could not be unlinked while held"
+                );
+            }
+        }
+        if let Err(error) = FileExt::unlock(self.handle.as_file()) {
+            tracing::warn!(
+                lock_name = %self.lock_name,
+                error = %error,
+                "host config lock could not be released"
+            );
+        }
     }
 }
 
-fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
+/// Each retry means a prior holder unlinked the entry we waited on; bounded so
+/// a pathological churn storm surfaces as a typed error instead of a spin.
+const HOST_FILE_LOCK_ACQUIRE_ATTEMPTS: usize = 64;
+
+pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -68,34 +103,89 @@ fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
         .read(true)
         .write(true)
         .follow(FollowSymlinks::No);
-    let lock = directory
-        .open_with(&lock_name, &options)
-        .map_err(|error| TraceDecayError::Config {
+    let mut probe = CapOpenOptions::new();
+    probe.read(true).follow(FollowSymlinks::No);
+    // cap-std already defaults to FILE_SHARE_READ|WRITE|DELETE; set it
+    // explicitly so Drop can unlink the still-open lock on Windows even if
+    // that default ever changes.
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        probe.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    for _ in 0..HOST_FILE_LOCK_ACQUIRE_ATTEMPTS {
+        let lock = directory
+            .open_with(&lock_name, &options)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to open host config lock {}: {error}",
+                    parent.join(&lock_name).display()
+                ),
+            })?
+            .into_std();
+        let metadata = lock.metadata().map_err(|error| TraceDecayError::Config {
             message: format!(
-                "failed to open host config lock {}: {error}",
+                "failed to inspect host config lock {}: {error}",
                 parent.join(&lock_name).display()
             ),
-        })?
-        .into_std();
-    let metadata = lock.metadata().map_err(|error| TraceDecayError::Config {
+        })?;
+        if !metadata.is_file() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing unsafe host config lock {}",
+                    parent.join(&lock_name).display()
+                ),
+            });
+        }
+        lock.lock_exclusive()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to lock host config {}: {error}", path.display()),
+            })?;
+        let locked = Handle::from_file(lock).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to identify host config lock {}: {error}",
+                parent.join(&lock_name).display()
+            ),
+        })?;
+        // A prior holder may have unlinked the inode we waited on; the lock is
+        // valid only while the directory entry still names the locked file.
+        let current = match directory.open_with(&lock_name, &probe) {
+            Ok(file) => {
+                Handle::from_file(file.into_std()).map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "failed to identify host config lock {}: {error}",
+                        parent.join(&lock_name).display()
+                    ),
+                })?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to inspect host config lock {}: {error}",
+                        parent.join(&lock_name).display()
+                    ),
+                });
+            }
+        };
+        if current == locked {
+            return Ok(HostFileWriteLock {
+                directory,
+                lock_name,
+                handle: locked,
+            });
+        }
+    }
+    Err(TraceDecayError::Config {
         message: format!(
-            "failed to inspect host config lock {}: {error}",
+            "host config lock {} kept churning while waiting for it",
             parent.join(&lock_name).display()
         ),
-    })?;
-    if !metadata.is_file() {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "refusing unsafe host config lock {}",
-                parent.join(&lock_name).display()
-            ),
-        });
-    }
-    lock.lock_exclusive()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to lock host config {}: {error}", path.display()),
-        })?;
-    Ok(HostFileWriteLock(lock))
+    })
 }
 
 #[cfg(unix)]
@@ -331,7 +421,13 @@ fn remove_host_file_from_snapshot(path: &Path, observed: &HostFileSnapshot) -> R
     super::persist_host_config_remove_intent(path)?;
     tracedecay_private_fs::framed_log::remove_conditionally(
         path,
-        || {},
+        || {
+            #[cfg(test)]
+            super::test_pause_host_config_write(
+                path,
+                super::TestHostConfigWriteBoundary::Publication,
+            );
+        },
         |displaced| {
             let displaced = capture_host_file_snapshot(displaced)?;
             Ok(displaced.same_after_move(observed))
@@ -375,11 +471,28 @@ fn safe_write_bytes_file_from_snapshot(
                 super::persist_host_config_write_intent(path, contents, Some(&expected_metadata))
                     .map_err(std::io::Error::other)?;
                 verify_host_file_snapshot(path, observed)?;
+                #[cfg(test)]
+                super::test_pause_host_config_write(
+                    path,
+                    super::TestHostConfigWriteBoundary::Validation,
+                );
                 verify_host_file_snapshot(path, observed)?;
                 Ok(())
             },
-            before_publish: || {},
-            after_publish: || {},
+            before_publish: || {
+                #[cfg(test)]
+                super::test_pause_host_config_write(
+                    path,
+                    super::TestHostConfigWriteBoundary::Publication,
+                );
+            },
+            after_publish: || {
+                #[cfg(test)]
+                super::test_pause_host_config_write(
+                    path,
+                    super::TestHostConfigWriteBoundary::Published,
+                );
+            },
             verify_displaced: |displaced: &Path| {
                 let displaced = capture_host_file_snapshot(displaced)?;
                 Ok(displaced.same_after_move(observed))
@@ -407,5 +520,7 @@ fn safe_write_bytes_file_from_snapshot(
             message: format!("failed to atomically replace {}: {e}{hint}", path.display()),
         });
     }
+    #[cfg(feature = "test-transport")]
+    super::test_abort_after_host_config_write(path);
     Ok(())
 }

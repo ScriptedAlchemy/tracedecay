@@ -67,18 +67,42 @@ compiles.
 - `dashboard/app-dist/` is gitignored build output but required by `build.rs`;
   a fresh checkout/worktree must build the dashboard (or seed the directory)
   before Rust compiles. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` only skips a
-  stale rebuild.
+  stale rebuild. Create linked worktrees with `scripts/agent-worktree.sh` so
+  `app-dist` and `node_modules` are seeded from the primary checkout.
 - This machine shares one compile cache (kache, keyed on
   profile × features × RUSTFLAGS × source); the `kache cargo -- <args>`
   front-end above keeps that key stable, which is why bare `cargo` is
   avoided. `CARGO_TARGET_DIR` and worktree
-  paths do not affect the key — use per-task target dirs freely. Novel feature
+  paths do not affect the key. Novel feature
   permutations do: each one recompiles the workspace spine (~7 min for
   `tracedecay`) instead of hitting the cache. Stick to the standard lanes —
   default features (add `test-helpers` only when the suite requires it), plain
   `--no-default-features` for lean lib iteration, `--all-features` for the
   handoff gate, and the fixed hotpath profiling combos — rather than toggling
   individual features (e.g. `semantic-fastembed`) per task.
+- The CLI build lane (`build -p tracedecay-cli --bin tracedecay`) and any test
+  compile of the root crate resolve different spine features: dev-dependency
+  unification activates `test-helpers`/`test-transport` on ~13 spine crates
+  (usecases, sessions, runtime-core, global-db, graph-db, query, semantic,
+  code-index, agent-hosts, dashboard-api, …) that a plain CLI build resolves
+  without. That is the typed test-feature design working as intended — the
+  fixture surfaces live in-crate and stay out of the shipped binary — and
+  Cargo keeps both feature variants side by side in one target dir, so
+  alternating the two standard build and test lanes does not recompile at
+  steady state (measured: no-ops in both directions once each lane has
+  populated; the first test compile after a plain build pays a one-time extra
+  spine compile). The recurring cost is per edit: a change in a flipped crate
+  compiles it and its dependents once per lane. What actually costs is a
+  novel feature combination (new cache key, full spine rebuild) or a
+  needless fresh `CARGO_TARGET_DIR` for a big crate. Do not "fix" the flip
+  by enabling test features in the build lane (that ships fixture surface in
+  the CLI), and do not invent a per-lane target dir — the variants coexist.
+  Pick one `CARGO_TARGET_DIR` for the task so you reuse the populated
+  artifacts.
+- Start long cargo runs in the background and check back in minutes, not
+  10–30s polls. Never run `--workspace` suites mid-task — those are handoff
+  gates only. Never re-run tests that are known-red under another active
+  lane; cite the owner instead.
 
 ## Conventions
 

@@ -87,9 +87,9 @@ fn staged_identity_matches(
     {
         let path_file =
             File::open(path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        let path_identity = tracedecay_runtime_core::windows_file::information(&path_file)
+        let path_identity = tracedecay_private_fs::windows_file::information(&path_file)
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        let handle_identity = tracedecay_runtime_core::windows_file::information(file)
+        let handle_identity = tracedecay_private_fs::windows_file::information(file)
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         return Ok(
             path_identity.volume_serial_number == handle_identity.volume_serial_number

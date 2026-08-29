@@ -2406,26 +2406,6 @@ enum TextHeadOpenOutcomeV1 {
     Build(CodeTextArtifactBuildV1),
 }
 
-/// Occupies the head-open singleflight claim exactly as a wake that owns the
-/// corpus-sized verified open does. Restores `Idle` and wakes parked
-/// arrivals on drop, so a parked wake is never stranded.
-#[cfg(test)]
-struct HeldTextHeadOpenV1 {
-    state: Arc<CodeTextProjectionStateV1>,
-}
-
-#[cfg(test)]
-impl Drop for HeldTextHeadOpenV1 {
-    fn drop(&mut self) {
-        let mut slot = self.state.lock_slot();
-        if matches!(&*slot, CodeTextProjectionSlotV1::HeadOpening) {
-            *slot = CodeTextProjectionSlotV1::Idle;
-        }
-        drop(slot);
-        self.state.ready.notify_all();
-    }
-}
-
 fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
     match error {
         CodeLexicalArtifactErrorV1::Interrupted(
@@ -3000,19 +2980,6 @@ impl LatestCodeTextGenerationV1 {
 
     fn mark_text_serving_failed(&self) {
         self.text_projection_failed.store(true, Ordering::Release);
-    }
-
-    /// Occupy the head-open singleflight claim as a real open owner would,
-    /// so tests can observe concurrent-arrival parking and typed
-    /// cancellation without a corpus-sized artifact.
-    #[cfg(test)]
-    fn hold_text_head_open(&self) -> HeldTextHeadOpenV1 {
-        let mut slot = self.text_projection_build.lock_slot();
-        *slot = CodeTextProjectionSlotV1::HeadOpening;
-        drop(slot);
-        HeldTextHeadOpenV1 {
-            state: Arc::clone(&self.text_projection_build),
-        }
     }
 }
 

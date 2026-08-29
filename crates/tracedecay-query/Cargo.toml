@@ -15,7 +15,11 @@ hmac = "0.13.0"
 hotpath.workspace = true
 rayon = "1"
 roaring = { version = "=0.11.4", default-features = false }
-rusqlite = { workspace = true, features = ["functions"] }
+# Lexical artifact finalization installs a SQLite progress_handler, and
+# receipt-verification tests install an authorizer. Both APIs live behind
+# rusqlite's `hooks` feature and must be selected here; they are not part
+# of the workspace rusqlite baseline.
+rusqlite = { workspace = true, features = ["functions", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -28,9 +32,6 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 zeroize = "1.9.0"
 
-[target.'cfg(windows)'.dependencies]
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-
 [features]
 # Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
 # the feature off, so instrumented call sites compile identically both ways.
@@ -41,7 +42,6 @@ hotpath = [
     "tracedecay-code-index/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-private-fs/hotpath",
-    "tracedecay-runtime-core/hotpath",
     "tracedecay-temporal-query/hotpath",
 ]
 hotpath-alloc = [
@@ -52,7 +52,6 @@ hotpath-alloc = [
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
 ]
 hotpath-cpu = [
@@ -63,7 +62,6 @@ hotpath-cpu = [
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
 ]
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
@@ -84,7 +82,6 @@ tempfile = "3"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", features = ["lite"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["lite", "test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 
 [[bench]]
 name = "code_lexical_catchup"

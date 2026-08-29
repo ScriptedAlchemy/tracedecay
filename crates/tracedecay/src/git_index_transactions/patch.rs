@@ -1,5 +1,7 @@
 use serde::Serialize;
-use tracedecay_domain::{HunkRefV1, canonical_sha256, full_hunk_selection_bitmap};
+use tracedecay_domain::{
+    HunkRefV1, canonical_sha256, full_hunk_selection_bitmap, parse_hunk_header,
+};
 
 use super::NativeGitIndexError;
 
@@ -92,31 +94,11 @@ impl ValidatedIndexPatch {
     }
 }
 
+/// Stored hunk headers are normalized `@@ -a,b +c,d @@` text: a trailing
+/// section heading is as much a mismatch as a malformed range.
 fn parse_hunk_line_counts(header: &str) -> Result<(u32, u32), NativeGitIndexError> {
-    let mut fields = header.split_whitespace();
-    if fields.next() != Some("@@") {
-        return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
-    }
-    let old = fields
-        .next()
-        .and_then(|value| value.strip_prefix('-'))
-        .and_then(parse_hunk_range_count)
-        .ok_or(NativeGitIndexError::PatchDoesNotMatchHunk)?;
-    let new = fields
-        .next()
-        .and_then(|value| value.strip_prefix('+'))
-        .and_then(parse_hunk_range_count)
-        .ok_or(NativeGitIndexError::PatchDoesNotMatchHunk)?;
-    if fields.next() != Some("@@") || fields.next().is_some() {
-        return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
-    }
-    Ok((old, new))
-}
-
-fn parse_hunk_range_count(value: &str) -> Option<u32> {
-    match value.split_once(',') {
-        Some((start, count)) if !start.is_empty() => count.parse().ok(),
-        None if !value.is_empty() => Some(1),
-        _ => None,
+    match parse_hunk_header(header) {
+        Some(parsed) if parsed.section.is_none() => Ok((parsed.old_count, parsed.new_count)),
+        Some(_) | None => Err(NativeGitIndexError::PatchDoesNotMatchHunk),
     }
 }

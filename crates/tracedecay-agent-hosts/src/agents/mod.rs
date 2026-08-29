@@ -32,6 +32,7 @@ pub mod opencode;
 pub mod plugin_bundle;
 pub mod prompt_rules;
 mod text_file_transaction;
+use text_file_transaction::lock_host_file_write;
 pub(crate) use text_file_transaction::{TextFileMutation, update_text_file_transactionally};
 pub(crate) mod retired_memory_digest;
 pub mod roo_code;
@@ -39,13 +40,8 @@ pub mod vibe;
 pub mod zed;
 
 use std::cell::RefCell;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::ambient_authority;
-use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
@@ -1066,88 +1062,6 @@ pub fn safe_write_bytes_file_with_metadata(
     safe_write_bytes_file_guarded(path, contents, backup, replacement_metadata)
 }
 
-/// Stable sibling lock held across host-file observation, intent, and rename.
-struct HostFileWriteLock(File);
-
-impl Drop for HostFileWriteLock {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
-    }
-}
-
-fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
-        message: format!("cannot create directory {}: {error}", parent.display()),
-    })?;
-    let parent = std::fs::canonicalize(parent).map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "failed to resolve host config directory {}: {error}",
-            parent.display()
-        ),
-    })?;
-    let file_name = path.file_name().ok_or_else(|| TraceDecayError::Config {
-        message: format!("host config path has no file name: {}", path.display()),
-    })?;
-    let file_name_identity =
-        serde_json::to_vec(file_name).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to bind host config lock for {}: {error}",
-                path.display()
-            ),
-        })?;
-    let lock_name = format!(
-        ".tracedecay-host-config-{}.lock",
-        sha256_hex(&file_name_identity)
-    );
-    let directory = Dir::open_ambient_dir(&parent, ambient_authority()).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!(
-                "failed to open host config directory {}: {error}",
-                parent.display()
-            ),
-        }
-    })?;
-    let mut options = CapOpenOptions::new();
-    options
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .follow(FollowSymlinks::No);
-    let lock = directory
-        .open_with(&lock_name, &options)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to open host config lock {}: {error}",
-                parent.join(&lock_name).display()
-            ),
-        })?
-        .into_std();
-    let metadata = lock.metadata().map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "failed to inspect host config lock {}: {error}",
-            parent.join(&lock_name).display()
-        ),
-    })?;
-    if !metadata.is_file() {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "refusing unsafe host config lock {}",
-                parent.join(&lock_name).display()
-            ),
-        });
-    }
-    lock.lock_exclusive()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to lock host config {}: {error}", path.display()),
-        })?;
-    Ok(HostFileWriteLock(lock))
-}
-
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HostFileObjectIdentity {
@@ -1238,13 +1152,6 @@ enum HostFileSnapshot {
 }
 
 impl HostFileSnapshot {
-    fn contents(&self) -> Option<&[u8]> {
-        match self {
-            Self::Missing => None,
-            Self::Present { contents, .. } => Some(contents),
-        }
-    }
-
     fn metadata(&self) -> Option<&HostFileMetadataIdentityV1> {
         match self {
             Self::Missing => None,
@@ -1478,29 +1385,6 @@ fn safe_write_bytes_file_guarded(
     safe_write_bytes_file_from_snapshot(path, contents, backup, replacement_metadata, &observed)
 }
 
-
-fn remove_host_file_from_snapshot(path: &Path, observed: &HostFileSnapshot) -> Result<()> {
-    if matches!(observed, HostFileSnapshot::Missing) {
-        return Ok(());
-    }
-    persist_host_config_remove_intent(path)?;
-    tracedecay_private_fs::framed_log::remove_conditionally(
-        path,
-        || {
-            #[cfg(test)]
-            test_pause_host_config_write(path, TestHostConfigWriteBoundary::Publication);
-        },
-        |displaced| {
-            let displaced = capture_host_file_snapshot(displaced)?;
-            Ok(displaced.same_after_move(observed))
-        },
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("failed to conditionally remove {}: {error}", path.display()),
-    })
-}
-
 fn safe_write_bytes_file_from_snapshot(
     path: &Path,
     contents: &[u8],
@@ -1574,6 +1458,15 @@ fn safe_write_bytes_file_from_snapshot(
         });
     }
     #[cfg(feature = "test-transport")]
+    test_abort_after_host_config_write(path);
+    Ok(())
+}
+
+/// Crash-injection point for host-config durability acceptance tests: abort
+/// the process right after a config write publishes so recovery paths are
+/// exercised against a real torn install.
+#[cfg(feature = "test-transport")]
+fn test_abort_after_host_config_write(path: &Path) {
     if (std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()
         && !path
             .file_name()
@@ -1584,7 +1477,6 @@ fn safe_write_bytes_file_from_snapshot(
     {
         std::process::abort();
     }
-    Ok(())
 }
 
 thread_local! {

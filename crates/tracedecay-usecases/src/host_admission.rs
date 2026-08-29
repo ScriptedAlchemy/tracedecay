@@ -23,7 +23,7 @@ use crate::observation::{
 };
 use crate::store::observation::GlobalDbObservationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::background_cpu::process_background_cpu;
+use tracedecay_private_fs::background_cpu::process_background_cpu;
 use tracedecay_runtime_core::privacy::{PrivacySanitizerError, RecordSanitizerV1};
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 

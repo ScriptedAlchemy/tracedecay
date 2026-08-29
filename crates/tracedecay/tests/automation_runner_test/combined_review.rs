@@ -300,6 +300,7 @@ async fn combined_review_commits_atomic_terminal_effects() {
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     let _global_db = isolate_global_db(&cg);
+    seed_project_session_activity(&cg).await;
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -409,6 +410,10 @@ async fn combined_review_not_dispatched_when_skill_writer_is_not_due() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
+    let now = current_timestamp();
+    // Activity must predate the skill-writer terminal so the interval gate
+    // still applies; newer activity would re-admit the writer as fresh.
+    seed_project_session_activity_at(&cg, now - 120).await;
     let config = scheduler_config(Some(3600), None);
     append_run_record(
         &cg.store_layout().dashboard_root,
@@ -416,7 +421,7 @@ async fn combined_review_not_dispatched_when_skill_writer_is_not_due() {
             "previous_skill_writer_run",
             AgentTaskKind::SkillWriter,
             AutomationRunStatus::Succeeded,
-            current_timestamp() - 60,
+            now - 60,
         ),
     )
     .await
@@ -454,6 +459,7 @@ async fn combined_review_task_configuration_skips_before_retrieval_or_backend() 
         let temp = tempdir().unwrap();
         let profile_root = temp.path().join("profile");
         let cg = init_project(temp.path()).await;
+        seed_project_session_activity(&cg).await;
         let mut config = scheduler_config(Some(3600), None);
         if disabled_task == AgentTaskKind::SessionReflector {
             config.tasks.session_reflector.enabled = false;
@@ -502,6 +508,7 @@ async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
         let temp = tempdir().unwrap();
         let profile_root = temp.path().join("profile");
         let cg = init_project(temp.path()).await;
+        seed_project_session_activity(&cg).await;
         let config = scheduler_config(Some(3600), None);
         let active_lock = AutomationTaskLock::try_acquire(
             &cg.store_layout().dashboard_root,
@@ -587,7 +594,9 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     let _global_db = isolate_global_db(&cg);
-    // No seeded session evidence: the reflector evidence bundle is empty, so
+    seed_project_session_activity(&cg).await;
+    // Activity authority is present so the due-gate can pass; the injected
+    // empty retrieval still makes the reflector evidence bundle empty, so
     // the combined path defers to the per-task runs (which record their own
     // skips).
     let config = scheduler_config(Some(3600), None);
@@ -627,6 +636,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
         let temp = tempdir().unwrap();
         let profile_root = temp.path().join("profile");
         let cg = init_project(temp.path()).await;
+        seed_project_session_activity(&cg).await;
         let config = scheduler_config(Some(3600), None);
         let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
         let retrieval = RejectedAutomationSessionRetrieval::new(reason);
@@ -663,6 +673,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("empty-profile");
     let cg = init_project(temp.path()).await;
+    seed_project_session_activity(&cg).await;
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
     let retrieval = EmptyAutomationSessionRetrieval::new();

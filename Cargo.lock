@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=7910717cacb491470d71bfc93070838a0a00ca8f#7910717cacb491470d71bfc93070838a0a00ca8f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=09382071a329bc3457755e28b9ae7a481f3756a2#09382071a329bc3457755e28b9ae7a481f3756a2"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2744,7 +2744,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=7910717cacb491470d71bfc93070838a0a00ca8f#7910717cacb491470d71bfc93070838a0a00ca8f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=09382071a329bc3457755e28b9ae7a481f3756a2#09382071a329bc3457755e28b9ae7a481f3756a2"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2764,7 +2764,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=7910717cacb491470d71bfc93070838a0a00ca8f#7910717cacb491470d71bfc93070838a0a00ca8f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=09382071a329bc3457755e28b9ae7a481f3756a2#09382071a329bc3457755e28b9ae7a481f3756a2"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2789,7 +2789,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=7910717cacb491470d71bfc93070838a0a00ca8f#7910717cacb491470d71bfc93070838a0a00ca8f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=09382071a329bc3457755e28b9ae7a481f3756a2#09382071a329bc3457755e28b9ae7a481f3756a2"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2811,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=7910717cacb491470d71bfc93070838a0a00ca8f#7910717cacb491470d71bfc93070838a0a00ca8f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=09382071a329bc3457755e28b9ae7a481f3756a2#09382071a329bc3457755e28b9ae7a481f3756a2"
 dependencies = [
  "bincode",
  "byteorder",
@@ -5960,6 +5960,7 @@ dependencies = [
  "hex",
  "hotpath",
  "rustls",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6135,7 +6136,7 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-domain",
  "tracedecay-graph-db",
- "tracedecay-runtime-core",
+ "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tree-sitter",
@@ -6211,6 +6212,7 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -6320,9 +6322,12 @@ dependencies = [
 name = "tracedecay-private-fs"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "hotpath",
  "libc",
  "tempfile",
+ "thiserror 2.0.19",
  "windows-sys 0.61.2",
 ]
 
@@ -6349,7 +6354,6 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-private-fs",
- "tracedecay-runtime-core",
  "tracedecay-temporal-query",
  "zeroize",
 ]
@@ -6480,8 +6484,8 @@ dependencies = [
  "tokio",
  "tracedecay-code-index",
  "tracedecay-domain",
+ "tracedecay-private-fs",
  "tracedecay-query",
- "tracedecay-runtime-core",
  "tracing",
  "url",
 ]

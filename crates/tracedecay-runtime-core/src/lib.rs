@@ -25,7 +25,7 @@
 //!
 //! `test-transport` forwards to `tracedecay-rusqlite-runtime/test-transport`.
 //! Platform cfgs travel with the code that needs them: `cfg(windows)`
-//! (`lifecycle_lease`, `os_str_bytes`, `windows_file`, `db/access/owner_io`),
+//! (`lifecycle_lease`, `os_str_bytes`, `db/access/owner_io`),
 //! `cfg(unix)` (`os_str_bytes`, `branch_meta`), `cfg(target_os = "linux")` /
 //! `cfg(target_os = "macos")` (`open_store_holders`), with matching
 //! `[target.'cfg(…)'.dependencies]` blocks (`xattr`, `libc`, `fsys`,
@@ -76,7 +76,6 @@
 #![allow(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]
 
-pub mod background_cpu;
 pub mod branch;
 pub mod branch_meta;
 pub mod cancellation;
@@ -107,8 +106,6 @@ pub mod sync;
 pub mod text;
 pub mod timeutil;
 pub mod tracedecay;
-#[cfg(windows)]
-pub mod windows_file;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;
 pub mod work_topology;

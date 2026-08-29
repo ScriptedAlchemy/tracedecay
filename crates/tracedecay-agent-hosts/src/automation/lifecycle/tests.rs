@@ -490,10 +490,25 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     assert!(matches!(gate, SchedulerGate::Skip("delegated_host_mode")));
 }
 
+/// The shortest valid interval schedule: a post-gate skip is a cadence
+/// terminal, so a repeat scheduler run can only be gated in after the
+/// interval elapses. Tests wait out one real second between runs.
+fn every_second_config() -> AutomationConfig {
+    let mut config = scheduler_enabled_config();
+    config.tasks.memory_curator.schedule = Some("every 1s".to_string());
+    config
+}
+
+/// Waits until the next scheduler tick is due after a cadence terminal under
+/// [`every_second_config`].
+async fn wait_out_scheduler_interval() {
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+}
+
 /// Runs the production post-gate skip path: the gate proceeds (caching
 /// ledger records), and the task body later decides to skip.
 async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &str) {
-    let config = scheduler_enabled_config();
+    let config = every_second_config();
     let sessions = test_sessions_db(dashboard_root).await;
     let mut run = AgentTaskRunContext::new(
         dashboard_root.to_path_buf(),
@@ -504,8 +519,13 @@ async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &
         &config,
         AgentTaskKind::MemoryCurator,
     );
-    let SchedulerGate::Proceed(lock) = run.gate().await.expect("gate") else {
-        panic!("gate must proceed so the skip is decided post-gate");
+    let gate = run.gate().await.expect("gate");
+    let SchedulerGate::Proceed(lock) = gate else {
+        let why = match &gate {
+            SchedulerGate::Skip(why) => why,
+            SchedulerGate::Proceed(_) => unreachable!(),
+        };
+        panic!("gate must proceed so the skip is decided post-gate: skipped {why}");
     };
     run.skipped_parts(None, reason, None)
         .await
@@ -519,6 +539,7 @@ async fn consecutive_identical_post_gate_scheduler_skips_persist_once() {
     let root = temp.path();
 
     post_gate_scheduler_skip(root, "run-1", "nothing_to_review").await;
+    wait_out_scheduler_interval().await;
     post_gate_scheduler_skip(root, "run-2", "nothing_to_review").await;
 
     let records = load_run_records(root, 50).await.expect("load records");
@@ -539,7 +560,10 @@ async fn page_cursor_transitions_bypass_reason_only_skip_deduplication() {
         ("run-cursor-1", serde_json::json!("fact.cursor")),
         ("run-cursor-2", serde_json::Value::Null),
     ] {
-        let config = scheduler_enabled_config();
+        if run_id == "run-cursor-2" {
+            wait_out_scheduler_interval().await;
+        }
+        let config = every_second_config();
         let sessions = test_sessions_db(root).await;
         let mut run = AgentTaskRunContext::new(
             root.to_path_buf(),

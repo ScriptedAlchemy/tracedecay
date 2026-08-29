@@ -32,8 +32,8 @@ use crate::runtime::source::{
     try_stream_new_jsonl_raw_strict_with_resume,
 };
 #[cfg(test)]
-use tracedecay_runtime_core::background_cpu::install_process_background_cpu;
-use tracedecay_runtime_core::background_cpu::{ProcessBackgroundCpuV1, process_background_cpu};
+use tracedecay_private_fs::background_cpu::install_process_background_cpu;
+use tracedecay_private_fs::background_cpu::{ProcessBackgroundCpuV1, process_background_cpu};
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
     prepare_observation_record_v1,

@@ -58,7 +58,11 @@ hotpath-cpu = [
 ]
 # Explicit opt-in (same policy as the query kernel): exposes the registered
 # global-db harness to dependent crates' test builds only.
-test-helpers = ["tracedecay-runtime-core/test-helpers", "dep:tempfile"]
+test-helpers = [
+    "tracedecay-runtime-core/test-helpers",
+    "dep:tempfile",
+    "dep:tracedecay-private-fs",
+]
 
 [dependencies]
 base64 = "0.22"
@@ -92,6 +96,9 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "
 # re-exported `tests::` harness); the crate's own `cfg(test)` builds resolve
 # it from dev-dependencies, so production builds never link it.
 tempfile = { version = "3", optional = true }
+# Same policy: the shared harness installs the process background CPU
+# authority; production code in this crate never touches it.
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
@@ -103,6 +110,9 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", feat
 # `test-transport` exposes the maintenance-authority fixture publisher this
 # crate's WAL reclaim tests need to prove exclusive-maintenance truncation.
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers", "test-transport"] }
+# The shared harness (`src/tests/harness.rs`) installs the process background
+# CPU authority for this crate's own `cfg(test)` builds.
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 

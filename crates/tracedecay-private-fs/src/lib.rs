@@ -1,9 +1,16 @@
-//! Owner-private filesystem creation, validation, and durable publication.
+//! Owner-private filesystem creation, validation, and durable publication,
+//! plus the process-wide OS primitives that share this crate's cold,
+//! dependency-light position: background CPU admission and Windows
+//! file-handle identity.
 
 use std::fs::File;
 use std::io;
 
+pub mod background_cpu;
+pub mod capability_dir;
 pub mod framed_log;
+#[cfg(windows)]
+pub mod windows_file;
 
 /// A private-file creation failure that distinguishes pre-creation errors from
 /// validation errors on an already-created exact file handle.

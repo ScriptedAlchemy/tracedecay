@@ -2010,7 +2010,7 @@ mod tests {
     };
     use crate::intake::{CodeIndexIntake, SanitizedCodeIntake};
     use crate::languages::{LanguageRegistry, StaticLanguageRegistry};
-    use tracedecay_runtime_core::background_cpu::{
+    use tracedecay_private_fs::background_cpu::{
         install_process_background_cpu, process_background_cpu,
     };
 

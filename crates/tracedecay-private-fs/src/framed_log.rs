@@ -301,14 +301,14 @@ fn replace_existing_with_backup(
             .chain(std::iter::once(0))
             .collect::<Vec<_>>()
     };
-    let destination = wide(destination);
-    let replacement = wide(replacement);
-    let backup = wide(backup);
+    let destination_wide = wide(destination);
+    let replacement_wide = wide(replacement);
+    let backup_wide = wide(backup);
     let result = unsafe {
         ReplaceFileW(
-            destination.as_ptr(),
-            replacement.as_ptr(),
-            backup.as_ptr(),
+            destination_wide.as_ptr(),
+            replacement_wide.as_ptr(),
+            backup_wide.as_ptr(),
             REPLACEFILE_WRITE_THROUGH,
             std::ptr::null(),
             std::ptr::null(),
