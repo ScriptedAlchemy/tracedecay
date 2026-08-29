@@ -3666,11 +3666,22 @@ pub(crate) fn project_semantic_generation_pointer(
 }
 
 /// Application status for a mounted project semantic scheduler, if any.
+///
+/// The durable activation receipt and the scheduler status projection are
+/// read under one acquisition of the project activation gate. A concurrent
+/// activation mutates the receipt and the installed authorities under that
+/// same gate, so status can never pair a stale receipt with a newer scheduler
+/// generation (reporting `Current` while semantic is unavailable) or the
+/// inverse (reporting degraded after a coherent install).
 pub fn project_semantic_application_status(
     project_root: &Path,
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> Option<SemanticRuntimeStatusV1> {
-    let activation_receipt = super::project_semantic_activation_receipt(project_root);
+    let activation = super::project_semantic_activation_gate(project_root);
+    let _activation = activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let activation_receipt = super::project_semantic_activation_receipt_under_gate(project_root);
     if let Some(runtime) = project_semantic_production_runtime(project_root) {
         let lifecycle = runtime.lifecycle_status();
         let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);

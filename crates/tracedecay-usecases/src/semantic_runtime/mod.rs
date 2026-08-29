@@ -114,6 +114,7 @@ pub use redundancy::{
     retain_project_semantic_code_sources,
 };
 pub(crate) use redundancy::{
+    project_semantic_activation_receipt_under_gate,
     register_project_semantic_redundancy_generation,
     unregister_project_semantic_redundancy_generation,
 };
