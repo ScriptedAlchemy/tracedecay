@@ -22,9 +22,9 @@ tracedecay-semantic = { version = "0.1.0" }
 tracedecay-usecases = { version = "0.1.0" }
 
 [features]
-lite = ["tracedecay-code-index/lite"]
+lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]
 medium = ["tracedecay-code-index/medium"]
-full = ["tracedecay-code-index/full"]
+full = ["tracedecay-code-index/full", "tracedecay-code-index-runtime/full"]
 hotpath = []
 hotpath-alloc = ["hotpath"]
 hotpath-cpu = ["hotpath"]
@@ -36,6 +36,7 @@ test-transport = []
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-usecases/semantic-fastembed",
+    "tracedecay-code-index-runtime/semantic-fastembed",
 ]
 """
 
@@ -280,9 +281,22 @@ def main() -> int:
     if "tracedecay-cli hotpath-mcp must enable" not in miswired_cli_mcp.stderr:
         raise SystemExit("miswired CLI MCP feature failed for an unexpected reason")
 
+    root_without_runtime_lite = ROOT_MANIFEST.replace(
+        'lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]',
+        'lite = ["tracedecay-code-index/lite"]',
+    )
+    missing_runtime_lite = run_fixture(
+        root_source=root_without_runtime_lite,
+        root_packaged=root_without_runtime_lite,
+    )
+    if missing_runtime_lite.returncode == 0:
+        raise SystemExit("root lite without code-index-runtime forwarding was accepted")
+    if "root lite must forward only" not in missing_runtime_lite.stderr:
+        raise SystemExit("missing runtime lite forward failed for an unexpected reason")
+
     root_with_local_tier_members = ROOT_MANIFEST.replace(
-        'full = ["tracedecay-code-index/full"]',
-        'full = ["tracedecay-code-index/full", "lang-markdown"]',
+        'full = ["tracedecay-code-index/full", "tracedecay-code-index-runtime/full"]',
+        'full = ["tracedecay-code-index/full", "tracedecay-code-index-runtime/full", "lang-markdown"]',
     )
     duplicated_tier = run_fixture(
         root_source=root_with_local_tier_members,
