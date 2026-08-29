@@ -357,7 +357,7 @@ jobs:
           echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --locked --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --locked --features tracedecay/test-helpers --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload nextest archive
         uses: actions/upload-artifact@v4
