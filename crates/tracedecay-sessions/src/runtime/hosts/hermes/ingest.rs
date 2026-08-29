@@ -25,6 +25,17 @@ fn new_sweep_budget(max_new_bytes: Option<u64>) -> IngestByteBudget {
     IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_HERMES_SWEEP_BYTES))
 }
 
+/// Default Hermes profile homes under the resolved user home.
+///
+/// Missing home is a typed absence (`None`), never an empty successful sweep.
+fn hermes_homes() -> Option<Vec<PathBuf>> {
+    hermes_homes_from(crate::runtime::home_dir())
+}
+
+fn hermes_homes_from(home: Option<PathBuf>) -> Option<Vec<PathBuf>> {
+    Some(vec![home?.join(".hermes")])
+}
+
 /// Result of a Hermes sweep with one aggregate logical source-byte budget.
 #[derive(Debug, Default, Clone)]
 pub struct HermesSweepOutcome {
@@ -42,10 +53,12 @@ pub async fn ingest_for_project(
     admission: &dyn HostAdmission,
     project_root: &Path,
     project_id: ProjectId,
-) -> TranscriptIngestStats {
-    ingest_for_project_capped(admission, project_root, project_id, None)
-        .await
-        .stats
+) -> Option<TranscriptIngestStats> {
+    Some(
+        ingest_for_project_capped(admission, project_root, project_id, None)
+            .await?
+            .stats,
+    )
 }
 
 /// [`ingest_for_project`] with one aggregate logical source-byte budget shared
@@ -55,7 +68,7 @@ pub async fn ingest_for_project_capped(
     project_root: &Path,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
-) -> HermesSweepOutcome {
+) -> Option<HermesSweepOutcome> {
     ingest_for_project_capped_with_admission(project_root, project_id, admission, max_new_bytes)
         .await
 }
@@ -70,7 +83,7 @@ pub async fn ingest_for_project_capped_with_admission(
     project_id: ProjectId,
     admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
-) -> HermesSweepOutcome {
+) -> Option<HermesSweepOutcome> {
     ingest_for_project_capped_with_admission_and_cancellation(
         project_root,
         project_id,
@@ -87,19 +100,19 @@ pub async fn ingest_for_project_capped_with_admission_and_cancellation(
     admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-) -> HermesSweepOutcome {
-    let homes = crate::runtime::home_dir()
-        .map(|home| vec![home.join(".hermes")])
-        .unwrap_or_default();
-    ingest_homes_capped_with_admission_and_cancellation(
-        &homes,
-        project_root,
-        project_id,
-        admission,
-        max_new_bytes,
-        cancellation,
+) -> Option<HermesSweepOutcome> {
+    let homes = hermes_homes()?;
+    Some(
+        ingest_homes_capped_with_admission_and_cancellation(
+            &homes,
+            project_root,
+            project_id,
+            admission,
+            max_new_bytes,
+            cancellation,
+        )
+        .await,
     )
-    .await
 }
 
 /// One project-store destination for a shared Hermes source sweep.
@@ -116,11 +129,9 @@ pub struct ProjectIngestDestination<'a> {
 /// observation persistence or typed complete-record coverage.
 pub async fn ingest_for_projects(
     destinations: &[ProjectIngestDestination<'_>],
-) -> TranscriptIngestStats {
-    let homes = crate::runtime::home_dir()
-        .map(|home| vec![home.join(".hermes")])
-        .unwrap_or_default();
-    ingest_homes_for_projects(&homes, destinations).await
+) -> Option<TranscriptIngestStats> {
+    let homes = hermes_homes()?;
+    Some(ingest_homes_for_projects(&homes, destinations).await)
 }
 
 /// Test seam for [`ingest_for_projects`].
@@ -279,11 +290,9 @@ pub async fn ingest_user_sessions_capped(
     admission: &dyn HostAdmission,
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
-) -> HermesSweepOutcome {
-    let homes = crate::runtime::home_dir()
-        .map(|home| vec![home.join(".hermes")])
-        .unwrap_or_default();
-    ingest_user_homes_capped(admission, &homes, registered_roots, max_new_bytes).await
+) -> Option<HermesSweepOutcome> {
+    let homes = hermes_homes()?;
+    Some(ingest_user_homes_capped(admission, &homes, registered_roots, max_new_bytes).await)
 }
 
 pub async fn ingest_user_sessions_capped_with_admission(
@@ -291,18 +300,18 @@ pub async fn ingest_user_sessions_capped_with_admission(
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-) -> HermesSweepOutcome {
-    let homes = crate::runtime::home_dir()
-        .map(|home| vec![home.join(".hermes")])
-        .unwrap_or_default();
-    ingest_user_homes_capped_with_admission(
-        admission,
-        &homes,
-        registered_roots,
-        max_new_bytes,
-        cancellation,
+) -> Option<HermesSweepOutcome> {
+    let homes = hermes_homes()?;
+    Some(
+        ingest_user_homes_capped_with_admission(
+            admission,
+            &homes,
+            registered_roots,
+            max_new_bytes,
+            cancellation,
+        )
+        .await,
     )
-    .await
 }
 
 pub async fn ingest_user_homes(
@@ -550,5 +559,19 @@ mod tests {
 
         let explicit = new_sweep_budget(Some(17));
         assert_eq!(explicit.remaining(), Some(17));
+    }
+
+    #[test]
+    fn missing_home_is_typed_absence_not_empty_homes() {
+        assert_eq!(hermes_homes_from(None), None);
+    }
+
+    #[test]
+    fn resolved_home_points_at_the_default_hermes_profile() {
+        let home = PathBuf::from("/tmp/operator-home");
+        assert_eq!(
+            hermes_homes_from(Some(home.clone())),
+            Some(vec![home.join(".hermes")])
+        );
     }
 }
