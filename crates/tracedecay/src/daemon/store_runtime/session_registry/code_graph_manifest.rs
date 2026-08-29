@@ -71,9 +71,9 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
 fn same_windows_handle_identity(file: &File, path: &std::path::Path) -> Result<bool, GraphDbError> {
     let path_file =
         File::open(path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    let path_identity = tracedecay_runtime_core::windows_file::information(&path_file)
+    let path_identity = tracedecay_private_fs::windows_file::information(&path_file)
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    let handle_identity = tracedecay_runtime_core::windows_file::information(file)
+    let handle_identity = tracedecay_private_fs::windows_file::information(file)
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
     Ok(
         path_identity.volume_serial_number == handle_identity.volume_serial_number

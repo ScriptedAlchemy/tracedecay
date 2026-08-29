@@ -90,7 +90,7 @@ fn stable_filesystem_identity(path: &Path) -> Result<Vec<u8>, BoundedBackfillInt
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    let information = tracedecay_runtime_core::windows_file::information(&directory)
+    let information = tracedecay_private_fs::windows_file::information(&directory)
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let mut identity = b"windows-volume-index-v1\0".to_vec();
     identity.extend_from_slice(&information.volume_serial_number.to_le_bytes());

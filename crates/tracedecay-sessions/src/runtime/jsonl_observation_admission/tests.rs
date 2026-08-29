@@ -265,7 +265,7 @@ async fn lazy_preparation_cpu_wait_is_operation_cancellable() {
     .await
     .expect("lazy page");
     let preparations_before = super::shared_jsonl_frame_preparations_for_test(page.file_identity);
-    let background_cpu = tracedecay_runtime_core::background_cpu::test_process_background_cpu(
+    let background_cpu = tracedecay_private_fs::background_cpu::test_process_background_cpu(
         NonZeroUsize::new(1).expect("nonzero CPU width"),
     );
     let held = background_cpu.acquire();

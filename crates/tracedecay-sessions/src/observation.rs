@@ -21,7 +21,7 @@ use tracedecay_store::{
 };
 
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
-use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_private_fs::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::privacy::{
     ObservationSanitizationOutcomeV1, ParsedObservationRecordV1, PrivacySanitizerError,
     RecordSanitizerV1, SanitizationFindingV1, SanitizedObservationRecordV1,

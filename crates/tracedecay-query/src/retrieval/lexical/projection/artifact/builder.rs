@@ -1692,7 +1692,7 @@ fn stable_file_identity(
     }
     #[cfg(windows)]
     {
-        let information = tracedecay_runtime_core::windows_file::information(file)
+        let information = tracedecay_private_fs::windows_file::information(file)
             .map_err(private_staging_error)?;
 
         Ok(StableArtifactFileIdentityV1 {

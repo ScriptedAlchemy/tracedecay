@@ -6135,7 +6135,7 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-domain",
  "tracedecay-graph-db",
- "tracedecay-runtime-core",
+ "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tree-sitter",
@@ -6211,6 +6211,7 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -6323,6 +6324,7 @@ dependencies = [
  "hotpath",
  "libc",
  "tempfile",
+ "thiserror 2.0.19",
  "windows-sys 0.61.2",
 ]
 
@@ -6349,7 +6351,6 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-private-fs",
- "tracedecay-runtime-core",
  "tracedecay-temporal-query",
  "zeroize",
 ]
@@ -6480,8 +6481,8 @@ dependencies = [
  "tokio",
  "tracedecay-code-index",
  "tracedecay-domain",
+ "tracedecay-private-fs",
  "tracedecay-query",
- "tracedecay-runtime-core",
  "tracing",
  "url",
 ]

@@ -2224,9 +2224,9 @@ fn verify_named_path_identity(path: &Path, file: &File) -> Result<(), CodeLexica
     #[cfg(windows)]
     {
         let named_file = File::open(path).map_err(map_artifact_file_error)?;
-        let named_identity = tracedecay_runtime_core::windows_file::information(&named_file)
+        let named_identity = tracedecay_private_fs::windows_file::information(&named_file)
             .map_err(map_artifact_file_error)?;
-        let opened_identity = tracedecay_runtime_core::windows_file::information(file)
+        let opened_identity = tracedecay_private_fs::windows_file::information(file)
             .map_err(map_artifact_file_error)?;
         if named_identity.volume_serial_number != opened_identity.volume_serial_number
             || named_identity.file_index != opened_identity.file_index
