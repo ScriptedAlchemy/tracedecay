@@ -93,7 +93,7 @@ use tracedecay_code_index_runtime::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
     capture_exact_snapshot,
 };
-use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
+use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 use tracedecay_application::ConfigurationWireRequestV1;
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::configuration::{
@@ -144,10 +144,10 @@ use tracedecay_usecases::semantic_runtime::{
 // Re-exported so daemon-internal call sites can keep naming the contract
 // through `service::invocation::`.
 #[cfg(test)]
-pub(crate) use crate::daemon_contract::{
+pub(crate) use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, parse_daemon_invocation_request,
 };
-pub(crate) use crate::daemon_contract::{
+pub(crate) use tracedecay_daemon_protocol::{
     DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
@@ -252,7 +252,8 @@ pub(crate) use types::{
 pub(crate) use registrars::{
     DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
-    DaemonLspOwnerRegistrar, DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
+    DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
+    DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
 };
 pub(in crate::daemon::service) use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
@@ -298,7 +299,8 @@ pub(crate) struct DaemonInvocationService {
     github_stack_coordinator:
         Arc<tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1>,
     work_attempt_processes: Arc<work_attempt_exec::WorkAttemptProcessRegistryV1>,
-    worktree_holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
+    worktree_holder_admission:
+        tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
     session_holder_databases:
         Arc<Mutex<BTreeMap<PathBuf, tracedecay_global_db::RegisteredGlobalDbLeaseV1>>>,
     /// Per-project fan-out of observed native-integration transaction
@@ -344,7 +346,7 @@ impl DaemonInvocationService {
                 work_attempt_exec::WorkAttemptProcessRegistryV1::default(),
             ),
             worktree_holder_admission:
-                crate::daemon::native_integration::daemon_worktree_holder_admission_fence(),
+                tracedecay_agent_hosts::native_integration::daemon_worktree_holder_admission_fence(),
             session_holder_databases: Arc::new(Mutex::new(BTreeMap::new())),
             native_integration_status_broadcasts: Arc::new(Mutex::new(BTreeMap::new())),
         }

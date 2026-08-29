@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::client_identity::DaemonClientIdentity;
+use tracedecay_daemon_protocol::DaemonClientIdentity;
 use crate::daemon::{DaemonHandshake, StoreAdministration};
 use crate::mcp::McpServer;
 use crate::mcp::server::McpServerConstructionContext;

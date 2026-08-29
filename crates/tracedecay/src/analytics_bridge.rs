@@ -117,7 +117,7 @@ async fn call_admin_cli(
     arguments: Value,
 ) -> tracedecay_runtime_core::errors::Result<Value> {
     let handshake =
-        crate::daemon::DaemonHandshake::for_current_client(project_root, None, false, false)?;
+        crate::daemon::handshake_for_current_client(project_root, None, false, false)?;
     let result =
         crate::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments).await?;
     crate::daemon::tool_json_payload(&result, "tracedecay_admin_cli")

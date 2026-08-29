@@ -1,0 +1,71 @@
+[package]
+name = "tracedecay-mcp"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Portable MCP catalog, rendering, and JSON-RPC transport for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "tracedecay-api/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+    "tracedecay-usecases/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-api/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+    "tracedecay-usecases/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-api/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+    "tracedecay-usecases/hotpath-cpu",
+]
+# Gates in-memory ChannelTransport. ReplayTransport stays on the default
+# graph because production initialize-root replay uses it.
+test-transport = []
+
+[dependencies]
+hotpath.workspace = true
+schemars = "1.2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "sync"] }
+tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

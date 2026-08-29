@@ -9,7 +9,7 @@ use super::{
     configuration, ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
     ensure_session_parent_columns, git_index_transactions, global_db_operation_error,
     global_db_operation_message, observability_rollup, observation, observation_projection,
-    project_registry, session_temporal, stack_delivery,
+    project_registry, session_temporal_schema, stack_delivery,
 };
 use tracedecay_runtime_core::{
     db::{
@@ -407,24 +407,12 @@ pub struct RegisteredSchemaConvergence {
     is_fresh: bool,
 }
 
-impl RegisteredSchemaConvergence {
-    /// A client attaches only after the sealed installer has completed. Its
-    /// convergence therefore treats the store as existing and conservatively
-    /// requires an exhaustive audit rather than recreating admission evidence.
-    pub(crate) const fn for_existing_client() -> Self {
-        Self {
-            force_exhaustive: true,
-            is_fresh: false,
-        }
-    }
-}
-
 /// Typed schema states an admissible store was classified into, carried from
 /// the read-only classification pass to the installation stages that consume
 /// them.
 struct RegisteredSchemaAdmissionClassification {
     configuration_fresh: Option<configuration::FreshConfigurationStoreEvidence>,
-    temporal_admission: session_temporal::SessionTemporalSchemaAdmission,
+    temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
     workflow_admission: WorkflowSchemaAdmission,
 }
 
@@ -470,7 +458,7 @@ async fn classify_registered_schema_admission(
                 global_db_operation_error("inspect configuration schema freshness", error)
             }
         })?;
-    let temporal_admission = session_temporal::require_admissible_session_temporal_schema(
+    let temporal_admission = session_temporal_schema::require_admissible_session_temporal_schema(
         connection,
         configuration_fresh.as_ref(),
     )
@@ -574,7 +562,7 @@ pub async fn ensure_registered_schema_for_admission(
 async fn install_registered_schema_stages(
     transaction: &(impl Executor + Sync),
     configuration_fresh: Option<&configuration::FreshConfigurationStoreEvidence>,
-    temporal_admission: session_temporal::SessionTemporalSchemaAdmission,
+    temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
 ) -> tracedecay_runtime_core::errors::Result<()> {
@@ -696,13 +684,13 @@ async fn install_registered_schema_stages(
 
     ensure_authority_audit_checkpoint_schema(transaction).await?;
     match temporal_admission {
-        session_temporal::SessionTemporalSchemaAdmission::Fresh => {
-            session_temporal::install_session_temporal_schema(transaction).await?;
+        session_temporal_schema::SessionTemporalSchemaAdmission::Fresh => {
+            session_temporal_schema::install_session_temporal_schema(transaction).await?;
         }
-        session_temporal::SessionTemporalSchemaAdmission::ReleasedV3 => {
-            session_temporal::migrate_released_v3_session_temporal_schema(transaction).await?;
+        session_temporal_schema::SessionTemporalSchemaAdmission::ReleasedV3 => {
+            session_temporal_schema::migrate_released_v3_session_temporal_schema(transaction).await?;
         }
-        session_temporal::SessionTemporalSchemaAdmission::Current => {}
+        session_temporal_schema::SessionTemporalSchemaAdmission::Current => {}
     }
     observation::ensure_observation_schema(transaction).await?;
     observation_projection::ensure_observation_projection_schema(transaction)
@@ -713,7 +701,7 @@ async fn install_registered_schema_stages(
         "initialize registered external source state",
     )
     .await?;
-    if temporal_admission != session_temporal::SessionTemporalSchemaAdmission::Current {
+    if temporal_admission != session_temporal_schema::SessionTemporalSchemaAdmission::Current {
         ensure_authority_invariant_schema(transaction).await?;
         if !authority_invariant_triggers_intact(transaction).await? {
             return Err(global_db_operation_message(
@@ -830,7 +818,7 @@ pub async fn converge_attached_registered_schema(
 #[hotpath::measure(future = true, label = "global_db.schema.persist.attach")]
 pub async fn ensure_attached_registered_schema(
     database: &Database,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
     let read_connection = database.read_connection();
     let RegisteredSchemaAdmissionClassification {
         configuration_fresh,
@@ -875,7 +863,10 @@ pub async fn ensure_attached_registered_schema(
         transaction.commit().await?;
     }
     validate_authority_schema_contract(&read_connection).await?;
-    Ok(())
+    Ok(RegisteredSchemaConvergence {
+        force_exhaustive,
+        is_fresh: configuration_fresh.is_some(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

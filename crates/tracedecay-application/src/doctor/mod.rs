@@ -7,10 +7,19 @@
 //! module owns no store, transport, provider runtime, or health formula;
 //! source-port implementations and any surface binding are owned elsewhere.
 
+mod adapters;
 mod report;
 mod sources;
 mod types;
 
+pub use adapters::{
+    AdvisoryFeedbackDoctorAdapterV1, CodeIndexMountDoctorAdapterV1,
+    ConfigurationAuthorityDoctorAdapterV1, DaemonRuntimeHealthSignalV1, DoctorKernelInputsV1,
+    HostIntegrationDoctorAdapterV1, LanguageServerDoctorAdapterV1, ObservabilityDoctorAdapterV1,
+    OperationalAuditDoctorAdapterV1, RuntimeHealthDoctorAdapterV1, StorageDoctorAdapterV1,
+    advisory_feedback_read_from_publication, compose_doctor_report, merge_storage_reads,
+    runtime_health_read, storage_family_read,
+};
 pub use report::{
     DOCTOR_FINDING_FAMILIES, DoctorFamilyConsultationV1, DoctorFamilyCoverageV1,
     DoctorFamilyUnavailableReasonV1, DoctorReportComposerV1, DoctorReportCoverageV1,

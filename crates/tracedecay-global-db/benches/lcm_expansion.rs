@@ -10,7 +10,7 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, TemporalModeV1, UtcMicros,
 };
-use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_global_db::{GlobalDbObservationStore, RegisteredGlobalDb};
 use tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication;

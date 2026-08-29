@@ -13,8 +13,8 @@ fn build_http_application_router(project_id: &str, project_path: &Path) -> Resul
         }
     })?;
     let handshake =
-        DaemonHandshake::for_current_client(Some(project_path.to_path_buf()), None, false, false)?;
-    let client = crate::daemon_client::DaemonInvocationClient::for_current(handshake)?;
+        crate::daemon::handshake_for_current_client(Some(project_path.to_path_buf()), None, false, false)?;
+    let client = crate::daemon::invocation_client_for_current(handshake)?;
     crate::application_surface::http_application_router(
         client,
         daemon_operation_event_authority(),

@@ -111,7 +111,7 @@ async fn run_foreground_loopback(
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
     prewarm_static_daemon_bootstrap_catalog();
-    let requested = transport::default_loopback_endpoint();
+    let requested = default_loopback_endpoint();
     let _lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
         "managed daemon database ownership",
@@ -515,7 +515,7 @@ async fn run_foreground_unix(
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
     prewarm_static_daemon_bootstrap_catalog();
-    let endpoint = transport::DaemonEndpoint::Unix(socket_path);
+    let endpoint = DaemonEndpoint::Unix(socket_path);
     let _lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
         "managed daemon database ownership",
@@ -565,8 +565,8 @@ async fn run_foreground_unix(
     }
     install_profile_worker_plan(&engine.store_administration, &engine.invocation).await?;
     let socket_path = match authority.endpoint() {
-        transport::DaemonEndpoint::Unix(path) => path.clone(),
-        transport::DaemonEndpoint::Loopback(_) => {
+        DaemonEndpoint::Unix(path) => path.clone(),
+        DaemonEndpoint::Loopback(_) => {
             return Err(TraceDecayError::Config {
                 message: "Unix daemon requires a Unix socket endpoint".to_string(),
             });
@@ -905,14 +905,14 @@ fn remove_stale_socket(socket_path: &Path) -> Result<()> {
 async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<()> {
     authority.ensure_current()?;
     let socket_path = match authority.endpoint() {
-        transport::DaemonEndpoint::Unix(path) => path,
-        transport::DaemonEndpoint::Loopback(_) => {
+        DaemonEndpoint::Unix(path) => path,
+        DaemonEndpoint::Loopback(_) => {
             return Err(TraceDecayError::Config {
                 message: "Unix daemon requires a Unix socket endpoint".to_string(),
             });
         }
     };
-    transport::ensure_private_socket_parent(socket_path)?;
+    ensure_private_socket_parent(socket_path)?;
     match UnixStream::connect(socket_path).await {
         Ok(_) => Err(TraceDecayError::Config {
             message: format!(
@@ -969,7 +969,7 @@ mod tests {
         let socket = socket_parent.join("daemon.sock");
         drop(std::os::unix::net::UnixListener::bind(&socket).expect("stale socket"));
 
-        let endpoint = transport::DaemonEndpoint::Unix(socket.clone());
+        let endpoint = DaemonEndpoint::Unix(socket.clone());
         let authority = authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
         let error = prepare_socket_path(&authority)

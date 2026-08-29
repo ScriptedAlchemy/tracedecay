@@ -27,7 +27,7 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     git_index_transaction_services:
         Arc<tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry>,
     native_integration_services:
-        Arc<super::super::native_integration::DaemonNativeIntegrationServiceRegistry>,
+        Arc<crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar>,
     session_sync_service: Arc<super::super::session_sync::DaemonSessionSyncService>,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<super::project_retirement::ProjectServerRetirement>>>,

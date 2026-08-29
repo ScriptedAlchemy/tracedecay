@@ -38,8 +38,8 @@ use super::{
 use tracedecay_usecases::request_identity::{PreviewIdentityDomain, derive_preview_identity};
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
+use crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
-use crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry;
 use crate::mcp::McpServer;
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
@@ -593,7 +593,7 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
     git_transactions: &DaemonGitIndexTransactionServiceRegistry,
-    native_integration: &DaemonNativeIntegrationServiceRegistry,
+    native_integration: &DaemonNativeIntegrationRuntimeRegistrar,
     project_root: &Path,
     project_id: &str,
     server: &McpServer,
@@ -895,7 +895,7 @@ pub(super) async fn register_project_open_production_owners(
                         "project-open GitHub stack delivery runtime registration failed: {error:?}"
                     ),
                 })?;
-            crate::daemon::native_integration::register_github_stack_hook_runtime(
+            tracedecay_agent_hosts::native_integration::register_github_stack_hook_runtime(
                 &scope,
                 &stack_runtime,
             );

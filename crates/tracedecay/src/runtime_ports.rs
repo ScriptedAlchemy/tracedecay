@@ -162,7 +162,7 @@ fn daemon_tool_json<'a>(
 ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
     Box::pin(hotpath::future!(
         async move {
-            let handshake = crate::daemon::DaemonHandshake::for_current_client(
+            let handshake = crate::daemon::handshake_for_current_client(
                 project_root.map(Path::to_path_buf),
                 None,
                 false,

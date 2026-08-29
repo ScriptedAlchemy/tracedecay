@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2744,7 +2744,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2764,7 +2764,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2789,7 +2789,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2811,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aa1d25eeb982d683dac0324384882dafa416e73f#aa1d25eeb982d683dac0324384882dafa416e73f"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
 dependencies = [
  "bincode",
  "byteorder",
@@ -5917,14 +5917,15 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-code-index-runtime",
+ "tracedecay-daemon-protocol",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-hooks",
- "tracedecay-jsonrpc",
  "tracedecay-lsp",
  "tracedecay-maintenance",
+ "tracedecay-mcp",
  "tracedecay-policy",
  "tracedecay-private-fs",
  "tracedecay-query",
@@ -5933,6 +5934,7 @@ dependencies = [
  "tracedecay-sdk",
  "tracedecay-search-eval",
  "tracedecay-semantic",
+ "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",
@@ -5957,6 +5959,7 @@ dependencies = [
  "cap-std",
  "fs2",
  "getrandom 0.2.17",
+ "gix",
  "hex",
  "hotpath",
  "same-file",
@@ -5968,6 +5971,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tiktoken-rs",
  "tokio",
+ "tokio-util",
  "toml",
  "tracedecay-application",
  "tracedecay-automation",
@@ -5981,6 +5985,8 @@ dependencies = [
  "tracedecay-policy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",
@@ -6066,6 +6072,7 @@ dependencies = [
  "tracedecay-policy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",
@@ -6122,14 +6129,17 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
  "tracedecay-lsp",
  "tracedecay-maintenance",
+ "tracedecay-mcp",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracedecay-sdk",
  "tracedecay-sessions",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
@@ -6219,12 +6229,38 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-search-eval",
  "tracedecay-semantic",
+ "tracedecay-session-temporal-store",
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
  "tracing",
  "url",
  "walkdir",
+]
+
+[[package]]
+name = "tracedecay-daemon-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "hotpath",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracedecay-agent-hosts",
+ "tracedecay-api",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tracedecay-lsp",
+ "tracedecay-mcp",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-search-eval",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
 ]
 
 [[package]]
@@ -6304,6 +6340,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-semantic",
+ "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",
@@ -6366,14 +6403,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracedecay-jsonrpc"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "tracedecay-lsp"
 version = "0.1.0"
 dependencies = [
@@ -6418,6 +6447,26 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-usecases",
+]
+
+[[package]]
+name = "tracedecay-mcp"
+version = "0.1.0"
+dependencies = [
+ "hotpath",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracedecay-api",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
+ "tracing",
 ]
 
 [[package]]
@@ -6603,6 +6652,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-session-temporal-store"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "hex",
+ "hotpath",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-capture",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-graph-db",
+ "tracedecay-query",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-sessions",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
@@ -6718,6 +6795,7 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-search-eval",
  "tracedecay-semantic",
+ "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",

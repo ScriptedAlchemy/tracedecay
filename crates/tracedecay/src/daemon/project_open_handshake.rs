@@ -12,7 +12,7 @@ pub(super) async fn open_project_for_handshake(
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
 ) -> Result<crate::tracedecay::TraceDecay> {
-    let open_options = handshake.open_options();
+    let open_options = crate::daemon::handshake_open_options(handshake);
     let registry_database = store_administration.registered_profile_database().await?;
     let (store_layout, first_touch) =
         match crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(

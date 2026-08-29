@@ -25,11 +25,11 @@ use super::{
 use crate::mcp::StdioTransport;
 #[cfg(unix)]
 use crate::mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
-use tracedecay_jsonrpc::JsonRpcRequest;
+use tracedecay_mcp::JsonRpcRequest;
 #[cfg(not(unix))]
-use tracedecay_jsonrpc::McpTransport;
+use tracedecay_mcp::McpTransport;
 #[cfg(unix)]
-use tracedecay_jsonrpc::{ErrorCode, JsonRpcResponse};
+use tracedecay_mcp::{ErrorCode, JsonRpcResponse};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
