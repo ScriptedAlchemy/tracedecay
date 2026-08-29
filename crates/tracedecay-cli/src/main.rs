@@ -30,6 +30,7 @@ mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
 mod project_cmd;
+mod serve_cmd;
 mod sessions_cmd;
 mod status_cmd;
 mod tool_command;
@@ -38,7 +39,6 @@ mod upgrade;
 mod work_command;
 mod workflow_command;
 
-pub use tracedecay::serve;
 
 use cli::*;
 use tracedecay::daemon::StderrTracingDefault;
@@ -1163,7 +1163,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay_runtime_core:
             // structured-row backfill sweep; one-shot CLI/hook processes never
             // do (they would drop the sweep mid-parse on exit).
             tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
-            hotpath::future!(serve::run_serve(path, timings), label = "cli.serve.run").await?;
+            hotpath::future!(serve_cmd::run_serve(path, timings), label = "cli.serve.run").await?;
         }
         Commands::Daemon { action } => {
             dispatch_daemon_command(action).await?;
