@@ -20,7 +20,8 @@ compiles.
   suites are `crates/tracedecay/tests/`, and the ones that use the fixture
   surface in `tests/common/` declare `required-features = ["test-helpers"]`.
 - `crates/tracedecay-cli/` — the shipped `tracedecay` binary. Build it with
-  `cargo build -p tracedecay-cli --bin tracedecay`, never `-p tracedecay`.
+  `kache cargo -- build -p tracedecay-cli --bin tracedecay`, never
+  `-p tracedecay`.
 - `crates/` — the remaining workspace member crates (`tracedecay-api`,
   `-application`, `-domain`, `-store`, `-hooks`, `-policy`, `-tool-catalog`,
   rusqlite parity/runtime crates).
@@ -38,19 +39,25 @@ compiles.
 
 ## Build & test
 
-- Ordinary `cargo` commands; edition 2024, resolver 3. Scope checks to the
-  smallest touched package/target during development.
+- Invoke Cargo as `kache cargo -- <args>` instead of bare `cargo`
+  (e.g. `kache cargo -- check -p tracedecay-store`). It execs the real Cargo
+  after collapsing the duplicate `$CARGO_HOME` rustflags source and isolating
+  the per-worktree build dir, so builds hit the shared compile cache;
+  commands other than `build`/`check` pass through verbatim. Edition 2024,
+  resolver 3. Scope checks to the smallest touched package/target during
+  development.
 - Before handoff, run a broader gate from the repo root, e.g.
-  `cargo check --all-features` or `cargo test-all` (alias for
-  `cargo nextest run --workspace --all-features --no-fail-fast
+  `kache cargo -- check --all-features` or `kache cargo -- test-all` (alias
+  for `cargo nextest run --workspace --all-features --no-fail-fast
   --cargo-profile perf`).
 - Dashboard: `npm run build` (rsbuild), `npm run typecheck` (`tsc --noEmit`),
   `npm test` (vitest) from `dashboard/`.
-- Default `cargo build` / `cargo test` compile every package at the base
+- Default `build` / `test` runs compile every package at the base
   dev/test opt-level. The critical-path kernel `opt-level` overrides
   (code index, graph, sha2, …) live in the opt-in `perf` profile in the root
-  `Cargo.toml`; run generation-scale suites with `cargo test --profile perf`
-  (or `cargo build --profile perf`) when they need production-like speed.
+  `Cargo.toml`; run generation-scale suites with
+  `kache cargo -- test --profile perf` (or `kache cargo -- build
+  --profile perf`) when they need production-like speed.
 - libtest `--exact` requires the full module path and exits 0 when a filter
   matches nothing — a vacuous "0 passed" green. For name-filtered runs prefer
   the ad-hoc anti-vacuity helper `scripts/require-exact-test.sh`; it is not a
@@ -62,7 +69,9 @@ compiles.
   before Rust compiles. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` only skips a
   stale rebuild.
 - This machine shares one compile cache (kache, keyed on
-  profile × features × RUSTFLAGS × source). `CARGO_TARGET_DIR` and worktree
+  profile × features × RUSTFLAGS × source); the `kache cargo -- <args>`
+  front-end above keeps that key stable, which is why bare `cargo` is
+  avoided. `CARGO_TARGET_DIR` and worktree
   paths do not affect the key — use per-task target dirs freely. Novel feature
   permutations do: each one recompiles the workspace spine (~7 min for
   `tracedecay`) instead of hitting the cache. Stick to the standard lanes —
