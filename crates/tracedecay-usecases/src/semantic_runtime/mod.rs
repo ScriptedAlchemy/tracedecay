@@ -89,10 +89,12 @@ pub use production::{
     SavedGenerationScheduleHookParametersV1, SemanticCompatibleCurrentGenerationSnapshotV1,
     SemanticEvaluationCurrentGenerationSnapshotV1, SemanticEvaluationLifecycleVerificationV1,
     SemanticEvaluationPublicationLeaseV1, SemanticVectorPublicationLeaseV1,
-    SemanticVerifiedEvaluationTargetSnapshotV1, production_saved_generation_schedule_hook,
+    SemanticVerifiedEvaluationTargetSnapshotV1, lifecycle_to_runtime_state,
+    prefer_lifecycle_over_generic_unavailable, production_saved_generation_schedule_hook,
     project_semantic_application_status, project_semantic_production_runtime,
     project_semantic_source_generation, register_project_semantic_runtime,
-    unbind_project_semantic_cache_if_current, unregister_project_semantic_runtime,
+    resolve_semantic_application_status, unbind_project_semantic_cache_if_current,
+    unregister_project_semantic_runtime,
 };
 pub use publish_failure_memo::{
     DEFAULT_PUBLISH_FAILURE_BACKOFF_BASE, DEFAULT_PUBLISH_FAILURE_BACKOFF_CEILING,
@@ -106,9 +108,10 @@ pub use redundancy::{
     commit_project_semantic_redundancy_authority,
     commit_project_semantic_redundancy_authority_under_gate,
     prepare_project_semantic_redundancy_authority, project_committed_semantic_pins,
-    project_semantic_activation_gate, project_semantic_redundancy_generation,
-    project_semantic_redundancy_revision, project_semantic_retained_code_generation,
-    project_semantic_retained_vector_generations, retain_project_semantic_code_sources,
+    project_semantic_activation_gate, project_semantic_activation_receipt,
+    project_semantic_redundancy_generation, project_semantic_redundancy_revision,
+    project_semantic_retained_code_generation, project_semantic_retained_vector_generations,
+    retain_project_semantic_code_sources,
 };
 pub(crate) use redundancy::{
     project_committed_semantic_activation, register_project_semantic_redundancy_generation,

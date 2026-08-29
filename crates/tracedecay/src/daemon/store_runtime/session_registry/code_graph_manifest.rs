@@ -6,8 +6,9 @@ use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
+use tracedecay_code_index::production::UninterruptibleCodeIndexControlV1;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
-use tracedecay_domain::{ProjectId, RepositoryId};
+use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphDbError, GraphGenerationManifest, GraphGenerationManifestProvider,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
@@ -293,23 +294,80 @@ fn decode_verified_seal(
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
-    let (mut reader, opened_metadata, admitted_len) = open_checked_seal_reader(path, check)?;
-    let decoded =
-        tracedecay_code_index::production::CodeIndexPublishedGenerationV1::decode_sealed_reader(
-            &mut reader,
-            admitted_len,
-        );
-    // Bytes are counted per pass once the streaming read has ended, so failed
-    // and interrupted passes report the waste they actually incurred.
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_registry.seal.decode.bytes_total").inc(reader.bytes_read);
-    if let Some(error) = reader.failure.take() {
-        return Err(error);
-    }
-    let generation = decoded.map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed code generation replay is invalid: {error}"),
+    (check)()?;
+    let path_metadata = path.symlink_metadata().map_err(|error| {
+        GraphDbError::unavailable(format!(
+            "sealed code generation is unavailable for replay: {error}"
+        ))
     })?;
-    reader.finish(path, &opened_metadata, admitted_len, expected_digest)?;
+    let admitted_len = validate_sealed_generation_metadata(&path_metadata)?;
+    let mut file = File::open(path).map_err(|error| {
+        GraphDbError::unavailable(format!(
+            "sealed code generation cannot be opened for replay: {error}"
+        ))
+    })?;
+    let opened_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed code generation metadata cannot be read: {error}"),
+    })?;
+    if !same_file_identity(&path_metadata, &opened_metadata) {
+        return Err(GraphDbError::Corrupt {
+            message: "sealed code generation identity changed while it was opened".to_owned(),
+        });
+    }
+    #[cfg(windows)]
+    if !same_windows_handle_identity(&file, path)? {
+        return Err(GraphDbError::Corrupt {
+            message: "sealed code generation identity changed while it was opened".to_owned(),
+        });
+    }
+    let expected_digest =
+        ManifestDigest::new(format!("sha256:{expected_digest}")).map_err(|error| {
+            GraphDbError::Corrupt {
+                message: format!(
+                    "sealed code generation filename digest is not canonical: {error}"
+                ),
+            }
+        })?;
+    (check)()?;
+    let decoded = tracedecay_code_index::production::CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
+        &mut file,
+        admitted_len,
+        Some(&expected_digest),
+        &UninterruptibleCodeIndexControlV1,
+    );
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("session_registry.seal.decode.bytes_total").inc(admitted_len);
+    let generation = decoded
+        .map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed code generation replay is invalid: {error}"),
+        })?
+        .ok_or_else(|| GraphDbError::Corrupt {
+            message: "sealed code generation format revision is incompatible".to_owned(),
+        })?;
+    (check)()?;
+    let final_file_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed code generation metadata cannot be revalidated: {error}"),
+    })?;
+    let final_path_metadata = path
+        .symlink_metadata()
+        .map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed code generation path cannot be revalidated: {error}"),
+        })?;
+    if !same_file_identity(&opened_metadata, &final_file_metadata)
+        || !same_file_identity(&opened_metadata, &final_path_metadata)
+    {
+        return Err(GraphDbError::Corrupt {
+            message: "sealed code generation identity or length changed while it was read"
+                .to_owned(),
+        });
+    }
+    #[cfg(windows)]
+    if !same_windows_handle_identity(&file, path)? {
+        return Err(GraphDbError::Corrupt {
+            message: "sealed code generation identity or length changed while it was read"
+                .to_owned(),
+        });
+    }
     Ok(generation)
 }
 

@@ -427,6 +427,7 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree_id,
             scheduler,
             serving_generation,
+            published_generation_id,
             serving_generation_epoch,
             graph_activation,
             publication_gate,
@@ -447,6 +448,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.published_generation_id),
                 Arc::clone(&worktree.serving_generation_epoch),
                 worktree.graph_activation.clone(),
                 Arc::clone(&worktree.semantic_evaluation_publication_gate),
@@ -606,6 +608,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         Self::publish_generation(
             &self.generation_publications,
+            &published_generation_id,
             project_root.to_path_buf(),
             &build.publication,
         );

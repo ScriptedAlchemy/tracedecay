@@ -9,11 +9,11 @@ pub(super) async fn write_json_rpc_response(
     transport: &mut impl McpTransport,
     response: &tracedecay_jsonrpc::JsonRpcResponse,
 ) -> Result<()> {
-    transport
-        .write_line(&serde_json::to_string(response)?)
-        .await?;
-    transport.write_line("\n").await?;
-    transport.flush().await?;
+    let payload = hotpath::measure_block!(
+        "daemon.wire.encode_response",
+        serde_json::to_string(response)
+    )?;
+    write_response_payload(transport, &payload).await?;
     Ok(())
 }
 
@@ -21,12 +21,30 @@ pub(super) async fn write_daemon_invocation_response(
     transport: &mut impl McpTransport,
     response: &DaemonInvocationResponse,
 ) -> Result<()> {
-    transport
-        .write_line(&serde_json::to_string(response)?)
-        .await?;
-    transport.write_line("\n").await?;
-    transport.flush().await?;
+    let payload = hotpath::measure_block!(
+        "daemon.wire.encode_response",
+        serde_json::to_string(response)
+    )?;
+    write_response_payload(transport, &payload).await?;
     Ok(())
+}
+
+/// Write-back phase of one daemon response: socket write plus flush, kept
+/// separate from `daemon.wire.encode_response` so a report can distinguish
+/// serialization cost from a peer that is slow to drain the socket.
+async fn write_response_payload(
+    transport: &mut impl McpTransport,
+    payload: &str,
+) -> std::io::Result<()> {
+    hotpath::future!(
+        async {
+            transport.write_line(payload).await?;
+            transport.write_line("\n").await?;
+            transport.flush().await
+        },
+        label = "daemon.wire.write_response"
+    )
+    .await
 }
 
 /// Read one newline-delimited frame. Oversized input gets a typed non-durable

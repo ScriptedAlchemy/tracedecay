@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -8,6 +10,14 @@ use super::canonical_value::write_canonical;
 use super::error::DomainError;
 use super::id::ManifestDigest;
 use crate::canonical_text::encode_tagged_lowercase_hex;
+
+thread_local! {
+    /// One 64 KiB canonical-hash buffer per worker. `canonical_sha256` is
+    /// called once per chunk during sealed restore; a fresh `BufferedSink`
+    /// per call was 85% of seating allocation traffic.
+    static CANONICAL_SHA256_SINK_BUFFER: RefCell<String> =
+        const { RefCell::new(String::new()) };
+}
 
 impl ManifestDigest {
     /// Canonical `sha256:`-tagged encoding of raw SHA-256 digest bytes — the
@@ -53,10 +63,22 @@ pub fn canonical_json_value(value: &Value) -> Result<String, DomainError> {
 /// the six-figure element sets the code index digests on every publish.
 #[hotpath::measure(label = "domain.canonical.sha256")]
 pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<ManifestDigest, DomainError> {
-    let mut sink = BufferedSink::new(Sha256::new());
-    canonical_serializer::serialize_canonical(value, &mut sink)?;
-    let digest = sink.finish().finalize();
-    ManifestDigest::from_sha256_bytes(&digest)
+    CANONICAL_SHA256_SINK_BUFFER.with(|cell| {
+        // `replace` keeps the buffer owned across a panic in serialize so the
+        // thread-local is never left borrowed; a panicked call drops one
+        // buffer and the next remint reallocates.
+        let buffer = cell.replace(String::new());
+        let mut sink = if buffer.capacity() == 0 {
+            BufferedSink::new(Sha256::new())
+        } else {
+            BufferedSink::with_buffer(Sha256::new(), buffer)
+        };
+        let serialize = canonical_serializer::serialize_canonical(value, &mut sink);
+        let (hasher, buffer) = sink.finish_reuse();
+        cell.replace(buffer);
+        serialize?;
+        ManifestDigest::from_sha256_bytes(&hasher.finalize())
+    })
 }
 
 /// Serialize once to canonical JSON and return those bytes with their canonical

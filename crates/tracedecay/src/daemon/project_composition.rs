@@ -494,11 +494,12 @@ async fn production_project_server_inner(
                         )
                         .ok()
                     });
-                let status =
-                    tracedecay_usecases::semantic_runtime::project_semantic_application_status(
-                        &project_root,
+                let status = Some(
+                    crate::semantic_code::resolve_project_semantic_runtime_status(
+                        Some(&project_root),
                         configuration,
-                    );
+                    ),
+                );
                 crate::dashboard::ExplorerSemanticReadV1 { activated, status }
             })
         },

@@ -24,6 +24,7 @@
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,6 +44,10 @@ pub const MAX_SEALED_READ_BUNDLE_ARTIFACT_BYTES_V1: u64 = 8 * 1024 * 1024 * 1024
 const MAX_SEALED_READ_BUNDLE_ARTIFACTS_V1: usize = 64;
 const MAX_SEALED_READ_BUNDLE_MANIFEST_BYTES_V1: u64 = 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 1024 * 1024;
+
+/// Distinguishes concurrent or retried staging attempts that share a PID so
+/// an aborted catalog write cannot collide with the next attempt's temporary.
+static BUNDLE_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// One derived artifact row of a sealed read bundle manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,11 +103,13 @@ pub enum SealedReadBundleArtifactStateV1 {
 
 /// Stages artifact files for one generation's bundle, then commits them with
 /// an identity-bound manifest. Dropping the writer without committing removes
-/// every staged temporary file.
+/// every staged temporary file, including a write that aborted before the
+/// artifact was recorded in `staged`.
 pub struct SealedReadBundleWriterV1 {
     root: PathBuf,
     sealed: SealedGraphStateDigest,
     staged: Vec<(SealedReadBundleArtifactV1, PathBuf)>,
+    pending: Option<PathBuf>,
     committed: bool,
 }
 
@@ -113,12 +120,28 @@ impl SealedReadBundleWriterV1 {
                 "sealed read bundle root is not a directory",
             ));
         }
+        sweep_aborted_sealed_read_bundle_temporaries(root, sealed)?;
         Ok(Self {
             root: root.to_path_buf(),
             sealed: sealed.clone(),
             staged: Vec::new(),
+            pending: None,
             committed: false,
         })
+    }
+
+    fn temporary_path(&self, name: &str) -> Result<PathBuf, GraphDbError> {
+        Ok(bundle_tmp_path(
+            &self.root,
+            &sealed_hex(&self.sealed)?,
+            name,
+        ))
+    }
+
+    fn abort_pending(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            let _ = std::fs::remove_file(pending);
+        }
     }
 
     /// Streams one artifact through `write` into a durable temporary file,
@@ -144,54 +167,54 @@ impl SealedReadBundleWriterV1 {
                 "sealed read bundle artifact name is already staged",
             ));
         }
-        let temporary = self.root.join(format!(
-            ".read-bundle-{}.{name}.{}.tmp",
-            sealed_hex(&self.sealed)?,
-            std::process::id()
-        ));
-        remove_stale_regular_file(&temporary)?;
-        let result = hotpath::measure_block!("graph_db.bundle.write", {
-            let file = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)
-                .map_err(|error| {
+        let temporary = self.temporary_path(name)?;
+        self.pending = Some(temporary.clone());
+        // Isolate `?` / `return` so a write abort cannot skip pending cleanup.
+        let result = (|| {
+            hotpath::measure_block!("graph_db.bundle.write", {
+                let file = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&temporary)
+                    .map_err(|error| {
+                        GraphDbError::unavailable(format!(
+                            "failed to create sealed read bundle artifact stage: {error}"
+                        ))
+                    })?;
+                let mut hashing = HashingFileWriter {
+                    file,
+                    digest: Sha256::new(),
+                    bytes: 0,
+                    failure: None,
+                };
+                write(&mut hashing)?;
+                if let Some(failure) = hashing.failure.take() {
+                    return Err(failure);
+                }
+                hashing.file.sync_all().map_err(|error| {
                     GraphDbError::unavailable(format!(
-                        "failed to create sealed read bundle artifact stage: {error}"
+                        "failed to sync sealed read bundle artifact: {error}"
                     ))
                 })?;
-            let mut hashing = HashingFileWriter {
-                file,
-                digest: Sha256::new(),
-                bytes: 0,
-                failure: None,
-            };
-            write(&mut hashing)?;
-            if let Some(failure) = hashing.failure.take() {
-                return Err(failure);
-            }
-            hashing.file.sync_all().map_err(|error| {
-                GraphDbError::unavailable(format!(
-                    "failed to sync sealed read bundle artifact: {error}"
-                ))
-            })?;
-            Ok(SealedReadBundleArtifactV1 {
-                name: name.to_owned(),
-                digest: format!(
-                    "sha256:{}",
-                    encode_lowercase_hex(&hashing.digest.finalize())
-                ),
-                bytes: hashing.bytes,
+                Ok(SealedReadBundleArtifactV1 {
+                    name: name.to_owned(),
+                    digest: format!(
+                        "sha256:{}",
+                        encode_lowercase_hex(&hashing.digest.finalize())
+                    ),
+                    bytes: hashing.bytes,
+                })
             })
-        });
+        })();
         let artifact = match result {
             Ok(artifact) => artifact,
             Err(error) => {
-                let _ = std::fs::remove_file(&temporary);
+                self.abort_pending();
                 return Err(error);
             }
         };
         hotpath::gauge!("graph_db.bundle.write.bytes").set(artifact.bytes as f64);
+        self.pending = None;
         self.staged.push((artifact, temporary));
         Ok(())
     }
@@ -230,11 +253,8 @@ impl SealedReadBundleWriterV1 {
                 "failed to encode sealed read bundle manifest: {error}"
             ))
         })?;
-        let temporary = self.root.join(format!(
-            ".read-bundle-{hex}.manifest.{}.tmp",
-            std::process::id()
-        ));
-        remove_stale_regular_file(&temporary)?;
+        let temporary = bundle_tmp_path(&self.root, &hex, "manifest");
+        self.pending = Some(temporary.clone());
         let write_manifest = || -> Result<(), GraphDbError> {
             let mut file = std::fs::OpenOptions::new()
                 .create_new(true)
@@ -254,17 +274,18 @@ impl SealedReadBundleWriterV1 {
                 })
         };
         if let Err(error) = write_manifest() {
-            let _ = std::fs::remove_file(&temporary);
+            self.abort_pending();
             self.remove_committed_artifacts(&hex, &manifest);
             return Err(error);
         }
         if let Err(error) = std::fs::rename(&temporary, self.root.join(manifest_file_name(&hex))) {
-            let _ = std::fs::remove_file(&temporary);
+            self.abort_pending();
             self.remove_committed_artifacts(&hex, &manifest);
             return Err(GraphDbError::unavailable(format!(
                 "failed to place sealed read bundle manifest: {error}"
             )));
         }
+        self.pending = None;
         sync_bundle_directory(&self.root)?;
         self.committed = true;
         Ok(manifest)
@@ -279,6 +300,7 @@ impl SealedReadBundleWriterV1 {
 
 impl Drop for SealedReadBundleWriterV1 {
     fn drop(&mut self) {
+        self.abort_pending();
         if self.committed {
             return;
         }
@@ -470,6 +492,41 @@ pub fn retire_sealed_read_bundle(
     })
 }
 
+/// Removes aborted staging temporaries for one sealed digest without touching
+/// a committed bundle. Activation retries call this (via [`SealedReadBundleWriterV1::create`])
+/// so a prior OOM or cancelled catalog write cannot stack `.tmp` files.
+pub fn sweep_aborted_sealed_read_bundle_temporaries(
+    root: &Path,
+    sealed: &SealedGraphStateDigest,
+) -> Result<(), GraphDbError> {
+    let hex = sealed_hex(sealed)?;
+    let prefix = format!(".read-bundle-{hex}.");
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GraphDbError::unavailable(format!(
+                "failed to enumerate sealed read bundle temporaries: {error}"
+            )));
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            GraphDbError::unavailable(format!(
+                "failed to enumerate sealed read bundle temporaries: {error}"
+            ))
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name.ends_with(".tmp") {
+            let _ = remove_bundle_file(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn verify_manifest_binding(
     manifest: &SealedReadBundleManifestV1,
     sealed: &SealedGraphStateDigest,
@@ -540,6 +597,14 @@ impl Write for HashingFileWriter {
     fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
     }
+}
+
+fn bundle_tmp_path(root: &Path, hex: &str, name: &str) -> PathBuf {
+    let seq = BUNDLE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    root.join(format!(
+        ".read-bundle-{hex}.{name}.{}.{seq}.tmp",
+        std::process::id()
+    ))
 }
 
 fn sealed_hex(sealed: &SealedGraphStateDigest) -> Result<String, GraphDbError> {
@@ -799,5 +864,80 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn aborted_write_removes_in_progress_temporary() {
+        let temp = TempDir::new().unwrap();
+        let mut writer = SealedReadBundleWriterV1::create(temp.path(), &sealed()).unwrap();
+        let error = writer
+            .stage_artifact("interactive-catalog", &mut |out| {
+                out.write_all(&[0u8; 4096])
+                    .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+                Err(GraphDbError::unavailable("catalog write aborted"))
+            })
+            .expect_err("aborted staging must fail");
+        assert!(error.to_string().contains("catalog write aborted"));
+        drop(writer);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn panic_during_write_removes_in_progress_temporary() {
+        let temp = TempDir::new().unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut writer = SealedReadBundleWriterV1::create(temp.path(), &sealed()).unwrap();
+            writer
+                .stage_artifact("interactive-catalog", &mut |out| {
+                    out.write_all(&[0u8; 4096])
+                        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+                    panic!("catalog write panicked");
+                })
+                .expect("panic is the abort path");
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn create_sweeps_aborted_temporaries_without_touching_committed_or_foreign_digests() {
+        let temp = TempDir::new().unwrap();
+        write_bundle(temp.path(), "generation-a", b"catalog-bytes");
+        let hex = "ab".repeat(32);
+        let foreign = "cd".repeat(32);
+        std::fs::write(
+            temp.path()
+                .join(format!(".read-bundle-{hex}.interactive-catalog.1.tmp")),
+            vec![0u8; 32],
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path()
+                .join(format!(".read-bundle-{hex}.interactive-catalog.9.2.tmp")),
+            vec![0u8; 32],
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path()
+                .join(format!(".read-bundle-{foreign}.interactive-catalog.1.tmp")),
+            b"keep-foreign",
+        )
+        .unwrap();
+
+        drop(SealedReadBundleWriterV1::create(temp.path(), &sealed()).unwrap());
+
+        let mut remaining: Vec<String> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            vec![
+                format!(".read-bundle-{foreign}.interactive-catalog.1.tmp"),
+                format!("read-bundle-{hex}.interactive-catalog.bin"),
+                format!("read-bundle-{hex}.json"),
+            ]
+        );
     }
 }

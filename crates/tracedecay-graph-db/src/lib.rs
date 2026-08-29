@@ -31,6 +31,7 @@ pub use bundle::{
     MAX_SEALED_READ_BUNDLE_ARTIFACT_BYTES_V1, SEALED_READ_BUNDLE_FORMAT_V1,
     SealedReadBundleArtifactStateV1, SealedReadBundleArtifactV1, SealedReadBundleManifestV1,
     SealedReadBundleWriterV1, load_sealed_read_bundle_artifact, retire_sealed_read_bundle,
+    sweep_aborted_sealed_read_bundle_temporaries,
 };
 pub use error::{GraphBudgetKind, GraphDbError};
 pub use generation::{

@@ -101,11 +101,18 @@ impl VerifiedGenerationState {
                 .values()
                 .filter_map(std::sync::Weak::upgrade)
                 .any(|lease| lease_retains(&lease, locator, &mut BTreeSet::new()))
-            || self.stored.contains_key(locator)
-            || self
-                .stored
-                .values()
-                .any(|dependencies| dependencies.contains(locator))
+            // `stored` is a durable-row ledger, not a live reader. A
+            // generation that wrote pages must still be reservable for
+            // staged retirement once every lease has dropped. Dependencies
+            // of generations that still have rows stay retained so a
+            // still-present child cannot lose its base out from under it.
+            || self.stored.iter().any(|(owner, dependencies)| {
+                owner != locator && dependencies.contains(locator)
+            })
+    }
+
+    fn sweep_dead_known(&mut self) {
+        self.known.retain(|_, weak| weak.strong_count() > 0);
     }
 
     pub(crate) fn remember(
@@ -131,6 +138,7 @@ impl VerifiedGenerationState {
                 })
                 .collect(),
         );
+        self.sweep_dead_known();
         Ok(())
     }
 
@@ -578,4 +586,97 @@ pub(crate) fn generation_lease(
         dependency_identities: identity.dependencies.clone(),
         dependencies,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GenerationLocator, VerifiedGenerationLease, VerifiedGenerationState};
+    use crate::{GraphGenerationId, GraphNamespace, GraphProjectionId, GraphProjectionIdentity};
+    use std::sync::Arc;
+    use tracedecay_store::runtime::{
+        BrainId, GraphDependencyGenerationClosureDigestV1, GraphGenerationIdV1, GraphNamespaceV1,
+        GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
+        GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationSequenceV1,
+        GraphRecoveredGenerationDigestV1, GraphVerifiedHeadV1, ProjectId, StoreShardIdV1,
+        UserProfileId,
+    };
+
+    const ZERO_DIGEST: &str =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn test_lease(generation: &str) -> (GenerationLocator, Arc<VerifiedGenerationLease>) {
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("namespace.lease-release").expect("namespace"),
+            GraphProjectionId::new("projection.lease-release").expect("projection"),
+        );
+        let generation = GraphGenerationId::new(generation).expect("generation");
+        let locator = GenerationLocator::new(projection.clone(), generation.clone());
+        let shard = StoreShardIdV1::project(
+            BrainId::new("brain.lease-release").expect("brain"),
+            UserProfileId::new("profile.lease-release").expect("profile"),
+            ProjectId::new("project.lease-release").expect("project"),
+        );
+        let head = GraphVerifiedHeadV1 {
+            sequence: GraphPublicationSequenceV1::new(1).expect("sequence"),
+            key: GraphPublicationKeyV1::new(
+                GraphProjectionIdentityV1 {
+                    shard_id: shard,
+                    namespace: GraphNamespaceV1::new("namespace.lease-release").expect("namespace"),
+                    projection: GraphProjectionIdV1::new("projection.lease-release")
+                        .expect("projection"),
+                },
+                GraphGenerationIdV1::new(generation.as_str()).expect("generation id"),
+                GraphPublicationIdempotencyKeyV1::new("publication.lease-release")
+                    .expect("idempotency"),
+            ),
+            input_digest: GraphPublicationInputDigestV1::new(ZERO_DIGEST).expect("input digest"),
+            dependency_generation_closure_digest: GraphDependencyGenerationClosureDigestV1::new(
+                ZERO_DIGEST,
+            )
+            .expect("closure digest"),
+            recovered_digest: GraphRecoveredGenerationDigestV1::new(ZERO_DIGEST)
+                .expect("recovered digest"),
+        };
+        let lease = Arc::new(VerifiedGenerationLease {
+            locator: locator.clone(),
+            head,
+            dependency_identities: Vec::new(),
+            dependencies: Default::default(),
+        });
+        (locator, lease)
+    }
+
+    #[test]
+    fn dropped_verified_lease_stops_retaining_and_is_not_kept_alive_by_stored_rows() {
+        let (locator, lease) = test_lease("generation.lease-release");
+        let probe = Arc::downgrade(&lease);
+        let mut state = VerifiedGenerationState::default();
+        state.remember(&lease).expect("remember live lease");
+        assert!(
+            state.retains(&locator),
+            "a live verified lease must retain its generation"
+        );
+        assert!(
+            state.stored.contains_key(&locator),
+            "remembering a lease records its durable-row ledger entry"
+        );
+
+        drop(lease);
+        assert!(
+            probe.upgrade().is_none(),
+            "dropping the last lease handle must release the generation"
+        );
+        assert!(
+            !state.retains(&locator),
+            "durable rows alone must not keep a generation unreclaimable after every lease drops"
+        );
+
+        state
+            .remember(&test_lease("generation.lease-release-successor").1)
+            .expect("remember successor");
+        assert!(
+            !state.known.contains_key(&locator),
+            "remembering another generation must sweep the dead predecessor Weak"
+        );
+    }
 }

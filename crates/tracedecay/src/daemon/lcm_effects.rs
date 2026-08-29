@@ -433,31 +433,6 @@ mod tests {
         let session_id = SessionId::new("compress-session").unwrap();
         let relation_ids = [summary.node_id.clone()];
         let read_control = execution_control();
-        let unavailable = db
-            .active_session_summary_relations(
-                &session_id,
-                &relation_ids,
-                4_096,
-                crate::global_db::session_temporal::store::execution_control_graph_cancellation(
-                    &read_control,
-                ),
-            )
-            .await;
-        assert!(
-            unavailable.is_err(),
-            "relation reads must not reconstruct a pending projection"
-        );
-        assert_eq!(
-            db.recover_pending_session_relation_projections(
-                1,
-                crate::global_db::session_temporal::store::execution_control_graph_cancellation(
-                    &read_control,
-                ),
-            )
-            .await
-            .unwrap(),
-            1
-        );
         let (_, relations) = db
             .active_session_summary_relations(
                 &session_id,
@@ -471,6 +446,18 @@ mod tests {
             .unwrap();
         assert_eq!(relations.len(), 1);
         assert_eq!(relations[0].sources.len(), summary.source_refs.len());
+        assert_eq!(
+            db.recover_pending_session_relation_projections(
+                1,
+                crate::global_db::session_temporal::store::execution_control_graph_cancellation(
+                    &read_control,
+                ),
+            )
+            .await
+            .unwrap(),
+            0,
+            "compress applies the graph projection in the same journey"
+        );
 
         let expected_relations = relations.clone();
         drop(response);

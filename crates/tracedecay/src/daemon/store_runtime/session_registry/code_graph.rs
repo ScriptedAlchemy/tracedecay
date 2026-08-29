@@ -749,6 +749,17 @@ impl RetainedCodeGraphRuntimeV1 {
         Arc::clone(&self.authority)
     }
 
+    /// Drops aborted catalog/manifest staging files for this sealed digest.
+    /// A retry must not inherit another attempt's `.read-bundle-*.tmp` scratch.
+    pub(crate) fn sweep_aborted_read_bundle_temporaries(
+        &self,
+    ) -> std::result::Result<(), GraphDbError> {
+        tracedecay_graph_db::sweep_aborted_sealed_read_bundle_temporaries(
+            &self.generations_root,
+            &self.sealed_state_digest,
+        )
+    }
+
     pub(crate) fn semantic_vector_identity(
         &self,
     ) -> std::result::Result<
@@ -818,6 +829,7 @@ impl RetainedCodeGraphRuntimeV1 {
         if generation.manifest().generation_id != self.generation_id {
             return Err(GraphDbError::Conflict);
         }
+        self.sweep_aborted_read_bundle_temporaries()?;
         // Everything up to `prepared` below is a pure function of the
         // immutable published generation and this runtime's identity — no
         // publication storage is read or written — so racing publishers
@@ -1299,6 +1311,7 @@ impl RetainedCodeGraphRuntimeV1 {
             registry: Some(Arc::clone(&self.lifecycle_cancelled)),
         };
         let stage = || {
+            self.sweep_aborted_read_bundle_temporaries()?;
             let mut writer = tracedecay_graph_db::SealedReadBundleWriterV1::create(
                 &self.generations_root,
                 &self.sealed_state_digest,

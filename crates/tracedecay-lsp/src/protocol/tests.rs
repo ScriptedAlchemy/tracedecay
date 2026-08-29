@@ -863,6 +863,7 @@ fn outbound_backpressure_cannot_half_commit_initialize() {
         payload: vec![0; MAX_QUEUED_OUTBOUND_BYTES],
         publication: None,
         server_request: None,
+        queued_at: std::time::Instant::now(),
     });
     session.outbound.queued_bytes = MAX_QUEUED_OUTBOUND_BYTES;
     session.handle_payload(

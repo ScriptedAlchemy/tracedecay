@@ -1,6 +1,6 @@
 //! Generation-bound semantic-vector adapter for redundancy classification.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -13,8 +13,9 @@ use crate::config::retrieval::SemanticCompatibilityPinsV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 
 use super::{
-    CommittedRetrievalProfileStateV1, SemanticCurrentLinkedActivationV1,
-    SemanticRetainedVectorGenerationsV1, project_semantic_production_runtime,
+    CommittedRetrievalProfileStateV1, SemanticActivationReceiptV1,
+    SemanticCurrentLinkedActivationV1, SemanticRetainedVectorGenerationsV1,
+    project_semantic_production_runtime,
 };
 
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
@@ -100,6 +101,11 @@ pub struct PreparedSemanticRedundancyAuthorityV1 {
     revision: ConfigurationRevisionId,
     roots: SemanticRetainedVectorGenerationsV1,
     authority: Option<SemanticRedundancyAuthorityV1>,
+    /// Durable Ready receipt from the committed linked activation. Present
+    /// only when [`authority`] validated that exact receipt; remount must
+    /// reattach it onto the public Ready projection instead of synthesizing
+    /// one from the scheduler pointer.
+    activation_receipt: Option<SemanticActivationReceiptV1>,
 }
 
 impl PreparedSemanticRedundancyAuthorityV1 {
@@ -114,13 +120,26 @@ impl PreparedSemanticRedundancyAuthorityV1 {
 
 struct RetainedProjectGenerationsV1 {
     latest: CodeGenerationId,
+    /// Last durable vector-readable source set observed by
+    /// [`retain_project_semantic_code_sources`]. Until that maintenance
+    /// proof runs, only `latest` is kept so publish supersession cannot
+    /// accumulate every decoded generation for the life of the daemon.
+    configured_sources: BTreeSet<CodeGenerationId>,
     generations: BTreeMap<CodeGenerationId, Arc<CodeIndexPublishedGenerationV1>>,
+}
+
+fn prune_retained_project_generations(project: &mut RetainedProjectGenerationsV1) {
+    let latest = project.latest.clone();
+    project
+        .generations
+        .retain(|source, _| source == &latest || project.configured_sources.contains(source));
 }
 
 struct SemanticProjectRedundancyStateV1 {
     revision: ConfigurationRevisionId,
     roots: SemanticRetainedVectorGenerationsV1,
     authority: Option<SemanticRedundancyAuthorityV1>,
+    activation_receipt: Option<SemanticActivationReceiptV1>,
 }
 
 fn retained_generations() -> &'static Mutex<BTreeMap<PathBuf, RetainedProjectGenerationsV1>> {
@@ -181,6 +200,25 @@ pub(crate) fn project_committed_semantic_activation(
         .map(|authority| authority.activation.clone())
 }
 
+/// Durable Ready receipt last installed for this project, if any.
+///
+/// Process-local only: unmount drops it. Restart remount must recommit the
+/// exact receipt from the configuration store; a scheduler `Current`
+/// pointer alone is not Ready.
+pub fn project_semantic_activation_receipt(
+    project_root: &Path,
+) -> Option<SemanticActivationReceiptV1> {
+    let activation = project_semantic_activation_gate(project_root);
+    let _activation = activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    redundancy_states()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(project_root)
+        .and_then(|state| state.activation_receipt.clone())
+}
+
 pub fn project_semantic_retained_vector_generations(
     project_root: &Path,
 ) -> Option<SemanticRetainedVectorGenerationsV1> {
@@ -224,10 +262,12 @@ pub(crate) fn register_project_semantic_redundancy_generation(
         .entry(project_root)
         .or_insert_with(|| RetainedProjectGenerationsV1 {
             latest: incoming.clone(),
+            configured_sources: BTreeSet::new(),
             generations: BTreeMap::new(),
         });
     project.latest = incoming.clone();
     project.generations.insert(incoming, generation);
+    prune_retained_project_generations(project);
     record_retained_generation_count(&retained);
 }
 
@@ -238,16 +278,14 @@ pub(crate) fn register_project_semantic_redundancy_generation(
 /// Doctor and other diagnostic readers must never call it.
 pub fn retain_project_semantic_code_sources(
     project_root: &Path,
-    configured_sources: &std::collections::BTreeSet<CodeGenerationId>,
+    configured_sources: &BTreeSet<CodeGenerationId>,
 ) {
     let mut retained = retained_generations()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(project) = retained.get_mut(project_root) {
-        let latest = project.latest.clone();
-        project
-            .generations
-            .retain(|source, _| source == &latest || configured_sources.contains(source));
+        project.configured_sources = configured_sources.clone();
+        prune_retained_project_generations(project);
     }
     record_retained_generation_count(&retained);
 }
@@ -268,10 +306,18 @@ pub fn project_semantic_retained_code_generation(
 pub fn prepare_project_semantic_redundancy_authority(
     committed: &CommittedRetrievalProfileStateV1,
 ) -> PreparedSemanticRedundancyAuthorityV1 {
+    let authority = redundancy_authority_from_committed(committed);
+    let activation_receipt = authority.as_ref().and_then(|_| {
+        committed
+            .current_activation
+            .as_ref()
+            .map(|activation| activation.receipt.clone())
+    });
     PreparedSemanticRedundancyAuthorityV1 {
         revision: committed.state.configuration_revision().clone(),
         roots: SemanticRetainedVectorGenerationsV1::from_profile_state(&committed.state),
-        authority: redundancy_authority_from_committed(committed),
+        authority,
+        activation_receipt,
     }
 }
 
@@ -286,6 +332,7 @@ pub fn commit_project_initial_semantic_roots(
         revision: state.configuration_revision().clone(),
         roots: SemanticRetainedVectorGenerationsV1::from_profile_state(state),
         authority: None,
+        activation_receipt: None,
     };
     commit_project_semantic_redundancy_authority(project_root, &prepared, false);
     true
@@ -317,6 +364,10 @@ pub fn commit_project_semantic_redundancy_authority_under_gate(
         revision: prepared.revision.clone(),
         roots: prepared.roots.clone(),
         authority: prepared.authority.clone().filter(|_| install_authority),
+        activation_receipt: prepared
+            .activation_receipt
+            .clone()
+            .filter(|_| install_authority),
     };
     redundancy_states()
         .lock()
@@ -563,6 +614,66 @@ mod tests {
         assert!(
             project_a.try_lock().is_err(),
             "the exact project gate still serializes its own activation and reads"
+        );
+    }
+
+    #[test]
+    fn project_unregistration_releases_retained_semantic_registries() {
+        use super::{
+            PreparedSemanticRedundancyAuthorityV1, activation_gates,
+            commit_project_semantic_redundancy_authority,
+            project_semantic_retained_vector_generations, redundancy_states, retained_generations,
+            unregister_project_semantic_redundancy_generation,
+        };
+        use crate::semantic_runtime::SemanticRetainedVectorGenerationsV1;
+        use std::sync::Arc;
+        use tracedecay_domain::configuration::ConfigurationRevisionId;
+
+        let project_root = Path::new("/tmp/tracedecay-retention-release-unmount");
+        let prepared = PreparedSemanticRedundancyAuthorityV1 {
+            revision: ConfigurationRevisionId::new("configuration.revision.retention-release")
+                .expect("revision"),
+            roots: SemanticRetainedVectorGenerationsV1::default(),
+            authority: None,
+            activation_receipt: None,
+        };
+        commit_project_semantic_redundancy_authority(project_root.to_path_buf(), &prepared, false);
+        assert!(
+            project_semantic_retained_vector_generations(project_root).is_some(),
+            "commit must seat the process-local redundancy record"
+        );
+
+        let gate = project_semantic_activation_gate(project_root);
+        let gate_probe = Arc::downgrade(&gate);
+        drop(gate);
+
+        unregister_project_semantic_redundancy_generation(project_root);
+
+        assert!(
+            redundancy_states()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(project_root)
+                .is_none(),
+            "project unmount must drop the process-local redundancy record"
+        );
+        assert!(
+            !activation_gates()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(project_root),
+            "project unmount must drop the activation-gate registry entry"
+        );
+        assert!(
+            !retained_generations()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(project_root),
+            "project unmount must drop retained code-generation handles"
+        );
+        assert!(
+            gate_probe.upgrade().is_none(),
+            "project unmount must drop the last strong activation-gate handle"
         );
     }
 }

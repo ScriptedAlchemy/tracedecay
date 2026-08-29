@@ -239,6 +239,11 @@ impl CodeGraphActivationAuthorityV1 {
                     .map_err(|error| {
                         CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
                     })?;
+                retained
+                    .sweep_aborted_read_bundle_temporaries()
+                    .map_err(|error| {
+                        CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
+                    })?;
                 let pending_catalog_warm = tokio::task::spawn_blocking(move || {
                     latest.activate_persistent_graph(retained, cancellation)
                 })
@@ -371,6 +376,9 @@ impl LatestCompleteCodeIndexV1 {
         cancellation: Arc<AtomicBool>,
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let generation_id = self.generation.manifest().generation_id.clone();
+        retained
+            .sweep_aborted_read_bundle_temporaries()
+            .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         let authority = retained.authority();
         let snapshot = hotpath::measure_block!(
             "code_graph.activation.publish_verified_snapshot",
