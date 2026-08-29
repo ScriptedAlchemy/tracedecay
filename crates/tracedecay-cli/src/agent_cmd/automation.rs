@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tracedecay_agent_hosts::automation::config::{
+use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
 };
 

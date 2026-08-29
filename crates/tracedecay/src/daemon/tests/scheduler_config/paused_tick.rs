@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_agent_hosts::automation::config::{
+use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
 };
-use tracedecay_agent_hosts::automation::run_ledger::load_run_records;
-use tracedecay_agent_hosts::automation::scheduler::{
+use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
+use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedulerControl, save_scheduler_control,
 };
 
@@ -58,9 +58,10 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
     .await
     .expect("save paused scheduler control");
 
-    let run_control = tracedecay_agent_hosts::automation::AutomationRunControl::from_interrupted(
-        Arc::new(|| false),
-    );
+    let run_control =
+        tracedecay_automation_runtime::automation::AutomationRunControl::from_interrupted(
+            Arc::new(|| false),
+        );
     Box::pin(super::super::super::run_automation_scheduler_tick(
         &project,
         &cg,

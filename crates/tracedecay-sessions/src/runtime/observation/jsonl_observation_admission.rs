@@ -123,7 +123,10 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
         self
     }
 
-    pub(in crate::runtime) fn with_cancellation(mut self, cancellation: ObservationCancellation) -> Self {
+    pub(in crate::runtime) fn with_cancellation(
+        mut self,
+        cancellation: ObservationCancellation,
+    ) -> Self {
         self.cancellation = cancellation;
         self
     }
@@ -337,7 +340,8 @@ const fn shared_jsonl_speculative_capacity_from(total_capacity: usize) -> usize 
     total_capacity.saturating_sub(1)
 }
 
-pub(in crate::runtime) fn shared_jsonl_background_cpu() -> TranscriptIngestResult<Arc<ProcessBackgroundCpuV1>> {
+pub(in crate::runtime) fn shared_jsonl_background_cpu()
+-> TranscriptIngestResult<Arc<ProcessBackgroundCpuV1>> {
     process_background_cpu().ok_or(TranscriptIngestError::BackgroundResourceUnavailable {
         provider: "codex",
         resource: "process background CPU authority",

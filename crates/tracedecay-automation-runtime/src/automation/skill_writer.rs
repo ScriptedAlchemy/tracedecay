@@ -16,9 +16,9 @@ use super::skill_usage::{
     skill_improvement_recommendations as usage_skill_improvement_recommendations,
 };
 use super::text::truncate_chars_for_prompt;
-use crate::analytics::ToolFamilySignal;
 use crate::errors::Result;
 use crate::ports::session_evidence::LcmGrepHit;
+use tracedecay_automation::analytics::ToolFamilySignal;
 
 use super::config_error;
 
@@ -343,12 +343,24 @@ fn deploy_managed_skills(
             retry_required: true,
         };
     };
-    let exports = project_root.map_or_else(
+    let exports = match project_root.map_or_else(
         || crate::agents::export_managed_skills_to_agents(&home, profile_root),
         |project_root| {
             crate::agents::export_managed_skills_to_agent_hosts(&home, project_root, profile_root)
         },
-    );
+    ) {
+        Ok(exports) => exports,
+        Err(error) => {
+            return ManagedSkillDeploymentReceipt {
+                status: ManagedSkillDeploymentStatus::Unavailable,
+                exports: Vec::new(),
+                materialization_scopes: Vec::new(),
+                errors: vec![error.to_string()],
+                reason: Some("host_io_unregistered".to_string()),
+                retry_required: true,
+            };
+        }
+    };
     let project_root = project_root.unwrap_or(home.as_path());
     let (scopes, errors) =
         super::skill_materialization::reconcile_detected_scopes(profile_root, &home, project_root);

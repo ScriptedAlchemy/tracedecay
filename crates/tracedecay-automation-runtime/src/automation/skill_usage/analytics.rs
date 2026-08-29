@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::analytics::{UsageKind, infer_usage_events};
 use crate::errors::Result;
 use crate::ports::session_store::{
     AnalyticsEventQuery, AnalyticsEventRecord, AutomationSessionStore, canonical_project_key,
 };
+use tracedecay_automation::analytics::{UsageKind, infer_usage_events};
 
 use super::{
     SkillUsageAction, SkillUsageEvent, SkillUsageRecord, config_error, ledger_skill_id,
@@ -86,7 +86,7 @@ pub async fn ingest_project_analytics_events(
 
 fn skill_usage_events_from_analytics(
     event: &AnalyticsEventRecord,
-) -> Vec<crate::analytics::UsageEvent> {
+) -> Vec<tracedecay_automation::analytics::UsageEvent> {
     let mut events = infer_usage_events(
         event.tool_name.as_deref(),
         event.metadata_json.as_deref(),
@@ -137,7 +137,7 @@ fn should_skip_analytics_event(event: &AnalyticsEventRecord) -> bool {
         && event
             .tool_name
             .as_deref()
-            .is_some_and(crate::analytics::is_skill_view_tool)
+            .is_some_and(tracedecay_automation::analytics::is_skill_view_tool)
         && event.outcome.as_deref().is_some_and(|outcome| {
             !matches!(
                 outcome.to_ascii_lowercase().as_str(),
@@ -165,7 +165,7 @@ fn analytics_action(event: &AnalyticsEventRecord) -> SkillUsageAction {
             if event
                 .tool_name
                 .as_deref()
-                .is_some_and(crate::analytics::is_skill_view_tool) =>
+                .is_some_and(tracedecay_automation::analytics::is_skill_view_tool) =>
         {
             SkillUsageAction::View
         }

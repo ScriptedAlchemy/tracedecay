@@ -706,8 +706,10 @@ fn reconcile_materialized_managed_skills_after_update() {
         .or_else(tracedecay::agents::home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
     let project_root =
-        tracedecay_agent_hosts::automation::skill_materialization::resolve_project_root(&start);
-    tracedecay_agent_hosts::automation::skill_materialization::reconcile_after_activation(
+        tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(
+            &start,
+        );
+    tracedecay_automation_runtime::automation::skill_materialization::reconcile_after_activation(
         &profile_root,
         &project_root,
     );

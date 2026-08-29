@@ -12,12 +12,12 @@ use super::exact_automation_authority;
 use super::{DashboardAutomationAuthorityErrorV1, DashboardHttpRequestControlV1, DashboardState};
 use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_code};
 use crate::read_model::DashboardDomainStateV1;
-use tracedecay_agent_hosts::automation::managed_skills::list_managed_skills;
-use tracedecay_agent_hosts::automation::outcomes::{
+use tracedecay_automation_runtime::automation::managed_skills::list_managed_skills;
+use tracedecay_automation_runtime::automation::outcomes::{
     AutomationOutcomesSnapshot, compute_fact_outcomes, compute_skill_outcomes,
     load_outcomes_snapshot,
 };
-use tracedecay_agent_hosts::automation::skill_usage::summarize_skill_usage;
+use tracedecay_automation_runtime::automation::skill_usage::summarize_skill_usage;
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_store::FactReadControl;

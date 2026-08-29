@@ -504,10 +504,7 @@ pub async fn try_ingest_cursor_transcript_event_capped(
     .await
 }
 
-#[hotpath::measure(
-    label = "sessions.hosts.cursor.ingest_event_capped",
-    future = true
-)]
+#[hotpath::measure(label = "sessions.hosts.cursor.ingest_event_capped", future = true)]
 pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
     event_json: &str,
     project_id: ProjectId,

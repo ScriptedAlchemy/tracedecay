@@ -3,8 +3,8 @@
 //! Hosts expose the same tool under several namespaces depending on how
 //! tracedecay was installed, so the prefixes live here once and every consumer
 //! (permission allowlists in `agents::claude`, usage classification in
-//! [`crate::analytics`]) reads them from this module instead of restating a
-//! partial list.
+//! `tracedecay_automation::analytics`) reads them from this module instead of
+//! restating a partial list.
 
 /// Permission/tool prefix for the tracedecay tools exposed through the Claude
 /// **plugin** MCP server. Claude namespaces a plugin server's tools as

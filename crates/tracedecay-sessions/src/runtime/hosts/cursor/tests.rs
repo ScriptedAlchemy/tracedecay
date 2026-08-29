@@ -18,10 +18,9 @@ fn host_event_ordering_is_kept_distinct_from_transcript_ordering() {
 
 #[test]
 fn native_record_identity_is_stable_across_json_formatting() {
-    let compact: Value = serde_json::from_str(
-        r#"{"role":"assistant","message":{"content":"redacted fixture"}}"#,
-    )
-    .unwrap();
+    let compact: Value =
+        serde_json::from_str(r#"{"role":"assistant","message":{"content":"redacted fixture"}}"#)
+            .unwrap();
     let spaced: Value = serde_json::from_str(
         r#"{ "message": { "content": "redacted fixture" }, "role": "assistant" }"#,
     )
@@ -107,8 +106,7 @@ fn canonical_cursor_record_keeps_typed_tools_and_structured_content() {
         }
     });
     let range = tracedecay_domain::ObservationSourceRangeV1::new(10, 90).unwrap();
-    let record_id =
-        observation_native_record_id("cursor", "session-redacted", &native).unwrap();
+    let record_id = observation_native_record_id("cursor", "session-redacted", &native).unwrap();
     let envelope = normalize_cursor_observation(
         &native,
         "session-redacted",
@@ -141,8 +139,7 @@ fn cursor_conversation_id_sets_thread_relation_without_inventing_turn() {
         "message": {"content": [{"type": "text", "text": "hello"}]}
     });
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 20).unwrap();
-    let record_id =
-        observation_native_record_id("cursor", "conversation-native", &native).unwrap();
+    let record_id = observation_native_record_id("cursor", "conversation-native", &native).unwrap();
     let envelope = normalize_cursor_observation(
         &native,
         "conversation-native",
@@ -202,8 +199,7 @@ fn fixture_backed_cursor_jsonl_tool_use_reaches_canonical_envelope() {
     ))
     .expect("Cursor golden expected envelope");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 64).unwrap();
-    let record_id =
-        observation_native_record_id("cursor", "cursor-tool-fixture", &native).unwrap();
+    let record_id = observation_native_record_id("cursor", "cursor-tool-fixture", &native).unwrap();
     let envelope = normalize_cursor_observation(
         &native,
         "cursor-tool-fixture",
@@ -241,9 +237,10 @@ fn fixture_backed_cursor_jsonl_tool_use_reaches_canonical_envelope() {
             && fact["arguments"] == native["message"]["content"][1]["input"]
     }));
     assert!(
-        envelope.facts().iter().all(|fact| {
-            !matches!(fact, CanonicalObservationFactV1::WorkflowLifecycle { .. })
-        }),
+        envelope
+            .facts()
+            .iter()
+            .all(|fact| { !matches!(fact, CanonicalObservationFactV1::WorkflowLifecycle { .. }) }),
         "Cursor JSONL fixture must not emit WorkflowLifecycle without native lifecycle evidence"
     );
 }
@@ -283,9 +280,10 @@ fn fixture_backed_cursor_workflow_lookalike_emits_no_workflow_lifecycle() {
         );
     }
     assert!(
-        envelope.facts().iter().all(|fact| {
-            !matches!(fact, CanonicalObservationFactV1::WorkflowLifecycle { .. })
-        }),
+        envelope
+            .facts()
+            .iter()
+            .all(|fact| { !matches!(fact, CanonicalObservationFactV1::WorkflowLifecycle { .. }) }),
         "Cursor JSONL workflow lookalikes must not become WorkflowLifecycle"
     );
     let rendered = actual.to_string();

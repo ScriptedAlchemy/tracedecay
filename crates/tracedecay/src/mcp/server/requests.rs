@@ -88,7 +88,7 @@ fn analytics_arguments_snapshot(tool_name: &str, arguments: &Value) -> Value {
         "memory_min_trust",
     ];
 
-    if tracedecay_agent_hosts::analytics::is_skill_view_tool(tool_name) {
+    if tracedecay_automation::analytics::is_skill_view_tool(tool_name) {
         return arguments.clone();
     }
     let Some(map) = arguments.as_object() else {

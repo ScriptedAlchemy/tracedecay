@@ -456,13 +456,16 @@ catalog section, so a caller can stamp the generation digest its index
 was built over and compare after a reopen instead of trusting that a
 restored topology still describes the rows.
 
-**The pin is deliberately unchanged.** Moving `[patch.crates-io]` onto
-this rev is the owner's call, and it changes every consumer's build. Until
-it moves, tracedecay builds against the unfixed rev and a reopen still
-finds no index — which is why the reopen tests in
-`tests/runtime_contract.rs` still assert `Missing`. Bumping the five
-`grafeo-*` revs together is what flips them, and what turns the
-`graph_db.vector_index.restore` gauge non-zero.
+**The pin has moved.** The vector-durability commits were reintegrated
+onto the fork's `fix/catalog-version-guard` branch (ported over the
+out-of-place checkpoint and close-skip storage rewrite that landed in
+the meantime) and the five `grafeo-*` revs in `[patch.crates-io]` now
+point at that lineage. The reopen tests in `tests/runtime_contract.rs`
+assert `Available` — restored, within the same admission bound that
+proves no rebuild ran — and the fork gates the semantics with
+`vector_index_reopen`, `vector_index_restore_cost`, and
+`torn_vector_checkpoint` (a checkpoint killed at every injection point
+over a populated HNSW index must reopen and serve search).
 
 ### `has_vector_index` — resolved, and worse than gap 3 described
 

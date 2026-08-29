@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tracedecay_agent_hosts::ports::project_runtime::ProfileIdentity;
+use tracedecay_automation_runtime::ports::project_runtime::ProfileIdentity;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use crate::storage::PROFILE_IDENTITY_FILENAME;

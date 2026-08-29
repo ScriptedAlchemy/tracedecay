@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 
 use serde_json::json;
 use tempfile::tempdir;
-use tracedecay_agent_hosts::automation::automatic_facts::{
+use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
     record_session_automatic_facts,
 };

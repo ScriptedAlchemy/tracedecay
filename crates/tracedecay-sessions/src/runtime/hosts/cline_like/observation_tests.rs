@@ -77,9 +77,7 @@ async fn checked_in_cline_family_snapshots_preserve_receipts_through_failures_an
             .map(|item| {
                 let envelope: CanonicalObservationEnvelopeV1 =
                     serde_json::from_value(item.observation().payload().clone())
-                        .unwrap_or_else(|error| {
-                            panic!("{provider}: canonical envelope: {error}")
-                        });
+                        .unwrap_or_else(|error| panic!("{provider}: canonical envelope: {error}"));
                 assert_eq!(envelope.provider().as_str(), provider);
                 item.commit_receipt().clone()
             })
@@ -375,14 +373,11 @@ fn message(provider: &str, ordinal: i64) -> SessionMessageRecord {
 fn provider_identity_and_snapshot_order_feed_canonical_requests() {
     for provider in ["cline", "roo-code", "kilo"] {
         let first =
-            normalize_cline_like_snapshot_observations(provider, &[message(provider, 0)])
-                .unwrap();
+            normalize_cline_like_snapshot_observations(provider, &[message(provider, 0)]).unwrap();
         let prior =
-            normalize_cline_like_snapshot_observations(provider, &[message(provider, 2)])
-                .unwrap();
+            normalize_cline_like_snapshot_observations(provider, &[message(provider, 2)]).unwrap();
         let moved =
-            normalize_cline_like_snapshot_observations(provider, &[message(provider, 3)])
-                .unwrap();
+            normalize_cline_like_snapshot_observations(provider, &[message(provider, 3)]).unwrap();
         assert_eq!(first[0].provider(), provider);
         assert_eq!(first[0].native_record_id(), moved[0].native_record_id());
         assert_eq!(first[0].order(), 0);
@@ -550,8 +545,7 @@ const GOLDEN_PARSER_PROVENANCE: &str = include_str!(
 fn fixture_backed_tool_use_name_reaches_canonical_facts() {
     // Checked-in golden input (same shape as write_task). Roo's api_messages.json
     // twin must stay byte-equivalent to the shared Cline/Kilo history fixture.
-    let history: Value =
-        serde_json::from_str(GOLDEN_API_HISTORY).expect("golden api history JSON");
+    let history: Value = serde_json::from_str(GOLDEN_API_HISTORY).expect("golden api history JSON");
     let roo_twin: Value =
         serde_json::from_str(GOLDEN_API_MESSAGES).expect("golden Roo api_messages JSON");
     assert_eq!(

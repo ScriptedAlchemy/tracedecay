@@ -4,7 +4,6 @@ use tracedecay_domain::TemporalCoverageCountsV1;
 
 use crate::ports::session_evidence::{LcmGrepHit, LcmGrepSort, LcmScope};
 
-use crate::analytics::{ToolUsageObservation, underused_tool_family_signals};
 use crate::automation::artifacts::sha256_json;
 use crate::automation::managed_skills::list_managed_skills;
 use crate::automation::skill_usage::{
@@ -20,6 +19,7 @@ use crate::ports::session_store::AutomationSessionStore;
 use crate::tracedecay::current_timestamp;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use tracedecay_automation::analytics::{ToolUsageObservation, underused_tool_family_signals};
 
 use super::retrieval::{
     AutomationSessionRetrieval, AutomationTemporalRetrieval, automation_structural_refusal_reason,

@@ -6,7 +6,7 @@ mod automatic_fact_receipts;
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "test-transport")]
-use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
+use tracedecay_automation_runtime::ports::session_evidence::{LcmGrepSort, LcmScope};
 #[cfg(feature = "test-transport")]
 use tracedecay_store::{ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery};
 
@@ -31,7 +31,7 @@ async fn retained_session_reflector_preserves_retrieval_and_defers_ledger_public
     seed_session_evidence(&cg).await;
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
     let backend = SessionJsonBackend::new(json!({"facts": []}));
-    let retained = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
+    let retained = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
         &cg,
         &scheduler_config(Some(3600), None),
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -62,7 +62,7 @@ async fn retained_session_reflector_preserves_retrieval_and_defers_ledger_public
     drop(guard);
 }
 
-use tracedecay_agent_hosts::automation::automatic_facts::record_session_automatic_facts;
+use tracedecay_automation_runtime::automation::automatic_facts::record_session_automatic_facts;
 
 #[tokio::test]
 async fn session_reflector_runner_skips_when_task_is_disabled() {
@@ -193,7 +193,7 @@ async fn session_reflector_fails_closed_on_stale_temporal_evidence() {
         ..AutomationConfig::default()
     };
 
-    let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -264,7 +264,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         };
 
         let reflector =
-            tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
+            tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
                 &cg,
                 &config,
                 &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -275,7 +275,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
             )
             .await
             .unwrap();
-        let skill = tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        let skill = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
             &cg,
             &config,
             &test_configuration_revision(),
@@ -328,7 +328,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         ..AutomationConfig::default()
     };
     let reflector =
-        tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
+        tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
             &cg,
             &config,
             &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -340,7 +340,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         .await
         .unwrap();
     let skill =
-        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
             &cg,
             &config,
             &test_configuration_revision(),
@@ -1232,7 +1232,7 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
         ..AutomationConfig::default()
     };
 
-    let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -1331,7 +1331,7 @@ async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
         ..AutomationConfig::default()
     };
 
-    let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -1451,7 +1451,7 @@ async fn session_reflector_replay_respects_include_summaries_false() {
         "Remember TraceDecay automation should manage durable session reflection facts directly.",
     );
 
-    let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),

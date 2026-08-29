@@ -121,8 +121,7 @@ fn vibe_workflow_lookalike_stays_ordinary_message_without_goal_kind() {
         message.text,
         "Vibe workflow lookalike remains an ordinary message"
     );
-    let metadata: Value =
-        serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
     for key in ["workflow", "todos", "thread_goal_updated", "status", "kind"] {
         assert!(
             metadata.get(key).is_none(),
