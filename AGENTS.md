@@ -79,6 +79,21 @@ compiles.
   `--no-default-features` for lean lib iteration, `--all-features` for the
   handoff gate, and the fixed hotpath profiling combos — rather than toggling
   individual features (e.g. `semantic-fastembed`) per task.
+- The CLI build lane (`build -p tracedecay-cli --bin tracedecay`) and any test
+  compile of the root crate resolve different spine features: dev-dependency
+  unification activates `test-helpers`/`test-transport` on ~13 spine crates
+  (usecases, sessions, runtime-core, global-db, graph-db, query, semantic,
+  code-index, agent-hosts, dashboard-api, …) that a plain CLI build resolves
+  without. That is the typed test-feature design working as intended — the
+  fixture surfaces live in-crate and stay out of the shipped binary — and
+  Cargo keeps both feature variants side by side in one target dir, so
+  alternating build and test does not recompile at steady state (measured:
+  no-ops in both directions once each lane has populated; the first test
+  compile after a plain build pays a one-time extra spine compile). The
+  recurring cost is per edit: a change in a flipped crate compiles it and its
+  dependents once per lane. Do not "fix" the flip by enabling test features
+  in the build lane (that ships fixture surface in the CLI), and per-lane
+  target dirs are unnecessary — the variants coexist.
 
 ## Conventions
 
