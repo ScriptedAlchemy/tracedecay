@@ -2,10 +2,12 @@
 //! one-shot JSON-RPC tool calls against the daemon.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
+use tracedecay_daemon_protocol::DaemonLivenessProbe;
 
 #[cfg(unix)]
 use super::unavailable_error;
@@ -78,14 +80,52 @@ pub(crate) struct DaemonConnection {
 }
 
 impl DaemonConnection {
-    #[cfg(test)]
-    pub(crate) fn unauthenticated_for_test(endpoint: DaemonEndpoint) -> Self {
-        Self {
-            endpoint,
-            auth_token: None,
-            authority_record: None,
+    pub(crate) fn into_protocol(self) -> tracedecay_daemon_protocol::DaemonConnection {
+        let connection =
+            tracedecay_daemon_protocol::DaemonConnection::new(self.endpoint, self.auth_token);
+        match self.authority_record {
+            Some(record) => connection.with_liveness(Arc::new(AuthorityLivenessProbe { record })),
+            None => connection,
         }
     }
+}
+
+struct AuthorityLivenessProbe {
+    record: authority::DaemonAuthorityRecord,
+}
+
+impl DaemonLivenessProbe for AuthorityLivenessProbe {
+    fn ensure_live(&self, request_label: &str) -> Result<()> {
+        let current = authority::current_record(&self.record.profile_root)?;
+        let Some(current) = current else {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon authority disappeared while request '{request_label}' was awaiting a response; the request was already sent and was not retried"
+                ),
+            });
+        };
+        if current.epoch != self.record.epoch
+            || current.process_run_id != self.record.process_run_id
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon restarted while request '{request_label}' was awaiting a response (expected epoch {}, current epoch {}); the request was already sent and was not retried",
+                    self.record.epoch, current.epoch
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Authenticated invocation client for this process's current daemon authority.
+pub fn invocation_client_for_current(
+    handshake: tracedecay_daemon_protocol::DaemonHandshake,
+) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
+    Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        current_daemon_connection()?.into_protocol(),
+        handshake,
+    ))
 }
 
 pub(crate) fn current_daemon_connection() -> Result<DaemonConnection> {
@@ -190,7 +230,7 @@ pub(crate) async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    use tracedecay_usecases::host_admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
+    use tracedecay_sessions::admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
 
     // Pin one frame-read future for the whole wait. Liveness polls must not
     // recreate `read_bounded_mcp_line`: that future owns the partial-frame
@@ -206,7 +246,7 @@ where
                         Err(TraceDecayError::Config {
                             message: format!(
                                 "daemon {request_label} response exceeded wire message bound ({})",
-                                tracedecay_usecases::host_admission::WIRE_RECORD_TOO_LARGE
+                                tracedecay_sessions::admission::WIRE_RECORD_TOO_LARGE
                             ),
                         })
                     }
@@ -287,29 +327,6 @@ pub(crate) fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'stati
     } else {
         "The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`."
     }
-}
-
-pub(crate) async fn connect_to_daemon_connection(
-    connection: &DaemonConnection,
-) -> Result<BrokerStream> {
-    connect_to_daemon_connection_within(connection, None).await
-}
-
-pub(crate) async fn connect_to_daemon_connection_within(
-    connection: &DaemonConnection,
-    client_deadline: Option<DaemonClientDeadline>,
-) -> Result<BrokerStream> {
-    let grace = match client_deadline {
-        Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
-        None => DAEMON_RESTART_GRACE,
-    };
-    let (_, stream) = connect_with_restart_grace_resolving(
-        || Ok(connection.clone()),
-        grace,
-        DAEMON_RESTART_POLL_INTERVAL,
-    )
-    .await?;
-    Ok(stream)
 }
 
 pub(crate) async fn connect_to_current_daemon_within(

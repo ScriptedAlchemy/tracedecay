@@ -4,7 +4,8 @@
 #
 # Reads only Hotpath's metrics server, so it needs no product code change and
 # no restart: build the binary with `hotpath` (see
-# .claude/skills/using-hotpath) and point this at the live port.
+# .claude/skills/using-hotpath and scripts/hotpath-rustflags.sh) and point
+# this at the live port.
 #
 # The two numbers this exists to produce:
 #

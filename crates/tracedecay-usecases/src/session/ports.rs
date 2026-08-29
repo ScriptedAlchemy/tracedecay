@@ -11,7 +11,7 @@ pub trait SessionProjectionServingStatusPort: Send + Sync {
     fn serving_status(&self) -> SessionProjectionServingStatus;
 }
 
-pub use tracedecay_global_db::session_temporal::execution::{
+pub use tracedecay_session_temporal_store::execution::{
     AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };

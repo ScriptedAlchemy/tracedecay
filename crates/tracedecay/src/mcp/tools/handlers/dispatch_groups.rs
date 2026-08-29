@@ -5,8 +5,8 @@ use tracedecay_application::{
 use tracedecay_tool_catalog::BindingSurface;
 
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
-use crate::daemon_client::InvocationCancellationPolicy;
 use crate::tracedecay::TraceDecay;
+use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
@@ -173,7 +173,7 @@ pub(crate) fn tool_dispatch_budget(
         // A carried deadline is preferred whenever it is shorter; the ceiling
         // still clamps a pathologically distant one so it can never be a way
         // out of the bound.
-        Some(deadline) => crate::daemon_client::deadline_remaining(deadline)
+        Some(deadline) => tracedecay_daemon_protocol::deadline_remaining(deadline)
             .map(|remaining| remaining.min(ceiling)),
         None => Some(ceiling),
     }
@@ -746,7 +746,7 @@ fn dispatch_git_tools_inner<'a>(
         // blocking/ref and daemon-generation executors, so timing out this future
         // also tells the underlying operation to stop at its next checkpoint.
         let carried_deadline = options.application_deadline.as_ref();
-        let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
+        let remaining = carried_deadline.and_then(tracedecay_daemon_protocol::deadline_remaining);
 
         let handler = async {
             match tool_name {
@@ -985,7 +985,7 @@ fn dispatch_retained_application_tools_inner<'a>(
                         )
                     })?;
                 let invocation =
-                    crate::daemon_contract::DaemonInvocationRequest::retained_application(
+                    tracedecay_daemon_protocol::DaemonInvocationRequest::retained_application(
                         request_id.as_str(),
                         request,
                         tracedecay_application::now_micros(),
@@ -1007,9 +1007,9 @@ fn dispatch_retained_application_tools_inner<'a>(
                 {
                     Ok(response)
                         if response.protocol
-                            == crate::daemon_contract::DAEMON_INVOCATION_PROTOCOL
+                            == tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL
                             && response.revision
-                                == crate::daemon_contract::DAEMON_INVOCATION_REVISION
+                                == tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION
                             && response.request_id == request_id.as_str() =>
                     {
                         retained_response::validated_retained_response(

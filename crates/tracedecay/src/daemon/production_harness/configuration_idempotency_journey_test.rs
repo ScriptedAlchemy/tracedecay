@@ -90,7 +90,7 @@ async fn cli_configuration_set(
         maximum_millis, 15_000,
         "CLI configuration effects use the catalog-owned 15 second deadline"
     );
-    let observed_at = crate::daemon_client::invocation_now_micros();
+    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
     let deadline = Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
@@ -113,7 +113,7 @@ async fn cli_configuration_set(
             PageRequest::first(10).expect("CLI page"),
             Some(deadline),
             cancellation,
-            crate::daemon_client::RequestedOutputFormat::Json,
+            tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("CLI configuration dispatch");
     crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
@@ -178,7 +178,7 @@ async fn configuration_batch_via_surface(
         maximum_millis, 15_000,
         "user configuration effects use the catalog-owned 15 second deadline"
     );
-    let observed_at = crate::daemon_client::invocation_now_micros();
+    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
     let deadline = Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
@@ -201,7 +201,7 @@ async fn configuration_batch_via_surface(
             crate::application_surface::ApplicationSurfaceRequest::Configuration(
                 tracedecay_application::ConfigurationWireRequestV1::Batch(request),
             ),
-            crate::daemon_client::RequestedOutputFormat::Json,
+            tracedecay_daemon_protocol::RequestedOutputFormat::Json,
             Some(&executor),
         )
         .await
@@ -222,7 +222,7 @@ async fn configuration_batch_via_surface(
             PageRequest::first(10).expect("surface page"),
             Some(deadline),
             cancellation,
-            crate::daemon_client::RequestedOutputFormat::Json,
+            tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
     crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))

@@ -68,10 +68,7 @@ where
 /// If local handle storage is unavailable or fails, the envelope still carries
 /// a preview but also includes explicit recovery metadata so clients can tell
 /// why no handle was emitted and what to retry.
-pub fn truncated_json_envelope_with_handle(
-    project_root: Option<&Path>,
-    formatted: &str,
-) -> String {
+pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatted: &str) -> String {
     if formatted.len() <= MAX_RESPONSE_CHARS {
         return formatted.to_string();
     }

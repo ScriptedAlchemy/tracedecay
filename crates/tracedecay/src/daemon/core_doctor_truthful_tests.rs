@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::client_identity::DaemonClientIdentity;
 use crate::daemon::{DaemonHandshake, StoreAdministration};
 use crate::mcp::McpServer;
 use crate::mcp::server::McpServerConstructionContext;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_daemon_protocol::DaemonClientIdentity;
 
 static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 

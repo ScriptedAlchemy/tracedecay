@@ -185,6 +185,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         }
     }
 
+    #[hotpath::measure(label = "usecases.diagnostics.overview", future = true)]
     pub async fn overview(
         &self,
         request: DashboardDiagnosticsGraphRequestV1,

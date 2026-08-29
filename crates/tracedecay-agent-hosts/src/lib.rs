@@ -52,6 +52,7 @@ pub(crate) fn register_test_schema_installer() {
 
 pub mod agents;
 pub mod hooks;
+pub mod native_integration;
 pub mod ports;
 pub mod product_version;
 pub mod shell;

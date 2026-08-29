@@ -1972,7 +1972,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     .unwrap();
     runtime
         .set_lcm_schema_migration_applied_at_for_test(
-            tracedecay_usecases::host_admission::HostAdmissionScope::Project,
+            tracedecay_sessions::admission::HostAdmissionScope::Project,
             123,
         )
         .await
@@ -1980,7 +1980,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     assert_eq!(
         runtime
             .lcm_schema_migration_applied_at_for_test(
-                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
+                tracedecay_sessions::admission::HostAdmissionScope::Project,
             )
             .await
             .unwrap(),
@@ -2050,7 +2050,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     assert_eq!(
         runtime
             .lcm_schema_migration_applied_at_for_test(
-                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
+                tracedecay_sessions::admission::HostAdmissionScope::Project,
             )
             .await
             .unwrap(),

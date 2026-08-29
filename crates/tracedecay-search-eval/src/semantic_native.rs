@@ -234,7 +234,7 @@ pub enum SemanticNativeEvaluationErrorV1 {
 
 /// Execute channel ablations, exact-flat oracle capture, bounded rerank
 /// off/on, and the fallback-byte invariant for one checked-in query.
-#[hotpath::measure]
+#[hotpath::measure(label = "search_eval.semantic_native.evaluate")]
 pub fn evaluate_native_query(
     input: SemanticNativeQueryInputV1<'_, '_>,
 ) -> Result<SemanticNativeQueryOutputV1, SemanticNativeEvaluationErrorV1> {
@@ -412,7 +412,7 @@ fn canonical_fallback_bytes(
         .map_err(|error| SemanticNativeEvaluationErrorV1::Contract(error.to_string()))
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "search_eval.semantic_native.compose_ablation")]
 fn compose_ablation(
     kernel: &CompositionKernel,
     profile: &FusionProfile,
@@ -483,7 +483,7 @@ type SemanticStageOutcome = (
     SemanticNativeStageResultV1<SemanticNativeStageMeasurementV1>,
 );
 
-#[hotpath::measure]
+#[hotpath::measure(label = "search_eval.semantic_native.evaluate_semantic")]
 fn evaluate_semantic(
     semantic: Option<SemanticNativeSemanticInputV1<'_>>,
     fusion_profile: &FusionProfile,
@@ -662,7 +662,7 @@ fn exact_flat_oracle(
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "search_eval.semantic_native.evaluate_rerank")]
 fn evaluate_rerank(
     requested: bool,
     pre_rerank: &[RankedCandidate],

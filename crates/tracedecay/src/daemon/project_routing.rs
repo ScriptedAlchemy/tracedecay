@@ -149,7 +149,7 @@ pub(super) async fn resolved_project_server_key(
     let registry_database = store_administration.registered_profile_database().await?;
     let Ok(layout) = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
         canonical_project_path,
-        &handshake.open_options(),
+        &crate::daemon::handshake_open_options(handshake),
         registry_database.as_ref(),
     )
     .await

@@ -73,7 +73,7 @@ impl SessionActivity {
 /// This reads from the read-only store using bounded indexed timestamp lookups,
 /// so it is cheap and race-safe to call from every scheduler tick; concurrent
 /// ingest writers only ever move the value forward.
-#[hotpath::measure(label = "automation_load_session_activity")]
+#[hotpath::measure(label = "automation.run.load_session_activity", future = true)]
 pub async fn load_session_activity(sessions_db: &dyn AutomationSessionStore) -> SessionActivity {
     SessionActivity {
         last_activity_secs: sessions_db.latest_session_activity_secs().await,
@@ -146,6 +146,7 @@ pub fn scheduler_control_path(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join(SCHEDULER_CONTROL_FILENAME)
 }
 
+#[hotpath::measure(label = "automation.scheduler.load_control", future = true)]
 pub async fn load_scheduler_control(dashboard_root: &Path) -> Result<AutomationSchedulerControl> {
     let path = scheduler_control_path(dashboard_root);
     match tokio::fs::read(&path).await {
@@ -167,6 +168,7 @@ pub async fn load_scheduler_control(dashboard_root: &Path) -> Result<AutomationS
     }
 }
 
+#[hotpath::measure(label = "automation.scheduler.save_control", future = true)]
 pub async fn save_scheduler_control(
     dashboard_root: &Path,
     control: &AutomationSchedulerControl,
@@ -209,8 +211,9 @@ impl AutomationTaskLock {
     /// job (`user_job_<id>`) so concurrent jobs never serialize on the shared
     /// fixed-task lock name.
     #[hotpath::measure(
-        label = "automation_task_lock_acquire",
-        impl_type = "AutomationTaskLock"
+        label = "automation.scheduler.task_lock",
+        impl_type = "AutomationTaskLock",
+        future = true
     )]
     pub async fn try_acquire_keyed(
         dashboard_root: &Path,
@@ -330,7 +333,7 @@ where
     }
 }
 
-#[hotpath::measure(label = "automation_schedule_decision")]
+#[hotpath::measure(label = "automation.scheduler.decision")]
 pub fn schedule_decision(
     config: &AutomationConfig,
     task: AgentTaskKind,

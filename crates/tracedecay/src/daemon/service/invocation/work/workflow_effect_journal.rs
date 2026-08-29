@@ -12,7 +12,7 @@ use tracedecay_application::{
 use tracedecay_domain::{ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::UseCaseId;
 
-use crate::daemon_contract::{
+use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
     WorkflowApplicationOutcome,
 };

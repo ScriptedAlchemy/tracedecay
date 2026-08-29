@@ -1,8 +1,13 @@
-//! Generation, intake, extraction, lineage, and test-attribution contracts.
+//! Generation, snapshot, relation, and test-attribution contracts shared
+//! across the workspace.
 //!
 //! These are storage-neutral logical records. The index stores only typed
 //! references to `GenerationDiagnosticV1` (`crate::diagnostics`) — never a
 //! duplicate diagnostic record.
+//!
+//! Intake-rejection, extraction, and lineage records are owned by
+//! `tracedecay-code-index`, whose ports produce and consume them, so edits to
+//! those shapes do not invalidate every crate that depends on this one.
 
 use std::collections::BTreeSet;
 
@@ -16,9 +21,9 @@ use crate::research::time::UtcMicros;
 use crate::research::{DomainError, canonical_sha256};
 
 use super::identity::{
-    ChunkerRevision, CodeGenerationId, CodeSearchChunkId, ContentDigest, ExtractorRevision,
-    FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageId,
-    LanguageRegistryRevision, SanitizerRevision, SourceSpan, SymbolOccurrenceId,
+    ChunkerRevision, CodeGenerationId, ContentDigest, ExtractorRevision, FileOccurrenceId,
+    GrammarRevision, LanguageId, LanguageRegistryRevision, SanitizerRevision, SourceSpan,
+    SymbolOccurrenceId,
 };
 use super::language::EdgeAuthorityV1;
 
@@ -161,17 +166,6 @@ pub enum SnapshotFileDispositionV1 {
     UnsupportedLanguage,
 }
 
-/// A snapshot that passed intake validation: receipt-bound, single-snapshot,
-/// and sanitized. Constructed only by `CodeIndexIntake::validate` in
-/// `src/code_index/intake.rs`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ValidatedCodeSnapshotV1 {
-    pub snapshot: SanitizedCodeSnapshotV1,
-    pub intake_digest: ManifestDigest,
-    pub validated_at: UtcMicros,
-}
-
 /// One file drawn from a validated snapshot, the extractor input unit.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -181,17 +175,6 @@ pub struct ValidatedCodeFileV1 {
     pub file: SanitizedCodeFileV1,
     pub snapshot_digest: ManifestDigest,
     pub sanitized_bytes: Vec<u8>,
-}
-
-/// Why intake rejected a snapshot. Reject before parsing.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(tag = "rejection", content = "detail", rename_all = "snake_case")]
-pub enum IntakeRejectionV1 {
-    MissingReceipt,
-    UnsanitizedInput,
-    StaleSnapshot,
-    MixedSnapshot,
-    IncompatibleSanitizerRevision,
 }
 
 /// The sealed manifest of one immutable logical generation. Generations are
@@ -291,69 +274,6 @@ pub struct GenerationSealV1 {
 /// Identity of the deterministic generation planner that produced a seal.
 pub type GenerationPlannerIdV1 = crate::research::id::ComponentVersion;
 
-/// The output of one language extractor for one validated file. Identical
-/// input, registry, and extractor revisions produce stable canonical rows
-/// and digests on every supported host; parse errors and unsupported
-/// constructs are preserved as evidence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ExtractionBatchV1 {
-    pub generation_id: CodeGenerationId,
-    pub file_occurrence_id: FileOccurrenceId,
-    pub language: LanguageId,
-    pub descriptor_revision: LanguageDescriptorRevision,
-    pub grammar_revision: GrammarRevision,
-    pub extractor_revision: ExtractorRevision,
-    pub content_digest: ContentDigest,
-    pub parse_outcome: ParseOutcomeV1,
-    pub parsed_ranges: Vec<SourceSpan>,
-    pub error_ranges: Vec<SourceSpan>,
-    pub unsupported_ranges: Vec<SourceSpan>,
-    pub coverage: ExtractionCoverageV1,
-    /// Digest of the canonical parser-emitted import rows before file
-    /// occurrence binding. Downstream artifacts compare against this single
-    /// parser authority instead of persisting a self-referential copy.
-    pub parser_import_rows_digest: ManifestDigest,
-    pub rows_digest: ManifestDigest,
-}
-
-/// Parse outcome; bounded traversal or extraction caps propagate as partial.
-/// Extraction never invents successful structure.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(tag = "outcome", content = "detail", rename_all = "snake_case")]
-pub enum ParseOutcomeV1 {
-    Complete,
-    Partial { reason: String },
-    TimedOut,
-    Cancelled,
-    Failed { reason: String },
-}
-
-/// Extraction coverage and ambiguity evidence. These are canonical raw
-/// quantifier inputs; no universal quality score is defined here.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ExtractionCoverageV1 {
-    pub parsed_bytes: u64,
-    pub error_bytes: u64,
-    pub unsupported_bytes: u64,
-    pub symbols_extracted: u64,
-    pub relations_extracted: u64,
-    pub ambiguity_count: u64,
-}
-
-/// Why extraction failed (the typed error half of the `LanguageExtractor`
-/// port result).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "failure", content = "detail", rename_all = "snake_case")]
-pub enum ExtractionFailureV1 {
-    GrammarUnavailable { language: LanguageId },
-    ParseFailed { detail: String },
-    Cancelled,
-    TimedOut,
-    IncompatibleDescriptor { detail: String },
-}
-
 /// One recorded relationship edge with its authority class. Every graph path
 /// preserves its weakest edge authority; unresolved dispatch cannot become
 /// semantic fact.
@@ -379,75 +299,6 @@ pub enum RelationEdgeKindV1 {
     Annotates,
     Returns,
     Receives,
-}
-
-/// One lineage candidate for a symbol across generations. Record rename,
-/// move, split, merge, and structural-continuity candidates with method,
-/// evidence, confidence kind, alternatives, and abstention; ambiguous
-/// lineage stays explicit and never silently merges unrelated symbols.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SymbolLineageCandidateV1 {
-    pub prior_occurrence: SymbolOccurrenceId,
-    pub current_occurrence: SymbolOccurrenceId,
-    pub kind: LineageKindV1,
-    pub method: LineageMethodV1,
-    pub evidence: LineageEvidenceV1,
-    pub confidence: LineageConfidenceKindV1,
-    pub alternatives: Vec<SymbolOccurrenceId>,
-    pub abstention: Option<LineageAbstentionV1>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum LineageKindV1 {
-    Unchanged,
-    Renamed,
-    Moved,
-    Split,
-    Merged,
-    StructuralContinuity,
-}
-
-/// How a lineage candidate was derived. Tree-sitter object reuse, path,
-/// line, qualified-name similarity, or embedding similarity never proves
-/// lineage.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum LineageMethodV1 {
-    ExactIdentityTuple,
-    StructuralBoundaryMatch,
-    ContentDigestMatch,
-    QualifiedStructureMatch,
-    DeclaredAbstention,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LineageEvidenceV1 {
-    pub prior_generation: CodeGenerationId,
-    pub current_generation: CodeGenerationId,
-    pub prior_digest: Option<ContentDigest>,
-    pub current_digest: Option<ContentDigest>,
-    pub evidence_digest: ManifestDigest,
-}
-
-/// Confidence kind; kept as a kind, not a scalar score. This preserves raw
-/// evidence and does not define a universal quality score.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum LineageConfidenceKindV1 {
-    Exact,
-    Structural,
-    Ambiguous,
-    Abstained,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LineageAbstentionV1 {
-    pub reason: String,
-    pub candidate_count: u32,
 }
 
 /// A typed reference to the generation-bound diagnostic contract. The
@@ -491,16 +342,6 @@ pub enum TestAttributionEvidenceClassV1 {
     PredictiveRankedCandidates,
     StaleEvidence,
     UnknownUnsupported,
-}
-
-/// A chunk-to-generation binding asserted by the index. Every eligible
-/// chunk names exactly one code generation and file occurrence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
-pub struct ChunkGenerationBindingV1 {
-    pub chunk_id: CodeSearchChunkId,
-    pub generation_id: CodeGenerationId,
-    pub file_occurrence_id: FileOccurrenceId,
 }
 
 impl CodeGenerationManifestV1 {

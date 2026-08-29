@@ -194,7 +194,7 @@ where
                     .as_ref()
                     .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
                 || worker_request_deadline.as_ref().is_some_and(|deadline| {
-                    crate::daemon_client::deadline_remaining(deadline).is_none()
+                    tracedecay_daemon_protocol::deadline_remaining(deadline).is_none()
                 })
         };
         work(&checkpoint)
@@ -206,7 +206,7 @@ where
                 let request_stopped = request_cancellation.as_ref().is_some_and(
                     tracedecay_application::CancellationSignal::is_cancelled,
                 ) || request_deadline.as_ref().is_some_and(|deadline| {
-                    crate::daemon_client::deadline_remaining(deadline).is_none()
+                    tracedecay_daemon_protocol::deadline_remaining(deadline).is_none()
                 });
                 if request_stopped {
                     state.cancelled.store(true, Ordering::Release);
@@ -639,11 +639,9 @@ impl PrContextControls {
                 "PR context was cancelled",
             ));
         }
-        if self
-            .deadline
-            .as_ref()
-            .is_some_and(|deadline| crate::daemon_client::deadline_remaining(deadline).is_none())
-        {
+        if self.deadline.as_ref().is_some_and(|deadline| {
+            tracedecay_daemon_protocol::deadline_remaining(deadline).is_none()
+        }) {
             return Err(TraceDecayError::project_route(
                 "tool_dispatch_deadline_exceeded",
                 true,

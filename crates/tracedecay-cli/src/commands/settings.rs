@@ -1,9 +1,6 @@
 use std::path::Path;
 
 use tracedecay::application_surface::{ApplicationSurfaceOperation, ApplicationSurfaceRequest};
-use tracedecay::daemon_client::{
-    DaemonInvocationClient, RequestedOutputFormat, invocation_now_micros,
-};
 use tracedecay_application::{
     ApplicationEnvelope, ApplicationOutcome, CancellationSignal, ComponentConfigurationState,
     Deadline, EffectReceipt, ResolvedSetting,
@@ -13,6 +10,7 @@ use tracedecay_application::{
     ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
     ConfigurationWireRequestV1,
 };
+use tracedecay_daemon_protocol::{RequestedOutputFormat, invocation_now_micros};
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
@@ -109,13 +107,13 @@ async fn invoke_configuration_surface(
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .map_err(|error| configuration_error(error.to_string()))?;
-    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+    let handshake = tracedecay::daemon::handshake_for_current_client(
         Some(project_path.to_path_buf()),
         None,
         false,
         false,
     )?;
-    let client = DaemonInvocationClient::for_current(handshake)?;
+    let client = tracedecay::daemon::invocation_client_for_current(handshake)?;
     loop {
         let result = crate::cli::dispatch::resolve_cli_application_surface(
             operation,

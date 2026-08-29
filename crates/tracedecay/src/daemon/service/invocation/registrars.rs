@@ -860,7 +860,7 @@ impl DaemonConfigurationRuntimeRegistrar {
                     grants,
                     semantic_operation: Arc::new(OnceLock::new()),
                     semantic_evaluation_workers: Arc::new(
-                        crate::daemon::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::default(),
+                        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::default(),
                     ),
                 },
             )
@@ -895,7 +895,7 @@ impl DaemonConfigurationRuntimeRegistrar {
         &self,
         project_root: &Path,
         reconciler: Arc<
-            crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
+            tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
         >,
     ) -> Result<(), TraceDecayError> {
         self.service
@@ -1130,5 +1130,68 @@ impl DaemonRetainedRuntimeRegistrar {
                 },
             )
             .await
+    }
+}
+
+/// Registers one native-integration owner per exact project/repository identity.
+///
+/// The owner registry lives in `tracedecay-agent-hosts`. This registrar is the
+/// daemon composition entry so project-open and store administration do not
+/// reach the owner map directly.
+#[derive(Clone, Default)]
+pub(crate) struct DaemonNativeIntegrationRuntimeRegistrar {
+    registry:
+        Arc<tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry>,
+}
+
+impl DaemonNativeIntegrationRuntimeRegistrar {
+    pub(crate) async fn ensure(
+        &self,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+        repository_root: PathBuf,
+        project_id: ProjectId,
+        repository_id: tracedecay_domain::RepositoryId,
+        policy_digest: ManifestDigest,
+        observed_at: UtcMicros,
+    ) -> Result<
+        tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner,
+        tracedecay_application::NativeIntegrationPortError,
+    > {
+        self.registry
+            .ensure(
+                database,
+                repository_root,
+                project_id,
+                repository_id,
+                policy_digest,
+                observed_at,
+            )
+            .await
+    }
+
+    pub(crate) async fn for_repository_root(
+        &self,
+        repository_root: &Path,
+    ) -> Result<
+        Option<tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner>,
+        tracedecay_application::NativeIntegrationPortError,
+    > {
+        self.registry.for_repository_root(repository_root).await
+    }
+
+    pub(crate) async fn retire_project_database(
+        &self,
+        project_id: &ProjectId,
+        database_path: &Path,
+    ) -> Result<(), tracedecay_application::NativeIntegrationPortError> {
+        self.registry
+            .retire_project_database(project_id, database_path)
+            .await
+    }
+
+    pub(crate) async fn shutdown(
+        &self,
+    ) -> Result<usize, tracedecay_application::NativeIntegrationPortError> {
+        self.registry.shutdown().await
     }
 }

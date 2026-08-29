@@ -11,12 +11,12 @@ use tracedecay_domain::{
     ProviderId, RetentionClass, SessionId, UtcMicros,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
 use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
-use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_usecases::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };

@@ -106,8 +106,8 @@ pub fn register_test_schema_installer() {
     });
 }
 
-pub mod session_temporal;
-pub use session_temporal::operations as session_temporal_operations;
+mod session_temporal_handle;
+mod session_temporal_schema;
 mod transcript;
 
 pub use git_index_transactions::{
@@ -128,9 +128,9 @@ pub use registered::{
     MAX_PENDING_RECEIPTED_DELIVERIES_V1, MAX_WORK_ATTEMPT_DELIVERY_FANOUTS_V1,
     PendingDeliverySourceReceiptV1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
     RegisteredGlobalDbOwnerV1, RegisteredGlobalDbWeakLeaseIssuerV1,
-    RegisteredGlobalDbWriteTransaction, RegisteredWorkApplicationServicesV1,
-    RegisteredWorkProductServicesV1, RegisteredWorkflowApplicationServicesV1,
-    WorkAttemptDeliveryCensusReadV1,
+    RegisteredGlobalDbWriteTransaction, RegisteredGlobalDbWriterConnection,
+    RegisteredWorkApplicationServicesV1, RegisteredWorkProductServicesV1,
+    RegisteredWorkflowApplicationServicesV1, WorkAttemptDeliveryCensusReadV1,
 };
 pub use registered_analytics::ObservabilityRetentionReceiptV1;
 pub use registered_lcm_privacy::{LcmPrivacyRescanOutcomeV1, LcmPrivacyRescanReceiptV1};
@@ -138,10 +138,6 @@ pub use remote_deletion::{
     RemoteDeletionCleanupState, RemoteDeletionFailureCode, RemoteDeletionPhase,
     RemoteDeletionTarget, RemoteDeletionTombstone, RemoteDeletionTombstoneRecordOutcome,
     RemoteDeletionTombstoneTransitionOutcome,
-};
-pub use session_temporal::{
-    SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
-    SessionTemporalRefreshDiscoveryPage,
 };
 pub use tracedecay_runtime_core::store_runtime::{
     VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,

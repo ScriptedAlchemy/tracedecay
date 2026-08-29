@@ -77,7 +77,7 @@ fn distribution_background_acquisition_installs_verified_jina_model() {
     ));
     assert!(initial.semantics_omitted);
     assert!(
-        owner.enqueue_startup_acquisition_if_needed(),
+        owner.enqueue_demand_acquisition_if_needed(),
         "fresh profile must queue acquisition without blocking startup"
     );
 

@@ -23,8 +23,8 @@ use tracedecay_application::{
 use tracedecay_tool_catalog::RouteExposureV1;
 
 use super::{ApplicationSurfaceAdapterError, RegisteredHttpOperation, invoke_registered_http};
-use crate::daemon_client::DaemonInvocationExecutor;
-use crate::daemon_contract::{DaemonInvocationOutcome, DaemonInvocationRequest};
+use tracedecay_daemon_protocol::DaemonInvocationExecutor;
+use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
@@ -114,7 +114,7 @@ async fn invoke_operation(
         controls,
         body,
     } = request;
-    let observed_at = crate::daemon_client::invocation_now_micros();
+    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
     match operation {
         MultiRootHttpOperation::ScopeSetRead => {
             let Ok(decoded) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body) else {
@@ -231,7 +231,7 @@ mod tests {
     /// answered in-process or not being mounted at all.
     #[derive(Default)]
     struct RecordingMultiRootExecutor {
-        operations: Mutex<Vec<crate::daemon_contract::DaemonInvocationOperation>>,
+        operations: Mutex<Vec<tracedecay_daemon_protocol::DaemonInvocationOperation>>,
     }
 
     impl tracedecay_application::ApplicationInvocationExecutor for RecordingMultiRootExecutor {
@@ -249,25 +249,25 @@ mod tests {
         }
     }
 
-    impl crate::daemon_client::DaemonInvocationExecutor for RecordingMultiRootExecutor {
+    impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRootExecutor {
         fn invoke_controlled(
             &self,
-            request: crate::daemon_contract::DaemonInvocationRequest,
+            request: tracedecay_daemon_protocol::DaemonInvocationRequest,
             _deadline: tracedecay_application::Deadline,
             _cancellation: tracedecay_application::CancellationSignal,
-            _policy: crate::daemon_client::InvocationCancellationPolicy,
-        ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+            _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
             std::result::Result<
-                crate::daemon_contract::DaemonInvocationResponse,
-                crate::daemon_client::DaemonInvocationError,
+                tracedecay_daemon_protocol::DaemonInvocationResponse,
+                tracedecay_daemon_protocol::DaemonInvocationError,
             >,
         > {
             self.operations
                 .lock()
                 .expect("recorded daemon operations")
                 .push(request.operation());
-            Box::pin(async { Err(crate::daemon_client::DaemonInvocationError::Unavailable) })
+            Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
         }
 
         fn observe_feedback(
@@ -275,7 +275,7 @@ mod tests {
             _subject_digest: tracedecay_domain::ManifestDigest,
             _observed_at: tracedecay_domain::UtcMicros,
             _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-        ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
             tracedecay_runtime_core::errors::Result<()>,
         > {
@@ -291,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn production_http_router_mounts_all_multi_root_operations() {
         let executor = Arc::new(RecordingMultiRootExecutor::default());
-        let application_executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor> =
+        let application_executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor> =
             executor.clone();
         let router = http_application_router_with_executor(
             application_executor,
@@ -349,9 +349,9 @@ mod tests {
                 .lock()
                 .expect("recorded daemon operations"),
             vec![
-                crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetRead,
-                crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap,
-                crate::daemon_contract::DaemonInvocationOperation::MultiRootExecute,
+                tracedecay_daemon_protocol::DaemonInvocationOperation::MultiRootScopeSetRead,
+                tracedecay_daemon_protocol::DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap,
+                tracedecay_daemon_protocol::DaemonInvocationOperation::MultiRootExecute,
             ]
         );
     }

@@ -460,7 +460,7 @@ impl super::McpServer {
             Some(caller) if caller.expires_at <= ceiling_deadline.expires_at => caller,
             _ => match carried_deadline {
                 Some(deadline)
-                    if crate::daemon_client::deadline_remaining(&deadline)
+                    if tracedecay_daemon_protocol::deadline_remaining(&deadline)
                         .is_some_and(|remaining| remaining <= ceiling) =>
                 {
                     deadline
@@ -484,7 +484,7 @@ impl DispatchControl {
         cancellation: tracedecay_application::CancellationSignal,
     ) -> Result<Self> {
         let tool_name = tool_name.into();
-        let remaining = crate::daemon_client::deadline_remaining(&deadline)
+        let remaining = tracedecay_daemon_protocol::deadline_remaining(&deadline)
             .ok_or_else(|| dispatch_deadline_error(&tool_name, DispatchSettlement::NotStarted))?;
         let deadline_at = tokio::time::Instant::now()
             .checked_add(remaining)
@@ -547,7 +547,8 @@ impl DispatchControl {
             Err(error) => return RetainedDispatchOutcome::failed(error),
         };
         let deadline = tokio::time::sleep_until(self.deadline_at);
-        let cancellation = crate::daemon_client::wait_for_cancellation(self.cancellation.clone());
+        let cancellation =
+            tracedecay_daemon_protocol::wait_for_cancellation(self.cancellation.clone());
         tokio::pin!(deadline);
         tokio::pin!(cancellation);
 

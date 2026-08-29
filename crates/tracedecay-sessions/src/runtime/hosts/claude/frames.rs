@@ -177,7 +177,6 @@ pub fn scan_claude_source_frames(
     }
 }
 
-#[hotpath::measure(label = "sessions.hosts.claude.scan_frames")]
 pub fn try_scan_claude_source_frames(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,

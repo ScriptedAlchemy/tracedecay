@@ -82,7 +82,7 @@ fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
 }
 
 fn doctor_runtime_temporal_report(
-    report: tracedecay_global_db::SessionTemporalHealthReport,
+    report: tracedecay_session_temporal_store::SessionTemporalHealthReport,
 ) -> serde_json::Value {
     serde_json::to_value(report).unwrap_or_else(|_| {
         doctor_runtime_temporal_unavailable("session_health_serialization_failed")
@@ -566,11 +566,11 @@ mod doctor_runtime_route_tests {
         cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
         serve_core_doctor_runtime_request,
     };
-    use crate::client_identity::DaemonClientIdentity;
     use crate::daemon::{DaemonHandshake, DaemonLifecycle, StoreAdministration};
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+    use tracedecay_daemon_protocol::DaemonClientIdentity;
     use tracedecay_mcp::McpTransport;
     use tracedecay_usecases::semantic_runtime::{
         SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,

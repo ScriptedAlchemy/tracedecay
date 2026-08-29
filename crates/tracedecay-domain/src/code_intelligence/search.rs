@@ -181,36 +181,6 @@ pub enum CodeSearchChunkGrainV1 {
     FileWindow,
 }
 
-/// Eligibility of one generation-bound file document for chunk production.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(tag = "eligibility", content = "reason", rename_all = "snake_case")]
-pub enum CodeSearchEligibilityV1 {
-    Eligible,
-    /// Explicitly excluded; every excluded byte range is declared.
-    Excluded {
-        reason: String,
-    },
-    /// Partially eligible; unsupported ranges are declared evidence.
-    Partial {
-        reason: String,
-    },
-    Unsupported {
-        reason: String,
-    },
-}
-
-/// One generation-bound file manifest — the scheduling/checkpoint unit.
-/// Chunks are the projection and receipt unit.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeSearchDocumentV1 {
-    pub generation_id: CodeGenerationId,
-    pub file_occurrence_id: FileOccurrenceId,
-    pub content_digest: ContentDigest,
-    pub eligibility: CodeSearchEligibilityV1,
-    pub chunk_ids: Vec<CodeSearchChunkId>,
-}
-
 /// Where one chunk lives inside one generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

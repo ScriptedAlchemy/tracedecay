@@ -18,7 +18,7 @@ use tracedecay_usecases::session::{
 };
 
 use super::{AllowAuthorizer, BenchResult, CONFIG_VERSION, NoopWake, PROJECTOR_VERSION};
-use tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore;
+use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 
 pub(super) const ROOT_RELATION_PARTICIPANT_COUNT: usize = 64;
 

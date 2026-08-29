@@ -4,7 +4,7 @@ use tracedecay_domain::{
     RetrievalGrainV1, SessionId, SymbolOccurrenceId, TemporalModeV1, canonical_sha256,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
+use tracedecay_session_temporal_store::GlobalDbCursorKeyProvider;
 use tracedecay_temporal_query::cursor::{StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,

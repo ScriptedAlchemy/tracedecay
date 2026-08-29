@@ -14,7 +14,7 @@ use tracedecay_application::ResolvedScope;
 use tracedecay_usecases::graph::{CodeGraphReadError, VerifiedCodeGraphRead};
 
 struct ProjectCodeGraphProjectionReadPortV1 {
-    schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
 }
@@ -80,7 +80,7 @@ impl tracedecay_usecases::graph::CodeGraphProjectionReadPort
 }
 
 pub(crate) fn project_code_graph_projection_read_port(
-    schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
 ) -> Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort> {
@@ -95,7 +95,7 @@ pub(crate) fn project_code_graph_projection_read_port(
 /// root and resolved scope. A missing or unready sealed generation is an
 /// explicit unavailable census; it never falls back to the runtime database.
 pub(crate) fn project_code_index_generation_census_reader(
-    schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
 ) -> tracedecay_usecases::runtime_telemetry::GenerationCensusReader {

@@ -28,11 +28,11 @@ use tracedecay_usecases::session::{
 
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use crate::tracedecay::TraceDecay;
-use tracedecay_global_db::session_temporal::{
+use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_session_temporal_store::{
     RegisteredGlobalDbSessionTemporalExecution, SessionPageReconstruction,
     SessionPageReconstructionRequest,
 };
-use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
 use tracedecay_temporal_query::context::{ContextError, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::hydration::HydrationError;
@@ -173,11 +173,15 @@ impl DaemonSessionRetrievalRoot {
 
         let project_key = ProjectId::new(context.project.project_id.clone()).ok()?;
         let repository_id =
-            crate::daemon::code_index_scheduler::identity::repository_id_for(cg.project_root())
-                .ok()?;
+            tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
+                cg.project_root(),
+            )
+            .ok()?;
         let worktree_id =
-            crate::daemon::code_index_scheduler::identity::worktree_id_for(cg.project_root())
-                .ok()?;
+            tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
+                cg.project_root(),
+            )
+            .ok()?;
         let identity = ResolvedSessionIdentity::for_project(
             ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).ok()?,
             project_key,
@@ -212,10 +216,14 @@ impl DaemonSessionRetrievalRoot {
             SessionRootId::new("root.project.test")
                 .unwrap_or_else(|error| panic!("test root identity: {error}")),
             ResolvedGitRoute::new(
-                crate::daemon::code_index_scheduler::identity::repository_id_for(&project_root)
-                    .unwrap_or_else(|error| panic!("test repository identity: {error}")),
-                crate::daemon::code_index_scheduler::identity::worktree_id_for(&project_root)
-                    .unwrap_or_else(|error| panic!("test worktree identity: {error}")),
+                tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
+                    &project_root,
+                )
+                .unwrap_or_else(|error| panic!("test repository identity: {error}")),
+                tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
+                    &project_root,
+                )
+                .unwrap_or_else(|error| panic!("test worktree identity: {error}")),
                 BranchId::new(
                     tracedecay_runtime_core::branch::current_branch(&project_root)
                         .unwrap_or_else(|| "detached".to_owned()),
@@ -458,7 +466,10 @@ impl DaemonSessionRetrievalService {
 
     fn registered_execution(
         &self,
-    ) -> Result<RegisteredGlobalDbSessionTemporalExecution<'_>, SessionTemporalExecutionError> {
+    ) -> Result<
+        RegisteredGlobalDbSessionTemporalExecution<'_, RegisteredGlobalDb>,
+        SessionTemporalExecutionError,
+    > {
         Ok(RegisteredGlobalDbSessionTemporalExecution::new(
             self.database.as_ref(),
         ))

@@ -12,6 +12,8 @@ use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
 #[cfg(feature = "test-transport")]
+use tracedecay_sessions::admission::HostAdmissionScope;
+#[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::lcm::{
@@ -19,8 +21,6 @@ use tracedecay_sessions::runtime::lcm::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 #[test]
 fn lcm_mutation_tools_remain_daemon_internal() {

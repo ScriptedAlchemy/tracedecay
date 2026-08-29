@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use tracedecay_application::ResolvedScope;
 
 use super::DaemonInvocationState;
-use crate::daemon::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
+use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
 
 /// Which project-open mount to retry once a generation exists.
 pub(super) enum DeferredQueryAuthorityMountV1 {

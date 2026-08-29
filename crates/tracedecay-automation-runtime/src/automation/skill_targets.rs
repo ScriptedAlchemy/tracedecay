@@ -79,6 +79,7 @@ pub fn profile_root_for_agent_home(home: &Path) -> PathBuf {
         .map_or_else(|| home.join(TRACEDECAY_DIR), PathBuf::from)
 }
 
+#[hotpath::measure(label = "automation.host_io.export_native_overlay")]
 pub fn export_native_skill_overlay(
     profile_root: &Path,
     target: SkillInstallTarget,
@@ -205,6 +206,7 @@ fn render_native_skill_overlay(
     Ok(RenderedNativeSkillOverlay { files, exported })
 }
 
+#[hotpath::measure(label = "automation.host_io.export_prompt_index")]
 pub fn export_prompt_skill_index(
     profile_root: &Path,
     target: SkillInstallTarget,

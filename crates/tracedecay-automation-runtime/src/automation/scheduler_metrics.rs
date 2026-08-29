@@ -37,12 +37,12 @@ const STATE_SKIP: &str = "skip";
 
 #[cfg(feature = "hotpath")]
 fn publish_queue_gauges() {
-    hotpath::gauge!("automation_queued").set(QUEUED.load(Ordering::Relaxed));
-    hotpath::gauge!("automation_running").set(RUNNING.load(Ordering::Relaxed));
-    hotpath::gauge!("automation_cooldown").set(COOLDOWN.load(Ordering::Relaxed));
+    hotpath::gauge!("automation.queued").set(QUEUED.load(Ordering::Relaxed));
+    hotpath::gauge!("automation.running").set(RUNNING.load(Ordering::Relaxed));
+    hotpath::gauge!("automation.cooldown").set(COOLDOWN.load(Ordering::Relaxed));
 }
 
-/// Holds `automation_running` for the lifetime of one orchestration run.
+/// Holds `automation.running` for the lifetime of one orchestration run.
 pub(crate) struct RunningGuard;
 
 impl RunningGuard {
@@ -121,10 +121,10 @@ impl Drop for DurationGuard {
         let ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
         match self.kind {
             DurationKind::BackendStartup => {
-                hotpath::gauge!("automation_backend_startup_ms").set(ms);
+                hotpath::gauge!("automation.backend.startup_ms").set(ms);
             }
             DurationKind::Run => {
-                hotpath::gauge!("automation_run_ms").set(ms);
+                hotpath::gauge!("automation.run_ms").set(ms);
             }
         }
     }
@@ -139,13 +139,13 @@ pub(crate) fn observe_run_terminal(status: AutomationRunStatus) {
     {
         match status {
             AutomationRunStatus::Succeeded => {
-                hotpath::gauge!("automation_runs_succeeded_total").inc(1_u64);
+                hotpath::gauge!("automation.runs.succeeded_total").inc(1_u64);
             }
             AutomationRunStatus::Failed => {
-                hotpath::gauge!("automation_runs_failed_total").inc(1_u64);
+                hotpath::gauge!("automation.runs.failed_total").inc(1_u64);
             }
             AutomationRunStatus::Skipped => {
-                hotpath::gauge!("automation_runs_skipped_total").inc(1_u64);
+                hotpath::gauge!("automation.runs.skipped_total").inc(1_u64);
             }
             // Non-terminal statuses never reach terminal-record construction.
             AutomationRunStatus::Queued | AutomationRunStatus::Running => {}
@@ -163,19 +163,19 @@ pub(crate) fn observe_run_terminal(status: AutomationRunStatus) {
 fn count_skip_reason(reason: &str) {
     match reason {
         "scheduler_lock_active" => {
-            hotpath::gauge!("automation_skips_lock_total").inc(1_u64);
+            hotpath::gauge!("automation.skips.lock_total").inc(1_u64);
         }
         "scheduler_cooldown_active" => {
-            hotpath::gauge!("automation_skips_cooldown_total").inc(1_u64);
+            hotpath::gauge!("automation.skips.cooldown_total").inc(1_u64);
         }
         "scheduler_interval_not_elapsed"
         | "scheduler_cron_not_due"
         | "scheduler_idle_window_active"
         | "scheduler_schedule_manual" => {
-            hotpath::gauge!("automation_skips_not_due_total").inc(1_u64);
+            hotpath::gauge!("automation.skips.not_due_total").inc(1_u64);
         }
         "no_new_session_activity" => {
-            hotpath::gauge!("automation_skips_no_activity_total").inc(1_u64);
+            hotpath::gauge!("automation.skips.no_activity_total").inc(1_u64);
         }
         AUTOMATION_DISABLED
         | "delegated_host_mode"
@@ -187,18 +187,18 @@ fn count_skip_reason(reason: &str) {
         | "skill_writer_disabled"
         | "combined_review_disabled"
         | "user_job_disabled" => {
-            hotpath::gauge!("automation_skips_disabled_total").inc(1_u64);
+            hotpath::gauge!("automation.skips.disabled_total").inc(1_u64);
         }
         SESSION_EVIDENCE_BUDGET_SUPPRESSED
         | BACKEND_IDENTITY_SUPPRESSED
         | "scheduler_non_retryable_failure" => {
-            hotpath::gauge!("automation_skips_suppressed_total").inc(1_u64);
+            hotpath::gauge!("automation.skips.suppressed_total").inc(1_u64);
         }
         "scheduler_history_invalid" | "scheduler_schedule_invalid" => {
-            hotpath::gauge!("automation_skips_invalid_total").inc(1_u64);
+            hotpath::gauge!("automation.skips.invalid_total").inc(1_u64);
         }
         _ => {
-            hotpath::gauge!("automation_skips_other_total").inc(1_u64);
+            hotpath::gauge!("automation.skips.other_total").inc(1_u64);
         }
     }
 }
@@ -207,8 +207,8 @@ fn count_skip_reason(reason: &str) {
 pub(crate) fn observe_due() {
     #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("automation_due_total").inc(1_u64);
-        hotpath::val!("automation_schedule_state").set(&STATE_DUE);
+        hotpath::gauge!("automation.due_total").inc(1_u64);
+        hotpath::val!("automation.schedule_state").set(&STATE_DUE);
         QUEUED.store(1, Ordering::Relaxed);
         COOLDOWN.store(0, Ordering::Relaxed);
         publish_queue_gauges();
@@ -222,16 +222,16 @@ pub(crate) fn observe_skip_reason(reason: &str) {
         count_skip_reason(reason);
         match reason {
             "scheduler_lock_active" => {
-                hotpath::val!("automation_schedule_state").set(&STATE_QUEUED);
+                hotpath::val!("automation.schedule_state").set(&STATE_QUEUED);
                 QUEUED.store(1, Ordering::Relaxed);
             }
             "scheduler_cooldown_active" => {
-                hotpath::val!("automation_schedule_state").set(&STATE_COOLDOWN);
+                hotpath::val!("automation.schedule_state").set(&STATE_COOLDOWN);
                 COOLDOWN.store(1, Ordering::Relaxed);
                 QUEUED.store(0, Ordering::Relaxed);
             }
             _ => {
-                hotpath::val!("automation_schedule_state").set(&STATE_SKIP);
+                hotpath::val!("automation.schedule_state").set(&STATE_SKIP);
                 QUEUED.store(0, Ordering::Relaxed);
                 COOLDOWN.store(0, Ordering::Relaxed);
             }

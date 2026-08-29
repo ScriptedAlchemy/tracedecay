@@ -25,7 +25,7 @@ impl ModelArtifactStore {
         self.gc_locked_by_policy(now_unix, true)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.artifact_store.gc")]
     pub(super) fn gc_locked_by_policy(
         &self,
         now_unix: u64,
@@ -402,7 +402,7 @@ impl ModelArtifactStore {
 
     /// Full read + SHA-256 re-verification of every installed member — the
     /// dominant read cost inside runtime admission and recovery.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.artifact_store.verify")]
     pub(super) fn verify_artifact_record(
         &self,
         record: &ArtifactInventoryRecordV1,

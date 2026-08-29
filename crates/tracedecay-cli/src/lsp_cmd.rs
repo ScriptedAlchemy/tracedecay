@@ -5,9 +5,8 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, interval};
 use tokio_util::codec::FramedRead;
-use tracedecay::daemon::DaemonHandshake;
-use tracedecay::daemon_client::{DaemonInvocationClient, DaemonLspSessionClient};
 use tracedecay_application::{CancellationSignal, Deadline, InvocationError};
+use tracedecay_daemon_protocol::DaemonLspSessionClient;
 use tracedecay_lsp::analyzer::{adapters as lsp_adapters, broker as lsp_broker};
 use tracedecay_lsp::{
     ContentLengthCodec, DEFAULT_LSP_REQUEST_DEADLINE_MS, FramePoll, FrameSend,
@@ -65,8 +64,9 @@ async fn run_stdio_bridge(
                 .map(|binding| binding.project_root.clone())
         })
         .ok_or_else(|| bridge_config_error("LSP initialize did not identify a workspace root"))?;
-    let handshake = DaemonHandshake::for_current_client(Some(project_root), None, false, false)?;
-    let invocation = DaemonInvocationClient::for_current(handshake)?;
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
+    let invocation = tracedecay::daemon::invocation_client_for_current(handshake)?;
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     let mut session = DaemonLspSessionClient::open(
         invocation,

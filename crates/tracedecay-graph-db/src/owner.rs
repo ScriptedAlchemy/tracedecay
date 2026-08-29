@@ -738,6 +738,20 @@ impl GraphDbOwner {
     }
 }
 
+/// Issues a counted read lease over a verified derived graph artifact.
+///
+/// The artifact is not a registry-owned staging database, but the lease still
+/// retains the exact Store operation authority that admitted it. This keeps
+/// derived sealed reads on the canonical lease lifecycle without registering
+/// or reopening the shared mutable staging runtime.
+pub(crate) fn issue_derived_read_lease(
+    database: Arc<GraphDb>,
+    authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
+) -> Result<GraphDbLeaseV1, GraphDbError> {
+    let owner = GraphDbOwner::from_database(database, None)?;
+    issue_client_lease_with_store(&owner.source, Some(authority_lease))
+}
+
 #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
 fn issue_client_lease(source: &Arc<GraphDbOwnerSource>) -> Result<GraphDbLeaseV1, GraphDbError> {
     issue_client_lease_with_store(source, None)

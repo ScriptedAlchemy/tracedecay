@@ -35,7 +35,7 @@ use tracedecay_usecases::graph::{
 };
 
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_usecases::edit::{
+use tracedecay_source_edit::{
     SourceEditApplicationResult, SourceEditOutcome, execute_source_edit,
     preview_source_edit_expected_state,
 };

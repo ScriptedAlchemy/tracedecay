@@ -16,7 +16,7 @@ use crate::config::lock_user_data_dir_test_env;
 /// daemon route rather than some in-process handler.
 #[derive(Default)]
 struct RecordingMultiRootExecutor {
-    operations: Mutex<Vec<crate::daemon_contract::DaemonInvocationOperation>>,
+    operations: Mutex<Vec<tracedecay_daemon_protocol::DaemonInvocationOperation>>,
 }
 
 impl tracedecay_application::ApplicationInvocationExecutor for RecordingMultiRootExecutor {
@@ -34,25 +34,25 @@ impl tracedecay_application::ApplicationInvocationExecutor for RecordingMultiRoo
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for RecordingMultiRootExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRootExecutor {
     fn invoke_controlled(
         &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
+        request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         _deadline: tracedecay_application::Deadline,
         _cancellation: tracedecay_application::CancellationSignal,
-        _policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
-            crate::daemon_contract::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
         self.operations
             .lock()
             .expect("recorded daemon operations")
             .push(request.operation());
-        Box::pin(async { Err(crate::daemon_client::DaemonInvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
     fn observe_feedback(
@@ -60,7 +60,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for RecordingMultiRootExecut
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_runtime_core::errors::Result<()>,
     > {
@@ -130,9 +130,9 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
             .lock()
             .expect("recorded daemon operations"),
         vec![
-            crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetRead,
-            crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap,
-            crate::daemon_contract::DaemonInvocationOperation::MultiRootExecute,
+            tracedecay_daemon_protocol::DaemonInvocationOperation::MultiRootScopeSetRead,
+            tracedecay_daemon_protocol::DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap,
+            tracedecay_daemon_protocol::DaemonInvocationOperation::MultiRootExecute,
         ]
     );
 }
@@ -459,7 +459,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
     .await
     .unwrap();
     let database = runtime
-        .registered_database(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .unwrap();
     let cursor_path = dir.path().join("cursor.jsonl");
     let claude_path = dir.path().join("claude.jsonl");
@@ -512,9 +512,8 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         .await
         .unwrap();
     let options = || ToolCallRegistryOptions {
-        registered_project_session_db: runtime.registered_database_arc(
-            tracedecay_usecases::host_admission::HostAdmissionScope::Project,
-        ),
+        registered_project_session_db: runtime
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project),
         ..Default::default()
     };
     let status = handle_tool_call_with_registry_options(

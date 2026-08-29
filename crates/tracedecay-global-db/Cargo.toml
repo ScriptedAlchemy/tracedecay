@@ -22,6 +22,7 @@ hotpath = [
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-semantic/hotpath",
+    "tracedecay-session-temporal-store/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
@@ -37,6 +38,7 @@ hotpath-alloc = [
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
@@ -52,6 +54,7 @@ hotpath-cpu = [
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
@@ -60,6 +63,7 @@ hotpath-cpu = [
 # global-db harness to dependent crates' test builds only.
 test-helpers = [
     "tracedecay-runtime-core/test-helpers",
+    "tracedecay-session-temporal-store/test-helpers",
     "dep:tempfile",
     "dep:tracedecay-private-fs",
 ]
@@ -88,6 +92,7 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
@@ -113,6 +118,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 # The shared harness (`src/tests/harness.rs`) installs the process background
 # CPU authority for this crate's own `cfg(test)` builds.
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 

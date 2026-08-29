@@ -6,17 +6,17 @@ use tracedecay_application::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
 
-use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use crate::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, NormalizedApplicationToolArgs,
     parse_application_surface_request,
 };
-use crate::daemon_client::{DaemonInvocationExecutor, RequestedOutputFormat};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
 use crate::tracedecay::TraceDecay;
+use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
+use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
@@ -275,12 +275,9 @@ fn render_result_parts(
         }
     };
     let text =
-        super::super::render::finalize_with_format(
-            project_root,
-            requested_format,
-            &value,
-            || markdown.unwrap_or_default(),
-        );
+        super::super::render::finalize_with_format(project_root, requested_format, &value, || {
+            markdown.unwrap_or_default()
+        });
     let mut rendered = super::text_tool_result(&text);
     if let Err(problem) = result {
         // Keep the typed problem machine-readable in every presentation

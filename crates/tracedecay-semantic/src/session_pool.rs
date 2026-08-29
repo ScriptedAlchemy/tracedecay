@@ -324,7 +324,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
     /// matching identity or opens a new one within the bounds; otherwise
     /// fails with a typed error. Never blocks and never substitutes a
     /// session from another identity.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.session_pool.acquire")]
     pub fn acquire(
         &self,
         authority: &AdmittedProjectionArtifactV1,
@@ -517,7 +517,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
     /// Bounded blocking acquisition with FIFO-fair waiter accounting.
     /// Waits on resource, cancellation, and deadline wakeups until the caller
     /// reaches the head of the FIFO queue and a resource is available.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.session_pool.acquire_blocking")]
     pub fn acquire_blocking(
         &self,
         authority: &AdmittedProjectionArtifactV1,

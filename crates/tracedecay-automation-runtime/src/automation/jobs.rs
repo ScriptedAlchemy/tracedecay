@@ -181,6 +181,7 @@ pub(super) async fn try_acquire_job_task_lock(
     .await
 }
 
+#[hotpath::measure(label = "automation.jobs.load", future = true)]
 pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
     let path = jobs_path(dashboard_root);
     match tokio::fs::read(&path).await {
@@ -211,6 +212,7 @@ pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
     }
 }
 
+#[hotpath::measure(label = "automation.jobs.save", future = true)]
 pub async fn save_jobs(dashboard_root: &Path, jobs: &[AutomationJob]) -> Result<()> {
     let path = jobs_path(dashboard_root);
     if let Some(parent) = path.parent() {
@@ -453,7 +455,7 @@ fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
 /// Executes one user job through the automation backend, delivering its
 /// output and recording the run in the shared ledger under
 /// `user_job:<job_id>`.
-#[hotpath::measure(label = "automation_run_user_job")]
+#[hotpath::measure(label = "automation.run.user_job", future = true)]
 pub async fn run_user_job_with_backend(
     dashboard_root: &Path,
     config: &AutomationConfig,

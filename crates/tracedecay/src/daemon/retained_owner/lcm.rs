@@ -19,7 +19,7 @@ use tracedecay_application::{
     RetainedSurfaceExecutionFutureV1,
 };
 use tracedecay_domain::{SessionId, TemporalModeV1, UtcMicros};
-use tracedecay_global_db::{
+use tracedecay_session_temporal_store::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
 use tracedecay_sessions::runtime::lcm::LcmStatus;

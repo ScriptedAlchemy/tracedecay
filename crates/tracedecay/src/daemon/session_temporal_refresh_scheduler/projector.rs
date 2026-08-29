@@ -9,7 +9,7 @@ use tracedecay_store::{
 };
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_global_db::session_temporal::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
+use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::daemon) struct SessionTemporalRefreshPolicy {

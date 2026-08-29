@@ -11,25 +11,30 @@ CARGO_TARGET_DIR=target/hotpath-off \
   cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production
 
-RUSTFLAGS='--cfg tokio_unstable' CARGO_TARGET_DIR=target/hotpath-timing \
+# Env RUSTFLAGS replaces cargo config rustflags. Source the composed set
+# (tokio_unstable + mold + unpacked split-debuginfo) instead of exporting
+# `--cfg tokio_unstable` alone. See scripts/hotpath-rustflags.sh.
+source scripts/hotpath-rustflags.sh
+
+CARGO_TARGET_DIR=target/hotpath-timing \
   cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production,hotpath,hotpath-mcp
 
-RUSTFLAGS='--cfg tokio_unstable' CARGO_TARGET_DIR=target/hotpath-alloc \
+CARGO_TARGET_DIR=target/hotpath-alloc \
   cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production,hotpath-alloc,hotpath-mcp
 
-RUSTFLAGS='--cfg tokio_unstable' CARGO_TARGET_DIR=target/hotpath-cpu \
+CARGO_TARGET_DIR=target/hotpath-cpu \
   cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production,hotpath-cpu,hotpath-mcp
 
-RUSTFLAGS='--cfg tokio_unstable' CARGO_TARGET_DIR=target/hotpath-all \
+CARGO_TARGET_DIR=target/hotpath-all \
   cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features \
   --features production,hotpath,hotpath-alloc,hotpath-cpu,hotpath-mcp
 ```
 
-`tokio_unstable` adds blocking-pool, local-queue, steal/poll, remote-schedule, and I/O-driver runtime metrics. Basic Tokio metrics work without it.
+`tokio_unstable` adds blocking-pool, local-queue, steal/poll, remote-schedule, and I/O-driver runtime metrics. Basic Tokio metrics work without it. Source `scripts/hotpath-rustflags.sh` so that cfg does not replace the workspace linker and debuginfo flags.
 
 CPU profiling is Linux/macOS-only and additionally needs `hotpath-samply`, a `samply` executable, symbols, and OS sampling permissions.
 

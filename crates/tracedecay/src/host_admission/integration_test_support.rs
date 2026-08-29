@@ -57,7 +57,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn session_temporal_store(
         &self,
         scope: HostAdmissionScope,
-    ) -> std::result::Result<tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore<'_>, HostAdmissionOutcome>
+    ) -> std::result::Result<tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>, HostAdmissionOutcome>
     {
         self.session_temporal_store_for_test(scope).map_err(|_| {
             HostAdmissionOutcome::retained_unavailable("registered_authority_unavailable")

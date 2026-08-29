@@ -20,7 +20,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_usecases::observability::RegisteredObservabilityPortV1;
 
 const HINT_TS: i64 = 1_000_000;

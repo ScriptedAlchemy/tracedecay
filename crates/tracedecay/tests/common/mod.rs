@@ -29,8 +29,8 @@ use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::code_intelligence::{Node, NodeKind, Visibility};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::host_admission::{HostAdmissionOutcome, HostAdmissionScope};
 
 pub fn repository_root() -> &'static Path {
     repository_layout::repository_root()
@@ -1307,7 +1307,7 @@ impl LcmTestRuntime {
 
     pub fn session_temporal_store(
         &self,
-    ) -> Result<tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore<'_>, HostAdmissionOutcome> {
+    ) -> Result<tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>, HostAdmissionOutcome> {
         self.runtime
             .session_temporal_store(HostAdmissionScope::Profile)
     }

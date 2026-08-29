@@ -10,7 +10,7 @@ use super::{
     enter_test_daemon_database_scope, initialize_test_project, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
-use crate::daemon::DaemonHandshake;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 fn initialized_project_id(layout: &tracedecay_runtime_core::storage::StoreLayout) -> ProjectId {
     ProjectId::new(

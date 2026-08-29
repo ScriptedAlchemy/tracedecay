@@ -10,8 +10,8 @@ use tracedecay_application::{
 use tracedecay_tool_catalog::RouteExposureV1;
 
 use super::{ApplicationSurfaceAdapterError, invoke_registered_http};
-use crate::daemon_client::DaemonInvocationExecutor;
-use crate::daemon_contract::{HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1};
+use tracedecay_daemon_protocol::DaemonInvocationExecutor;
+use tracedecay_daemon_protocol::{HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1};
 
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
@@ -75,13 +75,14 @@ async fn invoke_operation(
             let Ok(decoded) = serde_json::from_value::<IssueTaskHandoffRequestV1>(body) else {
                 return tracedecay_api::handoff_invalid_request_response(request_id);
             };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::handoff_application(
-                request_id.as_str(),
-                HandoffApplicationInvocationV1::IssueTaskHandoff(decoded),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
+            let invocation =
+                tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
+                    request_id.as_str(),
+                    HandoffApplicationInvocationV1::IssueTaskHandoff(decoded),
+                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
             invoke_registered_http::<IssueTaskHandoffResultV1, _>(
                 executor.as_ref(),
                 operation,
@@ -89,7 +90,7 @@ async fn invoke_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::HandoffApplication {
+                    tracedecay_daemon_protocol::DaemonInvocationOutcome::HandoffApplication {
                         scope,
                         outcome:
                             HandoffApplicationOutcomeV1::IssueTaskHandoff(
@@ -108,13 +109,14 @@ async fn invoke_operation(
             let Ok(decoded) = serde_json::from_value::<ListTaskHandoffsRequestV1>(body) else {
                 return tracedecay_api::handoff_invalid_request_response(request_id);
             };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::handoff_application(
-                request_id.as_str(),
-                HandoffApplicationInvocationV1::ListTaskHandoffs(decoded),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
+            let invocation =
+                tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
+                    request_id.as_str(),
+                    HandoffApplicationInvocationV1::ListTaskHandoffs(decoded),
+                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
             invoke_registered_http::<ListTaskHandoffsResultV1, _>(
                 executor.as_ref(),
                 operation,
@@ -125,7 +127,7 @@ async fn invoke_operation(
                 // there is no effect receipt to project. Matching `Effect` here
                 // would drop every successful read on the floor.
                 |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::HandoffApplication {
+                    tracedecay_daemon_protocol::DaemonInvocationOutcome::HandoffApplication {
                         scope,
                         outcome:
                             HandoffApplicationOutcomeV1::ListTaskHandoffs(
@@ -145,13 +147,14 @@ async fn invoke_operation(
             else {
                 return tracedecay_api::handoff_invalid_request_response(request_id);
             };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::handoff_application(
-                request_id.as_str(),
-                HandoffApplicationInvocationV1::OpenInvestigationHandoff(decoded),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
+            let invocation =
+                tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
+                    request_id.as_str(),
+                    HandoffApplicationInvocationV1::OpenInvestigationHandoff(decoded),
+                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
             invoke_registered_http::<OpenInvestigationHandoffResultV1, _>(
                 executor.as_ref(),
                 operation,
@@ -159,7 +162,7 @@ async fn invoke_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::HandoffApplication {
+                    tracedecay_daemon_protocol::DaemonInvocationOutcome::HandoffApplication {
                         scope,
                         outcome:
                             HandoffApplicationOutcomeV1::OpenInvestigationHandoff(
@@ -178,13 +181,14 @@ async fn invoke_operation(
             let Ok(decoded) = serde_json::from_value::<OpenTaskHandoffRequestV1>(body) else {
                 return tracedecay_api::handoff_invalid_request_response(request_id);
             };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::handoff_application(
-                request_id.as_str(),
-                HandoffApplicationInvocationV1::OpenTaskHandoff(decoded),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
+            let invocation =
+                tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
+                    request_id.as_str(),
+                    HandoffApplicationInvocationV1::OpenTaskHandoff(decoded),
+                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
             invoke_registered_http::<OpenTaskHandoffResultV1, _>(
                 executor.as_ref(),
                 operation,
@@ -192,7 +196,7 @@ async fn invoke_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::HandoffApplication {
+                    tracedecay_daemon_protocol::DaemonInvocationOutcome::HandoffApplication {
                         scope,
                         outcome:
                             HandoffApplicationOutcomeV1::OpenTaskHandoff(

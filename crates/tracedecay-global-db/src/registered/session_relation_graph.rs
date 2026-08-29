@@ -1,7 +1,9 @@
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use super::{RegisteredGlobalDb, registered_error};
-use crate::session_temporal::relations::{SessionRelationGraphStore, SessionRelationScope};
+use tracedecay_session_temporal_store::relations::{
+    SessionRelationGraphStore, SessionRelationScope,
+};
 
 impl RegisteredGlobalDb {
     /// Mounts the daemon-owned native graph handle for this exact session
@@ -90,11 +92,21 @@ impl RegisteredGlobalDb {
         Ok((binding, locator))
     }
 
-    pub(crate) fn session_relation_store(
+    pub fn session_relation_store(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<(&SessionRelationScope, SessionRelationGraphStore)>
     {
         let (scope, graph, _, _) = self.session_relation_graph()?;
         Ok((scope, SessionRelationGraphStore::new(graph.clone())))
+    }
+
+    /// Shared-crate graph lease so dependents (including this crate's
+    /// `cfg(test)` unit-test identity) can reconstruct a same-crate
+    /// [`SessionRelationGraphStore`] without crossing crate versions.
+    pub fn session_relation_graph_lease(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_graph_db::GraphDbLeaseV1> {
+        let (_, graph, _, _) = self.session_relation_graph()?;
+        Ok(graph.clone())
     }
 }

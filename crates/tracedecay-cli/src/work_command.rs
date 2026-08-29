@@ -20,7 +20,7 @@ pub(crate) async fn run(
     // latency is separable from request parsing, render, and delivery
     // settlement.
     let mut response = hotpath::future!(
-        tracedecay::work_cli::invoke_work_cli_with_delivery(project_root.clone(), operation, body),
+        crate::work_cli::invoke_work_cli_with_delivery(project_root.clone(), operation, body),
         label = "cli.work.request"
     )
     .await?;

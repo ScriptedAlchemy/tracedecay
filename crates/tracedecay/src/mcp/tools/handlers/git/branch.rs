@@ -54,7 +54,7 @@ where
         )
         .map_err(BranchRouteReadErrorV1::Ref)
     });
-    match crate::daemon::code_index_task_support::settle_owned_blocking_task(
+    match tracedecay_code_index_runtime::code_index_task_support::settle_owned_blocking_task(
         task,
         std::time::Duration::from_millis(10),
         || {

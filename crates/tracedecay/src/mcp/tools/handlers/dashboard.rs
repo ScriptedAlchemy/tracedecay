@@ -160,14 +160,14 @@ fn dashboard_code_index_worker_configuration(
 }
 
 struct DashboardInvocationExecutorAdapter {
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     configuration_batch_contract: tracedecay_application::ResultContractRef,
     user_profile_id: Option<UserProfileId>,
 }
 
 impl DashboardInvocationExecutorAdapter {
     fn new(
-        executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+        executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
         user_profile_id: Option<UserProfileId>,
     ) -> Result<Self> {
         let operation =
@@ -199,15 +199,15 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         &self,
         project_root: &std::path::Path,
     ) -> std::result::Result<Arc<dyn DashboardApplicationRuntime>, String> {
-        let handshake = crate::daemon::DaemonHandshake::for_current_client(
+        let handshake = crate::daemon::handshake_for_current_client(
             Some(project_root.to_path_buf()),
             None,
             false,
             false,
         )
         .map_err(|error| error.to_string())?;
-        let executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor> = Arc::new(
-            crate::daemon_client::DaemonInvocationClient::for_current(handshake)
+        let executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor> = Arc::new(
+            crate::daemon::invocation_client_for_current(handshake)
                 .map_err(|error| error.to_string())?,
         );
         Self::new(executor, self.user_profile_id.clone())
@@ -274,7 +274,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                         },
                     ),
                 ),
-                crate::daemon_client::RequestedOutputFormat::Json,
+                tracedecay_daemon_protocol::RequestedOutputFormat::Json,
                 Some(executor.as_ref()),
             )
             .await
@@ -310,7 +310,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                     detail: error.to_string(),
                 })?;
             let invocation =
-                crate::daemon_contract::DaemonInvocationRequest::multi_root_scope_set_read(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::multi_root_scope_set_read(
                     control.request_id().as_str(),
                     request,
                     control.observed_at(),
@@ -322,14 +322,14 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                     invocation,
                     control.deadline(),
                     control.cancellation().clone(),
-                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+                    tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
                 )
                 .await
                 .map_err(|error| DashboardDaemonReadUnavailableV1 {
                     detail: format!("the daemon multi-root read transport failed: {error:?}"),
                 })?;
             match response.outcome {
-                crate::daemon_contract::DaemonInvocationOutcome::MultiRootScopeSetRead {
+                tracedecay_daemon_protocol::DaemonInvocationOutcome::MultiRootScopeSetRead {
                     outcome: tracedecay_application::ApplicationOutcome::Evidence(packet),
                     ..
                 } => packet
@@ -338,15 +338,15 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                         detail: "the daemon multi-root read returned no evidence payload"
                             .to_owned(),
                     }),
-                crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
-                    Err(DashboardDaemonReadUnavailableV1 {
-                        detail: format!(
-                            "the daemon rejected the multi-root read: {}",
-                            problem.safe_message()
-                        ),
-                    })
-                }
-                crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+                tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
+                    problem,
+                } => Err(DashboardDaemonReadUnavailableV1 {
+                    detail: format!(
+                        "the daemon rejected the multi-root read: {}",
+                        problem.safe_message()
+                    ),
+                }),
+                tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => {
                     Err(DashboardDaemonReadUnavailableV1 {
                         detail: format!("the daemon refused the multi-root read: {problem:?}"),
                     })
@@ -375,7 +375,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
 /// project.
 #[hotpath::measure(future = true, label = "mcp.dashboard.native_integration.status")]
 pub(crate) async fn dashboard_native_integration_status(
-    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     control: &tracedecay_dashboard_api::DashboardHttpRequestControlV1,
     transaction_id: tracedecay_domain::NativeIntegrationTransactionId,
 ) -> std::result::Result<
@@ -384,7 +384,7 @@ pub(crate) async fn dashboard_native_integration_status(
 > {
     use tracedecay_dashboard_api::DashboardDaemonReadUnavailableV1;
 
-    let request = crate::daemon_contract::DaemonInvocationRequest::native_integration(
+    let request = tracedecay_daemon_protocol::DaemonInvocationRequest::native_integration(
         control.request_id().as_str(),
         crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStatus,
         crate::application_surface::NativeIntegrationSurfaceRequest::Status(
@@ -399,14 +399,14 @@ pub(crate) async fn dashboard_native_integration_status(
             request,
             control.deadline(),
             control.cancellation().clone(),
-            crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+            tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
         )
         .await
         .map_err(|error| DashboardDaemonReadUnavailableV1 {
             detail: format!("the dashboard native-integration transport failed: {error:?}"),
         })?;
     let payload = match response.outcome {
-        crate::daemon_contract::DaemonInvocationOutcome::NativeIntegration {
+        tracedecay_daemon_protocol::DaemonInvocationOutcome::NativeIntegration {
             outcome: tracedecay_application::ApplicationOutcome::Evidence(packet),
             ..
         } => packet
@@ -415,7 +415,7 @@ pub(crate) async fn dashboard_native_integration_status(
                 detail: "the native-integration status read returned no evidence payload"
                     .to_owned(),
             })?,
-        crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+        tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } => {
             return Err(DashboardDaemonReadUnavailableV1 {
                 detail: format!(
                     "the daemon rejected the native-integration status read: {}",
@@ -423,7 +423,7 @@ pub(crate) async fn dashboard_native_integration_status(
                 ),
             });
         }
-        crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+        tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => {
             return Err(DashboardDaemonReadUnavailableV1 {
                 detail: format!(
                     "the daemon refused the native-integration status read: {problem:?}"
@@ -675,7 +675,7 @@ pub(super) async fn handle_dashboard(
         Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
     application_invocation_executor: Option<
-        Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+        Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     >,
     delivery_settlement_authority: Option<
         Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,

@@ -5,7 +5,9 @@
 //! application feature without importing a transport or persistence adapter.
 
 use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 pub use tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1;
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
@@ -209,6 +211,68 @@ pub enum ConfigurationWireRequestV1 {
     RollbackPreview(ConfigurationRollbackPreviewRequestV1),
     RollbackApply(ConfigurationRollbackApplyRequestV1),
     Audit(ConfigurationAuditRequestV1),
+}
+
+/// Decode an envelope-stripped configuration invocation payload.
+///
+/// Callers send the operation's inner request body — the same shape every
+/// surface parser accepts — not the adjacently tagged `operation`/`request`
+/// envelope [`ConfigurationWireRequestV1`] uses on the daemon contract. The
+/// envelope form fails admission because the inner request structs deny
+/// unknown fields (`operation` is not a member of those structs).
+pub fn configuration_wire_request_from_invocation_payload(
+    operation: &str,
+    payload: Value,
+) -> Result<ConfigurationWireRequestV1, ApplicationContractError> {
+    match operation {
+        "configuration_list" => wrap_configuration_inner(payload, ConfigurationWireRequestV1::List),
+        "configuration_explain" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::Explain)
+        }
+        "configuration_get" => wrap_configuration_inner(payload, ConfigurationWireRequestV1::Get),
+        "configuration_set" => wrap_configuration_inner(payload, ConfigurationWireRequestV1::Set),
+        "configuration_unset" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::Unset)
+        }
+        "configuration_batch" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::Batch)
+        }
+        "configuration_write_credential" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::WriteCredential)
+        }
+        "configuration_observed_state" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::ObservedState)
+        }
+        "configuration_protected_preview" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::ProtectedPreview)
+        }
+        "configuration_protected_apply" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::ProtectedApply)
+        }
+        "configuration_rollback_preview" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::RollbackPreview)
+        }
+        "configuration_rollback_apply" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::RollbackApply)
+        }
+        "configuration_audit" => {
+            wrap_configuration_inner(payload, ConfigurationWireRequestV1::Audit)
+        }
+        _ => Err(ApplicationContractError::Inconsistent {
+            field: "configuration surface operation",
+        }),
+    }
+}
+
+fn wrap_configuration_inner<T: DeserializeOwned>(
+    payload: Value,
+    wrap: fn(T) -> ConfigurationWireRequestV1,
+) -> Result<ConfigurationWireRequestV1, ApplicationContractError> {
+    serde_json::from_value(payload)
+        .map(wrap)
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "configuration surface request",
+        })
 }
 
 struct ConfigurationSurfaceSpec {

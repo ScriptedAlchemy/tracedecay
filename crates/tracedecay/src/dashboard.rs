@@ -112,7 +112,7 @@ pub async fn dashboard_automation_authority_for_test(
         ),
     );
     let invocation_service = crate::daemon::DaemonInvocationService::with_code_index_schedulers(
-        crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
             1,
             resident_memory,
         ),

@@ -20,11 +20,11 @@ use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, SessionId,
     SessionRefreshOperationIdV1, UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     SessionRefreshReceiptRequestV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
 };
 use tracedecay_usecases::context::{SessionRootId, SessionStoreId};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use super::{DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1};
 use crate::daemon::StoreOwnerKey;
@@ -37,7 +37,7 @@ use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::{DaemonSessionRefreshService, DaemonWorkflowIndexReadService};
 use crate::mcp::tools::{SessionRefreshServiceOutcome, SessionRefreshServicePort};
-use tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore;
+use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 
 const DIGEST: &str = "sha256:6161616161616161616161616161616161616161616161616161616161616161";
 const BRANCH_ID: &str = "branch.project.test";

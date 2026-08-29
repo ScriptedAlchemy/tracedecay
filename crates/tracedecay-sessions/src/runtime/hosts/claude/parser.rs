@@ -185,6 +185,7 @@ fn envelope_native_content(record: &Value) -> Option<Value> {
     })
 }
 
+#[hotpath::measure(label = "sessions.hosts.claude.parse")]
 pub(super) fn try_parse_claude_transcript(
     source_adapter: &ClaudeSource,
     path: &Path,

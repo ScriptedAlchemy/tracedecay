@@ -13,10 +13,11 @@ use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, CommitId, ComponentVersion, ContentDigest,
     FileOccurrenceId, GenerationTestAttributionV1, ManifestDigest, SymbolOccurrenceId,
-    TestAttributionEvidenceClassV1, ValidatedCodeSnapshotV1, canonical_sha256,
+    TestAttributionEvidenceClassV1, canonical_sha256,
 };
 
 use super::capabilities::expected_seal_digest;
+use crate::intake::ValidatedCodeSnapshotV1;
 
 const TEST_ATTRIBUTION_EVIDENCE_SEPARATOR: &str = "tracedecay.test-attribution-evidence.v1";
 

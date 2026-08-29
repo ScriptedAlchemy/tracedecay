@@ -250,13 +250,13 @@ pub(super) async fn evaluate_native_profile(
             None,
             None,
             None,
-            crate::daemon_contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
+            tracedecay_daemon_protocol::DaemonInvocationRequest::semantic_evaluate_and_publish(
                 request_id.as_str(),
                 EVALUATED_PROFILE_ID.to_owned(),
                 observed_at,
                 tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
                     observed_at.0
-                        + crate::daemon_client::SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
+                        + tracedecay_daemon_protocol::SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
                 ))
                 .expect("evaluation deadline"),
                 tracedecay_application::CancellationContext::active(
@@ -267,7 +267,7 @@ pub(super) async fn evaluate_native_profile(
         )
         .await;
     match response.outcome {
-        crate::daemon_contract::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
+        tracedecay_daemon_protocol::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
             profile_digest,
             report,
             ..

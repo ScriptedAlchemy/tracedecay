@@ -389,7 +389,7 @@
             Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. })
         ));
         assert!(status.remediation.retry);
-        assert!(!owner.enqueue_startup_acquisition_if_needed());
+        assert!(!owner.enqueue_demand_acquisition_if_needed());
     }
 
     #[cfg(feature = "semantic-fastembed")]
@@ -411,7 +411,7 @@
                 .unwrap();
 
         online.select_model(Some(&model_id), true).unwrap();
-        assert!(online.enqueue_startup_acquisition_if_needed());
+        assert!(online.enqueue_demand_acquisition_if_needed());
         join_background_acquisition(&online).expect("online acquisition must complete");
         assert!(matches!(
             online.status().state,
@@ -447,7 +447,7 @@
         let owner = SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
 
         owner.select_model(Some(&model_id), true).unwrap();
-        assert!(owner.enqueue_startup_acquisition_if_needed());
+        assert!(owner.enqueue_demand_acquisition_if_needed());
         assert!(matches!(
             join_background_acquisition(&owner),
             Err(
@@ -516,7 +516,7 @@
             SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap(),
         );
         owner.select_model(Some(&model_id), true).unwrap();
-        assert!(owner.enqueue_startup_acquisition_if_needed());
+        assert!(owner.enqueue_demand_acquisition_if_needed());
         entered_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("background acquisition entered fixture source");
@@ -590,7 +590,7 @@
             )
             .unwrap();
             owner.select_model(Some(&model_id), true).unwrap();
-            assert!(owner.enqueue_startup_acquisition_if_needed());
+            assert!(owner.enqueue_demand_acquisition_if_needed());
             entered_rx
                 .recv_timeout(Duration::from_secs(1))
                 .expect("background acquisition entered fixture source");
@@ -663,7 +663,7 @@
         )
         .unwrap();
         owner.select_model(Some(&model_id), true).unwrap();
-        assert!(owner.enqueue_startup_acquisition_if_needed());
+        assert!(owner.enqueue_demand_acquisition_if_needed());
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while !owner
             .worker
@@ -719,7 +719,7 @@
             .unwrap(),
         );
         owner.select_model(Some(&model_id), true).unwrap();
-        assert!(owner.enqueue_startup_acquisition_if_needed());
+        assert!(owner.enqueue_demand_acquisition_if_needed());
         entered_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("background acquisition entered fixture source");

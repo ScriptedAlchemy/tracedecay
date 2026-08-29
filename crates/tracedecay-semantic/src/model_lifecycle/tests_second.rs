@@ -1,5 +1,5 @@
     #[test]
-    fn background_acquisition_does_not_block_startup_or_status_reads() {
+    fn config_selection_waits_for_semantic_demand_without_blocking_status_reads() {
         let fixture = tempfile::tempdir().unwrap();
         let (catalog, model_id) = tiny_catalog(fixture.path());
         let root = tempfile::tempdir().unwrap();
@@ -11,10 +11,25 @@
             entered: entered_tx,
             release: Mutex::new(release_rx),
         });
-        let owner = SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
-        owner.select_model(Some(&model_id), true).unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::clone(&source) as Arc<dyn ModelMemberSourceV1>,
+        )
+        .unwrap();
+        let selected = apply_config_selection_to_owner(&owner, Some(&model_id), true).unwrap();
 
-        assert!(owner.enqueue_startup_acquisition_if_needed());
+        assert!(matches!(
+            selected.state,
+            Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. })
+        ));
+        assert_eq!(
+            source.calls.load(Ordering::SeqCst),
+            0,
+            "configuration must not fetch model bytes before semantic demand"
+        );
+
+        assert!(owner.enqueue_demand_acquisition_if_needed());
         entered_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("background acquisition must start");
@@ -132,7 +147,7 @@
             status.state.as_ref().unwrap().artifact_digest(),
             imported.artifact_digest()
         );
-        assert!(!restarted.enqueue_startup_acquisition_if_needed());
+        assert!(!restarted.enqueue_demand_acquisition_if_needed());
 
         restarted.mark_ready().unwrap();
         let ready_restart = SemanticModelLifecycleOwnerV1::open(
@@ -146,7 +161,7 @@
             ready.state,
             Some(SemanticModelLifecycleStateV1::Ready { .. })
         ));
-        assert!(!ready_restart.enqueue_startup_acquisition_if_needed());
+        assert!(!ready_restart.enqueue_demand_acquisition_if_needed());
     }
 
     #[test]
@@ -858,7 +873,7 @@
         // Product default is auto_download: true; None still disables the lane.
         owner.select_model(None, true).unwrap();
         let status = owner.status();
-        assert!(!owner.enqueue_startup_acquisition_if_needed());
+        assert!(!owner.enqueue_demand_acquisition_if_needed());
         assert!(status.selected_model.is_none());
         assert!(status.state.is_none());
         assert!(status.semantics_omitted);
@@ -892,7 +907,7 @@
         )
         .unwrap();
         owner.select_model(Some(&model_id), true).unwrap();
-        assert!(owner.enqueue_startup_acquisition_if_needed());
+        assert!(owner.enqueue_demand_acquisition_if_needed());
         assert_eq!(
             join_background_acquisition(&owner),
             Err(ModelLifecycleErrorV1::DownloadFailed)
@@ -1089,6 +1104,6 @@
             .expect("verified installed bytes must re-admit offline");
 
         assert_eq!(reopened_status.state, Some(installed));
-        assert!(!reopened.enqueue_startup_acquisition_if_needed());
+        assert!(!reopened.enqueue_demand_acquisition_if_needed());
         assert_eq!(offline_source.calls.load(Ordering::SeqCst), 0);
     }

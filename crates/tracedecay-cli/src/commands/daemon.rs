@@ -31,8 +31,8 @@ pub(crate) fn env_duration_ms(
 #[hotpath::measure(label = "cli.daemon.handshake")]
 fn client_handshake(
     project_path: Option<&std::path::Path>,
-) -> tracedecay_runtime_core::errors::Result<tracedecay::daemon::DaemonHandshake> {
-    tracedecay::daemon::DaemonHandshake::for_current_client(
+) -> tracedecay_runtime_core::errors::Result<tracedecay_daemon_protocol::DaemonHandshake> {
+    tracedecay::daemon::handshake_for_current_client(
         project_path.map(std::path::Path::to_path_buf),
         None,
         false,
@@ -84,7 +84,7 @@ pub(crate) async fn daemon_tool_json_until(
 }
 
 async fn recover_truncated_payload(
-    handshake: &tracedecay::daemon::DaemonHandshake,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
     tool_name: &str,
     result: serde_json::Value,
     deadline: Option<Instant>,
@@ -146,7 +146,7 @@ async fn recover_truncated_payload(
 /// leave `content[*].text` as the recovered payload so `--format json` and
 /// `--json` callers still parse the tool schema rather than a handle envelope.
 pub(crate) async fn recover_truncated_mcp_result(
-    handshake: &tracedecay::daemon::DaemonHandshake,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
     tool_name: &str,
     result: serde_json::Value,
     deadline: Option<Instant>,

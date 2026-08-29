@@ -636,10 +636,11 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                let request = match request.into_primitive(
-                    crate::daemon::code_index_scheduler::queries::callable_query_sanitizer_revision(
+                let request = match crate::application_surface::primitive_code_into_primitive(
+                    request,
+                    tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(
                     ),
-                    crate::daemon::code_index_scheduler::queries::callable_query_normalization_revision(
+                    tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_normalization_revision(
                     ),
                     page,
                 ) {

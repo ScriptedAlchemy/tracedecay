@@ -13,14 +13,6 @@ pub(crate) fn record_snapshot_admissions(count: u64) {
 }
 
 #[inline(always)]
-pub(crate) fn record_output_sessions(count: u64) {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.output_sessions").inc(count);
-    #[cfg(not(feature = "hotpath"))]
-    let _ = count;
-}
-
-#[inline(always)]
 pub(crate) fn record_transaction_rows(count: u64) {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("global_db.transaction_rows").inc(count);

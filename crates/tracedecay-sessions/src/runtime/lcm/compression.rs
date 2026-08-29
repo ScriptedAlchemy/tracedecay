@@ -350,7 +350,7 @@ fn canonical_replay_messages(raw_messages: &[LcmRawMessage]) -> Vec<Value> {
     replay_transactions::normalize_replay_tool_pairs(&replay)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.lcm.compress", future = true)]
 pub async fn compress(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,

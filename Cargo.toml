@@ -10,10 +10,14 @@ members = [
     "crates/tracedecay-cli",
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
+    "crates/tracedecay-code-index-retention",
+    "crates/tracedecay-code-index-runtime",
+    "crates/tracedecay-daemon-protocol",
     "crates/tracedecay-dashboard-api",
     "crates/tracedecay-domain",
     "crates/tracedecay-global-db",
     "crates/tracedecay-graph-db",
+    "crates/tracedecay-host-admission",
     "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
     "crates/tracedecay-lsp",
@@ -27,6 +31,8 @@ members = [
     "crates/tracedecay-search-eval",
     "crates/tracedecay-semantic",
     "crates/tracedecay-sessions",
+    "crates/tracedecay-session-temporal-store",
+    "crates/tracedecay-source-edit",
     "crates/tracedecay-temporal-query",
     "crates/tracedecay-rusqlite-runtime",
     "crates/tracedecay-store",
@@ -56,6 +62,7 @@ grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["
 grafeo-common = { version = "=0.5.42", default-features = false }
 grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
 grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
+grafeo-storage = { version = "=0.5.42", default-features = false, features = ["wal"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
 
 [profile.bench]
@@ -115,6 +122,9 @@ debug = 0
 opt-level = 2
 
 [profile.perf.package.tracedecay-code-index]
+opt-level = 2
+
+[profile.perf.package.tracedecay-code-index-runtime]
 opt-level = 2
 
 [profile.perf.package.tracedecay-domain]
@@ -177,7 +187,7 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # (tracedecay/0.5.42-vector-index-durable, which stacks vector-index
 # restore-at-open, the arena multi-chunk
 # fix, streaming serialization + mmap compact open, and twelve
-# compact/overlay/close correctness fixes on upstream v0.5.42 rev 3bc8911).
+# compact/overlay/close correctness fixes plus transaction-bounded WAL recovery).
 # The published crates carry a tiered-storage arena whose `HotVersionRef` can
 # only address a single 1 MiB chunk, which caps an epoch near 32 Ki node
 # records and then panics; the fork spans epochs across chunks and types the
@@ -185,8 +195,8 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # resolves sibling crates by path, so every grafeo crate must come from the
 # same fork rev — a mixed registry/git graph would build two type-incompatible
 # instances of the unpatched crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "aa1d25eeb982d683dac0324384882dafa416e73f" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }

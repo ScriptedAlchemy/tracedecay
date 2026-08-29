@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 use tracedecay_code_index::chunks::{CodeFileChunksV1, content_digest};
+use tracedecay_code_index::chunks::{CodeSearchDocumentV1, CodeSearchEligibilityV1};
 use tracedecay_code_index::generations::{
     FileExtractionActionV1, FileExtractionPlanV1, GenerationIncrementPlanV1,
 };
@@ -8,13 +9,14 @@ use tracedecay_code_index::incremental::{
     ChunkIncrementErrorV1, GenerationChunkManifestV1, materialize_generation_increment,
     plan_chunk_increment,
 };
+use tracedecay_code_index::lineage::LineageKindV1;
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-    CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, CodeSearchDocumentV1,
-    CodeSearchEligibilityV1, FileIdentityDigest, FileOccurrenceId, LanguageDescriptorRevision,
-    LineageKindV1, ManifestDigest, PolicyRevisionId, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
+    CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, FileIdentityDigest,
+    FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
+    SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest,
+    SymbolOccurrenceId,
 };
 
 fn id<T>(value: &str) -> T

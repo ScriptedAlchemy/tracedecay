@@ -29,7 +29,10 @@ the real defects were projection throughput and writer contention.)
 1. Record the exact commit, build profile, feature set, corpus, cold/warm state, and workload.
 2. Check for an equivalent active Cargo run before building. Use a separate target directory for each profiling mode.
 3. Capture the OS baseline with `scripts/profile-hotpath-os-counters.sh`; this supplies elapsed time, CPU, RSS/swap, faults, and physical/logical I/O that Hotpath cannot infer.
-4. Build and run only one Hotpath resource lane at a time:
+4. Source `scripts/hotpath-rustflags.sh` before any lane that needs
+   `--cfg tokio_unstable`. Cargo's env `RUSTFLAGS` replaces config rustflags
+   entirely, so do not export that cfg alone. Then build and run only one
+   Hotpath resource lane at a time:
    - `production,hotpath` for timing, futures, locks, channels, I/O, HTTP, and Tokio runtime.
    - `production,hotpath-alloc` for allocation attribution.
    - `production,hotpath-cpu` for CPU sampling on Linux/macOS.

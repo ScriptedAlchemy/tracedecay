@@ -10,10 +10,11 @@
 
 use super::project_open_admission::ProjectOpenWaitOutcome;
 use super::*;
-#[cfg(any(not(unix), test))]
-use crate::daemon_contract::DaemonInvocationProblem;
 use service::invocation::semantic_evaluation::SemanticInvocationControlV1;
 use std::future::Future;
+use tracedecay_code_index_runtime::git_transactions;
+#[cfg(any(not(unix), test))]
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 fn semantic_invocation_interruption_response(
@@ -437,7 +438,7 @@ pub(super) async fn git_service_for_project_path(
 pub(super) async fn native_integration_service_for_project_path(
     store_administration: &StoreAdministration,
     project_path: Option<&Path>,
-) -> Option<native_integration::DaemonNativeIntegrationOwner> {
+) -> Option<tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner> {
     let project_path = project_path?;
     let repository_root = tracedecay_runtime_core::worktree::git_worktree_root(project_path)
         .unwrap_or_else(|| project_path.to_path_buf());

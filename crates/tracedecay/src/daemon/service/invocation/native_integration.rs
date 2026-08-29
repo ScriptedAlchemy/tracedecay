@@ -50,8 +50,8 @@ use tracedecay_usecases::observability::{
 use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
 use crate::application_surface::NativeIntegrationSurfaceRequest;
-use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
-use crate::daemon::native_integration::stack_signals::{
+use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
+use tracedecay_agent_hosts::native_integration::stack_signals::{
     signal_from_preflight, signal_from_receipt,
 };
 
@@ -81,7 +81,7 @@ pub(super) async fn execute_native_integration(
     let Some(registered) = registered else {
         return concealed_application_problem(wire_request_id);
     };
-    if request.operation() != surface_operation {
+    if crate::application_surface::native_integration_operation(&request) != surface_operation {
         return application_problem(wire_request_id, invalid_native_integration_request());
     }
 

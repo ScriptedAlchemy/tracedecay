@@ -2,12 +2,12 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::lcm::LcmStorageKind;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     SessionSearchScope, SessionSearchTimeRange,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{global_message as sample_message, global_session as sample_session};
 

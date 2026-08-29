@@ -5,13 +5,13 @@ use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use tracedecay_usecases::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
-    HostAdmissionStatus,
-};
+use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 #[cfg(test)]
-use tracedecay_usecases::host_admission::{
+use tracedecay_host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker,
+};
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
@@ -405,8 +405,8 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn session_temporal_store_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> Result<tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore<'_>> {
-        Ok(tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore::new(
+    ) -> Result<tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>> {
+        Ok(tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
             self.session_database_for_test(scope)?,
         ))
     }

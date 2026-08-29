@@ -63,7 +63,6 @@ use self::verified::{
 };
 
 use super::super::ToolResult;
-use tracedecay_mcp::tools::definitions;
 use super::super::render::{self, Md};
 use super::project_registry::{
     ProjectRegistryContextCommand, ProjectRegistryContextOutcome, ProjectRegistryListingCommand,
@@ -74,6 +73,7 @@ use super::support::{
     effective_path, generic_tool_result, is_explicit_project_path_selector, rendered_tool_result,
     require_node_id, require_object_args, unique_file_paths,
 };
+use tracedecay_mcp::tools::definitions;
 
 fn display_path(path: &std::path::Path) -> String {
     path.display().to_string()

@@ -20,7 +20,7 @@ use super::{MaintenanceContinuation, MaintenanceTickOutcome, StoreTelemetrySampl
 #[hotpath::measure(label = "daemon.maintenance.generation", future = true)]
 pub(in crate::daemon) async fn run_project_generation_maintenance(
     graph: &crate::tracedecay::TraceDecay,
-    code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_usecases::context::CancellationToken,
     retention: &crate::config::RetentionConfig,

@@ -169,6 +169,7 @@ enum AutomaticFactApplySettlement {
     ApplicationError(TraceDecayError),
 }
 
+#[hotpath::measure(label = "automation.automatic_facts.record", future = true)]
 pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     run_control: &AutomationRunControl,
@@ -365,6 +366,7 @@ pub async fn inspect_shipped_fact_proposals(
 /// `None` means the exact leaf was absent. Every other namespace, privacy, or
 /// byte-bound failure remains typed so retirement cannot digest, archive, or
 /// delete bytes that were not read from the admitted regular file.
+#[hotpath::measure(label = "automation.automatic_facts.read_proposal")]
 pub fn read_shipped_fact_proposal_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     let file = match open_shipped_fact_proposal_file(path) {
         Ok(file) => file,

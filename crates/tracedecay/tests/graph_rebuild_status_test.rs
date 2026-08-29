@@ -242,6 +242,10 @@ fn install_background_batch(isolation_root: &Path, project: &Path) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_refresh_and_reopen_report_only_servable_generations() {
+    Box::pin(background_refresh_and_reopen_report_only_servable_generations_inner()).await
+}
+
+async fn background_refresh_and_reopen_report_only_servable_generations_inner() {
     let isolation = tempfile::TempDir::new().expect("isolated production root");
     let project = isolation.path().join("project");
     fs::create_dir_all(project.join("src")).expect("project source directory");

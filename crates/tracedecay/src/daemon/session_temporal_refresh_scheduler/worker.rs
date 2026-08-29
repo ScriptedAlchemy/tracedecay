@@ -21,7 +21,7 @@ use super::wake::{
     SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use tracedecay_global_db::session_temporal::{
+use tracedecay_session_temporal_store::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
 
@@ -332,7 +332,7 @@ fn classify_store_error(error: &SessionStoreError) -> SessionTemporalRefreshRetr
 }
 
 pub(super) async fn process_refresh_begin_requests(
-    store: &GlobalDbSessionTemporalStore<'_>,
+    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     limit: usize,
     report: &mut SessionTemporalRefreshPassReport,
@@ -376,7 +376,7 @@ pub(super) async fn process_refresh_begin_requests(
 )]
 pub(super) async fn begin_admitted_session_refreshes(
     database: &RegisteredGlobalDb,
-    store: &GlobalDbSessionTemporalStore<'_>,
+    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     limit: usize,
     report: &mut SessionTemporalRefreshPassReport,
@@ -416,7 +416,7 @@ pub(super) async fn begin_admitted_session_refreshes(
 }
 
 async fn complete_ready_refresh(
-    store: &GlobalDbSessionTemporalStore<'_>,
+    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     recovery: &SessionRefreshRecoveryV1,
     report: &mut SessionTemporalRefreshPassReport,
@@ -482,7 +482,7 @@ fn record_projector_error(
 }
 
 async fn apply_refresh_effect(
-    store: &GlobalDbSessionTemporalStore<'_>,
+    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     recovery: &SessionRefreshRecoveryV1,
     effect: SessionTemporalRefreshEffect,
@@ -537,7 +537,7 @@ async fn apply_refresh_effect(
 
 async fn project_running_refresh(
     database: &RegisteredGlobalDbLeaseV1,
-    store: &GlobalDbSessionTemporalStore<'_>,
+    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     projector: &dyn SessionTemporalRefreshProjector,
     policy: SessionTemporalRefreshPolicy,
@@ -768,8 +768,8 @@ mod tests {
 
     use tempfile::TempDir;
     use tracedecay_domain::{SessionId, TemporalCoverageCountsV1, UtcMicros};
+    use tracedecay_sessions::admission::HostAdmissionScope;
     use tracedecay_store::{SessionRefreshBeginOrJoinRequestV1, SessionTemporalProjectionBatchV1};
-    use tracedecay_usecases::host_admission::HostAdmissionScope;
 
     use crate::host_admission::HostAdmissionTestRuntimeV1;
 

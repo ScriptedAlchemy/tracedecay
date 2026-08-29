@@ -1,9 +1,9 @@
 //! Aggregate facts derived from immutable sealed code-index generations.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::ExtractionCoverageV1;
 
 use super::{CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1};
+use crate::extract::ExtractionCoverageV1;
 
 /// Checked aggregate facts derived from one immutable sealed generation.
 ///

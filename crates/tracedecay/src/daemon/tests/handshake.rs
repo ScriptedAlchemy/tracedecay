@@ -156,8 +156,8 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
         super::super::ProjectOpenGates::default(),
     ));
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -179,7 +179,7 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
     });
     let mut handshake = test_handshake_defaults();
     handshake.project_path = Some(PathBuf::from("/must-not-route"));
-    let mut client = super::super::transport::BrokerStream::connect(&endpoint)
+    let mut client = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
         .await
         .expect("connect client");
     client
@@ -205,8 +205,8 @@ async fn socket_client_requires_authentication_before_routing() {
     use tokio::io::AsyncWriteExt;
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("bind broker");
@@ -221,7 +221,7 @@ async fn socket_client_requires_authentication_before_routing() {
         .await
     });
 
-    let mut client = super::super::transport::BrokerStream::connect(&endpoint)
+    let mut client = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
         .await
         .expect("connect client");
     client

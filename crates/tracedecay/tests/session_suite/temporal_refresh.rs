@@ -2,12 +2,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
 use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1};
-use tracedecay_global_db::session_temporal::{GlobalDbSessionTemporalStore, SessionRefreshRestartStateV1};
+use tracedecay_session_temporal_store::{GlobalDbSessionTemporalStore, SessionRefreshRestartStateV1};
 use tracedecay_domain::{
     SessionId, SessionRefreshKeyV1, SessionRefreshSourceTargetV1, SessionSourceFrontierV1,
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1,
     UtcMicros,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
     SessionRefreshCompletionRequestV1, SessionRefreshDispositionV1, SessionRefreshFailureRequestV1,
@@ -17,7 +18,6 @@ use tracedecay_store::{
     SessionTemporalSnapshotRequestV1,
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 fn session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
@@ -54,14 +54,14 @@ async fn registered_temporal_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV
         .expect("registered session-temporal test runtime")
 }
 
-fn temporal_store(runtime: &HostAdmissionTestRuntimeV1) -> GlobalDbSessionTemporalStore<'_> {
+fn temporal_store(runtime: &HostAdmissionTestRuntimeV1) -> GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb> {
     runtime
         .session_temporal_store_for_test(HostAdmissionScope::Profile)
         .expect("registered profile session-temporal store")
 }
 
 async fn begin(
-    store: &GlobalDbSessionTemporalStore<'_>,
+    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     session_id: &SessionId,
     target: SessionRefreshFrontierV1,
 ) -> tracedecay_store::SessionRefreshBeginOrJoinReceiptV1 {
@@ -99,7 +99,7 @@ async fn refresh_state_rows(runtime: &HostAdmissionTestRuntimeV1) -> i64 {
 }
 
 fn batch_for(
-    recovery: &tracedecay_global_db::session_temporal::SessionRefreshRecoveryV1,
+    recovery: &tracedecay_session_temporal_store::SessionRefreshRecoveryV1,
     batch_ordinal: u64,
     source_through: u64,
     projection_through: u64,
@@ -118,7 +118,7 @@ fn batch_for(
 }
 
 fn progress_for(
-    recovery: &tracedecay_global_db::session_temporal::SessionRefreshRecoveryV1,
+    recovery: &tracedecay_session_temporal_store::SessionRefreshRecoveryV1,
     committed_through: u64,
     committed_batches: u64,
 ) -> SessionRefreshProgressV1 {

@@ -14,6 +14,7 @@ use tracedecay_domain::{
     ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1,
 };
 use tracedecay_global_db::ParseOffset;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::hermes::{
     ProjectIngestDestination, ingest_for_project as ingest_for_project_with_id,
     ingest_homes as ingest_homes_with_id, ingest_homes_for_projects, ingest_user_homes,
@@ -21,7 +22,6 @@ use tracedecay_sessions::runtime::hermes::{
 use tracedecay_sessions::runtime::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay_sessions::runtime::source::TranscriptIngestStats;
 use tracedecay_sessions::runtime::{SessionProvider, SessionRecord};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{

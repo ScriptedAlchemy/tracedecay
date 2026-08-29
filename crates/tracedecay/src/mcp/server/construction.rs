@@ -93,8 +93,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) registered_user_session_db: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
-    pub(crate) host_admission_broker:
-        Option<tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
+    pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
     pub(crate) project_session_refresh_wake:
         Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
     pub(crate) user_session_refresh_wake:
@@ -135,7 +134,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) retained_project_server_resolver: Option<super::RetainedProjectServerResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
-        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+        Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
     pub(crate) daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
     pub(crate) delivery_settlement_authority:
         Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
@@ -164,8 +163,7 @@ pub(crate) struct McpServerDaemonDatabases {
 pub(crate) struct McpServerDaemonAuthority {
     pub(crate) profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
     pub(crate) databases: McpServerDaemonDatabases,
-    pub(crate) host_admission_broker:
-        Option<tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
+    pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
     pub(crate) project_session_refresh_wake:
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) user_session_refresh_wake:
@@ -497,7 +495,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_application_invocation_executor(
         mut self,
-        executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+        executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     ) -> Self {
         self.application_invocation_executor = Some(executor);
         self

@@ -12,8 +12,8 @@ use tracedecay_application::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
-use crate::daemon_client::{DaemonInvocationExecutor, invocation_now_micros};
 use crate::mcp::tools::ToolResult;
+use tracedecay_daemon_protocol::{DaemonInvocationExecutor, invocation_now_micros};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
@@ -187,7 +187,7 @@ mod tests {
     /// must preserve the identical typed Work unavailable envelope.
     #[derive(Default)]
     struct RecordingWorkExecutor {
-        operations: Mutex<Vec<crate::daemon_contract::DaemonInvocationOperation>>,
+        operations: Mutex<Vec<tracedecay_daemon_protocol::DaemonInvocationOperation>>,
     }
 
     impl ApplicationInvocationExecutor for RecordingWorkExecutor {
@@ -202,25 +202,25 @@ mod tests {
         }
     }
 
-    impl crate::daemon_client::DaemonInvocationExecutor for RecordingWorkExecutor {
+    impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingWorkExecutor {
         fn invoke_controlled(
             &self,
-            request: crate::daemon_contract::DaemonInvocationRequest,
+            request: tracedecay_daemon_protocol::DaemonInvocationRequest,
             _deadline: Deadline,
             _cancellation: CancellationSignal,
-            _policy: crate::daemon_client::InvocationCancellationPolicy,
-        ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+            _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
             std::result::Result<
-                crate::daemon_contract::DaemonInvocationResponse,
-                crate::daemon_client::DaemonInvocationError,
+                tracedecay_daemon_protocol::DaemonInvocationResponse,
+                tracedecay_daemon_protocol::DaemonInvocationError,
             >,
         > {
             self.operations
                 .lock()
                 .expect("recorded Work daemon operations")
                 .push(request.operation());
-            Box::pin(async { Err(crate::daemon_client::DaemonInvocationError::Unavailable) })
+            Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
         }
 
         fn observe_feedback(
@@ -228,7 +228,7 @@ mod tests {
             _subject_digest: tracedecay_domain::ManifestDigest,
             _observed_at: UtcMicros,
             _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-        ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
             tracedecay_runtime_core::errors::Result<()>,
         > {
@@ -310,7 +310,7 @@ mod tests {
             let request_id = RequestId::new(format!("request.work-mcp-parity-{index}"))
                 .expect("valid request id");
             let deadline = Deadline::new(UtcMicros(
-                crate::daemon_client::invocation_now_micros().0 + 30_000_000,
+                tracedecay_daemon_protocol::invocation_now_micros().0 + 30_000_000,
             ))
             .expect("valid deadline");
             let cancellation =
@@ -357,12 +357,12 @@ mod tests {
                 .lock()
                 .expect("recorded Work daemon operations"),
             vec![
-                crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
-                crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
-                crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
-                crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
-                crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
-                crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
+                tracedecay_daemon_protocol::DaemonInvocationOperation::WorkApplication,
+                tracedecay_daemon_protocol::DaemonInvocationOperation::WorkApplication,
+                tracedecay_daemon_protocol::DaemonInvocationOperation::WorkApplication,
+                tracedecay_daemon_protocol::DaemonInvocationOperation::WorkApplication,
+                tracedecay_daemon_protocol::DaemonInvocationOperation::WorkApplication,
+                tracedecay_daemon_protocol::DaemonInvocationOperation::WorkApplication,
             ]
         );
     }

@@ -297,7 +297,6 @@ pub fn find_run_record_exact_bounded_blocking(
     result.and_then(|record| unlock.map(|()| record))
 }
 
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.decode")]
 fn read_exact_run_record_bounded(
     path: &Path,
     run_id: &str,
@@ -509,7 +508,6 @@ pub(super) fn validate_jsonl_row_schema(
     JsonRangeReader::new(file, path, span.clone()).validate_ledger_record()
 }
 
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.decode_row")]
 pub(super) fn decode_jsonl_row(
     file: &std::fs::File,
     path: &Path,
@@ -665,7 +663,6 @@ impl<'a> ReverseJsonlScanner<'a> {
     }
 }
 
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.extract_pointer")]
 pub(super) fn extract_json_pointer_bounded(
     file: &std::fs::File,
     path: &Path,

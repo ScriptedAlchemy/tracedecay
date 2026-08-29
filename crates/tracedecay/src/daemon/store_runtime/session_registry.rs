@@ -27,7 +27,6 @@ use super::resolver::{
     LocalStoreRuntimeResolverV1,
 };
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
-use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
 use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
@@ -39,6 +38,7 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
 };
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
 
 mod code_graph;
 mod code_graph_manifest;
@@ -54,7 +54,6 @@ mod terminal_tasks;
 use maintenance::RegisteredSchemaConvergenceMaintenance;
 use retained_hook_tasks::RetainedHookTasks;
 
-pub(crate) use code_graph::RetainedCodeGraphRuntimeV1;
 pub(crate) use profile_memory::open_user_memory_db;
 
 /// Sanity ceiling on concurrently mounted project runtime owners, not a bound

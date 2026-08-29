@@ -2,9 +2,9 @@ use tracedecay_code_index::extract::{
     ExtractionCancellation, LanguageExtractor, MAX_EXTRACTION_SOURCE_BYTES, NeverCancelled,
     TreeSitterExtractor,
 };
-use tracedecay_domain::{ExtractionFailureV1, ParseOutcomeV1};
 
 use crate::support::{RUST_SOURCE, rust_descriptor, validated_rust_file};
+use tracedecay_code_index::extract::{ExtractionFailureV1, ParseOutcomeV1};
 
 struct AlwaysCancelled;
 

@@ -5,12 +5,12 @@ use std::time::Duration;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_sessions::runtime::source::TranscriptSource;
-use tracedecay_usecases::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
-    HostAdmissionStatus,
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
+use tracedecay_sessions::runtime::source::TranscriptSource;
 use tracedecay_usecases::observation::ObservationCancellation;
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,

@@ -55,6 +55,7 @@ pub async fn ingest_analytics_events(
     Ok(touched)
 }
 
+#[hotpath::measure(label = "automation.skill_usage.ingest_project", future = true)]
 pub async fn ingest_project_analytics_events(
     profile_root: &Path,
     project_root: &Path,

@@ -40,7 +40,7 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         plan: &SemanticVectorStagePlan,
     ) -> Result<SemanticVectorStageRecord, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.staging")?;
         require_authority_binding(&registration, authority)?;
         require_publication_binding(&registration, &plan.publication_key)?;
         require_plan_binding(&registration, plan)?;
@@ -90,7 +90,7 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         key: &SemanticVectorPublishedGenerationKey,
     ) -> Result<SemanticVectorPublishedGenerationLookup, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.staging")?;
         require_authority_binding(&registration, authority)?;
         if registration.binding().shard_id != key.projection.shard_id {
             return Err(GraphDbError::Conflict);
@@ -112,7 +112,7 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         stage: &tracedecay_store::SemanticVectorStageKey,
     ) -> Result<SemanticVectorStageResumeOutcome, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.staging")?;
         require_authority_binding(&registration, authority)?;
         require_stage_binding(&registration, stage)?;
         let database = self.resolve(registration.clone())?;
@@ -231,7 +231,7 @@ impl GraphDbRegistry {
         expected_receipt_digest: &SemanticVectorBatchReceiptDigest,
         batch: GraphWriteBatch,
     ) -> Result<VerifiedGenerationBatchApply, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.staging")?;
         require_authority_binding(&registration, authority)?;
         require_stage_binding(&registration, &batch_key.stage)?;
         let database = self.resolve(registration.clone())?;
@@ -290,7 +290,7 @@ impl GraphDbRegistry {
         }
         require_authority_binding(&registration, authority)?;
         require_plan_binding(&registration, &record.plan)?;
-        let check = || check_all(&registration, context);
+        let check = || check_all(&registration, context, "generation.staging");
         let commit =
             database.apply_staged_generation_batch(&record.plan, &receipt, batch, &check)?;
         let latest = authority
@@ -320,7 +320,7 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         stage: &tracedecay_store::SemanticVectorStageKey,
     ) -> Result<tracedecay_store::SemanticVectorStageCancelOutcome, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.staging")?;
         require_authority_binding(&registration, authority)?;
         require_stage_binding(&registration, stage)?;
         let database = self.resolve(registration.clone())?;
@@ -345,7 +345,7 @@ impl GraphDbRegistry {
             Err(error) => {
                 match authority.stage(stage, context) {
                     Ok(Some(observed)) if observed.state == SemanticVectorStageState::Cancelled => {
-                        let check = || check_all(&registration, context);
+                        let check = || check_all(&registration, context, "generation.staging");
                         database.delete_cancelled_staged_generation(&observed.plan, &check)?;
                     }
                     Ok(Some(_)) => {
@@ -359,7 +359,7 @@ impl GraphDbRegistry {
         match &outcome {
             tracedecay_store::SemanticVectorStageCancelOutcome::Cancelled(cancelled)
             | tracedecay_store::SemanticVectorStageCancelOutcome::ExactReplay(cancelled) => {
-                let check = || check_all(&registration, context);
+                let check = || check_all(&registration, context, "generation.staging");
                 database.delete_cancelled_staged_generation(&cancelled.plan, &check)?;
             }
             tracedecay_store::SemanticVectorStageCancelOutcome::StaleFence { .. }
@@ -383,7 +383,7 @@ impl GraphDbRegistry {
         batch_key: &SemanticVectorStageBatchKey,
         expected_receipt_digest: &SemanticVectorBatchReceiptDigest,
     ) -> Result<SemanticVectorStageGraphBatchEffect, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.staging")?;
         require_authority_binding(&registration, authority)?;
         require_stage_binding(&registration, &batch_key.stage)?;
         let database = self.resolve(registration.clone())?;
@@ -463,7 +463,7 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         stage: &tracedecay_store::SemanticVectorStageKey,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.staging")?;
         require_stage_binding(&registration, stage)?;
         require_authority_binding(&registration, authority)?;
         let record = authority
@@ -529,7 +529,7 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         stage: &tracedecay_store::SemanticVectorStageKey,
     ) -> Result<tracedecay_store::SemanticVectorStagePublicationPrepareOutcome, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.staging")?;
         require_authority_binding(&registration, authority)?;
         require_stage_binding(&registration, stage)?;
         let database = self.resolve(registration.clone())?;
@@ -555,7 +555,7 @@ impl GraphDbRegistry {
             return Err(GraphDbError::Conflict);
         }
         let checkpoint = record.checkpoint_digest.clone();
-        let check = || check_all(&registration, context);
+        let check = || check_all(&registration, context, "generation.staging");
         let replay = hotpath::measure_block!("graph_db.generation.stage.prepare.native", {
             database.prepare_publication_from_staged_native(&record.plan, &checkpoint, &check)
         })?;
@@ -648,7 +648,7 @@ fn cleanup_cancelled_generation(
     }
     require_unpublished_stage(authority, context, record)?;
     database.reserve_staged_generation_retirement(&record.plan)?;
-    let check = || check_all(registration, context);
+    let check = || check_all(registration, context, "generation.staging");
     database.delete_cancelled_staged_generation(&record.plan, &check)
 }
 

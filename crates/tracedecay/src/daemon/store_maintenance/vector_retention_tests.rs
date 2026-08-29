@@ -9,16 +9,16 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
-use crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
 use crate::daemon::maintenance::{
     SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
     StoreTelemetrySamplingRegistry,
 };
 use crate::tracedecay::TraceDecay;
-use tracedecay_usecases::retention::code_index_generations::{
+use tracedecay_code_index_retention::code_index_generations::{
     DurableGenerationIndexEntryV1, DurablePublicationPointerV1, durable_generation_index_digest,
 };
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
 
 use super::{
     VectorRetentionInventoryV1, apply_code_generation_retention, classify_vector_readable_sources,

@@ -19,16 +19,16 @@ use tracedecay_domain::{
     SourcePartitionIdV1, SourceRefetchStrategyV1, SourceSnapshotIdV1, UserProfileId,
     canonical_sha256,
 };
+use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_runtime_core::privacy::{
     ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
+};
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
 use tracedecay_sessions::runtime::source::TranscriptSource;
 use tracedecay_sessions::runtime::{claude, codex, cursor, hermes};
 use tracedecay_store::ObservationReplayRequest;
-use tracedecay_usecases::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
-    HostAdmissionStatus,
-};
 use tracedecay_usecases::observation::{CaptureObservationRequest, ObservationCancellation};
 
 mod common;

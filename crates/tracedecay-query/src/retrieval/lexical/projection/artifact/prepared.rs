@@ -170,10 +170,19 @@ pub(super) fn prepare_page(
                 )
             })?;
         for (kind, ngram) in ngrams {
+            // Pages enumerate documents by their contiguous source ordinal,
+            // and `document_ngrams` deduplicates each document first. Preserve
+            // that ordering at the bitmap boundary so Roaring can append
+            // instead of binary-searching every posting.
             ngram_documents
                 .entry((kind, ngram))
                 .or_default()
-                .insert(document);
+                .try_push(document)
+                .map_err(|_| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact ngram documents are not strictly ordered".to_owned(),
+                    )
+                })?;
         }
         documents.push(prepared);
     }

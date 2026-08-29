@@ -213,10 +213,11 @@ async fn remote_operational_read_observes_mounted_authorities_and_fails_typed_wh
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
-    let endpoint =
-        super::transport::DaemonEndpoint::Unix(profile_root.join("remote-operational.sock"));
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(
+        profile_root.join("remote-operational.sock"),
+    );
     #[cfg(not(unix))]
-    let endpoint = super::transport::default_loopback_endpoint();
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
     let daemon_authority =
         super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
@@ -317,10 +318,11 @@ async fn mounted_node_populates_exact_prebody_credential_route_and_shutdown_canc
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
-    let endpoint =
-        super::transport::DaemonEndpoint::Unix(profile_root.join("remote-credential.sock"));
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(
+        profile_root.join("remote-credential.sock"),
+    );
     #[cfg(not(unix))]
-    let endpoint = super::transport::default_loopback_endpoint();
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
     let daemon_authority =
         super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");

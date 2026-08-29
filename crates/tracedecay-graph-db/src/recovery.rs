@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::io;
+use std::path::Path;
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::ErrorCode;
@@ -82,6 +83,7 @@ pub(crate) fn open_recovered_database(
             );
         }
     };
+    collapse_replayed_wal(&recovered);
     Ok((recovered, state, quarantined))
 }
 
@@ -197,6 +199,109 @@ pub(crate) fn record_open_corpus_gauges(database: &GrafeoDB) {
     }
     #[cfg(not(feature = "hotpath"))]
     let _ = database;
+}
+
+/// Checkpoints sidecar-WAL history that a successful open replayed into the
+/// live store, then removes only segments that the checkpoint makes
+/// unreachable. Open remains available if this optimization fails: the
+/// durable WAL still contains the same history and a later open can retry.
+pub(crate) fn collapse_replayed_wal(database: &GrafeoDB) {
+    let status = database.wal_status();
+    if !status.enabled {
+        return;
+    }
+    let Some(file_manager) = database.file_manager() else {
+        return;
+    };
+    let sidecar = file_manager.sidecar_wal_path();
+    let Some(newest_segment) = newest_wal_segment_sequence(&sidecar) else {
+        return;
+    };
+    let checkpointed_sequence = grafeo_storage::wal::WalRecovery::new(&sidecar)
+        .checkpoint()
+        .map(|metadata| metadata.log_sequence);
+    if let Some(sequence) = checkpointed_sequence
+        && sequence >= newest_segment
+    {
+        let removed_segments = remove_checkpoint_covered_segments(&sidecar, sequence);
+        if removed_segments > 0 {
+            tracing::info!(
+                event = "graph_wal_segments_removed",
+                phase = "open",
+                removed_segments,
+                "removed checkpoint-covered WAL segments left by an earlier collapse"
+            );
+        }
+        return;
+    }
+
+    match hotpath::measure_block!(
+        "graph_db.generation.open.wal_checkpoint",
+        database.wal_checkpoint()
+    ) {
+        Ok(()) => {
+            let removed_segments = grafeo_storage::wal::WalRecovery::new(&sidecar)
+                .checkpoint()
+                .map_or(0, |metadata| {
+                    remove_checkpoint_covered_segments(&sidecar, metadata.log_sequence)
+                });
+            tracing::info!(
+                event = "graph_wal_checkpoint",
+                phase = "open",
+                wal_bytes = status.size_bytes,
+                removed_segments,
+                "collapsed replayed WAL history into the graph container"
+            );
+        }
+        Err(error) => tracing::warn!(
+            event = "graph_wal_checkpoint_failed",
+            phase = "open",
+            wal_bytes = status.size_bytes,
+            %error,
+            "replayed WAL history could not be checkpointed; the next open will retry"
+        ),
+    }
+}
+
+/// Delete segments that recovery skips because their sequence precedes the
+/// durable checkpoint. Keep the checkpoint segment and two preceding files,
+/// matching Grafeo's own rotation safety margin.
+fn remove_checkpoint_covered_segments(sidecar: &Path, covered_below: u64) -> u64 {
+    let Ok(entries) = std::fs::read_dir(sidecar) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(sequence) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("wal_"))
+            .and_then(|name| name.strip_suffix(".log"))
+            .and_then(|name| name.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if sequence + 2 < covered_below && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn newest_wal_segment_sequence(sidecar: &Path) -> Option<u64> {
+    let entries = std::fs::read_dir(sidecar).ok()?;
+    entries
+        .flatten()
+        .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            name.strip_prefix("wal_")?
+                .strip_suffix(".log")?
+                .parse::<u64>()
+                .ok()
+        })
+        .max()
 }
 
 fn close_recovered_after_error<T>(
@@ -433,5 +538,38 @@ pub(crate) fn map_open_error(
             GraphDbError::Corrupt { message }
         }
         _ => GraphDbError::unavailable(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_checkpoint_covered_segments;
+
+    #[test]
+    fn removes_only_segments_the_checkpoint_covers() {
+        let sidecar = tempfile::TempDir::new().unwrap();
+        for sequence in 0..=5u64 {
+            std::fs::write(sidecar.path().join(format!("wal_{sequence:08}.log")), b"x").unwrap();
+        }
+        std::fs::write(sidecar.path().join("checkpoint.meta"), b"meta").unwrap();
+
+        let removed = remove_checkpoint_covered_segments(sidecar.path(), 5);
+
+        assert_eq!(removed, 3, "segments 0, 1, and 2 are checkpoint-covered");
+        let mut remaining: Vec<String> = std::fs::read_dir(sidecar.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            [
+                "checkpoint.meta",
+                "wal_00000003.log",
+                "wal_00000004.log",
+                "wal_00000005.log",
+            ]
+        );
     }
 }

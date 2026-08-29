@@ -427,7 +427,11 @@ const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Reads the live daemon's mounted Remote Brain operational state over the
 /// authenticated loopback HTTP application. Never opens a local store or
 /// constructs a fresh in-process registry.
-pub(crate) fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1> {
+/// Status-read contract for the Remote Brain operator CLI.
+///
+/// The CLI must not open a local store or construct a fresh in-process
+/// registry; this is the daemon's live mounted operational state.
+pub fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1> {
     let connection = super::current_daemon_connection()?;
     let Some(record) = connection.authority_record.as_ref() else {
         return Err(missing_daemon_authority());

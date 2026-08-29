@@ -16,7 +16,7 @@ use tracedecay_domain::{
     GitBlameAvailabilityV1, GitBlameLineV1, GitBlameV1, GitChangeKindV1, GitDegradationV1,
     GitDiffScopeV1, GitDiffV1, GitFileModeV1, GitHistoryV1, GitHunkV1, GitOidV1, ManifestDigest,
     RefId, RepositoryId, SanitizedCodeFileV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
-    UtcMicros, ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
+    UtcMicros, WorktreeId, canonical_sha256,
 };
 
 use super::capabilities::expected_seal_digest;
@@ -24,6 +24,7 @@ use super::diagnostics::{GenerationDiagnosticDispositionV1, GenerationDiagnostic
 use super::impact_join::GenerationImpactJoinV1;
 use super::provider::GenerationProviderReadV1;
 use super::test_attribution::{GenerationTestJoinDispositionV1, GenerationTestJoinV1};
+use crate::intake::ValidatedCodeSnapshotV1;
 
 const GIT_JOIN_EVIDENCE_SEPARATOR: &str = "tracedecay.generation-git-evidence.v1";
 const GIT_HISTORY_EVIDENCE_SEPARATOR: &str = "tracedecay.generation-git-history.v1";

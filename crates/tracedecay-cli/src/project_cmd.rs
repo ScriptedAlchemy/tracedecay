@@ -156,7 +156,7 @@ async fn call_registry_admin(arguments: Value) -> Result<Value> {
     let cwd = std::env::current_dir()?;
     let project_root = tracedecay::config::discover_project_root(&cwd);
     let handshake =
-        tracedecay::daemon::DaemonHandshake::for_current_client(project_root, None, false, false)?;
+        tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)?;
     let result =
         tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
             .await?;

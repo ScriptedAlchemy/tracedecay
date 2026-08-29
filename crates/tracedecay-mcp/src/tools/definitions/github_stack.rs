@@ -3,8 +3,8 @@
 use serde_json::json;
 
 use super::application_schema::closed_object_schema;
-use crate::ToolDefinition;
 use super::{def, string_property};
+use crate::ToolDefinition;
 
 /// The hook wakeup carries no signal content or actor. This MCP operation is
 /// where the daemon mints actor authority and expands one opaque signal ID.

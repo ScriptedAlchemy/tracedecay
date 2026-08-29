@@ -101,10 +101,14 @@ hotpath = [
     "tracedecay-capture/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
+    "tracedecay-code-index-retention/hotpath",
+    "tracedecay-code-index-runtime/hotpath",
     "tracedecay-dashboard-api/hotpath",
+    "tracedecay-daemon-protocol/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-hooks/hotpath",
+    "tracedecay-host-admission/hotpath",
     "tracedecay-lsp/hotpath",
     "tracedecay-maintenance/hotpath",
     "tracedecay-mcp/hotpath",
@@ -114,10 +118,10 @@ hotpath = [
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-search-eval/hotpath",
-    "tracedecay-sdk/hotpath",
-    "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
+    "tracedecay-session-temporal-store/hotpath",
     "tracedecay-sessions/hotpath",
+    "tracedecay-source-edit/hotpath",
     "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
     "tracedecay-tool-catalog/hotpath",
@@ -135,10 +139,14 @@ hotpath-alloc = [
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-code-index-retention/hotpath-alloc",
+    "tracedecay-code-index-runtime/hotpath-alloc",
     "tracedecay-dashboard-api/hotpath-alloc",
+    "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-host-admission/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
     "tracedecay-maintenance/hotpath-alloc",
     "tracedecay-mcp/hotpath-alloc",
@@ -148,10 +156,10 @@ hotpath-alloc = [
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-search-eval/hotpath-alloc",
-    "tracedecay-sdk/hotpath-alloc",
-    "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-source-edit/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
@@ -169,10 +177,14 @@ hotpath-cpu = [
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-code-index-retention/hotpath-cpu",
+    "tracedecay-code-index-runtime/hotpath-cpu",
     "tracedecay-dashboard-api/hotpath-cpu",
+    "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-host-admission/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
     "tracedecay-maintenance/hotpath-cpu",
     "tracedecay-mcp/hotpath-cpu",
@@ -182,10 +194,10 @@ hotpath-cpu = [
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-search-eval/hotpath-cpu",
-    "tracedecay-sdk/hotpath-cpu",
-    "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-source-edit/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
@@ -231,10 +243,10 @@ token-counting = ["tracedecay-agent-hosts/token-counting", "tracedecay-dashboard
 # has it, and a build that indexes code but not its docs is not a shippable
 # tier. Its grammar lives in the (monolithic) large bundle, so `lite` now links
 # that bundle — the compile-weight cost of making docs unconditional.
-lite = ["tracedecay-code-index/lite"]
+lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]
 
 medium = ["tracedecay-code-index/medium"]
-full = ["tracedecay-code-index/full"]
+full = ["tracedecay-code-index/full", "tracedecay-code-index-runtime/full"]
 
 # These aliases are intentionally repeated at the binary boundary: Cargo
 # cannot expose a dependency feature as a caller-selectable local feature.
@@ -283,8 +295,10 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 # out of a default or `production` build: they compile only under `cfg(test)`
 # or when a consumer asks for them explicitly.
 test-helpers = [
-    "tracedecay-maintenance/test-helpers",
     "tracedecay-automation-runtime/test-helpers",
+    "tracedecay-code-index-runtime/test-helpers",
+    "tracedecay-host-admission/test-helpers",
+    "tracedecay-maintenance/test-helpers",
 ]
 
 test-transport = [
@@ -294,16 +308,20 @@ test-transport = [
     "tracedecay-agent-hosts/test-transport",
     "tracedecay-automation-runtime/test-transport",
     "tracedecay-dashboard-api/test-transport",
+    "tracedecay-host-admission/test-transport",
     "tracedecay-usecases/test-transport",
     "tracedecay-mcp/test-transport",
     # The observation-seed fixture bridge (`dashboard::observation_seed`) is
     # test-transport-gated and drives the global-db session-temporal refresh
     # helpers; plain builds (no dev-dep feature unification) need the forward.
     "tracedecay-global-db/test-helpers",
+    "tracedecay-session-temporal-store/test-helpers",
     # The graph-projection fixture bridge
     # (`dashboard::graph_projection_fixture`) publishes the hermetic code-graph
     # generation dashboard neighbor reads take their adjacency from.
     "tracedecay-code-index/test-helpers",
+    "tracedecay-code-index-runtime/test-helpers",
+    "tracedecay-code-index-runtime/test-transport",
 ]
 
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
@@ -314,6 +332,7 @@ test-transport = [
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-usecases/semantic-fastembed",
+    "tracedecay-code-index-runtime/semantic-fastembed",
 ]
 # Opt-in GPU execution providers for the FastEmbed/ORT runtime (owner
 # request: CoreML on macOS, CUDA on Linux). Not part of `production`; a
@@ -396,9 +415,13 @@ tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", ver
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
 tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
@@ -410,10 +433,11 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-source-edit = { path = "../tracedecay-source-edit", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-sdk = { path = "../tracedecay-sdk", version = "0.1.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
@@ -499,6 +523,7 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0", features =
 # Keep this edge grammar-free so tests do not also pull `medium` (code-index
 # defaults) and so the test graph matches the CLI lane plus `test-helpers`.
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers", "test-transport"] }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
@@ -512,6 +537,7 @@ tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.
 tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["test-transport"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]

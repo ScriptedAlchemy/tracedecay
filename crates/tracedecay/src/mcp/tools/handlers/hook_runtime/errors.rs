@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestError;
-use tracedecay_usecases::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
 
 /// Builds a hook-runtime error that carries the admission status its authority
 /// actually reported.

@@ -6,6 +6,19 @@
 
 use super::*;
 use std::collections::HashSet;
+#[cfg(unix)]
+use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
+
+#[cfg(unix)]
+fn git_watch_sync_config(config: &crate::config::SyncConfig) -> GitWatchSyncConfigV1 {
+    GitWatchSyncConfigV1 {
+        auto_watch: config.auto_watch,
+        watch_debounce_ms: config.watch_debounce_ms,
+        watch_max_delay_ms: config.watch_max_delay_ms,
+        watch_max_projects: config.watch_max_projects,
+        backstop_interval_mins: config.backstop_interval_mins,
+    }
+}
 
 #[cfg(unix)]
 mod shutdown;
@@ -781,7 +794,10 @@ impl DaemonEngine {
             // (the watcher may have started after this server was cached).
             match self
                 .git_watcher
-                .ensure_watching_with_config(&project_path, server.watcher_sync_config())
+                .ensure_watching_with_config(
+                    &project_path,
+                    &git_watch_sync_config(server.watcher_sync_config()),
+                )
                 .await
             {
                 git_watch::GitWatcherAdmission::Ready

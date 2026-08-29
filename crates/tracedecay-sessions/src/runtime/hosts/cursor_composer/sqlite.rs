@@ -101,6 +101,7 @@ pub(super) async fn open_readonly_immutable(db_path: &Path) -> Option<ReadOnlyDb
 /// Passing `after = None` starts at the prefix lower bound; passing the last
 /// key of the previous page continues the primary-key-ordered scan. Never
 /// materializes envelope text — keys and byte lengths only.
+#[hotpath::measure(label = "sessions.hosts.cursor.composer_scan", future = true)]
 pub(super) async fn scan_composer_keys_page(
     conn: &CursorConn,
     after: Option<&str>,

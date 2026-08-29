@@ -693,3 +693,151 @@ fn reset_required_shape_is_recreated_fresh_and_republished_from_the_manifest() {
     );
     assert_eq!(marker_of(&snapshot, &identity), "g1");
 }
+
+/// Recursively copies a live store's container and sidecar to a second root —
+/// the crash image of a process killed without a clean close.
+fn copy_crash_image(from_root: &std::path::Path, to_root: &std::path::Path) {
+    let from = graph_path(from_root);
+    let to = graph_path(to_root);
+    std::fs::copy(&from, &to).unwrap();
+    let from_sidecar = sidecar_wal_path(&from);
+    let to_sidecar = sidecar_wal_path(&to);
+    std::fs::create_dir_all(&to_sidecar).unwrap();
+    for entry in std::fs::read_dir(&from_sidecar).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), to_sidecar.join(entry.file_name())).unwrap();
+    }
+}
+
+/// Highest sequence among non-empty `wal_<sequence>.log` segments — the same
+/// replay-debt signal the open-time collapse gates on.
+fn newest_wal_segment(sidecar: &std::path::Path) -> Option<u64> {
+    let entries = std::fs::read_dir(sidecar).ok()?;
+    entries
+        .flatten()
+        .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            name.strip_prefix("wal_")?
+                .strip_suffix(".log")?
+                .parse::<u64>()
+                .ok()
+        })
+        .max()
+}
+
+/// An open that replays sidecar-WAL history from an unclean shutdown must
+/// collapse that history into the `.grafeo` container immediately, so a
+/// crash-looping rebuild pays the replay once instead of ratcheting the log
+/// (and the next open's replay cost) on every restart.
+#[test]
+fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("crash", "reopen-collapse");
+
+    let g1 = manifest(identity.clone(), "g1", "g1");
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    let first = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g1_head = first.head.clone();
+    drop(first);
+    let projection_key = g1_record.publication.key.projection.clone();
+
+    // Stage g2 durably but stop at the stage boundary, before the durable
+    // generation proof: the sidecar WAL now carries g2's staged history with
+    // no checkpoint metadata covering it — exactly the debt an interrupted
+    // full rebuild leaves behind.
+    let g2 = manifest(identity.clone(), "g2", "g2");
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:g2",
+        Some(g1_head.clone()),
+        'b',
+    );
+    let boundary = registered
+        .registry
+        .publish_verified_with_durable_stage_boundary(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g2_record.publication.key,
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(boundary, GraphDbError::DeadlineExceeded);
+
+    // Copy the live store without closing it: the crash image of a process
+    // killed mid-rebuild.
+    let crash_root = TempDir::new().unwrap();
+    copy_crash_image(temp.path(), crash_root.path());
+    let crash_path = graph_path(crash_root.path());
+    let crash_sidecar = sidecar_wal_path(&crash_path);
+    let debt_segment = newest_wal_segment(&crash_sidecar)
+        .expect("the crash image carries staged history in the sidecar WAL");
+    assert!(
+        grafeo_storage::wal::WalRecovery::new(&crash_sidecar)
+            .checkpoint()
+            .is_none(),
+        "no checkpoint covers the staged history in the crash image"
+    );
+    let container_before = std::fs::metadata(&crash_path).unwrap().len();
+
+    // Mounting the crash image replays the staged history once and must
+    // collapse it: checkpoint metadata now names the newest segment, so the
+    // next open of this store no longer pays the replay.
+    let reopened = RegisteredGraph::new_mounted(crash_root.path()).unwrap();
+    let collapsed = grafeo_storage::wal::WalRecovery::new(&crash_sidecar)
+        .checkpoint()
+        .expect("the reopen must checkpoint the replayed history");
+    assert!(
+        collapsed.log_sequence >= debt_segment,
+        "the reopen checkpoint must cover the replayed segments \
+         (log_sequence {} < newest segment {debt_segment})",
+        collapsed.log_sequence,
+    );
+    let container_after = std::fs::metadata(&crash_path).unwrap().len();
+    assert!(
+        container_after > container_before,
+        "the collapse must flush the replayed rows into the container \
+         ({container_before} -> {container_after} bytes)"
+    );
+
+    // The collapse changed durability bookkeeping only: the verified surface
+    // still serves exactly g1.
+    let recovered = reopened
+        .registry
+        .recover_verified_snapshot(
+            registration(reopened.binding.clone(), crash_root.path()),
+            &mut authority,
+            &context,
+            &projection_key,
+        )
+        .unwrap();
+    assert_eq!(
+        recovered.generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+    assert_eq!(marker_of(&recovered, &identity), "g1");
+}

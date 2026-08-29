@@ -216,13 +216,15 @@ pub(super) async fn ensure_registered_project_route(
         if durable_enrollment_resolves_existing_store(store_administration, &project_path) {
             return Ok(());
         }
-        let owns_repository_identity =
-            tracedecay_runtime_core::project_registry::primary_checkout_root(
-                &project_path,
-                repository_common_dir.as_deref(),
-            )
-            .is_none();
-        if allow_init && requested_path_is_repository_root && owns_repository_identity {
+        // Explicit initialization is valid from the root of any checkout,
+        // including a linked worktree. The first-touch resolver binds the
+        // identity through the shared Git common directory, and registration
+        // pins the canonical project root to the primary checkout. Requiring
+        // this path to own that repository identity makes daemon-first init
+        // impossible from the linked worktrees used by normal development and
+        // CI, even though the authenticated profile remains the sole store
+        // authority.
+        if allow_init && requested_path_is_repository_root {
             return Ok(());
         }
         return Err(unenrolled_project_route_error(&project_path));

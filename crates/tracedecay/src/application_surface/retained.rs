@@ -17,8 +17,8 @@ use tracedecay_application::retained_surfaces::{
 use tracedecay_tool_catalog::RouteExposureV1;
 
 use super::{ApplicationSurfaceAdapterError, RegisteredHttpOperation, invoke_registered_http};
-use crate::daemon_client::DaemonInvocationExecutor;
-use crate::daemon_contract::{DaemonInvocationOutcome, DaemonInvocationRequest};
+use tracedecay_daemon_protocol::DaemonInvocationExecutor;
+use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
@@ -193,7 +193,7 @@ async fn invoke_operation(
     let invocation = DaemonInvocationRequest::retained_application(
         request_id.as_str(),
         request,
-        crate::daemon_client::invocation_now_micros(),
+        tracedecay_daemon_protocol::invocation_now_micros(),
         controls.deadline.clone(),
         controls.cancellation.context(),
     );

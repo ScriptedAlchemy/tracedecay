@@ -200,6 +200,7 @@ pub async fn mark_turn_ingested(
     .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
 }
 
+#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.oldest_ready")]
 pub async fn oldest_ready(dashboard_root: &Path) -> Result<Option<ReadyHostReceipt>> {
     let root = dashboard_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -230,6 +231,7 @@ pub async fn oldest_ready(dashboard_root: &Path) -> Result<Option<ReadyHostRecei
     .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
 }
 
+#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.mark_consumed")]
 pub async fn mark_consumed(
     dashboard_root: &Path,
     session_key: &str,

@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::{
     CodeChunker, CodeFileChunksV1, DeterministicCodeChunker, content_digest,
 };
+use tracedecay_code_index::extract::ExtractionBatchV1;
 use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
 use tracedecay_code_index::incremental::{GenerationChunkManifestV1, plan_chunk_increment};
 use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake};
@@ -22,7 +23,7 @@ use tracedecay_code_index::projection::{
     project_for_publication,
 };
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, ExtractionBatchV1, FileOccurrenceId,
+    ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, FileOccurrenceId,
     LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
     ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId, SanitizationReceiptId,

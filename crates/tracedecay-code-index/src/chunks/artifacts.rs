@@ -7,11 +7,11 @@ use tracedecay_code_extraction::{
     ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
 };
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, ExtractionBatchV1, FileOccurrenceId, SourceSpan,
-    SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, SourceSpan, SymbolOccurrenceId,
 };
 
 use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key};
+use crate::extract::ExtractionBatchV1;
 use crate::extract::parser_import_rows_digest;
 use crate::lineage::LineageSymbolRecordV1;
 

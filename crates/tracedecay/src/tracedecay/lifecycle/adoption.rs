@@ -27,39 +27,13 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_daemon_protocol::MovedStoreAdoption;
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::TraceDecay;
-
-/// How first-touch resolution treats a moved non-git store whose registry row
-/// no longer resolves at its recorded root.
-///
-/// Old daemons ignore the handshake field carrying this value and new daemons
-/// default a missing field to [`Self::Never`], so mixed-version pairs always
-/// degrade to the safe no-adoption behavior.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MovedStoreAdoption {
-    /// Mint a fresh identity without consulting moved-store candidates. The
-    /// ambient first-touch default (agent tools, hooks) and
-    /// `tracedecay init --fresh`.
-    #[default]
-    Never,
-    /// Explicit `tracedecay init` without adoption flags: mint fresh when no
-    /// moved store could claim this root; otherwise refuse with the
-    /// candidates so the operator chooses `--adopt-project`, `--yes`, or
-    /// `--fresh` explicitly — never a silent remap, never a silent identity
-    /// split.
-    OfferCandidates,
-    /// `tracedecay init --yes`: adopt when candidates identify exactly one
-    /// moved store; anything ambiguous remains a typed refusal.
-    AdoptUnique,
-    /// `tracedecay init --adopt-project <id>`: adopt exactly this project.
-    AdoptNamed(String),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MovedNongitCandidate {

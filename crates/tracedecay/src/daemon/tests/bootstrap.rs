@@ -1635,7 +1635,7 @@ async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
+async fn linked_worktree_root_is_admitted_for_explicit_first_touch_init() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let primary = root.join("primary");
@@ -1668,22 +1668,20 @@ async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
         ..test_handshake_defaults()
     };
 
-    let error = match engine.project_server(&handshake).await {
-        Ok(_) => panic!("linked worktree must not claim first-touch project authority"),
-        Err(error) => error,
-    };
-
-    assert_missing_enrollment_admission(&error);
+    engine
+        .ensure_registered_project_route(&linked, handshake.allow_init)
+        .await
+        .expect("explicit init must admit a linked worktree repository root");
     assert_eq!(
         engine
             .project_open_attempts
             .load(std::sync::atomic::Ordering::Relaxed),
         0,
-        "linked first-touch rejection must precede project opening"
+        "admission alone must not start project opening"
     );
     assert!(
         !linked.join(".tracedecay").exists(),
-        "rejection must not write linked-worktree project state"
+        "admission must not write linked-worktree project state"
     );
 }
 
@@ -2622,8 +2620,8 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     ));
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lifecycle = DaemonLifecycle::default();
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -2675,11 +2673,11 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         let endpoint = endpoint.clone();
         let handshake = handshake.clone();
         async move {
-            let stream = super::super::transport::BrokerStream::connect(&endpoint)
+            let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
                 .await
                 .expect("connect client");
             let (reader, mut writer) = stream.into_split();
-            let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+            let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
                 .to_line()
                 .expect("auth preface");
             writer.write_all(preface.as_bytes()).await.expect("preface");

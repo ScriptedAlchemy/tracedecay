@@ -54,13 +54,13 @@ use tracedecay::application_surface::{
     resolve_catalog_tool_binding,
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_awaiting_project_open};
-use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::mcp::tools::internal_daemon_tool_definition;
 use tracedecay::mcp::tools::{
     LegacyToolCompatibilityOwner, RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,
     render_tool_cli_help, short_tool_name,
 };
 use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_domain::UtcMicros;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::BindingSurface;
@@ -356,9 +356,13 @@ fn dispatch_cli_application_surface_inner(
         let request = match parse_application_surface_request(operation, tool_args.clone()) {
             Ok(request) => request,
             Err(error) => {
-                if let Ok(handshake) =
-                    DaemonHandshake::for_current_client(project.clone(), None, false, false)
-                    && let Ok(client) = DaemonInvocationClient::for_current(handshake)
+                if let Ok(handshake) = tracedecay::daemon::handshake_for_current_client(
+                    project.clone(),
+                    None,
+                    false,
+                    false,
+                ) && let Ok(client) =
+                    tracedecay::daemon::invocation_client_for_current(handshake)
                 {
                     observe_surface_argument_rejection(
                         Some(&client),
@@ -374,8 +378,9 @@ fn dispatch_cli_application_surface_inner(
                 });
             }
         };
-        let handshake = DaemonHandshake::for_current_client(project, None, false, false)?;
-        let client = DaemonInvocationClient::for_current(handshake)?;
+        let handshake =
+            tracedecay::daemon::handshake_for_current_client(project, None, false, false)?;
+        let client = tracedecay::daemon::invocation_client_for_current(handshake)?;
         // A cold daemon answers a retryable pre-admission problem while the
         // project open still warms in the background (bounded by the daemon's
         // foreground open wait). The compatibility tool path rides that state out
@@ -502,7 +507,12 @@ impl DaemonToolDispatch {
     }
 
     fn handshake(&self) -> Result<DaemonHandshake> {
-        DaemonHandshake::for_current_client(self.project_path.clone(), None, false, self.allow_init)
+        tracedecay::daemon::handshake_for_current_client(
+            self.project_path.clone(),
+            None,
+            false,
+            self.allow_init,
+        )
     }
 
     /// `deadline` is the caller's request deadline. It is sent to the daemon and

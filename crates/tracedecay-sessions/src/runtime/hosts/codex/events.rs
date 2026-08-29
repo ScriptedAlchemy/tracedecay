@@ -167,7 +167,6 @@ impl CodexStructuredState {
     /// * `Some(rows)` — the line was recognized. `rows` may be empty (an
     ///   `exec_command` call is buffered until its output arrives; a recognized
     ///   but unusable line is consumed so it is not re-processed).
-    #[hotpath::measure(label = "sessions.hosts.codex.event_from_line")]
     pub(super) fn event_from_line(
         &mut self,
         record: &Value,

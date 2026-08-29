@@ -1,4 +1,4 @@
-use tracedecay_domain::code_intelligence::{
+use tracedecay::types::{
     BuildContextOptions, Edge, EdgeKind, ExtractionResult, Node, NodeKind, OutputFormat,
     TraversalDirection, TraversalOptions, UnresolvedRef, Visibility, generate_node_id,
 };

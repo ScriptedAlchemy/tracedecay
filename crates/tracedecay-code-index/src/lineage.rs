@@ -22,10 +22,78 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, ContentDigest, FileIdentityDigest, LineageAbstentionV1,
-    LineageConfidenceKindV1, LineageEvidenceV1, LineageKindV1, LineageMethodV1,
-    SymbolIdentityDigest, SymbolLineageCandidateV1, SymbolOccurrenceId, canonical_sha256,
+    CodeGenerationId, ContentDigest, FileIdentityDigest, ManifestDigest, SymbolIdentityDigest,
+    SymbolOccurrenceId, canonical_sha256,
 };
+
+/// One lineage candidate for a symbol across generations. Record rename,
+/// move, split, merge, and structural-continuity candidates with method,
+/// evidence, confidence kind, alternatives, and abstention; ambiguous
+/// lineage stays explicit and never silently merges unrelated symbols.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolLineageCandidateV1 {
+    pub prior_occurrence: SymbolOccurrenceId,
+    pub current_occurrence: SymbolOccurrenceId,
+    pub kind: LineageKindV1,
+    pub method: LineageMethodV1,
+    pub evidence: LineageEvidenceV1,
+    pub confidence: LineageConfidenceKindV1,
+    pub alternatives: Vec<SymbolOccurrenceId>,
+    pub abstention: Option<LineageAbstentionV1>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageKindV1 {
+    Unchanged,
+    Renamed,
+    Moved,
+    Split,
+    Merged,
+    StructuralContinuity,
+}
+
+/// How a lineage candidate was derived. Tree-sitter object reuse, path,
+/// line, qualified-name similarity, or embedding similarity never proves
+/// lineage.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageMethodV1 {
+    ExactIdentityTuple,
+    StructuralBoundaryMatch,
+    ContentDigestMatch,
+    QualifiedStructureMatch,
+    DeclaredAbstention,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LineageEvidenceV1 {
+    pub prior_generation: CodeGenerationId,
+    pub current_generation: CodeGenerationId,
+    pub prior_digest: Option<ContentDigest>,
+    pub current_digest: Option<ContentDigest>,
+    pub evidence_digest: ManifestDigest,
+}
+
+/// Confidence kind; kept as a kind, not a scalar score. This preserves raw
+/// evidence and does not define a universal quality score.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageConfidenceKindV1 {
+    Exact,
+    Structural,
+    Ambiguous,
+    Abstained,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LineageAbstentionV1 {
+    pub reason: String,
+    pub candidate_count: u32,
+}
 
 /// Domain separator for canonical lineage evidence digests.
 pub const LINEAGE_EVIDENCE_SEPARATOR: &str = "tracedecay.code-lineage-evidence.v1";

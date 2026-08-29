@@ -48,7 +48,7 @@ impl RegisteredGraphDbOperationV1 {
         context: &GraphPublicationOperationContextV1<'_>,
     ) -> Result<(), GraphDbError> {
         if let Some(request) = &self.request {
-            check_registration_request(request)?;
+            check_registration_request(request, "operation.check")?;
         }
         let current = registry.registered_operation_with_lease(&self.database)?;
         if current.binding != self.binding
@@ -83,7 +83,7 @@ impl GraphDbRegistry {
         &self,
         registration: GraphDbRegistration,
     ) -> Result<RegisteredGraphDbOperationV1, GraphDbError> {
-        check_registration_request(&registration)?;
+        check_registration_request(&registration, "operation.register")?;
         let binding = registration.binding().clone();
         let verified_locator = registration.verified_locator().clone();
         // `check` compares this against the registry entry, which stores the
@@ -225,7 +225,7 @@ impl GraphDbRegistry {
         registration: GraphDbRegistration,
         projection: &GraphProjectionIdentity,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-        check_registration_request(&registration)?;
+        check_registration_request(&registration, "snapshot.verified")?;
         let database = self.registered_database(&registration)?;
         let state = database.inner.verified_generations.read().map_err(|_| {
             GraphDbError::unavailable("verified graph generation state lock is poisoned")
@@ -440,8 +440,9 @@ pub(super) fn validate_replay_cursor(
 pub(super) fn check_all(
     registration: &GraphDbRegistration,
     context: &GraphPublicationOperationContextV1<'_>,
+    op: &'static str,
 ) -> Result<(), GraphDbError> {
-    check_registration_request(registration)?;
+    check_registration_request(registration, op)?;
     check_context(context)
 }
 
@@ -459,7 +460,14 @@ fn interruption_error(context: &GraphPublicationOperationContextV1<'_>) -> Optio
         .interruption()
         .map(|interruption| match interruption {
             RuntimeInterruptionV1::Cancelled => GraphDbError::Cancelled,
-            RuntimeInterruptionV1::DeadlineExceeded => GraphDbError::DeadlineExceeded,
+            RuntimeInterruptionV1::DeadlineExceeded => {
+                tracing::warn!(
+                    event = "graph_db_deadline_exceeded",
+                    deadline_id = context.deadline_id(),
+                    "graph publication operation exceeded its registered deadline"
+                );
+                GraphDbError::DeadlineExceeded
+            }
         })
 }
 

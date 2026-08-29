@@ -31,13 +31,16 @@ mod hook_cmd;
 mod lsp_cmd;
 mod project_cmd;
 mod monitor_cmd;
+mod remote_command;
 mod serve_cmd;
 mod sessions_cmd;
 mod status_cmd;
 mod tool_command;
 mod update_cmd;
 mod upgrade;
+mod work_cli;
 mod work_command;
+mod workflow_cli;
 mod workflow_command;
 
 
@@ -1080,10 +1083,7 @@ async fn dispatch_runtime_command(
         Commands::Work { invocation } => work_command::run(invocation).await?,
         Commands::Workflow { invocation } => workflow_command::run(invocation).await?,
         Commands::Remote { action } => {
-            hotpath::measure_block!(
-                "cli.remote.run",
-                tracedecay::remote_command::run(action.into())
-            )?;
+            hotpath::measure_block!("cli.remote.run", crate::remote_command::run(action.into()))?;
         }
         Commands::Lsp { action } => {
             lsp_cmd::handle_lsp_action(action).await?;

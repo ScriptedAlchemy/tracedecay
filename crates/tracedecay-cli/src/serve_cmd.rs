@@ -83,7 +83,7 @@ fn proxy_serve_handshake(
     path_arg: Option<String>,
     original_cwd: Option<&Path>,
     timings: bool,
-) -> Result<tracedecay::daemon::DaemonHandshake> {
+) -> Result<tracedecay_daemon_protocol::DaemonHandshake> {
     let unexpanded_template_path = path_arg
         .as_deref()
         .and_then(unexpanded_template_variable)
@@ -130,7 +130,7 @@ fn proxy_serve_handshake(
             tracedecay::config::cached_telemetry_config(path)
                 .is_ok_and(|telemetry| telemetry.timings)
         });
-    let mut handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+    let mut handshake = tracedecay::daemon::handshake_for_current_client(
         project_path,
         scope_prefix,
         telemetry_timings,

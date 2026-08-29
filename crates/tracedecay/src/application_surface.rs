@@ -15,7 +15,6 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
-pub use git_surface::{GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -25,35 +24,35 @@ use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationOperation, HttpApplicationRequest,
     WorkOperation, WorkflowOperation, application_problem_response, sse_response,
 };
+pub use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_application::git::{
-    GitHubStackSignalExpandSurfaceRequest, NativeIntegrationApproveSurfaceRequest,
-    NativeWorktreeSurfaceRequest,
+    GitHubStackSignalExpandSurfaceRequest, NativeWorktreeSurfaceRequest,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
-    CodeFacetDimension, CodeFacetRequest, CodeLexicalFieldFilter, CodeNavigationRequest,
-    CodeQueryScope, CodeRelationRequest, CodeTimelineRequest, ExactOccurrenceRequest,
-    GraphRelationRequest, HealthDeltaRequest, ImplementationSelector, ImplementationsRequest,
-    PhraseSearchRequest, SignatureSearchRequest, SymbolGraphScope, SymbolSearchPrimitiveRequest,
+    GraphRelationRequest, HealthDeltaRequest, ImplementationsRequest, SignatureSearchRequest,
     TypeHierarchyRequest,
 };
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
     ApplicationResult, CancellationContext, CancellationSignal, CancellationStage,
-    ConfigurationWireRequestV1, Deadline, HealthReadRequest, LegalAction,
-    NativeIntegrationApplySurfaceRequest, NativeIntegrationCancelSurfaceRequest,
-    NativeIntegrationPreflightSurfaceRequest, NativeIntegrationStackSnapshotSurfaceRequest,
-    NativeIntegrationStatusSurfaceRequest, ObservatoryReadRequestV1, OpaqueCursor,
+    ConfigurationWireRequestV1, Deadline, HealthReadRequest, LegalAction, ObservatoryReadRequestV1,
     OperationTermination, PageRequest, ProblemOwningLayer, RequestContext, RequestId,
-    ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
-    RetryDirective, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest, StreamEvent,
-    StreamEventKind,
+    ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic, SessionLookupRequest,
+    SourceLinesRequest, StreamEvent, StreamEventKind,
+    configuration_wire_request_from_invocation_payload,
 };
-use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
+pub use tracedecay_daemon_protocol::{
+    ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+    ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
+    ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
+    ContextScoutSurfaceRequest, GitReadSurfaceRequest,
+};
 use tracedecay_domain::{
-    ExactTechnicalTermKindV1, ManifestDigest, ProjectId, QueryNormalizationRevision,
-    SanitizerRevision, UtcMicros, canonical_sha256,
+    ManifestDigest, ProjectId, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, FeatureId,
@@ -64,7 +63,15 @@ use crate::catalog_composition::{
     ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
     compose_application_catalog_with,
 };
-use crate::daemon_client::{
+pub use tracedecay_application::{
+    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
+    CodeCallersSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
+    CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
+    NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
+};
+use tracedecay_daemon_protocol::{
     BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationError,
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
     InvocationControls, ResolvedBinding, ScopeSelector, resolve_dispatch,
@@ -228,487 +235,91 @@ pub struct FeedbackImpactSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct TestResultsSurfaceRequest {}
 
-/// Surface-owned query semantics. Page size remains an invocation control, but
-/// continuation is a request field so CLI, MCP, and HTTP callers all have the
-/// same channel for spending a `next_cursor`. HTTP folds its transport cursor
-/// into this field before decoding, keeping exactly one page authority at the
-/// point of use.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CallableCodeSurfaceMeta {
-    pub projection: ResultProjection,
-    pub order: RetrievalOrder,
-    #[serde(default)]
-    pub cursor: Option<OpaqueCursor>,
-}
-
-impl CallableCodeSurfaceMeta {
-    fn into_application(self, page: PageRequest) -> RetrievalRequestMeta {
-        let Self {
-            projection,
-            order,
-            cursor,
-        } = self;
-        let page = match cursor {
-            Some(cursor) => PageRequest {
-                page_size: page.page_size,
-                cursor: Some(cursor),
-            },
-            None => page,
-        };
-        RetrievalRequestMeta::current(page, projection, order)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeExactOccurrenceSurfaceRequest {
-    pub literal: String,
-    pub kind: Option<ExactTechnicalTermKindV1>,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeExactOccurrenceSurfaceRequest {
-    pub fn into_application_request(
-        self,
-        page: PageRequest,
-    ) -> Result<ExactOccurrenceRequest, ApplicationContractError> {
-        ExactOccurrenceRequest::new(
-            self.literal,
-            self.kind,
-            self.scope,
-            self.meta.into_application(page),
-        )
-    }
-}
-
-/// Serializable adapter DTO for the request-local phrase query view.
-///
-/// The callable application request deliberately keeps its sanitized query
-/// non-serializable. The owning runtime supplies the exact sanitizer
-/// revisions when converting this transport DTO.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodePhraseSearchSurfaceRequest {
-    pub query: String,
-    pub phrases: Vec<String>,
-    #[serde(default)]
-    pub field_filters: Vec<CodeLexicalFieldFilter>,
-    #[serde(default)]
-    pub fuzzy_budget: u32,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeSymbolSearchSurfaceRequest {
-    pub query: String,
-    pub scope: SymbolGraphScope,
-    pub lazy_index_ignored_dependencies: bool,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeSymbolSearchSurfaceRequest {
-    pub(crate) fn into_primitive_request(
-        self,
-        sanitizer_revision: SanitizerRevision,
-        normalization_revision: QueryNormalizationRevision,
-        page: PageRequest,
-    ) -> Result<SymbolSearchPrimitiveRequest, ApplicationContractError> {
-        let query = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
-            self.query,
-            sanitizer_revision,
-            normalization_revision,
-        )?;
-        Ok(SymbolSearchPrimitiveRequest {
-            query,
-            scope: self.scope,
-            lazy_index_ignored_dependencies: self.lazy_index_ignored_dependencies,
-            meta: self.meta.into_application(page),
-        })
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeSignatureSearchSurfaceRequest {
-    pub returns: Option<String>,
-    pub params: Vec<String>,
-    pub is_async: Option<bool>,
-    pub scope: SymbolGraphScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeImplementationsSurfaceRequest {
-    pub selector: ImplementationSelector,
-    pub scope: SymbolGraphScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeTypeHierarchySurfaceRequest {
-    pub node_id: String,
-    pub maximum_depth: u32,
-    pub scope: SymbolGraphScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeCallersSurfaceRequest {
-    pub node_id: String,
-    pub maximum_depth: u32,
-    pub resolve_trait_dispatch: bool,
-    pub scope: SymbolGraphScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum PrimitiveCodeSurfaceRequest {
-    SymbolSearch(CodeSymbolSearchSurfaceRequest),
-    SignatureSearch(CodeSignatureSearchSurfaceRequest),
-    Implementations(CodeImplementationsSurfaceRequest),
-    TypeHierarchy(CodeTypeHierarchySurfaceRequest),
-    Callers(CodeCallersSurfaceRequest),
-}
-
-impl PrimitiveCodeSurfaceRequest {
-    pub(crate) fn into_primitive(
-        self,
-        sanitizer_revision: SanitizerRevision,
-        normalization_revision: QueryNormalizationRevision,
-        page: PageRequest,
-    ) -> Result<PrimitiveRequest, ApplicationContractError> {
-        Ok(match self {
-            Self::SymbolSearch(request) => PrimitiveRequest::SymbolSearch(
-                request.into_primitive_request(sanitizer_revision, normalization_revision, page)?,
-            ),
-            Self::SignatureSearch(request) => {
-                PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
-                    returns: request.returns,
-                    params: request.params,
-                    is_async: request.is_async,
-                    scope: request.scope,
-                    meta: request.meta.into_application(page),
-                })
-            }
-            Self::Implementations(request) => {
-                PrimitiveRequest::Implementations(ImplementationsRequest {
-                    selector: request.selector,
-                    scope: request.scope,
-                    meta: request.meta.into_application(page),
-                })
-            }
-            Self::TypeHierarchy(request) => PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
+pub(crate) fn primitive_code_into_primitive(
+    request: PrimitiveCodeSurfaceRequest,
+    sanitizer_revision: SanitizerRevision,
+    normalization_revision: QueryNormalizationRevision,
+    page: PageRequest,
+) -> Result<PrimitiveRequest, ApplicationContractError> {
+    Ok(match request {
+        PrimitiveCodeSurfaceRequest::SymbolSearch(request) => PrimitiveRequest::SymbolSearch(
+            request.into_primitive_request(sanitizer_revision, normalization_revision, page)?,
+        ),
+        PrimitiveCodeSurfaceRequest::SignatureSearch(request) => {
+            PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
+                returns: request.returns,
+                params: request.params,
+                is_async: request.is_async,
+                scope: request.scope,
+                meta: request.meta.into_application(page),
+            })
+        }
+        PrimitiveCodeSurfaceRequest::Implementations(request) => {
+            PrimitiveRequest::Implementations(ImplementationsRequest {
+                selector: request.selector,
+                scope: request.scope,
+                meta: request.meta.into_application(page),
+            })
+        }
+        PrimitiveCodeSurfaceRequest::TypeHierarchy(request) => {
+            PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
                 node_id: request.node_id,
                 maximum_depth: request.maximum_depth,
                 scope: request.scope,
                 meta: request.meta.into_application(page),
-            }),
-            Self::Callers(request) => PrimitiveRequest::Callers(GraphRelationRequest {
+            })
+        }
+        PrimitiveCodeSurfaceRequest::Callers(request) => {
+            PrimitiveRequest::Callers(GraphRelationRequest {
                 node_id: request.node_id,
                 maximum_depth: request.maximum_depth,
                 resolve_trait_dispatch: request.resolve_trait_dispatch,
                 scope: request.scope,
                 meta: request.meta.into_application(page),
-            }),
-        })
-    }
-}
-
-impl CodePhraseSearchSurfaceRequest {
-    pub fn into_application_request(
-        self,
-        sanitizer_revision: SanitizerRevision,
-        normalization_revision: QueryNormalizationRevision,
-        page: PageRequest,
-    ) -> Result<PhraseSearchRequest, ApplicationContractError> {
-        let query = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
-            self.query,
-            sanitizer_revision,
-            normalization_revision,
-        )?;
-        PhraseSearchRequest::new(
-            query,
-            self.phrases,
-            self.field_filters,
-            self.fuzzy_budget,
-            self.scope,
-            self.meta.into_application(page),
-        )
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeCalleesSurfaceRequest {
-    pub node_id: String,
-    pub maximum_depth: u32,
-    pub resolve_trait_dispatch: bool,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeFacetSurfaceRequest {
-    pub dimension: CodeFacetDimension,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeFacetSurfaceRequest {
-    pub fn into_application_request(self, page: PageRequest) -> CodeFacetRequest {
-        CodeFacetRequest {
-            dimension: self.dimension,
-            scope: self.scope,
-            meta: self.meta.into_application(page),
+            })
         }
-    }
+    })
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeTimelineSurfaceRequest {
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeTimelineSurfaceRequest {
-    pub fn into_application_request(self, page: PageRequest) -> CodeTimelineRequest {
-        CodeTimelineRequest {
-            scope: self.scope,
-            meta: self.meta.into_application(page),
+pub(crate) const fn native_integration_operation(
+    request: &NativeIntegrationSurfaceRequest,
+) -> ApplicationSurfaceOperation {
+    match request {
+        NativeIntegrationSurfaceRequest::StackSnapshot(_) => {
+            ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
         }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeNavigationSurfaceRequest {
-    pub node_id: String,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeNavigationSurfaceRequest {
-    pub fn into_application_request(self, page: PageRequest) -> CodeNavigationRequest {
-        CodeNavigationRequest {
-            node_id: self.node_id,
-            scope: self.scope,
-            meta: self.meta.into_application(page),
+        NativeIntegrationSurfaceRequest::Preflight(_) => {
+            ApplicationSurfaceOperation::NativeIntegrationPreflight
         }
-    }
-}
-
-impl CodeCalleesSurfaceRequest {
-    pub fn into_application_request(self, page: PageRequest) -> CodeRelationRequest {
-        CodeRelationRequest {
-            node_id: self.node_id,
-            maximum_depth: self.maximum_depth,
-            resolve_trait_dispatch: self.resolve_trait_dispatch,
-            scope: self.scope,
-            meta: self.meta.into_application(page),
+        NativeIntegrationSurfaceRequest::Approve(_) => {
+            ApplicationSurfaceOperation::NativeIntegrationApprove
         }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum CallableCodeSurfaceRequest {
-    ExactOccurrence(CodeExactOccurrenceSurfaceRequest),
-    PhraseSearch(CodePhraseSearchSurfaceRequest),
-    Callees(CodeCalleesSurfaceRequest),
-    Facets(CodeFacetSurfaceRequest),
-    Timeline(CodeTimelineSurfaceRequest),
-    Declaration(CodeNavigationSurfaceRequest),
-    Definition(CodeNavigationSurfaceRequest),
-    TypeDefinition(CodeNavigationSurfaceRequest),
-    References(CodeNavigationSurfaceRequest),
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutClaimWindowSurfaceV1 {
-    IdleWindow,
-    OnRequest,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutExactAddressSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutRecentSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    #[serde(default = "default_context_scout_recent_limit")]
-    pub limit: usize,
-}
-
-const fn default_context_scout_recent_limit() -> usize {
-    8
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutControlSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub expected_revision: ConfigurationRevisionId,
-    pub idempotency_key: ConfigurationIdempotencyKey,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutCancelSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub work: crate::agents::context_scout_v2::ContextScoutWorkV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutClaimSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub window: ContextScoutClaimWindowSurfaceV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutDeliverySurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub claim: crate::agents::context_scout_v2::ContextScoutDurableClaimV1,
-    pub receipt: crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutFeedbackSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub receipt: crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
-    pub feedback: crate::agents::context_scout_v2::ContextScoutFeedbackV1,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "operation", content = "request")]
-pub enum ContextScoutSurfaceRequest {
-    Status(ContextScoutExactAddressSurfaceRequest),
-    Recent(ContextScoutRecentSurfaceRequest),
-    Explain(ContextScoutRecentSurfaceRequest),
-    Capability(ContextScoutExactAddressSurfaceRequest),
-    Budget(ContextScoutExactAddressSurfaceRequest),
-    Pause(ContextScoutControlSurfaceRequest),
-    Resume(ContextScoutControlSurfaceRequest),
-    Cancel(ContextScoutCancelSurfaceRequest),
-    Claim(ContextScoutClaimSurfaceRequest),
-    Delivery(Box<ContextScoutDeliverySurfaceRequest>),
-    Feedback(ContextScoutFeedbackSurfaceRequest),
-}
-
-impl ContextScoutSurfaceRequest {
-    pub(crate) const fn address(&self) -> crate::agents::context_scout_v2::ContextScoutAddressV1 {
-        match self {
-            Self::Status(request) | Self::Capability(request) | Self::Budget(request) => {
-                request.address
+        NativeIntegrationSurfaceRequest::Apply(_) => {
+            ApplicationSurfaceOperation::NativeIntegrationApply
+        }
+        NativeIntegrationSurfaceRequest::Status(_) => {
+            ApplicationSurfaceOperation::NativeIntegrationStatus
+        }
+        NativeIntegrationSurfaceRequest::Cancel(_) => {
+            ApplicationSurfaceOperation::NativeIntegrationCancel
+        }
+        NativeIntegrationSurfaceRequest::Worktree(request) => match request {
+            NativeWorktreeSurfaceRequest::Inventory(_) => {
+                ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
             }
-            Self::Recent(request) | Self::Explain(request) => request.address,
-            Self::Pause(request) | Self::Resume(request) => request.address,
-            Self::Cancel(request) => request.address,
-            Self::Claim(request) => request.address,
-            Self::Delivery(request) => request.address,
-            Self::Feedback(request) => request.address,
-        }
-    }
-
-    pub(crate) const fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
-        matches!(
-            (self, operation),
-            (
-                Self::Status(_),
-                ApplicationSurfaceOperation::ContextScoutStatus
-            ) | (
-                Self::Recent(_),
-                ApplicationSurfaceOperation::ContextScoutRecent
-            ) | (
-                Self::Explain(_),
-                ApplicationSurfaceOperation::ContextScoutExplain
-            ) | (
-                Self::Capability(_),
-                ApplicationSurfaceOperation::ContextScoutCapability
-            ) | (
-                Self::Budget(_),
-                ApplicationSurfaceOperation::ContextScoutBudget
-            ) | (
-                Self::Pause(_),
-                ApplicationSurfaceOperation::ContextScoutPause
-            ) | (
-                Self::Resume(_),
-                ApplicationSurfaceOperation::ContextScoutResume
-            ) | (
-                Self::Cancel(_),
-                ApplicationSurfaceOperation::ContextScoutCancel
-            ) | (
-                Self::Claim(_),
-                ApplicationSurfaceOperation::ContextScoutClaim
-            ) | (
-                Self::Delivery(_),
-                ApplicationSurfaceOperation::ContextScoutDelivery
-            ) | (
-                Self::Feedback(_),
-                ApplicationSurfaceOperation::ContextScoutFeedback
-            )
-        )
-    }
-}
-
-/// The canonical native-integration and native-worktree journey requests.
-///
-/// Each variant carries exact typed identity. There is no variant that can
-/// express a path, a raw SHA, a commit message, a patch, a Git argument, or a
-/// remote, so no transport can widen this journey into generic Git execution.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum NativeIntegrationSurfaceRequest {
-    StackSnapshot(Box<NativeIntegrationStackSnapshotSurfaceRequest>),
-    Preflight(Box<NativeIntegrationPreflightSurfaceRequest>),
-    Approve(NativeIntegrationApproveSurfaceRequest),
-    Apply(NativeIntegrationApplySurfaceRequest),
-    Status(NativeIntegrationStatusSurfaceRequest),
-    Cancel(NativeIntegrationCancelSurfaceRequest),
-    Worktree(NativeWorktreeSurfaceRequest),
-}
-
-impl NativeIntegrationSurfaceRequest {
-    pub(crate) const fn operation(&self) -> ApplicationSurfaceOperation {
-        match self {
-            Self::StackSnapshot(_) => ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
-            Self::Preflight(_) => ApplicationSurfaceOperation::NativeIntegrationPreflight,
-            Self::Approve(_) => ApplicationSurfaceOperation::NativeIntegrationApprove,
-            Self::Apply(_) => ApplicationSurfaceOperation::NativeIntegrationApply,
-            Self::Status(_) => ApplicationSurfaceOperation::NativeIntegrationStatus,
-            Self::Cancel(_) => ApplicationSurfaceOperation::NativeIntegrationCancel,
-            Self::Worktree(request) => match request {
-                NativeWorktreeSurfaceRequest::Inventory(_) => {
-                    ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
-                }
-                NativeWorktreeSurfaceRequest::Inspect(_) => {
-                    ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
-                }
-                NativeWorktreeSurfaceRequest::Confirm(_) => {
-                    ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
-                }
-                NativeWorktreeSurfaceRequest::Remove(_) => {
-                    ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
-                }
-                NativeWorktreeSurfaceRequest::Reconcile(_) => {
-                    ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
-                }
-            },
-        }
+            NativeWorktreeSurfaceRequest::Inspect(_) => {
+                ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+            }
+            NativeWorktreeSurfaceRequest::Confirm(_) => {
+                ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+            }
+            NativeWorktreeSurfaceRequest::Remove(_) => {
+                ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+            }
+            NativeWorktreeSurfaceRequest::Reconcile(_) => {
+                ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
+            }
+        },
     }
 }
 
@@ -741,7 +352,7 @@ pub struct ApplicationSurfaceInvocationResult {
 }
 
 struct HttpApplicationCatalogDispatcher {
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     catalog: Arc<CatalogSnapshotV1>,
 }
 
@@ -780,7 +391,7 @@ impl CanonicalApplicationDispatcher<CatalogBoundHttpApplicationRequest>
 
 #[hotpath::measure(label = "application_surface.invoker_assemble")]
 fn application_invoker_for_surface(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     surface: BindingSurface,
     required_operations: &[ApplicationSurfaceOperation],
 ) -> Result<
@@ -832,7 +443,7 @@ fn application_invoker_for_surface(
 
 #[hotpath::measure(label = "application_surface.multi_root.invoke", future = true)]
 pub(crate) async fn invoke_multi_root_surface_request(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
     page: PageRequest,
@@ -863,7 +474,7 @@ pub(crate) async fn invoke_multi_root_surface_request(
 }
 
 fn work_application_router_with_executor(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     work::router_with_executor(executor)
 }
@@ -874,7 +485,7 @@ fn work_application_router_with_executor(
 /// registry binding resolution, cancellation policy, and canonical result
 /// encoding remain here so transports cannot grow their own Work dispatcher.
 pub(crate) async fn invoke_work_operation(
-    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     request: tracedecay_api::WorkHttpRequest,
 ) -> Response {
     work::invoke_work_operation(Some(executor), request).await
@@ -1082,13 +693,13 @@ where
 
 #[hotpath::measure(label = "application_surface.registered.invoke")]
 async fn invoke_registered_http<T, O>(
-    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     operation: O,
     request_id: RequestId,
     controls: HttpApplicationControls,
-    invocation: crate::daemon_contract::DaemonInvocationRequest,
+    invocation: tracedecay_daemon_protocol::DaemonInvocationRequest,
     select_outcome: impl FnOnce(
-        crate::daemon_contract::DaemonInvocationOutcome,
+        tracedecay_daemon_protocol::DaemonInvocationOutcome,
     ) -> Option<(
         tracedecay_application::ResolvedScope,
         tracedecay_application::ApplicationOutcome<T>,
@@ -1167,23 +778,25 @@ where
     );
     let owning_layer = match &outcome {
         Ok(
-            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { .. }
-            | crate::daemon_contract::DaemonInvocationOutcome::RetainedApplicationProblem { .. },
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { .. }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplicationProblem {
+                ..
+            },
         ) => ProblemOwningLayer::Application,
         _ => ProblemOwningLayer::Runtime,
     };
     let problem = match outcome {
         Ok(outcome) => match outcome {
-            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } => {
                 problem
             }
-            crate::daemon_contract::DaemonInvocationOutcome::RetainedApplicationProblem {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplicationProblem {
                 problem,
                 ..
             } => problem,
-            crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => match problem {
-                crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
-                | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => match problem {
+                tracedecay_daemon_protocol::DaemonInvocationProblem::InvalidRequest
+                | tracedecay_daemon_protocol::DaemonInvocationProblem::UnsupportedRevision => {
                     ApplicationProblem::InvalidRequest {
                         diagnostic: SafeDiagnostic {
                             code: problem_code("invalid_request"),
@@ -1193,16 +806,16 @@ where
                         legal_actions: vec![LegalAction::CorrectRequest],
                     }
                 }
-                crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                tracedecay_daemon_protocol::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
                 }
-                crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+                tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired => {
                     ApplicationProblem::reset_required(SafeDiagnostic {
                         code: problem_code("reset_required"),
                         message: format!("The {family} store requires an explicit reset"),
                     })
                 }
-                crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation => {
+                tracedecay_daemon_protocol::DaemonInvocationProblem::ApplicationContractViolation => {
                     ApplicationProblem::unavailable(SafeDiagnostic {
                         code: problem_code("application_contract_violation"),
                         message: format!(
@@ -1210,7 +823,7 @@ where
                         ),
                     })
                 }
-                crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
+                tracedecay_daemon_protocol::DaemonInvocationProblem::Unavailable => {
                     ApplicationProblem::unavailable(SafeDiagnostic {
                         code: problem_code("unavailable"),
                         message: format!("The {family} application runtime is unavailable"),
@@ -1252,7 +865,7 @@ const DASHBOARD_FEEDBACK_OPERATIONS: [ApplicationSurfaceOperation; 3] = [
 ];
 
 pub fn http_application_router(
-    client: crate::daemon_client::DaemonInvocationClient,
+    client: tracedecay_daemon_protocol::DaemonInvocationClient,
     operation_events: OperationEventAuthority,
     active_project_id: ProjectId,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -1261,7 +874,7 @@ pub fn http_application_router(
 
 #[hotpath::measure(label = "application_surface.http.router")]
 pub fn http_application_router_with_executor(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     operation_events: OperationEventAuthority,
     active_project_id: ProjectId,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -1277,7 +890,7 @@ pub fn http_application_router_with_executor(
 /// Dashboard nests this under `/api/application` and applies one Axum layer
 /// after the full dashboard router is assembled.
 pub(crate) fn assemble_http_application_router(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     operation_events: OperationEventAuthority,
     active_project_id: ProjectId,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -1320,7 +933,7 @@ pub(crate) fn assemble_http_application_router(
 /// is unreachable from the dashboard rather than merely undocumented.
 #[hotpath::measure(label = "application_surface.http.dashboard_work_router")]
 pub fn dashboard_work_application_router_with_executor(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
     Ok(
@@ -1332,7 +945,7 @@ pub fn dashboard_work_application_router_with_executor(
 
 #[hotpath::measure(label = "application_surface.http.dashboard_configuration_router")]
 pub fn dashboard_configuration_application_router_with_executor(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
     Ok(
@@ -1350,7 +963,7 @@ pub fn dashboard_configuration_application_router_with_executor(
 
 #[hotpath::measure(label = "application_surface.http.dashboard_feedback_router")]
 pub fn dashboard_feedback_application_router_with_executor(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
     let invoker = application_invoker_for_surface(
@@ -1468,11 +1081,11 @@ struct HttpOperationEventState {
     authority: OperationEventAuthority,
     active_project_id: ProjectId,
     cancellations: HttpCancellationRegistry,
-    executor: Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+    executor: Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
 }
 
 struct SseDisconnectObserver {
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     subject: ManifestDigest,
     terminal: Arc<AtomicBool>,
 }
@@ -1559,7 +1172,7 @@ fn http_operation_event_router(
     authority: OperationEventAuthority,
     active_project_id: ProjectId,
     cancellations: HttpCancellationRegistry,
-    executor: Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+    executor: Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
 ) -> axum::Router {
     axum::Router::new()
         .route(
@@ -1655,7 +1268,7 @@ fn feedback_sse_stream_event<T>(
 }
 
 async fn http_operation_events_through_executor(
-    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     operation_id: &OperationId,
     request_id: &RequestId,
     controls: &HttpApplicationControls,
@@ -1982,7 +1595,7 @@ async fn http_operation_events(
 
 async fn http_operation_cancel_through_executor(
     state: &HttpOperationEventState,
-    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     operation_id: &OperationId,
     request_id: &RequestId,
     controls: &HttpApplicationControls,
@@ -2976,58 +2589,23 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::ObservatoryRead => serde_json::from_value(value)
             .map(ApplicationSurfaceRequest::ObservatoryRead)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationList => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::List)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationExplain => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Explain)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationGet => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Get)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationSet => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Set)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationUnset => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Unset)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationBatch => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Batch)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationWriteCredential => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::WriteCredential)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationObservedState => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::ObservedState)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationProtectedPreview => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::ProtectedPreview)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationProtectedApply => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::ProtectedApply)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationRollbackPreview => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::RollbackPreview)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationRollbackApply => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::RollbackApply)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationAudit => serde_json::from_value(value)
-            .map(ConfigurationWireRequestV1::Audit)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationList
+        | ApplicationSurfaceOperation::ConfigurationExplain
+        | ApplicationSurfaceOperation::ConfigurationGet
+        | ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationUnset
+        | ApplicationSurfaceOperation::ConfigurationBatch
+        | ApplicationSurfaceOperation::ConfigurationWriteCredential
+        | ApplicationSurfaceOperation::ConfigurationObservedState
+        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        | ApplicationSurfaceOperation::ConfigurationProtectedApply
+        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        | ApplicationSurfaceOperation::ConfigurationRollbackApply
+        | ApplicationSurfaceOperation::ConfigurationAudit => {
+            configuration_wire_request_from_invocation_payload(operation.as_str(), value)
+                .map(ApplicationSurfaceRequest::Configuration)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
         ApplicationSurfaceOperation::ContextScoutStatus => serde_json::from_value(value)
             .map(ContextScoutSurfaceRequest::Status)
             .map(ApplicationSurfaceRequest::ContextScout)
@@ -3096,7 +2674,7 @@ pub fn parse_application_surface_request(
 pub async fn execute_application_surface(
     operation: ApplicationSurfaceOperation,
     dispatched: DispatchedInvocation<ApplicationSurfaceRequest>,
-    executor: Option<&dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Option<&dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
     validate_current_application_binding(operation, &dispatched)?;
     let result_contract = ResultContractRef::from_schema(&dispatched.invocation.result_schema);
@@ -3239,7 +2817,7 @@ pub async fn execute_application_surface(
     let request = hotpath::measure_block!("application_surface.execute.request_build", {
         match invocation.request {
             ApplicationSurfaceRequest::GitRead(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::git_read(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::git_read(
                     request_id.as_str(),
                     operation,
                     request,
@@ -3249,7 +2827,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::GitPreview(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::git_preview(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::git_preview(
                     request_id.as_str(),
                     request,
                     observed_at,
@@ -3258,7 +2836,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::GitApply(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::git_apply(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::git_apply(
                     request_id.as_str(),
                     request,
                     observed_at,
@@ -3267,7 +2845,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::GitHubStackSignalExpand(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::github_stack_signal_expand(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::github_stack_signal_expand(
                     request_id.as_str(),
                     request,
                     observed_at,
@@ -3276,7 +2854,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::NativeIntegration(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::native_integration(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::native_integration(
                     request_id.as_str(),
                     operation,
                     request,
@@ -3286,7 +2864,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::Feedback(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::feedback(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
                     request_id.as_str(),
                     operation,
                     request.request_handle,
@@ -3296,7 +2874,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::feedback_advisory_cycle(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback_advisory_cycle(
                     request_id.as_str(),
                     request.document_uri,
                     observed_at,
@@ -3305,7 +2883,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::FeedbackImpact(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::feedback(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
                     request_id.as_str(),
                     ApplicationSurfaceOperation::FeedbackImpact,
                     request.request_handle,
@@ -3315,7 +2893,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::AffectedTests(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::feedback(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
                     request_id.as_str(),
                     ApplicationSurfaceOperation::AffectedTests,
                     request.request_handle,
@@ -3325,7 +2903,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::TestResults(_) => {
-                crate::daemon_contract::DaemonInvocationRequest::primitive(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::primitive(
                     request_id.as_str(),
                     operation,
                     tracedecay_usecases::primitives::PrimitiveRequest::RecentTestResults(
@@ -3337,7 +2915,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::CallableCode(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::callable_code(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::callable_code(
                     request_id.as_str(),
                     operation,
                     request,
@@ -3348,7 +2926,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::PrimitiveCode(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::primitive_code(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::primitive_code(
                     request_id.as_str(),
                     operation,
                     request,
@@ -3359,7 +2937,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::Primitive(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::primitive(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::primitive(
                     request_id.as_str(),
                     operation,
                     request,
@@ -3369,7 +2947,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::ObservatoryRead(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::observatory_read(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::observatory_read(
                     request_id.as_str(),
                     request,
                     observed_at,
@@ -3379,7 +2957,7 @@ pub async fn execute_application_surface(
                 .with_resolved_scope(resolved_scope)
             }
             ApplicationSurfaceRequest::Configuration(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::configuration(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::configuration(
                     request_id.as_str(),
                     operation,
                     request,
@@ -3389,7 +2967,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::ContextScout(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::context_scout(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::context_scout(
                     request_id.as_str(),
                     operation,
                     request,
@@ -3399,7 +2977,7 @@ pub async fn execute_application_surface(
                 )
             }
             ApplicationSurfaceRequest::Retained(request) => {
-                crate::daemon_contract::DaemonInvocationRequest::retained_application(
+                tracedecay_daemon_protocol::DaemonInvocationRequest::retained_application(
                     request_id.as_str(),
                     request,
                     observed_at,
@@ -3497,7 +3075,7 @@ pub async fn execute_application_surface(
     };
     let result = hotpath::measure_block!("application_surface.execute.assemble", {
         match response.outcome {
-            crate::daemon_contract::DaemonInvocationOutcome::GitRead { scope, result } => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitRead { scope, result } => {
                 Ok(ApplicationEnvelope::evidence(
                     result_contract.clone(),
                     request_id.clone(),
@@ -3505,7 +3083,7 @@ pub async fn execute_application_surface(
                     result.into_application(),
                 ))
             }
-            crate::daemon_contract::DaemonInvocationOutcome::GitPreview { scope, preview } => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitPreview { scope, preview } => {
                 Ok(ApplicationEnvelope::preview(
                     result_contract.clone(),
                     request_id.clone(),
@@ -3513,7 +3091,7 @@ pub async fn execute_application_surface(
                     preview.into_application_result()?,
                 ))
             }
-            crate::daemon_contract::DaemonInvocationOutcome::GitApply { scope, effect } => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitApply { scope, effect } => {
                 Ok(ApplicationEnvelope::effect(
                     result_contract.clone(),
                     request_id.clone(),
@@ -3521,9 +3099,18 @@ pub async fn execute_application_surface(
                     effect.into_application_result()?,
                 ))
             }
-            crate::daemon_contract::DaemonInvocationOutcome::Feedback { scope, result }
-            | crate::daemon_contract::DaemonInvocationOutcome::Primitive { scope, result }
-            | crate::daemon_contract::DaemonInvocationOutcome::ObservatoryRead { scope, result } => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Feedback { scope, result }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::Primitive { scope, result }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ObservatoryRead {
+                scope,
+                result,
+            } => Ok(ApplicationEnvelope::evidence(
+                result_contract.clone(),
+                request_id.clone(),
+                scope,
+                result.into_application(),
+            )),
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::CallableCode { scope, result } => {
                 Ok(ApplicationEnvelope::evidence(
                     result_contract.clone(),
                     request_id.clone(),
@@ -3531,15 +3118,10 @@ pub async fn execute_application_surface(
                     result.into_application(),
                 ))
             }
-            crate::daemon_contract::DaemonInvocationOutcome::CallableCode { scope, result } => {
-                Ok(ApplicationEnvelope::evidence(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    scope,
-                    result.into_application(),
-                ))
-            }
-            crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Configuration {
+                scope,
+                outcome,
+            } => {
                 if validate_configuration_outcome(
                     operation,
                     &outcome,
@@ -3565,23 +3147,24 @@ pub async fn execute_application_surface(
                     )?)
                 }
             }
-            crate::daemon_contract::DaemonInvocationOutcome::GitHubStackSignalExpand {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitHubStackSignalExpand {
                 scope,
                 outcome,
             }
-            | crate::daemon_contract::DaemonInvocationOutcome::NativeIntegration {
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::NativeIntegration {
                 scope,
                 outcome,
             }
-            | crate::daemon_contract::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
-                Ok(ApplicationEnvelope {
-                    contract: result_contract.clone(),
-                    request_id: request_id.clone(),
-                    scope,
-                    outcome,
-                })
-            }
-            crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication {
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ContextScout {
+                scope,
+                outcome,
+            } => Ok(ApplicationEnvelope {
+                contract: result_contract.clone(),
+                request_id: request_id.clone(),
+                scope,
+                outcome,
+            }),
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication {
                 scope,
                 outcome,
             } => Ok(ApplicationEnvelope {
@@ -3590,14 +3173,14 @@ pub async fn execute_application_surface(
                 scope,
                 outcome: retained::outcome_value(outcome)?,
             }),
-            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } => {
                 Err(ApplicationProblemEnvelope::new(
                     result_contract.clone(),
                     request_id.clone(),
                     problem,
                 )?)
             }
-            crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => {
                 Err(ApplicationProblemEnvelope::new(
                     result_contract.clone(),
                     request_id.clone(),
@@ -3746,7 +3329,7 @@ fn feedback_surface_is_observable(operation: ApplicationSurfaceOperation) -> boo
 }
 
 pub async fn observe_surface_argument_rejection(
-    executor: Option<&dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Option<&dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
     request_id: &RequestId,
@@ -3823,7 +3406,7 @@ pub async fn resolve_http_application_surface(
     request_id: RequestId,
     request: ApplicationSurfaceRequest,
     requested_format: RequestedOutputFormat,
-    executor: Option<&dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Option<&dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
     let dispatched = match resolve_http_application_surface_dispatch(
         operation,
@@ -3857,7 +3440,7 @@ pub async fn resolve_dashboard_application_surface(
     request_id: RequestId,
     request: ApplicationSurfaceRequest,
     requested_format: RequestedOutputFormat,
-    executor: Option<&dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Option<&dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
     let dispatched = resolve_application_surface_dispatch(
         BindingSurface::Dashboard,
@@ -3961,7 +3544,7 @@ fn invoke_catalog_bound_application_request(
 async fn invoke_application_adapter_request(
     request: HttpApplicationRequest,
     surface: BindingSurface,
-    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     catalog: &CatalogSnapshotV1,
 ) -> std::result::Result<CanonicalInvocationResult<Value>, ApplicationContractError> {
     let operation = request.operation;
@@ -4125,7 +3708,7 @@ fn resolve_application_binding(
     resolver: &impl BindingResolver,
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
-) -> Option<crate::daemon_client::ResolvedBinding> {
+) -> Option<tracedecay_daemon_protocol::ResolvedBinding> {
     resolve_named_binding(resolver, surface, operation.as_str())
 }
 
@@ -4269,11 +3852,11 @@ fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
 }
 
 fn invocation_problem(
-    problem: crate::daemon_contract::DaemonInvocationProblem,
+    problem: tracedecay_daemon_protocol::DaemonInvocationProblem,
 ) -> Result<ApplicationProblem, ApplicationSurfaceAdapterError> {
     Ok(match problem {
-        crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
-        | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
+        tracedecay_daemon_protocol::DaemonInvocationProblem::InvalidRequest
+        | tracedecay_daemon_protocol::DaemonInvocationProblem::UnsupportedRevision => {
             ApplicationProblem::InvalidRequest {
                 diagnostic: SafeDiagnostic::new(
                     "application.surface.invalid_request",
@@ -4283,22 +3866,22 @@ fn invocation_problem(
                 legal_actions: Vec::new(),
             }
         }
-        crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+        tracedecay_daemon_protocol::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+        tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired => {
             ApplicationProblem::reset_required(SafeDiagnostic::new(
                 "application.surface.reset_required",
                 "The application store requires an explicit reset",
             )?)
         }
-        crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation => {
+        tracedecay_daemon_protocol::DaemonInvocationProblem::ApplicationContractViolation => {
             ApplicationProblem::unavailable(SafeDiagnostic::new(
                 "application.surface.contract_violation",
                 "The application result violated its canonical contract",
             )?)
         }
-        crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
+        tracedecay_daemon_protocol::DaemonInvocationProblem::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic::new(
                 "application.surface.unavailable",
                 "The application service for this operation is unavailable",

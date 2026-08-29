@@ -82,7 +82,7 @@ fn post_commit_partial_effect(
 fn deadline_from_now(offset: Duration) -> Deadline {
     let offset = i64::try_from(offset.as_micros()).expect("fixture deadline fits domain clock");
     Deadline::new(UtcMicros(
-        crate::daemon_client::invocation_now_micros()
+        tracedecay_daemon_protocol::invocation_now_micros()
             .0
             .saturating_add(offset),
     ))
@@ -219,26 +219,26 @@ impl tracedecay_application::ApplicationInvocationExecutor for FactStoreCurateSu
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for FactStoreCurateSuccessExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for FactStoreCurateSuccessExecutor {
     fn invoke_controlled(
         &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
+        request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         deadline: Deadline,
         cancellation: CancellationSignal,
-        policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
-            crate::daemon_contract::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
         assert_eq!(
             policy,
-            crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect,
+            tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect,
         );
         assert!(!cancellation.is_cancelled());
-        let crate::daemon_contract::DaemonInvocationPayload::RetainedApplication {
+        let tracedecay_daemon_protocol::DaemonInvocationPayload::RetainedApplication {
             request: RetainedSurfaceRequestV1::FactStoreCurate(bounds),
             deadline: embedded_deadline,
             cancellation: embedded_cancellation,
@@ -262,9 +262,9 @@ impl crate::daemon_client::DaemonInvocationExecutor for FactStoreCurateSuccessEx
             bounds.fact_review_limit,
             bounds.min_confidence_millionths,
         );
-        let response = crate::daemon_contract::DaemonInvocationResponse::with_outcome(
+        let response = tracedecay_daemon_protocol::DaemonInvocationResponse::with_outcome(
             request_id.as_str().to_owned(),
-            crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication {
                 scope: self.scope.clone(),
                 outcome,
             },
@@ -277,7 +277,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for FactStoreCurateSuccessEx
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_runtime_core::errors::Result<()>,
     > {
@@ -305,44 +305,45 @@ impl tracedecay_application::ApplicationInvocationExecutor for ExpiredDeadlineEx
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for ExpiredDeadlineExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExecutor {
     fn invoke_controlled(
         &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
+        request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         deadline: Deadline,
         _cancellation: CancellationSignal,
-        policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
-            crate::daemon_contract::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
             policy,
-            crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect,
+            tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect,
         );
-        assert!(deadline.is_elapsed_at(crate::daemon_client::invocation_now_micros()));
-        let response = if deadline.is_elapsed_at(crate::daemon_client::invocation_now_micros()) {
-            crate::daemon_contract::DaemonInvocationResponse::application_problem(
-                &request.request_id,
-                ApplicationProblem::timed_out_before_admission(),
-            )
-        } else {
-            self.mutations.fetch_add(1, Ordering::SeqCst);
-            crate::daemon_contract::DaemonInvocationResponse::application_problem(
-                &request.request_id,
-                ApplicationProblem::unavailable(
-                    SafeDiagnostic::new(
-                        "retained.fixture.unexpected-deadline-mutation",
-                        "The expired fixture would have attempted a mutation.",
-                    )
-                    .expect("fixture diagnostic"),
-                ),
-            )
-        };
+        assert!(deadline.is_elapsed_at(tracedecay_daemon_protocol::invocation_now_micros()));
+        let response =
+            if deadline.is_elapsed_at(tracedecay_daemon_protocol::invocation_now_micros()) {
+                tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+                    &request.request_id,
+                    ApplicationProblem::timed_out_before_admission(),
+                )
+            } else {
+                self.mutations.fetch_add(1, Ordering::SeqCst);
+                tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+                    &request.request_id,
+                    ApplicationProblem::unavailable(
+                        SafeDiagnostic::new(
+                            "retained.fixture.unexpected-deadline-mutation",
+                            "The expired fixture would have attempted a mutation.",
+                        )
+                        .expect("fixture diagnostic"),
+                    ),
+                )
+            };
         Box::pin(async move { Ok(response) })
     }
 
@@ -351,7 +352,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for ExpiredDeadlineExecutor 
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_runtime_core::errors::Result<()>,
     > {
@@ -479,7 +480,7 @@ async fn fact_store_curate_expired_deadline_does_not_mutate() {
 }
 
 struct PostCommitPartialEffectExecutor {
-    response: Mutex<Option<crate::daemon_contract::DaemonInvocationResponse>>,
+    response: Mutex<Option<tracedecay_daemon_protocol::DaemonInvocationResponse>>,
 }
 
 impl PostCommitPartialEffectExecutor {
@@ -490,7 +491,7 @@ impl PostCommitPartialEffectExecutor {
     ) -> Self {
         Self {
             response: Mutex::new(Some(
-                crate::daemon_contract::DaemonInvocationResponse::retained_application_problem(
+                tracedecay_daemon_protocol::DaemonInvocationResponse::retained_application_problem(
                     request_id.as_str(),
                     authority_scope,
                     post_commit_partial_effect(operation, request_id),
@@ -515,23 +516,23 @@ impl tracedecay_application::ApplicationInvocationExecutor for PostCommitPartial
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for PostCommitPartialEffectExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PostCommitPartialEffectExecutor {
     fn invoke_controlled(
         &self,
-        _request: crate::daemon_contract::DaemonInvocationRequest,
+        _request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         _deadline: Deadline,
         _cancellation: CancellationSignal,
-        policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
-            crate::daemon_contract::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
         assert_eq!(
             policy,
-            crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect,
+            tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect,
             "retained mutations must retain the authoritative-effect policy",
         );
         let response = self
@@ -548,7 +549,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for PostCommitPartialEffectE
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_runtime_core::errors::Result<()>,
     > {
@@ -576,34 +577,34 @@ impl tracedecay_application::ApplicationInvocationExecutor for PreCommitInterrup
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for PreCommitInterruptionExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PreCommitInterruptionExecutor {
     fn invoke_controlled(
         &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
+        request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         _deadline: Deadline,
         cancellation: CancellationSignal,
-        policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
-            crate::daemon_contract::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
             policy,
-            crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect,
+            tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect,
             "retained mutations must retain the authoritative-effect policy",
         );
         let response = if cancellation.is_cancelled() {
-            crate::daemon_contract::DaemonInvocationResponse::application_problem(
+            tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
                 &request.request_id,
                 ApplicationProblem::cancelled_before_admission(),
             )
         } else {
             self.mutations.fetch_add(1, Ordering::SeqCst);
-            crate::daemon_contract::DaemonInvocationResponse::application_problem(
+            tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
                 &request.request_id,
                 ApplicationProblem::unavailable(
                     SafeDiagnostic::new(
@@ -622,7 +623,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for PreCommitInterruptionExe
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_runtime_core::errors::Result<()>,
     > {
