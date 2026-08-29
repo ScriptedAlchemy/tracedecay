@@ -27,6 +27,8 @@ use tracedecay_lsp::analyzer::settings::{
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
+use crate::lsp_support::analyzer_runtime_config_error;
+
 use crate::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
     CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
@@ -264,7 +266,7 @@ impl DashboardDiagnosticsAuthorityV1 {
             patch(&mut settings);
             save_settings(&self.inner.settings_root, &settings)
                 .await
-                .map_err(TraceDecayError::from)?;
+                .map_err(analyzer_runtime_config_error)?;
             let mut adapters = builtin_adapters();
             adapters.extend(settings.custom_adapters.clone());
             broker.update_adapters(adapters);
@@ -332,7 +334,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         let files = indexed_files(reader, Arc::clone(&cancellation))?;
         let documents = documents_for_adapter(&self.inner.project_root, &adapter, files)
             .await
-            .map_err(TraceDecayError::from)?;
+            .map_err(analyzer_runtime_config_error)?;
         let document_count = documents.len();
         self.inner.broker.lock().await.record_backfill_progress(
             language,
@@ -370,7 +372,7 @@ impl DashboardDiagnosticsAuthorityV1 {
                         let mut broker = authority.inner.broker.lock().await;
                         let refresh_result = broker
                             .finish_refresh(completed)
-                            .map_err(TraceDecayError::from);
+                            .map_err(analyzer_runtime_config_error);
                         if refresh_result.is_ok() {
                             let project_root = authority.inner.project_root.clone();
                             broker
@@ -423,7 +425,7 @@ impl DashboardDiagnosticsAuthorityV1 {
                 }
                 .into());
             }
-            Err(error) => return Err(TraceDecayError::from(error).into()),
+            Err(error) => return Err(analyzer_runtime_config_error(error).into()),
         }
         Ok(())
     }
