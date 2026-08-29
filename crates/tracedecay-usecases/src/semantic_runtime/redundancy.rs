@@ -604,12 +604,15 @@ mod tests {
         use super::{SemanticProjectRedundancyStateV1, redundancy_states};
         use crate::semantic_runtime::{
             SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticActivationRequestV1,
-            SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRetainedVectorGenerationsV1,
-            SemanticRuntimeStateV1, project_semantic_application_status,
-            register_project_semantic_runtime, unregister_project_semantic_runtime,
+            SemanticConfigurationPinV1, SemanticFallbackReasonV1,
+            SemanticRetainedVectorGenerationsV1, SemanticRuntimeStateV1,
+            project_semantic_application_status, register_project_semantic_runtime,
+            unregister_project_semantic_runtime,
         };
         use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
-        use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, VectorGenerationIdV1};
+        use tracedecay_domain::{
+            CodeGenerationId, ManifestDigest, UtcMicros, VectorGenerationIdV1,
+        };
         use tracedecay_semantic::{
             DaemonSemanticRuntimeHandleV1, PreparedSemanticRuntimeCommitV1,
             SemanticGenerationPointerV1, SemanticRuntimeWorkV1,
