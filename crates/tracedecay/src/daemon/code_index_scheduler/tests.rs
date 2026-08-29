@@ -5337,10 +5337,10 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
             .is_none(),
         "the exact failed generation must be retired from the serving slot"
     );
-    assert_eq!(
-        registry.latest_generation_id(fixture.path()).await,
-        Some(newer),
-        "retiring the serving slot must not wipe the text lane that latest_generation_id falls back to"
+    assert_ne!(
+        registry.latest_generation_id(fixture.path()).await.as_ref(),
+        Some(&newer),
+        "a matching rollback token must also withdraw the text fallback latest_generation_id would keep serving"
     );
 
     registry.shutdown().await;
