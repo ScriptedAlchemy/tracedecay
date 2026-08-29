@@ -256,7 +256,7 @@ fn truncated_json_envelope_reports_store_failure() {
     let blocker = dir.path().join("blocker");
     std::fs::write(&blocker, b"not a directory").unwrap();
     let _profile = EnvRestore::set(
-        crate::config::USER_DATA_DIR_ENV,
+        tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
         blocker.join(".tracedecay"),
     );
     let long = format!(

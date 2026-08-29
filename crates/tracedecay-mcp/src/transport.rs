@@ -442,7 +442,7 @@ mod tests {
 
         use tokio::io::{AsyncRead, BufReader, ReadBuf};
 
-        use tracedecay_sessions::admission::{
+        use tracedecay_sessions::admission::wire::{
             MAX_MCP_JSONRPC_FRAME_BYTES, WIRE_RECORD_TOO_LARGE, line_outcome_to_io,
             read_bounded_line, wire_oversized_io_error,
         };
