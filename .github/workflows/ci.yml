@@ -40,7 +40,7 @@ jobs:
     name: PR checkout dogfood
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -82,8 +82,10 @@ jobs:
       - name: Build checked-out TraceDecay CLI
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
-      - name: Test dogfood output validation
-        run: python3 scripts/test-check-pr-dogfood-output.py
+      - name: Test dogfood harnesses
+        run: |
+          python3 scripts/test-check-pr-dogfood-output.py
+          python3 scripts/test-pr-dogfood-portability.py
 
       - name: Initialize checkout and exercise CLI tools
         run: scripts/ci-pr-dogfood-smoke.sh

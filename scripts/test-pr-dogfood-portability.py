@@ -29,6 +29,50 @@ def helper(*args: str, timeout: float = 10) -> subprocess.CompletedProcess[str]:
     )
 
 
+def make_two_commit_project(directory: Path) -> tuple[Path, str, str]:
+    project = directory / "project"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    hooks = directory / "empty-hooks"
+    hooks.mkdir()
+    subprocess.run(
+        ["git", "-C", str(project), "config", "core.hooksPath", str(hooks)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(project), "config", "user.name", "Dogfood Test"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project),
+            "config",
+            "user.email",
+            "dogfood@example.invalid",
+        ],
+        check=True,
+    )
+    tracked = project / "fixture.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(project), "add", "fixture.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(project), "commit", "-qm", "base"], check=True
+    )
+    base_oid = subprocess.check_output(
+        ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
+    ).strip()
+    tracked.write_text("head\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(project), "commit", "-qam", "head"], check=True
+    )
+    head_oid = subprocess.check_output(
+        ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
+    ).strip()
+    return project, base_oid, head_oid
+
+
 class PortableProcessTests(unittest.TestCase):
     def test_run_preserves_output_and_exit_status(self) -> None:
         completed = helper(
@@ -169,9 +213,10 @@ class IsolatedDaemonHarnessTests(unittest.TestCase):
                 if term_marker and ready_marker and survived_marker:
                     child = '''
                 from pathlib import Path
-                import os, signal, time
+                import os, signal, sys, time
                 def on_term(_signum, _frame):
                     Path(os.environ["FAKE_DESCENDANT_TERM_MARKER"]).write_text("term", encoding="utf-8")
+                    raise SystemExit(0)
                 signal.signal(signal.SIGTERM, on_term)
                 Path(os.environ["FAKE_DESCENDANT_READY_MARKER"]).write_text("ready", encoding="utf-8")
                 time.sleep(1.5)
@@ -187,7 +232,10 @@ class IsolatedDaemonHarnessTests(unittest.TestCase):
                 listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 listener.bind(socket_path)
                 listener.listen()
-                signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
+                if os.environ.get("FAKE_DAEMON_IGNORE_TERM") == "1":
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                else:
+                    signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
                 while True:
                     listener.accept()[0].close()
                 """
@@ -208,6 +256,8 @@ class IsolatedDaemonHarnessTests(unittest.TestCase):
             env["FAKE_DESCENDANT_TERM_MARKER"] = str(term_marker)
             env["FAKE_DESCENDANT_READY_MARKER"] = str(ready_marker)
             env["FAKE_DESCENDANT_SURVIVED_MARKER"] = str(survived_marker)
+            profile_path_marker = tmp_path / "profile-path"
+            env["FAKE_PROFILE_PATH_MARKER"] = str(profile_path_marker)
             completed = subprocess.run(
                 [
                     str(DAEMON_HARNESS),
@@ -223,7 +273,7 @@ class IsolatedDaemonHarnessTests(unittest.TestCase):
                     sys.executable,
                     "-S",
                     "-c",
-                    "import os; assert os.path.exists(os.environ['TRACEDECAY_DAEMON_SOCKET']); print('smoke command output')",
+                    "import os, pathlib; assert os.path.exists(os.environ['TRACEDECAY_DAEMON_SOCKET']); pathlib.Path(os.environ['FAKE_PROFILE_PATH_MARKER']).write_text(os.environ['TRACEDECAY_DATA_DIR'], encoding='utf-8'); print('smoke command output')",
                 ],
                 check=False,
                 capture_output=True,
@@ -242,6 +292,66 @@ class IsolatedDaemonHarnessTests(unittest.TestCase):
             self.assertFalse(
                 survived_marker.exists(), "daemon descendant escaped group KILL"
             )
+            profile_path = Path(profile_path_marker.read_text(encoding="utf-8"))
+            self.assertFalse(profile_path.exists(), "isolated profile was retained")
+
+    def test_graceful_cleanup_preserves_command_failure_status(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="daemon-graceful-") as tmp:
+            daemon = self.make_fake_daemon(Path(tmp))
+            completed = subprocess.run(
+                [
+                    str(DAEMON_HARNESS),
+                    "--bin",
+                    str(daemon),
+                    "--ready-timeout",
+                    "2",
+                    "--stop-timeout",
+                    "1",
+                    "--",
+                    sys.executable,
+                    "-S",
+                    "-c",
+                    "raise SystemExit(7)",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(completed.returncode, 7, completed.stderr)
+
+    def test_forced_cleanup_fails_an_otherwise_green_command(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="daemon-forced-") as tmp:
+            daemon = self.make_fake_daemon(Path(tmp))
+            env = os.environ.copy()
+            env["FAKE_DAEMON_IGNORE_TERM"] = "1"
+            completed = subprocess.run(
+                [
+                    str(DAEMON_HARNESS),
+                    "--bin",
+                    str(daemon),
+                    "--ready-timeout",
+                    "2",
+                    "--stop-timeout",
+                    "1",
+                    "--lifecycle-label",
+                    "fake daemon",
+                    "--",
+                    sys.executable,
+                    "-S",
+                    "-c",
+                    "print('green command')",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=6,
+            )
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn("green command", completed.stdout)
+            self.assertIn("== force stopping fake daemon", completed.stderr)
+            self.assertIn("fake daemon boot", completed.stderr)
 
     def test_readiness_timeout_is_bounded_and_surfaces_daemon_output(self) -> None:
         with tempfile.TemporaryDirectory(prefix="daemon-not-ready-") as tmp:
@@ -292,53 +402,12 @@ class IsolatedDaemonHarnessTests(unittest.TestCase):
 
 
 class DogfoodJourneyOutputTests(unittest.TestCase):
-    def test_run_mode_emits_validated_phase_output_and_timings(self) -> None:
+    def test_run_mode_polls_until_strict_readiness_then_validates_journey(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dogfood-output-") as tmp:
             tmp_path = Path(tmp)
-            project = tmp_path / "project"
             output = tmp_path / "output"
-            project.mkdir()
             output.mkdir()
-            subprocess.run(["git", "init", "-q", str(project)], check=True)
-            hooks = tmp_path / "empty-hooks"
-            hooks.mkdir()
-            subprocess.run(
-                ["git", "-C", str(project), "config", "core.hooksPath", str(hooks)],
-                check=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(project), "config", "user.name", "Dogfood Test"],
-                check=True,
-            )
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(project),
-                    "config",
-                    "user.email",
-                    "dogfood@example.invalid",
-                ],
-                check=True,
-            )
-            tracked = project / "fixture.txt"
-            tracked.write_text("base\n", encoding="utf-8")
-            subprocess.run(
-                ["git", "-C", str(project), "add", "fixture.txt"], check=True
-            )
-            subprocess.run(
-                ["git", "-C", str(project), "commit", "-qm", "base"], check=True
-            )
-            base_oid = subprocess.check_output(
-                ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
-            ).strip()
-            tracked.write_text("head\n", encoding="utf-8")
-            subprocess.run(
-                ["git", "-C", str(project), "commit", "-qam", "head"], check=True
-            )
-            head_oid = subprocess.check_output(
-                ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
-            ).strip()
+            project, base_oid, head_oid = make_two_commit_project(tmp_path)
 
             fake_binary = tmp_path / "fake-tracedecay"
             fake_binary.write_text(
@@ -351,9 +420,19 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                     elif [[ "${1:-}" == "init" ]]; then
                       :
                     elif [[ "${1:-}" == "status" ]]; then
-                      echo '{"status":"ready"}'
+                      count=0
+                      if [[ -f "$FAKE_STATUS_COUNTER" ]]; then
+                        count="$(cat "$FAKE_STATUS_COUNTER")"
+                      fi
+                      count="$((count + 1))"
+                      echo "$count" >"$FAKE_STATUS_COUNTER"
+                      if [[ "${FAKE_NEVER_READY:-0}" == "1" || "$count" -lt 3 ]]; then
+                        echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.text-only"}},"graph_statistics":{"state":"unavailable","reason":"exact_scope_generation_not_ready"}}'
+                      else
+                        echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.ready"}},"graph_statistics":{"state":"observed","generation_id":"generation.ready","symbol_count":2,"edge_count":1}}'
+                      fi
                     elif [[ "${1:-} ${2:-}" == "tool context" ]]; then
-                      echo '{"coverage":{"state":"complete"}}'
+                      echo '{"coverage":{"exact":"complete","lexical":"complete","graph":"complete","semantic":{"status":"unavailable","reason":"disabled"},"recall":"partial"},"search_matches":[{"file":"src/main.rs"}],"symbols":[{"node_id":"symbol:main"}]}'
                     elif [[ "${1:-} ${2:-}" == "tool pr_context" ]]; then
                       project=""
                       base=""
@@ -370,7 +449,7 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                       base_oid="$(git -C "$project" rev-parse "$base^{commit}")"
                       head_oid="$(git -C "$project" rev-parse "$head^{commit}")"
                       merge_base="$(git -C "$project" merge-base "$base" "$head")"
-                      printf '{"base_oid":"%s","head_oid":"%s","merge_base":"%s","files_changed":1,"changes":[{"path":"fixture.txt","status":"modified"}],"analysis_coverage":{"complete":true}}\\n' \\
+                      printf '{"base_oid":"%s","head_oid":"%s","merge_base":"%s","graph_generation":"code-graph:sha256:ready-generation","files_changed":1,"changes":[{"path":"fixture.txt","status":"modified"}],"next_cursor":"pr-context.cursor.next","symbol_page":{"limit":1,"returned":1,"has_more":true,"complete":false,"selection":"stable_prefix","continuation_available":true},"analysis_coverage":{"seed_symbols_analyzed":1,"symbols_returned":1,"symbols_complete":false,"impact_nodes_admitted":2,"impact_nodes_returned":2,"direct_call_edges_admitted":1,"impact_bytes_admitted":256,"impact_partial":false,"complete":false}}\\n' \\
                         "$base_oid" "$head_oid" "$merge_base"
                     else
                       echo "unexpected fake TraceDecay arguments: $*" >&2
@@ -383,6 +462,10 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
             fake_binary.chmod(0o755)
             env = os.environ.copy()
             env["TRACEDECAY_BIN"] = str(fake_binary)
+            status_counter = tmp_path / "status-counter"
+            env["FAKE_STATUS_COUNTER"] = str(status_counter)
+            env["TRACEDECAY_DOGFOOD_READINESS_TIMEOUT"] = "1"
+            env["TRACEDECAY_DOGFOOD_READINESS_POLL_INTERVAL"] = "0.05"
             completed = subprocess.run(
                 [
                     str(DOGFOOD_SCRIPT),
@@ -408,7 +491,71 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
             self.assertIn(
                 "TraceDecay PR dogfood pr_context output is valid", completed.stdout
             )
+            self.assertIn("tracedecay_ci_readiness attempts=3", completed.stdout)
+            self.assertEqual(status_counter.read_text(encoding="utf-8").strip(), "4")
             self.assertIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
+
+    def test_run_mode_bounds_never_ready_graph_and_surfaces_last_reason(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dogfood-not-ready-") as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "output"
+            output.mkdir()
+            project, base_oid, head_oid = make_two_commit_project(tmp_path)
+
+            status_counter = tmp_path / "status-counter"
+            fake_binary = tmp_path / "fake-tracedecay"
+            fake_binary.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    if [[ "${1:-}" == "--version" ]]; then
+                      echo "tracedecay fake-test"
+                    elif [[ "${1:-}" == "init" ]]; then
+                      :
+                    elif [[ "${1:-}" == "status" ]]; then
+                      count=0
+                      [[ ! -f "$FAKE_STATUS_COUNTER" ]] || count="$(cat "$FAKE_STATUS_COUNTER")"
+                      echo "$((count + 1))" >"$FAKE_STATUS_COUNTER"
+                      echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.text-only"}},"graph_statistics":{"state":"unavailable","reason":"exact_scope_generation_not_ready"}}'
+                    else
+                      echo "journey advanced before graph readiness" >&2
+                      exit 2
+                    fi
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_binary.chmod(0o755)
+            env = os.environ.copy()
+            env["TRACEDECAY_BIN"] = str(fake_binary)
+            env["FAKE_STATUS_COUNTER"] = str(status_counter)
+            env["TRACEDECAY_DOGFOOD_READINESS_TIMEOUT"] = "0.3"
+            env["TRACEDECAY_DOGFOOD_READINESS_POLL_INTERVAL"] = "0.05"
+            started = time.monotonic()
+            completed = subprocess.run(
+                [
+                    str(DOGFOOD_SCRIPT),
+                    "--run",
+                    str(project),
+                    base_oid,
+                    head_oid,
+                    str(output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=5,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertGreaterEqual(
+                int(status_counter.read_text(encoding="utf-8").strip()), 2
+            )
+            self.assertIn("exact_scope_generation_not_ready", completed.stderr)
+            self.assertNotIn("Traceback", completed.stderr)
+            self.assertNotIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
 
 
 if __name__ == "__main__":
