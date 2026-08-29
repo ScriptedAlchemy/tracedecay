@@ -355,16 +355,9 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         if state.closed {
             return Err(SessionAcquireError::Closed);
         }
-        let reaped = reap_expired_locked(&mut state, now, self.inner.config.idle_timeout);
-        if reaped != 0 {
-            state.mark_availability_changed();
-        }
         if !state.allows_acquire(waiter_id) {
             let active = state.active;
             drop(state);
-            if reaped != 0 {
-                self.inner.wakeups.notify_all();
-            }
             return Err(SessionAcquireError::Exhausted {
                 active,
                 max: self.inner.config.max_sessions,
@@ -379,11 +372,18 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         if let Some(entry) = reusable {
             state.active += 1;
             drop(state);
-            if reaped != 0 {
-                self.inner.wakeups.notify_all();
-            }
             crate::hotpath_observe::record_session_acquire("warm");
             return Ok(self.make_guard(identity, entry.session, entry.resident_bytes));
+        }
+        // A request for the exact admitted projection is the authority that
+        // makes its idle session useful again. Reaping that session first and
+        // immediately reopening the same model turns every post-idle query
+        // into a cold model load. Only reclaim expired sessions after proving
+        // none can serve this acquisition; explicit maintenance may still
+        // call `reap_idle` when it needs to release all expired ownership.
+        let reaped = reap_expired_locked(&mut state, now, self.inner.config.idle_timeout);
+        if reaped != 0 {
+            state.mark_availability_changed();
         }
         if state.live_sessions() >= self.inner.config.max_sessions {
             let active = state.active;
@@ -1528,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn acquire_reaps_expired_idle_before_reuse() {
+    fn acquire_reuses_expired_exact_identity_instead_of_reopening() {
         let pool = fake_pool(2, Duration::from_secs(10), 1 << 20);
         let authority = authority();
         {
@@ -1537,8 +1537,14 @@ mod tests {
         pool.inner.clock.advance(Duration::from_secs(11));
         let _guard = pool.acquire(&authority).expect("second acquire");
         let stats = pool.stats();
-        assert_eq!(stats.sessions_reaped, 1, "expired idle reaped on acquire");
-        assert_eq!(stats.sessions_opened, 2, "a fresh session was opened");
+        assert_eq!(
+            stats.sessions_reaped, 0,
+            "on-demand acquisition must not discard the exact session it needs"
+        );
+        assert_eq!(
+            stats.sessions_opened, 1,
+            "the already-warmed exact session must be reused after idle"
+        );
     }
 
     #[test]
