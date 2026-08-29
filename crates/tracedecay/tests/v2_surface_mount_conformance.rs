@@ -181,7 +181,7 @@ impl MountFixture {
         let home_dir = common::tempdir_or_panic();
         let home = home_dir.path().to_path_buf();
         let profile = home.join(".tracedecay");
-        tracedecay::storage::PrivateStoreIo::create_dir_all(&profile)
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
             .expect("isolated profile root");
         let project = home.join("project");
         fs::create_dir_all(project.join("src")).expect("isolated project root");

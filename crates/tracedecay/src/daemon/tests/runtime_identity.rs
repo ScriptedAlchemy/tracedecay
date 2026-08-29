@@ -342,7 +342,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             | crate::dashboard::AutomationSchedulerReconcileOutcome::Exiting
     ));
     assert!(
-        crate::storage::read_legacy_enrollment_marker(&linked)
+        tracedecay_runtime_core::storage::read_legacy_enrollment_marker(&linked)
             .expect("read linked legacy marker")
             .is_some_and(|marker| marker.project_id == stale_project_id),
         "routing must ignore, not rewrite or delete, a stale legacy worktree-local marker"

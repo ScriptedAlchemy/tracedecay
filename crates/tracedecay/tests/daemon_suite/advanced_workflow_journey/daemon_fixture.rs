@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::storage::PrivateStoreIo;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_application::WorkAttemptListRequestV1;
 use tracedecay_application::configuration::{
     ComponentConfigurationState, ConfigurationObservedStateRequestV1,

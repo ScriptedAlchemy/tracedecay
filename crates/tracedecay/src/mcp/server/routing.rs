@@ -411,7 +411,7 @@ mod tests {
             )
             .await
             .expect("register original project root");
-        crate::storage::write_repository_identity_marker(&old_root, "proj_renamed")
+        tracedecay_runtime_core::storage::write_repository_identity_marker(&old_root, "proj_renamed")
             .expect("write repository identity");
 
         fs::rename(&old_root, &new_root).expect("rename project root");
@@ -479,7 +479,7 @@ mod tests {
             )
             .await
             .expect("register primary checkout");
-        crate::storage::write_repository_identity_marker(&primary_root, "proj_primary")
+        tracedecay_runtime_core::storage::write_repository_identity_marker(&primary_root, "proj_primary")
             .expect("write repository identity");
 
         let params = initialize_params(&linked_root);

@@ -12,7 +12,7 @@ use std::path::Path;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_runtime_core::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay::mcp::ToolResult;
-use tracedecay::storage::resolve_layout_for_current_profile;
+use tracedecay_runtime_core::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
 struct MountedProductionProject {

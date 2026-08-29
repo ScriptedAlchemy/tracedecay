@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::storage::{read_repository_identity_marker, write_repository_identity_marker};
+use tracedecay_runtime_core::storage::{read_repository_identity_marker, write_repository_identity_marker};
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
     ProviderId, SessionId,

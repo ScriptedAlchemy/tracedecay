@@ -49,7 +49,7 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::project_registry::{ProjectRegistryView, render_project_registry_view};
-use crate::storage::{ProjectPath, StorageMode, StoreKind};
+use tracedecay_runtime_core::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_usecases::context::read_modes::{LineRange, ReadMode};

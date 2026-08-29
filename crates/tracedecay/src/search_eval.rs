@@ -3,7 +3,7 @@
 //! The implementation lives in `tracedecay-search-eval`. Only the one contract
 //! that genuinely needs the root binary stays here: resolving the authoritative
 //! repository identity of the checkout under evaluation, which reads the
-//! repository identity marker (`crate::storage`) and the provenance admission
+//! repository identity marker (`tracedecay_runtime_core::storage`) and the provenance admission
 //! context (`tracedecay_sessions::repository_provenance`). Everything else is re-exported so
 //! extraction does not change the root's public surface.
 
@@ -33,7 +33,7 @@ pub mod semantic_native {
 pub fn root_admitted_corpus_scope(
     repo_root: &Path,
 ) -> Option<tracedecay_application::ResolvedScope> {
-    let marker = crate::storage::read_repository_identity_marker(repo_root)
+    let marker = tracedecay_runtime_core::storage::read_repository_identity_marker(repo_root)
         .ok()
         .flatten()?;
     let project_id = tracedecay_domain::ProjectId::new(marker.project_id.clone()).ok()?;
@@ -74,7 +74,7 @@ mod tests {
         );
 
         assert!(
-            crate::storage::write_repository_identity_marker(&root, "project.search-eval-fixture")
+            tracedecay_runtime_core::storage::write_repository_identity_marker(&root, "project.search-eval-fixture")
                 .expect("write repository fixture identity")
         );
         let scope = root_admitted_corpus_scope(&root).expect("admitted identity");

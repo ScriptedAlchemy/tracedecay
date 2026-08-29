@@ -731,7 +731,7 @@ impl StoreAdministration {
     pub(super) async fn registered_project_session_database(
         &self,
         project_root: &Path,
-        store_layout: &crate::storage::StoreLayout,
+        store_layout: &tracedecay_runtime_core::storage::StoreLayout,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let project_id = store_layout
             .identity
@@ -1412,7 +1412,7 @@ impl StoreAdministration {
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "branch administration requires a project path".to_string(),
                 })?;
-        let layout = crate::storage::resolve_persisted_layout(
+        let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(
             project_root,
             &handshake.client_identity.profile_root,
         )?

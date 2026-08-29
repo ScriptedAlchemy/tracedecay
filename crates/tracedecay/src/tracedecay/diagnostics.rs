@@ -8,7 +8,7 @@ use crate::branch;
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use crate::storage::StoreLayout;
+use tracedecay_runtime_core::storage::StoreLayout;
 
 use super::TraceDecay;
 

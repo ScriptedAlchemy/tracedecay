@@ -32,9 +32,9 @@ use tokio::sync::Mutex;
 #[cfg(unix)]
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
-use tracedecay::storage::default_profile_sharded_layout;
+use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 #[cfg(unix)]
-use tracedecay::storage::{PrivateStoreIo, pin_fixture_repository_identity};
+use tracedecay_runtime_core::storage::{PrivateStoreIo, pin_fixture_repository_identity};
 #[cfg(unix)]
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::tracedecay::TraceDecayOpenOptions;

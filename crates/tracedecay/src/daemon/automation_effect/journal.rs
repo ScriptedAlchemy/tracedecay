@@ -960,7 +960,7 @@ pub(super) fn abandon_reservation_blocking(
             ));
         }
         let sidecar = terminal_sidecar_path(path)?;
-        match crate::storage::PrivateStoreIo::remove_file_durable(&sidecar) {
+        match tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&sidecar) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -969,7 +969,7 @@ pub(super) fn abandon_reservation_blocking(
                 )));
             }
         }
-        crate::storage::PrivateStoreIo::remove_file_durable(path).map_err(|error| {
+        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path).map_err(|error| {
             contract_error(format!(
                 "memory automation reservation rollback failed: {error}"
             ))
@@ -990,12 +990,12 @@ fn with_journal_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> R
     let parent = path
         .parent()
         .ok_or_else(|| contract_error("automation terminal path has no parent"))?;
-    crate::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(|error| {
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(|error| {
         contract_error(format!(
             "automation terminal directory creation failed: {error}"
         ))
     })?;
-    let lock_path = crate::storage::append_lock_path(path);
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
     let lock = open_lock_nofollow(&lock_path)
         .map_err(|error| contract_error(format!("automation terminal lock failed: {error}")))?;
     let result = operation();
@@ -1143,9 +1143,9 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
 
 fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    crate::storage::reject_symlink_components(path, "automation terminal journal lock")?;
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation terminal journal lock")?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1253,7 +1253,7 @@ fn remove_terminal_sidecar_if_present(journal_path: &Path) -> Result<()> {
             )));
         }
     }
-    crate::storage::PrivateStoreIo::remove_file_durable(&path)
+    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&path)
         .map(|_| ())
         .map_err(|error| {
             contract_error(format!(
@@ -1373,7 +1373,7 @@ fn read_terminal_sidecar_if_present(
 }
 
 fn open_regular_nofollow(path: &Path) -> Result<Option<std::fs::File>> {
-    crate::storage::reject_symlink_components(path, "automation terminal journal or sidecar")
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation terminal journal or sidecar")
         .map_err(contract_error)?;
     let parent = path
         .parent()

@@ -567,7 +567,7 @@ async fn facts_section(
 }
 
 async fn automation_section(project_root: &Path, since: i64) -> Value {
-    let dashboard_root = match crate::storage::resolve_layout_for_current_profile(project_root) {
+    let dashboard_root = match tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root) {
         Ok(layout) => layout.dashboard_root,
         Err(err) => {
             return json!({

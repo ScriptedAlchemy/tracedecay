@@ -259,7 +259,7 @@ fn branch_admin_never_selects_default_branch_for_removal() {
 fn branch_admin_refuses_corrupt_metadata_without_selecting_stores() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     std::fs::write(
-        tracedecay_dir.join(crate::storage::BRANCH_META_FILENAME),
+        tracedecay_dir.join(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
         b"{not-json",
     )
     .unwrap();

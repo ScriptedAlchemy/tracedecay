@@ -2,10 +2,10 @@ use std::path::Path;
 
 use crate::current_unix_timestamp;
 
-pub(crate) use tracedecay::storage::{ProjectStorageLocation, ProjectStorageStatus};
+pub(crate) use tracedecay_runtime_core::storage::{ProjectStorageLocation, ProjectStorageStatus};
 
 pub(crate) fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
-    tracedecay::storage::classify_project_storage(project_root)
+    tracedecay_runtime_core::storage::classify_project_storage(project_root)
 }
 
 pub(crate) async fn classify_project_storage_with_registry(
@@ -28,7 +28,7 @@ fn classify_registry_storage(
     profile_root: &Path,
     store: &tracedecay_global_db::StoreInstanceRecord,
 ) -> Option<ProjectStorageLocation> {
-    tracedecay::storage::classify_registry_storage(project_root, profile_root, store)
+    store.classify_storage(project_root, profile_root)
 }
 
 pub(crate) fn classify_registry_storage_value(
@@ -36,7 +36,11 @@ pub(crate) fn classify_registry_storage_value(
     profile_root: &Path,
     store: &serde_json::Value,
 ) -> Option<ProjectStorageLocation> {
-    tracedecay::storage::classify_registry_storage_value(project_root, profile_root, store)
+    tracedecay_runtime_core::storage::classify_registry_storage_value(
+        project_root,
+        profile_root,
+        store,
+    )
 }
 
 /// Returns how many seconds have elapsed since a persisted timestamp.
@@ -392,9 +396,9 @@ fn local_project_marker_exists(project_root: &Path, data_dir: &Path) -> bool {
     data_dir.file_name().is_some_and(|name| {
         name == tracedecay::config::TRACEDECAY_DIR
             && matches!(
-                tracedecay::storage::read_legacy_enrollment_marker(project_root),
+                tracedecay_runtime_core::storage::read_legacy_enrollment_marker(project_root),
                 Ok(Some(marker))
-                    if marker.storage_mode == tracedecay::storage::StorageMode::ProfileSharded
+                    if marker.storage_mode == tracedecay_runtime_core::storage::StorageMode::ProfileSharded
             )
     })
 }
@@ -481,7 +485,7 @@ mod gather_tests {
         let ts = root.join(".tracedecay");
         fs::create_dir_all(&ts).unwrap();
         fs::write(
-            ts.join(tracedecay::storage::ENROLLMENT_FILENAME),
+            ts.join(tracedecay_runtime_core::storage::ENROLLMENT_FILENAME),
             format!(
                 r#"{{
   "project_id": "{project_id}",
@@ -581,7 +585,7 @@ mod gather_tests {
         fs::create_dir_all(&project_root).unwrap();
         fs::create_dir_all(&data_root).unwrap();
         fs::write(
-            data_root.join(tracedecay::storage::STORE_MANIFEST_FILENAME),
+            data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
             b"{}",
         )
         .unwrap();

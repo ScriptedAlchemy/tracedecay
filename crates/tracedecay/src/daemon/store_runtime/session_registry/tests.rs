@@ -70,11 +70,11 @@ async fn project_sessions_pending_convergence(
     let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, project_name)
         .expect("daemon database scope");
     let project_id = ProjectId::new(project_name).expect("typed project identity");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let sessions_path =
-        crate::storage::profile_sharded_data_root(identity.profile_root(), project_id.as_str())
-            .join(crate::storage::SESSIONS_DB_FILENAME);
+        tracedecay_runtime_core::storage::profile_sharded_data_root(identity.profile_root(), project_id.as_str())
+            .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
     std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
         .expect("session database directory");
     crate::daemon::store_runtime::register_registered_schema_installer();
@@ -579,11 +579,11 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
     )
     .expect("daemon database scope");
     let project_id = ProjectId::new("project.session-runtime").expect("typed project identity");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let sessions_path =
-        crate::storage::profile_sharded_data_root(identity.profile_root(), project_id.as_str())
-            .join(crate::storage::SESSIONS_DB_FILENAME);
+        tracedecay_runtime_core::storage::profile_sharded_data_root(identity.profile_root(), project_id.as_str())
+            .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
 
     let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
@@ -890,7 +890,7 @@ async fn cached_project_sessions_reject_conflicting_enrollment_authority() {
     )
     .expect("daemon database scope");
     let project_id = ProjectId::new("project.session-runtime").expect("typed project identity");
-    crate::storage::pin_fixture_repository_identity(&first_project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&first_project_root, project_id.as_str())
         .expect("project enrollment");
 
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -927,7 +927,7 @@ async fn worktree_graph_mount_does_not_require_git() {
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.non-git-worktree").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let _database_scope =
         tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 13, "non-git worktree graph")
@@ -970,7 +970,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.generic-graph").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let _database_scope =
         tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 19, "generic graph runtime")
@@ -1112,7 +1112,7 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.shared-code-graph").expect("project id");
     for project_root in [&primary_root, &linked_root] {
-        crate::storage::pin_fixture_repository_identity(project_root, project_id.as_str())
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id.as_str())
             .expect("project enrollment");
     }
     let _database_scope =
@@ -1192,7 +1192,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.derived-graph-corrupt").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
@@ -1438,7 +1438,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
         .await
         .expect("session runtime registry");
     let project_id = ProjectId::new("project.graph-publication").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     registry
         .project_sessions(project_id.clone(), [project_root.clone()])

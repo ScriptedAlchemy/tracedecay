@@ -93,7 +93,7 @@ pub(super) async fn handle_skill_list(
     args: Value,
     analytics_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
-    let profile_root = crate::storage::default_profile_root()?;
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
     let state = parse_state(&args)?;
     let include_body = optional_bool(&args, "include_body", false);
@@ -159,7 +159,7 @@ pub(super) async fn handle_skill_view(
     args: Value,
     analytics_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
-    let profile_root = crate::storage::default_profile_root()?;
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
     let include_support_files = optional_bool(&args, "include_support_files", true);
     let mut skill = hotpath::future!(

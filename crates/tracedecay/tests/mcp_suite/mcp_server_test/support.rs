@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::McpServer;
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
-use tracedecay::storage::resolve_response_handle_root;
+use tracedecay_runtime_core::storage::resolve_response_handle_root;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 // ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ pub(crate) fn project_id_of(cg: &TraceDecay) -> tracedecay_domain::ProjectId {
 pub(crate) async fn server_with_session_authority(project: &std::path::Path) -> Arc<McpServer> {
     let cg = TraceDecay::open(project).await.unwrap();
     let project_id = project_id_of(&cg);
-    let profile_root = tracedecay::storage::default_profile_root().unwrap();
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::project_scoped(&profile_root, project, project_id)
         .await
         .expect("registered project runtime opens for the isolated profile");

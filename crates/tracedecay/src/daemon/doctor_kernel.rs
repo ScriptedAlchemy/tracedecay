@@ -1307,7 +1307,7 @@ pub(in crate::daemon) type RemoteOperationalReadProviderV1 =
 pub(in crate::daemon) fn production_doctor_report_reader(
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,
-    layout: crate::storage::StoreLayout,
+    layout: tracedecay_runtime_core::storage::StoreLayout,
     graph: tracedecay_runtime_core::db::Database,
     registry: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     profile_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,

@@ -142,7 +142,7 @@ async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_sto
             .unwrap();
         drop(database);
     }
-    let marker_path = tracedecay::storage::repository_identity_path(&fx.main)
+    let marker_path = tracedecay_runtime_core::storage::repository_identity_path(&fx.main)
         .expect("primary checkout should have a repository identity path");
     std::fs::remove_file(&marker_path).unwrap();
 

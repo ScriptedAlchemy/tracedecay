@@ -272,7 +272,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     git(&project_root, &["add", "."]);
     git(&project_root, &["commit", "-qm", "sealed fixture"]);
     let project_id = ProjectId::new("project.sealed-code-publication").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let canonical_project = project_root.canonicalize().expect("canonical project root");
 
@@ -625,7 +625,7 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
     git(&project_root, &["add", "."]);
     git(&project_root, &["commit", "-qm", "sealed bundle fixture"]);
     let project_id = ProjectId::new("project.sealed-read-bundle").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let canonical_project = project_root.canonicalize().expect("canonical project root");
 
@@ -827,7 +827,7 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
     git(&project_root, &["add", "."]);
     git(&project_root, &["commit", "-qm", "offered decode fixture"]);
     let project_id = ProjectId::new("project.offered-decode").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let canonical_project = project_root.canonicalize().expect("canonical project root");
 
@@ -1059,7 +1059,7 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         &["commit", "-qm", "concurrent publication fixture"],
     );
     let project_id = ProjectId::new("project.concurrent-code-publication").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let canonical_project = project_root.canonicalize().expect("canonical project root");
 

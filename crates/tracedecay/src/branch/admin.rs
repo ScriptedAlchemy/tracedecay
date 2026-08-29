@@ -137,7 +137,7 @@ impl PreparedBranchAdminMutation {
                     message: format!(
                         "cannot publish branch metadata '{}': {error}",
                         self.tracedecay_dir
-                            .join(crate::storage::BRANCH_META_FILENAME)
+                            .join(tracedecay_runtime_core::storage::BRANCH_META_FILENAME)
                             .display()
                     ),
                 },
@@ -402,7 +402,7 @@ pub fn remove_tracked_branch_store_checked(
 fn load_branch_meta_exact(
     tracedecay_dir: &Path,
 ) -> tracedecay_runtime_core::errors::Result<(Option<BranchMeta>, Option<String>)> {
-    let path = tracedecay_dir.join(crate::storage::BRANCH_META_FILENAME);
+    let path = tracedecay_dir.join(tracedecay_runtime_core::storage::BRANCH_META_FILENAME);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),

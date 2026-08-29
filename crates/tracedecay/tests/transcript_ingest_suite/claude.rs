@@ -4,7 +4,7 @@ use tempfile::TempDir;
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay_global_db::ParseOffset;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::storage::PrivateStoreIo;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_domain::{
     ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
     ProviderUsageScopeV1,

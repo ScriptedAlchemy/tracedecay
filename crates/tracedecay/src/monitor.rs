@@ -121,7 +121,7 @@ fn write_entry_inner(
     // Exclusive lock for concurrent writer safety. This mmap handle is itself
     // the lock file; the shared helper supplies the cross-platform r/w open and
     // lock semantics without introducing a second sidecar.
-    let file = crate::storage::acquire_sidecar_lock_blocking(mmap_path)?;
+    let file = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(mmap_path)?;
 
     let len = file.metadata()?.len() as usize;
     if len < FILE_SIZE {
@@ -281,7 +281,7 @@ pub fn run() -> std::io::Result<()> {
     // Single-instance lock, held for the lifetime of `run` (shared sidecar
     // helper; see the sidecar-lock module note in `src/storage.rs`).
     let lock_path = dir.join(LOCK_FILENAME);
-    let Some(lock_file) = crate::storage::try_acquire_sidecar_lock(&lock_path)? else {
+    let Some(lock_file) = tracedecay_runtime_core::storage::try_acquire_sidecar_lock(&lock_path)? else {
         eprintln!("Monitor already running.");
         return Ok(());
     };

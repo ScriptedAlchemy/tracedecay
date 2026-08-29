@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use tracedecay_runtime_core::branch_meta::BranchMeta;
 use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::storage::{
+use tracedecay_runtime_core::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
     profile_sharded_layout, write_repository_identity_marker, write_store_manifest,
@@ -410,7 +410,7 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     let project = canonical_temp_path(project);
     let shard_root = profile_shard_root(home);
     std::fs::create_dir_all(&shard_root).unwrap();
-    tracedecay::storage::pin_fixture_repository_identity(&project, "proj_cli").unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project, "proj_cli").unwrap();
     let graph_db_path = shard_root.join("tracedecay.db");
     std::thread::spawn(move || {
         create_runtime()
@@ -1620,7 +1620,7 @@ fn wipe_local_returns_failure_when_a_selected_store_cannot_be_deleted() {
         project_id: "proj_cli".to_string(),
         storage_mode: StorageMode::ProfileSharded,
     };
-    let marker_path = tracedecay::storage::legacy_enrollment_marker_path(project.path());
+    let marker_path = tracedecay_runtime_core::storage::legacy_enrollment_marker_path(project.path());
     std::fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
     std::fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
     std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();

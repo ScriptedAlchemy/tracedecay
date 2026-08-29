@@ -55,7 +55,7 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
         };
 
         let fixture = start_dashboard_fixture(false).await;
-        let profile_root = tracedecay::storage::default_profile_root()
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root()
             .unwrap_or_else(|err| panic!("expected dashboard fixture profile root: {err}"));
         create_managed_skill(
             &profile_root,

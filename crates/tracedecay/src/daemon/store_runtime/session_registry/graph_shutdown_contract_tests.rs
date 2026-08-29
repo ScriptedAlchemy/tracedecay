@@ -27,7 +27,7 @@ use crate::store::DatabaseFactStore;
 fn enrolled_root(base: &Path, project_id: &ProjectId) -> PathBuf {
     let root = base.join(project_id.as_str());
     std::fs::create_dir_all(&root).expect("project root");
-    crate::storage::pin_fixture_repository_identity(&root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&root, project_id.as_str())
         .expect("project enrollment");
     root
 }

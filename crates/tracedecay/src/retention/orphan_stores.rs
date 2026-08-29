@@ -844,7 +844,7 @@ pub(crate) async fn execute_registered_collection_controlled(
 
         let manifest_path = finding
             .data_root
-            .join(crate::storage::STORE_MANIFEST_FILENAME);
+            .join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let current_manifest = match read_regular_file(&manifest_path) {
             RegularFileSnapshot::Bytes(bytes) => Some(bytes),
             RegularFileSnapshot::Missing => None,
@@ -1323,7 +1323,7 @@ fn durable_database_inventory(
     let Some(bytes) = manifest_bytes else {
         return DurableDatabaseInventoryV1::Unverifiable;
     };
-    let manifest = match serde_json::from_slice::<crate::storage::StoreManifest>(bytes) {
+    let manifest = match serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes) {
         Ok(manifest) => manifest,
         Err(_) if control.completion().is_some() => {
             return DurableDatabaseInventoryV1::Interrupted;
@@ -1897,14 +1897,14 @@ struct CheapStoreInspect {
 }
 
 fn inspect_store_leaf_cheap_sync(profile_root: &Path, data_root: &Path) -> CheapStoreInspect {
-    let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+    let manifest_path = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
     let expected_manifest_bytes = match read_regular_file(&manifest_path) {
         RegularFileSnapshot::Bytes(bytes) => Some(bytes),
         RegularFileSnapshot::Missing | RegularFileSnapshot::Unverifiable => None,
     };
     let parsed_manifest = expected_manifest_bytes
         .as_deref()
-        .map(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok());
+        .map(|bytes| serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes).ok());
     let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
     let manifest_root = parsed_manifest
         .flatten()
@@ -1931,14 +1931,14 @@ async fn inspect_store_leaf_cheap(
         if control.completion().is_some() {
             return Ok(None);
         }
-        let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+        let manifest_path = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let expected_manifest_bytes = match read_regular_file(&manifest_path) {
             RegularFileSnapshot::Bytes(bytes) => Some(bytes),
             RegularFileSnapshot::Missing | RegularFileSnapshot::Unverifiable => None,
         };
         let parsed_manifest = expected_manifest_bytes
             .as_deref()
-            .map(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok());
+            .map(|bytes| serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes).ok());
         let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
         let manifest_root = parsed_manifest
             .flatten()
@@ -2098,7 +2098,7 @@ pub(crate) async fn sweep_orphan_stores(
 // the on-disk payload it pointed at. The owner's audit measured this class at
 // 322 directories / 655 MB in one profile. This section is a bottom-up
 // counterpart: scan `profile_root/projects/*` (the layout every
-// profile-sharded store uses, see [`crate::storage::profile_sharded_data_root`])
+// profile-sharded store uses, see [`tracedecay_runtime_core::storage::profile_sharded_data_root`])
 // and flag any leaf directory whose name is not a currently-registered
 // `project_id`.
 
@@ -2234,7 +2234,7 @@ pub(crate) async fn execute_unregistered_collection_controlled(
             .join("projects")
             .join(&finding.project_dir_name);
         if expected != finding.data_root
-            || crate::storage::validate_project_id(&finding.project_dir_name).is_err()
+            || tracedecay_runtime_core::storage::validate_project_id(&finding.project_dir_name).is_err()
         {
             outcome.errors.push(CollectionFailure {
                 store_id: finding.project_dir_name.clone(),
@@ -2317,7 +2317,7 @@ pub(crate) async fn execute_unregistered_collection_controlled(
         // `.db` family is inspected directly and remains fail-closed on error.
         let manifest_path = finding
             .data_root
-            .join(crate::storage::STORE_MANIFEST_FILENAME);
+            .join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let durable_check = match read_regular_file(&manifest_path) {
             RegularFileSnapshot::Bytes(manifest_bytes) => {
                 // An unregistered store has no registry graph scopes by

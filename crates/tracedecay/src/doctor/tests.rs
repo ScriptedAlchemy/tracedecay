@@ -502,19 +502,19 @@ async fn store_layout_resolution_surfaces_split_identity_conflict()
     assert!(status.success());
 
     for project_id in ["proj_doctor_selected", "proj_doctor_legacy"] {
-        let layout = crate::storage::profile_sharded_layout(
+        let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
             &project_root,
             &profile_root,
-            &crate::storage::EnrollmentMarker {
+            &tracedecay_runtime_core::storage::EnrollmentMarker {
                 project_id: project_id.to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
+                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
             },
         )?;
         std::fs::create_dir_all(&layout.data_root)?;
         std::fs::write(&layout.graph_db_path, b"graph")?;
-        crate::storage::write_store_manifest(&layout)?;
+        tracedecay_runtime_core::storage::write_store_manifest(&layout)?;
     }
-    crate::storage::write_repository_identity_marker(&project_root, "proj_doctor_selected")?;
+    tracedecay_runtime_core::storage::write_repository_identity_marker(&project_root, "proj_doctor_selected")?;
 
     let open_options = crate::tracedecay::TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),

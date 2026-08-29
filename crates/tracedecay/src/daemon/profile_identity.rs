@@ -5,7 +5,7 @@ use tracedecay_agent_hosts::ports::project_runtime::ProfileIdentity;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use crate::storage::PROFILE_IDENTITY_FILENAME;
+use tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME;
 
 use super::authority::canonical_identity_path;
 

@@ -440,7 +440,7 @@ pub(super) fn read_project_directory_page(
                 project_id,
                 quarantine_name: name,
             })
-        } else if crate::storage::validate_project_id(&name).is_ok() {
+        } else if tracedecay_runtime_core::storage::validate_project_id(&name).is_ok() {
             Some(ProjectDirectoryWorkV1::Project(name))
         } else {
             None
@@ -733,7 +733,7 @@ pub(super) fn read_project_directory_page(
                 project_id,
                 quarantine_name: name,
             });
-        } else if crate::storage::validate_project_id(&name).is_ok() {
+        } else if tracedecay_runtime_core::storage::validate_project_id(&name).is_ok() {
             work.push(ProjectDirectoryWorkV1::Project(name));
         }
         if work.len() == limit || scanned >= scan_limit {
@@ -820,7 +820,7 @@ fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn portable_inventory_entry_is_valid(name: &str) -> bool {
-    quarantined_project_id(name).is_some() || crate::storage::validate_project_id(name).is_ok()
+    quarantined_project_id(name).is_some() || tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
 }
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
@@ -867,7 +867,7 @@ fn ensure_portable_inventory_header(
         }
     })?;
     let temporary = portable_inventory_temporary_path(inventory)?;
-    crate::storage::PrivateStoreIo::write_file_atomically_durable(
+    tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically_durable(
         inventory,
         &temporary,
         portable_inventory_header(signature).as_bytes(),
@@ -994,9 +994,9 @@ pub(super) fn advance_portable_inventory(
     // splice bytes into a record or publish completion for a concurrently
     // changing inventory. A contender yields without blocking the admission;
     // the page retains its opaque cursor and retries this bounded slice.
-    let lock_path = crate::storage::append_lock_path(inventory);
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(inventory);
     let _writer_lock =
-        match crate::storage::try_acquire_sidecar_lock(&lock_path).map_err(|error| {
+        match tracedecay_runtime_core::storage::try_acquire_sidecar_lock(&lock_path).map_err(|error| {
             tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("acquire unregistered inventory writer lock: {error}"),
             }

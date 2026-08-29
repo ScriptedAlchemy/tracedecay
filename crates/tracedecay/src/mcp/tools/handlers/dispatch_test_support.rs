@@ -198,7 +198,7 @@ pub(super) async fn init_sibling_registered_fixture(
     TraceDecay,
     Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
 ) {
-    let profile_root = crate::storage::default_profile_root().expect("sibling profile root");
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().expect("sibling profile root");
     let project_id =
         tracedecay_domain::ProjectId::new(project_id).expect("typed sibling project identity");
     let sibling = Arc::new(
@@ -258,7 +258,7 @@ impl SelectorEnv {
     pub(super) fn new(root: &Path) -> Self {
         let home = root.join("home");
         let profile_root = home.join(".tracedecay");
-        crate::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let home = home.canonicalize().unwrap();
         let profile_root = home.join(".tracedecay");
         let global_db_path = profile_root.join("global.db");

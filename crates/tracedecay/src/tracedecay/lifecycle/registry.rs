@@ -12,7 +12,7 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{
     GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
 };
-use crate::storage::{self, StoreLayout};
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 use crate::tracedecay::current_timestamp;
 
 use super::TraceDecay;

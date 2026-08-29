@@ -261,7 +261,7 @@ impl DashboardGraphTestRuntimeV1 {
     ) -> tracedecay_runtime_core::errors::Result<crate::tracedecay::TraceDecay> {
         // Fixture identity is pinned in the sanctioned `.git/` repository
         // identity marker; nothing is written into the working tree.
-        crate::storage::pin_fixture_repository_identity(project_root, project_id.as_str())?;
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id.as_str())?;
         let options = crate::tracedecay::TraceDecayOpenOptions {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),

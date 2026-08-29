@@ -4,7 +4,7 @@ use std::path::Path;
 use tempfile::TempDir;
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::serve;
-use tracedecay::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
+use tracedecay_runtime_core::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::{EnvVarGuard, canonical_existing_path};
@@ -357,7 +357,7 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
     assert!(
         !home
             .join(".tracedecay/projects")
-            .join(tracedecay::storage::default_profile_project_id(&renamed))
+            .join(tracedecay_runtime_core::storage::default_profile_project_id(&renamed))
             .join("tracedecay.db")
             .exists(),
         "renamed checkout must not create a second path-hash profile shard"
@@ -421,7 +421,7 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
     assert!(
         !client_profile
             .join("projects")
-            .join(tracedecay::storage::default_profile_project_id(&renamed))
+            .join(tracedecay_runtime_core::storage::default_profile_project_id(&renamed))
             .join("tracedecay.db")
             .exists(),
         "serve must not create or require a second path-hash profile shard"

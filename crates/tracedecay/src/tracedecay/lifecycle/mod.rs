@@ -15,7 +15,7 @@ use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistry
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use crate::storage::{self, StoreLayout};
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 use crate::support::weak_registry::WeakRegistry;
 use tokio::sync::Mutex as AsyncMutex;
 #[cfg(any(test, feature = "test-transport"))]
@@ -266,7 +266,7 @@ impl TraceDecay {
         // nothing here — its identity is deterministic from the canonical
         // path and durably owned by the profile registry. TraceDecay never
         // creates files inside a project's working tree.
-        crate::storage::write_repository_identity_marker(project_root, project_id.as_str())?;
+        tracedecay_runtime_core::storage::write_repository_identity_marker(project_root, project_id.as_str())?;
         let configuration_database = runtime_registry
             .project_sessions(project_id, [project_root.to_path_buf()])
             .await?;
@@ -286,7 +286,7 @@ impl TraceDecay {
         project_root: &Path,
         project_id: &str,
     ) -> Result<(Self, Arc<crate::host_admission::HostAdmissionTestRuntimeV1>)> {
-        let profile_root = crate::storage::default_profile_root()?;
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
         let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
             TraceDecayError::Config {
                 message: format!("invalid test fixture project identity: {error}"),

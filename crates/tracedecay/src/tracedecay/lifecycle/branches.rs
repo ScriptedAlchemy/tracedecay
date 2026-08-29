@@ -13,7 +13,7 @@ use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistry
 use tracedecay_runtime_core::db::DatabaseAccessMode;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use crate::storage::StoreLayout;
+use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_usecases::config::open_runtime_configuration_for_registered_database_read_only;
 use tracedecay_usecases::configuration::ProjectConfigurationRuntime;
 

@@ -13,7 +13,7 @@ static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 async fn initialize_test_project(
     project_root: &Path,
     profile_root: &Path,
-) -> crate::storage::StoreLayout {
+) -> tracedecay_runtime_core::storage::StoreLayout {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

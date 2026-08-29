@@ -1,7 +1,7 @@
 use crate::common::{EnvVarGuard, lock_global_db_env, lock_recovering_poison};
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::storage::{pin_fixture_repository_identity, resolve_layout_for_current_profile};
+use tracedecay_runtime_core::storage::{pin_fixture_repository_identity, resolve_layout_for_current_profile};
 use tracedecay_agent_hosts::hooks::{
     HookWorkspaceStatus, additional_context_json, build_cursor_session_context,
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,

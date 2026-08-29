@@ -269,7 +269,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
         project_id: &ProjectId,
     ) -> Result<WriterAdmissionGuard> {
         let data_root =
-            crate::storage::profile_sharded_data_root(&self.profile_root, project_id.as_str());
+            tracedecay_runtime_core::storage::profile_sharded_data_root(&self.profile_root, project_id.as_str());
         self.settle_retained_runtime_retirement(project_id).await?;
         let writer = self
             .gate

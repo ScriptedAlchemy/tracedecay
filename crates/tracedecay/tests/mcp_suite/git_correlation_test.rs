@@ -10,7 +10,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::storage::PrivateStoreIo;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,

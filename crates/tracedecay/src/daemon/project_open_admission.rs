@@ -199,7 +199,7 @@ fn refused_store_file_identity(path: &Path) -> Option<RefusedStoreFileIdentityV1
 /// resolves no persisted store, in which case a recorded refusal keeps its
 /// plain time-based backoff.
 fn refused_store_fingerprint(route: &ProjectRouteKey) -> Option<RefusedStoreFingerprintV1> {
-    let layout = crate::storage::resolve_persisted_layout(&route.project_path, &route.profile_root)
+    let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(&route.project_path, &route.profile_root)
         .ok()
         .flatten()?;
     let mut graph_dbs = BTreeMap::new();
@@ -260,7 +260,7 @@ fn project_route_matches_identity(
 ) -> bool {
     route.profile_root == profile_root
         && (project_roots.contains(&route.project_path)
-            || crate::storage::resolve_persisted_layout(&route.project_path, profile_root)
+            || tracedecay_runtime_core::storage::resolve_persisted_layout(&route.project_path, profile_root)
                 .ok()
                 .flatten()
                 .and_then(|layout| layout.identity.project_id)
@@ -1111,8 +1111,8 @@ mod refused_store_invalidation_tests {
     }
 
     fn store_data_root(profile_root: &Path, project_root: &Path) -> PathBuf {
-        let project_id = crate::storage::default_profile_project_id(project_root);
-        crate::storage::profile_sharded_data_root(profile_root, &project_id)
+        let project_id = tracedecay_runtime_core::storage::default_profile_project_id(project_root);
+        tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, &project_id)
     }
 
     fn seed_refused_store(profile_root: &Path, project_root: &Path) -> PathBuf {

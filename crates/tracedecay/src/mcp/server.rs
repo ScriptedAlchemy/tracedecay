@@ -541,7 +541,7 @@ impl McpServer {
         use_default_profile_root: bool,
     ) -> Arc<Self> {
         let profile_root = use_default_profile_root
-            .then(crate::storage::default_profile_root)
+            .then(tracedecay_runtime_core::storage::default_profile_root)
             .and_then(std::result::Result::ok);
         let context =
             Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)

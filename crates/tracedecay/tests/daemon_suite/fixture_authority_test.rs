@@ -5,7 +5,7 @@
 //! scattered "project not enrolled" or "prefix not found" across suites.
 
 use crate::common::fixture::{GitFixture, TestProfile};
-use tracedecay::storage;
+use tracedecay_runtime_core::storage;
 
 #[tokio::test]
 async fn one_profile_serves_two_projects_with_distinct_stores() {

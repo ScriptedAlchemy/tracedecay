@@ -1,3 +1,6 @@
+use std::path::Path;
+
+use tracedecay_runtime_core::storage::{ProjectStorageLocation, classify_registry_storage_fields};
 use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 /// Total savings + call count for a project (or all projects when `project` is None).
@@ -194,6 +197,23 @@ pub struct StoreInstanceRecord {
     pub created_at: i64,
     pub last_verified_at: Option<i64>,
     pub last_write_at: Option<i64>,
+}
+
+impl StoreInstanceRecord {
+    /// Classifies this registry-recorded store instance against a profile root.
+    pub fn classify_storage(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Option<ProjectStorageLocation> {
+        classify_registry_storage_fields(
+            project_root,
+            profile_root,
+            &self.storage_mode,
+            &self.store_relpath,
+            self.manifest_relpath.as_deref(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

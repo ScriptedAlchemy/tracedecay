@@ -12,7 +12,7 @@ use crate::common::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::storage::{
+use tracedecay_runtime_core::storage::{
     default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
 };
 use tracedecay_domain::UtcMicros;

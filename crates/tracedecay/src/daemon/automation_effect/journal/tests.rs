@@ -3360,7 +3360,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     recovery_index::add_pending_blocking(dashboard_root, &current_journal, &current_admission)
         .expect("current pending authority");
 
-    let journal_lock_path = crate::storage::append_lock_path(&current_journal);
+    let journal_lock_path = tracedecay_runtime_core::storage::append_lock_path(&current_journal);
     let journal_lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -3792,7 +3792,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
     assert!(!reserved.is_terminal());
     assert_eq!(reserved.admission(), &expected_admission);
 
-    let journal_lock_path = crate::storage::append_lock_path(&journal_path);
+    let journal_lock_path = tracedecay_runtime_core::storage::append_lock_path(&journal_path);
     let journal_lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -3996,7 +3996,7 @@ async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_owne
     let second_journal_lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(crate::storage::append_lock_path(&fixture.journal_paths[1]))
+        .open(tracedecay_runtime_core::storage::append_lock_path(&fixture.journal_paths[1]))
         .expect("open second request-waiting journal lock");
     second_journal_lock
         .lock_exclusive()

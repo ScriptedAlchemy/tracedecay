@@ -52,7 +52,7 @@ pub(super) async fn indexed_files(
         let mut files = counts
             .into_iter()
             .map(|(path, node_count)| {
-                let project_path = crate::storage::ProjectPath::resolve(
+                let project_path = tracedecay_runtime_core::storage::ProjectPath::resolve(
                     &project_root,
                     std::path::Path::new(&path),
                 )?;

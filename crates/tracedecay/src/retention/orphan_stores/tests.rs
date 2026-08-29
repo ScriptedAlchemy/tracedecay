@@ -7,7 +7,7 @@ use super::*;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
+use tracedecay_runtime_core::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 const DAY: i64 = 24 * 60 * 60;
@@ -184,14 +184,14 @@ fn malformed_manifest_bytes_mark_the_census_entry_unverifiable() {
     let data_root = profile.path().join("stores/malformed");
     std::fs::create_dir_all(&data_root).unwrap();
     std::fs::write(
-        data_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         b"{ this is not valid manifest json",
     )
     .unwrap();
 
     // Exercise the same parse the census performs, so the fixture proves the
     // production decode path — not a hand-set flag — yields unverifiable.
-    let bytes = std::fs::read(data_root.join(crate::storage::STORE_MANIFEST_FILENAME)).unwrap();
+    let bytes = std::fs::read(data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME)).unwrap();
     let parsed = serde_json::from_slice::<StoreManifest>(&bytes).ok();
     assert!(parsed.is_none(), "fixture manifest must be unparseable");
 
@@ -599,7 +599,7 @@ async fn registered_collection_refuses_same_second_directory_replacement() {
     let displaced = profile_root.join("displaced-store");
     std::fs::rename(&data_root, &displaced).unwrap();
     std::fs::create_dir_all(&data_root).unwrap();
-    for name in ["graph.db", crate::storage::STORE_MANIFEST_FILENAME] {
+    for name in ["graph.db", tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME] {
         let source = displaced.join(name);
         let target = data_root.join(name);
         std::fs::copy(&source, &target).unwrap();
@@ -782,10 +782,10 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
         data_root: store_root.clone(),
         graph_db_relpath: PathBuf::from("graph.db"),
         sessions_db_relpath: PathBuf::from("sessions.db"),
-        branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
+        branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
     };
     std::fs::write(
-        store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
@@ -810,8 +810,8 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
     assert_eq!(target_stores.len(), 1);
     assert_eq!(target_stores[0].store_id, "store_moved");
     assert_eq!(target_stores[0].project_id, "proj_live");
-    let relinked_manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let relinked_manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     assert_eq!(relinked_manifest.project_id.as_deref(), Some("proj_live"));
@@ -843,14 +843,14 @@ async fn sweep_resumes_manifest_forward_after_interrupted_relink() {
     )
     .await;
     seed_project(&db, "proj_live", &live_root, 1_700_000_000).await;
-    let mut manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let mut manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     manifest.project_id = Some("proj_live".to_string());
     manifest.project_root = live_root;
-    crate::storage::write_store_manifest_to_path(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    tracedecay_runtime_core::storage::write_store_manifest_to_path(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         &manifest,
     )
     .unwrap();
@@ -895,13 +895,13 @@ async fn sweep_leaves_relinkable_store_unchanged_without_exact_target_registrati
         1_700_000_000,
     )
     .await;
-    let mut manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let mut manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     manifest.project_root = unregistered_live_root;
     std::fs::write(
-        store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
@@ -919,8 +919,8 @@ async fn sweep_leaves_relinkable_store_unchanged_without_exact_target_registrati
         .unwrap();
     assert_eq!(prior.len(), 1);
     assert_eq!(prior[0].store_id, "store_moved");
-    let unchanged_manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let unchanged_manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     assert_eq!(unchanged_manifest.project_id.as_deref(), Some("proj_old"));
@@ -945,13 +945,13 @@ async fn relink_database_failure_rolls_back_manifest_and_registry() {
     )
     .await;
     seed_project(&db, "proj_live", &live_root, 1_700_000_000).await;
-    let mut manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let mut manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     manifest.project_root = live_root;
     std::fs::write(
-        store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
@@ -984,8 +984,8 @@ async fn relink_database_failure_rolls_back_manifest_and_registry() {
             .unwrap()
             .is_empty()
     );
-    let restored_manifest = crate::storage::read_store_manifest(
-        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    let restored_manifest = tracedecay_runtime_core::storage::read_store_manifest(
+        &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
     )
     .unwrap();
     assert_eq!(restored_manifest.project_id.as_deref(), Some("proj_old"));
@@ -1019,10 +1019,10 @@ async fn seed_store(
         data_root: data_root.clone(),
         graph_db_relpath: PathBuf::from("graph.db"),
         sessions_db_relpath: PathBuf::from("sessions.db"),
-        branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
+        branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
     };
     std::fs::write(
-        data_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
@@ -1528,7 +1528,7 @@ fn quarantine_restores_same_second_manifest_mutation() {
     let profile_root = tmp.path().join("profile");
     let data_root = profile_root.join("stores/manifest-race");
     std::fs::create_dir_all(&data_root).unwrap();
-    let manifest = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+    let manifest = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
     std::fs::write(&manifest, b"before").unwrap();
     let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
     let original_time =
@@ -2267,7 +2267,7 @@ fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
         .expect("the first bounded source slice does not contain every project")
         .clone();
     let torn = target[..target.len() - 1].to_owned();
-    assert!(crate::storage::validate_project_id(&torn).is_ok());
+    assert!(tracedecay_runtime_core::storage::validate_project_id(&torn).is_ok());
     let mut output = std::fs::OpenOptions::new()
         .append(true)
         .open(&inventory_path)
@@ -2317,8 +2317,8 @@ fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
     let inventory = super::unregistered_page::portable_inventory_path(&profile_root, &signature);
     std::fs::create_dir_all(inventory.parent().unwrap()).unwrap();
 
-    let writer_lock = crate::storage::acquire_sidecar_lock_blocking(
-        &crate::storage::append_lock_path(&inventory),
+    let writer_lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(
+        &tracedecay_runtime_core::storage::append_lock_path(&inventory),
     )
     .unwrap();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -2537,7 +2537,7 @@ mod durable_inventory {
             data_root: project_root,
             graph_db_relpath: PathBuf::from(graph_db_relpath),
             sessions_db_relpath: PathBuf::from("sessions.db"),
-            branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
+            branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
         };
         serde_json::to_vec(&manifest).unwrap()
     }
@@ -2753,7 +2753,7 @@ async fn symlink_manifest_is_unverifiable_and_never_collected() {
         1_700_000_000 - 100 * DAY,
     )
     .await;
-    let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+    let manifest_path = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
     let target = tmp.path().join("manifest-target.json");
     std::fs::copy(&manifest_path, &target).unwrap();
     std::fs::remove_file(&manifest_path).unwrap();

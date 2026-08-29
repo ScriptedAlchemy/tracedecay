@@ -548,7 +548,7 @@ mod tests {
         let endpoint = test_endpoint(&profile);
         let first = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
         drop(first);
-        std::fs::remove_file(profile.join(crate::storage::PROFILE_IDENTITY_FILENAME)).unwrap();
+        std::fs::remove_file(profile.join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME)).unwrap();
 
         let error = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap_err();
 

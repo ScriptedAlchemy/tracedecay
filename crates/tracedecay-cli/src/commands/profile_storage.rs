@@ -44,11 +44,11 @@ fn handle_reset_project_store(
     project_id: Option<String>,
     assume_yes: bool,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let profile_root = tracedecay::storage::default_profile_root()?;
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     let project_id = match (project_root, project_id) {
         (Some(root), None) => {
             let root = PathBuf::from(root);
-            let layout = tracedecay::storage::resolve_layout_for_current_profile(&root)?;
+            let layout = tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&root)?;
             layout.identity.project_id.ok_or_else(|| {
                 tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!(
@@ -59,7 +59,7 @@ fn handle_reset_project_store(
             })?
         }
         (None, Some(project_id)) => {
-            tracedecay::storage::validate_project_id(&project_id).map_err(|message| {
+            tracedecay_runtime_core::storage::validate_project_id(&project_id).map_err(|message| {
                 tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!("invalid --project-id: {message}"),
                 }
@@ -174,7 +174,7 @@ fn project_store_graph_db_paths(data_root: &Path) -> tracedecay_runtime_core::er
 /// is not a SQLite database is a typed error, never a deletion candidate.
 fn verified_graph_db_schema_version(graph_db_path: &Path) -> tracedecay_runtime_core::errors::Result<i64> {
     let has_header =
-        tracedecay::storage::has_sqlite_database_header(graph_db_path).map_err(|error| {
+        tracedecay_runtime_core::storage::has_sqlite_database_header(graph_db_path).map_err(|error| {
             tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!(
                     "could not verify the store header at {}: {error}",
@@ -219,7 +219,7 @@ fn reset_refused_project_graph_store(
     profile_root: &Path,
     project_id: &str,
 ) -> tracedecay_runtime_core::errors::Result<ResetProjectGraphStoreOutcome> {
-    let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
+    let data_root = tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
     let candidates = project_store_graph_db_paths(&data_root)?;
     if candidates.is_empty() {
         return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -306,7 +306,7 @@ fn handle_reset_authority(
             ),
         });
     }
-    let profile_root = tracedecay::storage::default_profile_root()?;
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,
         "reset-authority",
@@ -436,7 +436,7 @@ async fn handle_storage_report(
     project_root: Option<String>,
     json: bool,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let default_profile_root = tracedecay::storage::default_profile_root()?;
+    let default_profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     let profile_root = match profile_root {
         Some(path) => PathBuf::from(path),
         None => default_profile_root.clone(),
@@ -580,7 +580,7 @@ async fn handle_storage_report(
 }
 
 fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay_runtime_core::errors::Result<()> {
-    let profile_root = tracedecay::storage::default_profile_root()?;
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -653,7 +653,7 @@ mod reset_project_store_tests {
         project_id: &str,
         version: u32,
     ) -> PathBuf {
-        let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
+        let data_root = tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
         let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
         write_graph_db_with_user_version(&db_path, version);
         db_path
@@ -819,7 +819,7 @@ mod reset_project_store_tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         let data_root =
-            tracedecay::storage::profile_sharded_data_root(&profile_root, "proj_not_sqlite");
+            tracedecay_runtime_core::storage::profile_sharded_data_root(&profile_root, "proj_not_sqlite");
         std::fs::create_dir_all(&data_root).unwrap();
         let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
         std::fs::write(&db_path, b"not a database").unwrap();

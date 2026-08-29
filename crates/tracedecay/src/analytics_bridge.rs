@@ -209,7 +209,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
         .collect();
 
     let store_root = project_root.and_then(|root| {
-        crate::storage::resolve_layout_for_current_profile(root)
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root)
             .ok()
             .map(|layout| layout.data_root)
     });

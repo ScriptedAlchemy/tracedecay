@@ -127,7 +127,7 @@ impl Driver for CargoDriver {
 pub(crate) fn target_dir_for(project_root: &Path) -> PathBuf {
     std::env::temp_dir()
         .join("tracedecay-target")
-        .join(crate::storage::path_local_profile_project_id(project_root))
+        .join(tracedecay_runtime_core::storage::path_local_profile_project_id(project_root))
         .join("diagnostics")
 }
 
@@ -241,8 +241,8 @@ mod tests {
 
         // The two checkouts deliberately share one store identity...
         assert_eq!(
-            crate::storage::default_profile_project_id(&primary),
-            crate::storage::default_profile_project_id(&worktree),
+            tracedecay_runtime_core::storage::default_profile_project_id(&primary),
+            tracedecay_runtime_core::storage::default_profile_project_id(&worktree),
         );
         // ...but they hold different sources, so they must not share a cargo
         // target directory and contend for its lock.

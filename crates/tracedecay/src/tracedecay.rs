@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 use crate::config::TraceDecayConfig;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::errors::Result;
-use crate::storage::{self, StoreLayout};
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 #[cfg(test)]
 mod concrete_runtime_tests;

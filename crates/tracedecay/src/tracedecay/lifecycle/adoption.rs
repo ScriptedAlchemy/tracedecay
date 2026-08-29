@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
-use crate::storage::{self, StoreLayout};
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::TraceDecay;
 

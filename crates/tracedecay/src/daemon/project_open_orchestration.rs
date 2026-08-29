@@ -191,7 +191,7 @@ pub(super) async fn ensure_registered_project_route(
                         project_path.display()
                     ),
                 })?;
-        if let Some(layout) = crate::storage::resolve_persisted_layout(
+        if let Some(layout) = tracedecay_runtime_core::storage::resolve_persisted_layout(
             &project_path,
             store_administration.profile_identity()?.profile_root(),
         )? {
@@ -275,7 +275,7 @@ pub(super) fn durable_enrollment_resolves_existing_store(
         return false;
     };
     let Ok(Some(layout)) =
-        crate::storage::resolve_persisted_layout(project_path, identity.profile_root())
+        tracedecay_runtime_core::storage::resolve_persisted_layout(project_path, identity.profile_root())
     else {
         return false;
     };

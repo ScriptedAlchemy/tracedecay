@@ -18,7 +18,7 @@ struct FreshnessRuntime {
 impl FreshnessRuntime {
     async fn open(profile_root: &std::path::Path) -> Self {
         std::fs::create_dir_all(profile_root).expect("freshness profile root");
-        crate::storage::set_private_dir_permissions(profile_root)
+        tracedecay_runtime_core::storage::set_private_dir_permissions(profile_root)
             .expect("restrict freshness profile root");
         let identity = crate::daemon::profile_identity::load_or_create(profile_root)
             .expect("freshness profile identity");

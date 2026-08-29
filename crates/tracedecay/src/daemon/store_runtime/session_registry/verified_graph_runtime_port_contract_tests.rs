@@ -67,7 +67,7 @@ impl ContractFixture {
         let roots = self.project_roots(project_id);
         for root in &roots {
             std::fs::create_dir_all(root).expect("worktree root");
-            crate::storage::pin_fixture_repository_identity(root, project_id.as_str())
+            tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, project_id.as_str())
                 .expect("project enrollment");
         }
         let project_database = self
@@ -657,7 +657,7 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
     let project_id = project_id("verified-restart");
     let project_root = temporary.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
     let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 31, "verified graph restart")

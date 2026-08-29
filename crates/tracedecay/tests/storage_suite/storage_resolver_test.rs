@@ -16,7 +16,7 @@ use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
-use tracedecay::storage::{
+use tracedecay_runtime_core::storage::{
     ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath,
     StoreKind, StoreManifest, default_profile_project_id, default_profile_sharded_layout,

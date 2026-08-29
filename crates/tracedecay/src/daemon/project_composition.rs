@@ -132,7 +132,7 @@ async fn release_one_idle_project_server_before_open(
                 .await?;
             let project_sessions_path = retired_owner
                 .store_root
-                .join(crate::storage::SESSIONS_DB_FILENAME);
+                .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
             retirement_administration
                 .git_index_transaction_services()
                 .retire_project_database(&project_id, &project_sessions_path)

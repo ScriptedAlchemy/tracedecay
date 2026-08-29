@@ -51,7 +51,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::storage::PrivateStoreIo;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_domain::{
     CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProposalId,
     ProviderId, RefId, TaskId, UtcMicros, WorkApprovalPolicy, WorkEffectStateV1, WorkEgressPolicy,

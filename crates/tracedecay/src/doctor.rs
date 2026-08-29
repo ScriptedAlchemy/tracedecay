@@ -446,7 +446,7 @@ fn report_daemon_diagnostics_unavailable(
 
 fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
     if let Ok(Some(layout)) =
-        crate::storage::resolve_enrolled_layout_for_current_profile(project_path)
+        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(project_path)
     {
         return Some(layout.graph_db_path);
     }
@@ -463,7 +463,7 @@ fn database_recovery_guidance(db_path: &Path) -> String {
     graph_dirty.push(".dirty");
     let graph_dirty = PathBuf::from(graph_dirty);
     let legacy_dirty = data_root.join("dirty");
-    let sessions_path = data_root.join(crate::storage::SESSIONS_DB_FILENAME);
+    let sessions_path = data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
 
     format!(
         "First stop all TraceDecay daemon and MCP processes. No files were changed.\n\

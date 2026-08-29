@@ -465,7 +465,7 @@ pub(super) fn recover_existing_store_quarantine(
 /// Returns the original project id encoded in an orphan-store quarantine name.
 pub(super) fn quarantined_project_id(name: &str) -> Option<String> {
     let project_id = quarantine_original_name(name)?;
-    crate::storage::validate_project_id(project_id).ok()?;
+    tracedecay_runtime_core::storage::validate_project_id(project_id).ok()?;
     Some(project_id.to_owned())
 }
 

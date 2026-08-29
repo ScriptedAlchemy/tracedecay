@@ -90,7 +90,7 @@ fn remove_fixed_profile_path(profile_root: &Path, name: &str) -> tracedecay_runt
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
     let path = profile_root.join(name);
-    tracedecay::storage::reject_symlink_components(&path, "profile database wipe target")
+    tracedecay_runtime_core::storage::reject_symlink_components(&path, "profile database wipe target")
         .map_err(|error| wipe_io("validate wipe target", &path, &error))?;
     let removed = match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_dir() => {
@@ -103,7 +103,7 @@ fn remove_fixed_profile_path(profile_root: &Path, name: &str) -> tracedecay_runt
             true
         }
         Ok(metadata) if metadata.is_file() => {
-            tracedecay::storage::PrivateStoreIo::remove_file_durable(&path)
+            tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&path)
                 .map_err(|error| wipe_io("remove profile database file", &path, &error))?
         }
         Ok(_) => {
@@ -138,7 +138,7 @@ fn verify_wipe_path_absent(path: &Path) -> tracedecay_runtime_core::errors::Resu
 fn remove_local_wipe_directory(path: &Path) -> tracedecay_runtime_core::errors::Result<bool> {
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
-    tracedecay::storage::reject_symlink_components(path, "local wipe target")
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "local wipe target")
         .map_err(|error| wipe_io("validate local wipe target", path, &error))?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => {
@@ -175,7 +175,7 @@ fn wipe_complete_profile_database_state(profile_root: &Path) -> tracedecay_runti
         for suffix in ["-wal", "-shm", "-journal", ""] {
             let member = sqlite_family_member(&database, suffix);
             removed += usize::from(
-                tracedecay::storage::PrivateStoreIo::remove_file_durable(&member).map_err(
+                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&member).map_err(
                     |error| wipe_io("remove profile SQLite family member", &member, &error),
                 )?,
             );
@@ -284,7 +284,7 @@ fn handle_wipe_inner(
     // Erase the deeply nested wipe future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        let profile_root = tracedecay::storage::default_profile_root()?;
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
         let home_tracedecay = Some(profile_root.clone());
         if all {
             validate_complete_wipe_profile_root(

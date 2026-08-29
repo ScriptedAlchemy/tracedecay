@@ -696,7 +696,7 @@ mod tests {
                 .expect("fixture layout has a project identity"),
         )
         .unwrap();
-        crate::storage::pin_fixture_repository_identity(project_root, project_id.as_str()).unwrap();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id.as_str()).unwrap();
         let configuration_database = runtime_registry
             .project_sessions(
                 project_id,

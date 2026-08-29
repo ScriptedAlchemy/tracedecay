@@ -19,7 +19,7 @@ async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
             project.path(),
             crate::tracedecay::TraceDecayOpenOptions {
                 profile_root: Some(
-                    crate::storage::default_profile_root().expect("default profile root"),
+                    tracedecay_runtime_core::storage::default_profile_root().expect("default profile root"),
                 ),
                 global_db_path: None,
             },
@@ -29,7 +29,7 @@ async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
     assert!(!read_only.db().is_writable());
 
     let invocation = crate::daemon::invocation_state::DaemonInvocationState::default();
-    let profile_root = crate::storage::default_profile_root().expect("default profile root");
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().expect("default profile root");
     let profile_identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let profile_sessions = runtime

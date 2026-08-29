@@ -311,10 +311,10 @@ fn complete_after_pending_removal_with(
     let Some(capture_path) = closure.capture_path.as_ref() else {
         return Ok(());
     };
-    let lock_path = crate::storage::append_lock_path(&closure.source_path);
-    crate::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(&closure.source_path);
+    tracedecay_runtime_core::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
         .map_err(contract_error)?;
-    let lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
+    let lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
         contract_error(format!("shipped proposal retirement lock failed: {error}"))
     })?;
     let result = (|| {
@@ -339,7 +339,7 @@ fn complete_after_pending_removal_with(
                 let retired_name = retired_path.file_name().ok_or_else(|| {
                     contract_error("retired shipped proposal witness has no filename")
                 })?;
-                crate::storage::retry_transient_file_op(|| {
+                tracedecay_runtime_core::storage::retry_transient_file_op(|| {
                     rename_noreplace(&parent, captured_name, &parent, retired_name)
                 })
                 .map_err(|error| {
@@ -548,7 +548,7 @@ fn publish_archive_bytes_with(
     let parent = path
         .parent()
         .ok_or_else(|| contract_error("shipped proposal archive has no parent directory"))?;
-    crate::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(|error| {
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(|error| {
         contract_error(format!(
             "shipped proposal archive directory creation failed: {error}"
         ))
@@ -640,10 +640,10 @@ fn restore_existing_capture(source_path: &Path, captured_path: &Path) -> Result<
     let captured_name = captured_path
         .file_name()
         .ok_or_else(|| contract_error("captured shipped proposal source has no filename"))?;
-    let lock_path = crate::storage::append_lock_path(source_path);
-    crate::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(source_path);
+    tracedecay_runtime_core::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
         .map_err(contract_error)?;
-    let lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
+    let lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
         contract_error(format!("shipped proposal retirement lock failed: {error}"))
     })?;
     let result = (|| {
@@ -677,10 +677,10 @@ fn capture_exact_source_with_capture(
     let source_name = path
         .file_name()
         .ok_or_else(|| contract_error("shipped proposal source has no filename"))?;
-    let lock_path = crate::storage::append_lock_path(path);
-    crate::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
+    tracedecay_runtime_core::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
         .map_err(contract_error)?;
-    let lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
+    let lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
         contract_error(format!("shipped proposal retirement lock failed: {error}"))
     })?;
     let result = (|| {
@@ -699,7 +699,7 @@ fn capture_exact_source_with_capture(
                 "captured shipped proposal source changed before typed retirement capture",
             ));
         }
-        match crate::storage::retry_transient_file_op(|| {
+        match tracedecay_runtime_core::storage::retry_transient_file_op(|| {
             rename_noreplace(&parent, source_name, &parent, &tombstone_name)
         }) {
             Ok(()) => {}
@@ -774,7 +774,7 @@ fn restore_captured_source(
     source: &OsStr,
     source_path: &Path,
 ) -> Result<()> {
-    crate::storage::retry_transient_file_op(|| rename_noreplace(parent, captured, parent, source))
+    tracedecay_runtime_core::storage::retry_transient_file_op(|| rename_noreplace(parent, captured, parent, source))
         .map_err(|error| {
             contract_error(format!(
                 "captured shipped proposal source conflicts with a replacement and could not be restored: {error}"
@@ -1015,7 +1015,7 @@ mod tests {
             Some(&plan),
             |path, payload| {
                 publish_archive_bytes(path, payload)?;
-                crate::storage::PrivateStoreIo::remove_file_durable(path)
+                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)
                     .map(|_| ())
                     .map_err(contract_error)
             },

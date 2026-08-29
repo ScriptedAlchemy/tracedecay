@@ -599,7 +599,7 @@ pub fn build_project_storage_report(
     canonical_root: &Path,
     vector_readable_sources: Option<BTreeSet<CodeGenerationId>>,
 ) -> tracedecay_runtime_core::errors::Result<StorageReport> {
-    crate::storage::validate_project_id(project_id).map_err(|message| {
+    tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
         tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: message.to_owned(),
         }
@@ -885,7 +885,7 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if crate::storage::validate_project_id(&name).is_err() || registered_ids.contains(&name) {
+        if tracedecay_runtime_core::storage::validate_project_id(&name).is_err() || registered_ids.contains(&name) {
             continue;
         }
         count += 1;

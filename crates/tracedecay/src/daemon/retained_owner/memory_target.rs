@@ -237,7 +237,7 @@ mod tests {
         let selected_root = tmp.path().join("selected");
         std::fs::create_dir_all(&selected_root).unwrap();
         let selected_id =
-            ProjectId::new(crate::storage::default_profile_project_id(&selected_root)).unwrap();
+            ProjectId::new(tracedecay_runtime_core::storage::default_profile_project_id(&selected_root)).unwrap();
         let sibling = Arc::new(
             runtime
                 .sibling_project(&selected_root, selected_id)

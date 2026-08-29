@@ -106,7 +106,6 @@ pub mod serve;
 #[path = "sessions/ingest_tests.rs"]
 mod session_ingest_tests;
 pub mod session_temporal_benchmark;
-pub mod storage;
 pub mod store;
 pub(crate) mod support;
 pub mod tracedecay;

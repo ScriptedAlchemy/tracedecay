@@ -29,7 +29,7 @@ use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRu
 use tracedecay::mcp::ToolResult;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::{McpServer, McpTransport};
-use tracedecay::storage::PrivateStoreIo;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{

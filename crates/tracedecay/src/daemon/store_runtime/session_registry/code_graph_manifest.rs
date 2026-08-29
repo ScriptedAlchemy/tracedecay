@@ -1311,7 +1311,7 @@ mod tests {
         git(&project_root, &["add", "."]);
         git(&project_root, &["commit", "-qm", "single-pass fixture"]);
         let project_id = ProjectId::new("project.manifest-single-pass").unwrap();
-        crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
             .unwrap();
         let canonical_project = project_root.canonicalize().unwrap();
 

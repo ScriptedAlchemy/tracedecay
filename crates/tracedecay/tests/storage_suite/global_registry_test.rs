@@ -9,7 +9,7 @@ use tracedecay_global_db::{
     GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::storage::{
+use tracedecay_runtime_core::storage::{
     BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, write_store_manifest_to_path,
 };
