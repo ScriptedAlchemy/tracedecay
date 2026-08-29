@@ -4231,16 +4231,6 @@ mod tests {
         assert!(RerankExecutionControlV1::is_cancelled(&control));
     }
 
-    fn projection_key() -> ProjectionKeyV1 {
-        // Derive the projection key from the same admitted authority the query
-        // runtime binds against so `profile_digest` is the canonical digest the
-        // embedding projection produces, rather than a non-canonical placeholder.
-        tracedecay_semantic::session_pool::test_support::authority()
-            .projection()
-            .projection_key()
-            .clone()
-    }
-
     #[test]
     fn published_semantic_candidates_use_the_seated_score_domain() {
         let domain = published_semantic_candidate_score_domain().expect("score domain");
@@ -4249,6 +4239,16 @@ mod tests {
             tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1
         );
         assert_ne!(domain.as_str(), "score.semantic-distance.daemon.v1");
+    }
+
+    fn projection_key() -> ProjectionKeyV1 {
+        // Derive the projection key from the same admitted authority the query
+        // runtime binds against so `profile_digest` is the canonical digest the
+        // embedding projection produces, rather than a non-canonical placeholder.
+        tracedecay_semantic::session_pool::test_support::authority()
+            .projection()
+            .projection_key()
+            .clone()
     }
 
     fn search_index_key() -> &'static SemanticSearchIndexKeyV1 {
@@ -4988,6 +4988,7 @@ mod tests {
             },
             "restart remount must reattach the durable Ready receipt"
         );
+        remounted.validate().expect("ready runtime status");
         assert_eq!(
             remounted.route(),
             crate::semantic_runtime::SemanticRuntimeRouteV1::Semantic {

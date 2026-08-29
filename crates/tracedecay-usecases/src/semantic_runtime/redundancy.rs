@@ -14,7 +14,8 @@ use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 
 use super::{
     CommittedRetrievalProfileStateV1, SemanticActivationReceiptV1,
-    SemanticRetainedVectorGenerationsV1, project_semantic_production_runtime,
+    SemanticCurrentLinkedActivationV1, SemanticRetainedVectorGenerationsV1,
+    project_semantic_production_runtime,
 };
 
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
@@ -90,7 +91,7 @@ impl SemanticRedundancyProfileV1 {
 struct SemanticRedundancyAuthorityV1 {
     scope_digest: ManifestDigest,
     accepted_profile_digest: ManifestDigest,
-    pins: SemanticCompatibilityPinsV1,
+    activation: SemanticCurrentLinkedActivationV1,
     calibration_digest: ManifestDigest,
     redundancy_profile_digest: ManifestDigest,
 }
@@ -181,7 +182,7 @@ pub fn project_committed_semantic_pins(project_root: &Path) -> Option<SemanticCo
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
         .and_then(|state| state.authority.as_ref())
-        .map(|authority| authority.pins.clone())
+        .map(|authority| authority.activation.compatibility.clone())
 }
 
 /// Durable Ready receipt last installed for this project, if any.
@@ -457,10 +458,10 @@ async fn read_project_semantic_redundancy_generation(
             .and_then(|state| state.authority.clone())?
     };
     let vectors = project_semantic_production_runtime(project_root)?
-        .active_vector_generation(&authority.pins)
+        .active_vector_generation(&authority.activation.compatibility)
         .await?;
-    if vectors.generation_id() != &authority.pins.vector_generation_id
-        || vectors.embedding_key() != &authority.pins.projection
+    if vectors.generation_id() != &authority.activation.compatibility.vector_generation_id
+        || vectors.embedding_key() != &authority.activation.compatibility.projection
         || vectors.embedding_key().embedding_key().metric != EmbeddingMetricV1::Cosine
     {
         return None;
@@ -524,14 +525,19 @@ async fn read_project_semantic_redundancy_generation(
             scope_digest: authority.scope_digest.as_str().to_owned(),
             accepted_profile_digest: authority.accepted_profile_digest.as_str().to_owned(),
             calibration_profile_id: authority
-                .pins
+                .activation
+                .compatibility
                 .calibration
                 .calibration_profile_id
                 .as_str()
                 .to_owned(),
             calibration_digest: authority.calibration_digest.as_str().to_owned(),
             redundancy_profile_digest: authority.redundancy_profile_digest.as_str().to_owned(),
-            maximum_distance_micros: authority.pins.calibration.maximum_distance_micros,
+            maximum_distance_micros: authority
+                .activation
+                .compatibility
+                .calibration
+                .maximum_distance_micros,
         },
         vectors: admitted,
     })
@@ -569,7 +575,7 @@ fn redundancy_authority_from_committed(
     Some(SemanticRedundancyAuthorityV1 {
         scope_digest: committed.scope.scope_digest.clone(),
         accepted_profile_digest,
-        pins: pins.clone(),
+        activation: activation.clone(),
         calibration_digest,
         redundancy_profile_digest,
     })

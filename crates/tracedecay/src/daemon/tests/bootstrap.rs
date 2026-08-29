@@ -3322,7 +3322,9 @@ async fn production_composition_tool_json(
     serde_json::from_str(content).expect("retrieved payload json")
 }
 
-fn production_composition_probe_candidate(payload: &serde_json::Value) -> Option<&serde_json::Value> {
+fn production_composition_probe_candidate(
+    payload: &serde_json::Value,
+) -> Option<&serde_json::Value> {
     payload["results"].as_array().and_then(|matches| {
         matches
             .iter()
@@ -3331,9 +3333,8 @@ fn production_composition_probe_candidate(payload: &serde_json::Value) -> Option
 }
 
 fn production_composition_probe_node_id(payload: &serde_json::Value) -> Option<&str> {
-    production_composition_probe_candidate(payload).and_then(|candidate| {
-        candidate["node_id"].as_str()
-    })
+    production_composition_probe_candidate(payload)
+        .and_then(|candidate| candidate["node_id"].as_str())
 }
 
 fn commit_production_composition_project(project: &std::path::Path) {
@@ -3389,8 +3390,7 @@ async fn production_composition_mounts_core_query_without_optional_stage_evaluat
                 )
                 .await
                 .expect("production search");
-            let payload =
-                production_composition_tool_json(&harness, &project, &response).await;
+            let payload = production_composition_tool_json(&harness, &project, &response).await;
             // Graph seating is deliberately detached from text freshness, so
             // the code generation publishes before the verified graph read is
             // servable and `node_id` is absent until then. A follow-up that
