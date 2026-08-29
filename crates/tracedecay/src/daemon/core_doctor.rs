@@ -9,10 +9,7 @@ use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
 use crate::errors::Result;
 use tracedecay_jsonrpc::{JsonRpcRequest, JsonRpcResponse, McpTransport};
-use tracedecay_usecases::semantic_runtime::{
-    SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
-    SemanticRuntimeStatusV1,
-};
+use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 #[path = "core_doctor_schema.rs"]
 mod schema;
@@ -469,43 +466,10 @@ fn doctor_semantic_runtime_status(
     project_path: Option<&Path>,
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> serde_json::Value {
-    if let Some(project_path) = project_path
-        && let Some(status) =
-            tracedecay_usecases::semantic_runtime::project_semantic_application_status(
-                project_path,
-                configuration.clone(),
-            )
-    {
-        return serde_json::to_value(status)
-            .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }));
-    }
-    if configuration.is_none() {
-        return serde_json::to_value(SemanticRuntimeStatusV1::new(
-            None,
-            SemanticRuntimeStateV1::Unavailable {
-                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
-            },
-        ))
-        .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }));
-    }
-    let Some(owner) = crate::semantic_code::shared_lifecycle_owner() else {
-        return serde_json::to_value(SemanticRuntimeStatusV1::new(
-            None,
-            SemanticRuntimeStateV1::Unavailable {
-                reason: SemanticFallbackReasonV1::RuntimeUnavailable,
-            },
-        ))
-        .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }));
-    };
-    let status = owner.status();
-    let state = match status.state.as_ref() {
-        Some(lifecycle) => crate::semantic_code::lifecycle_to_runtime_state(lifecycle),
-        None => SemanticRuntimeStateV1::Unavailable {
-            reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
-        },
-    };
-    serde_json::to_value(SemanticRuntimeStatusV1::new(configuration, state))
-        .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
+    serde_json::to_value(
+        crate::semantic_code::resolve_project_semantic_runtime_status(project_path, configuration),
+    )
+    .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
 
 #[cfg(test)]
@@ -608,6 +572,10 @@ mod doctor_runtime_route_tests {
     use crate::mcp::server::McpServerConstructionContext;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
     use tracedecay_jsonrpc::McpTransport;
+    use tracedecay_usecases::semantic_runtime::{
+        SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
+        SemanticRuntimeStatusV1,
+    };
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -933,10 +901,174 @@ mod doctor_runtime_route_tests {
             serde_json::from_value(value).expect("semantic runtime status");
 
         assert_eq!(status.validate(), Ok(()));
+        assert!(status.configuration.is_none());
         assert!(matches!(
             status.state,
             tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
                 reason: tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::ConfigurationUnavailable,
+            }
+        ));
+    }
+
+    fn semantic_status_pin() -> SemanticConfigurationPinV1 {
+        use std::collections::BTreeMap;
+        use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
+
+        SemanticConfigurationPinV1::from_current(
+            &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+                revision_id: ConfigurationRevisionId::try_from(
+                    "configuration.revision.doctor".to_owned(),
+                )
+                .expect("revision"),
+                snapshot: ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default())
+                    .expect("snapshot"),
+            },
+        )
+        .expect("pin")
+    }
+
+    fn lifecycle_status(
+        selected_model: Option<&str>,
+        state: Option<crate::semantic_code::SemanticModelLifecycleStateV1>,
+    ) -> crate::semantic_code::SemanticModelLifecycleStatusV1 {
+        crate::semantic_code::SemanticModelLifecycleStatusV1 {
+            selected_model: selected_model.map(str::to_owned),
+            auto_download: false,
+            catalog_model_ids: Vec::new(),
+            state,
+            remediation: crate::semantic_code::SemanticModelRemediationV1 {
+                retry: false,
+                remove: false,
+                rollback: false,
+            },
+            semantics_omitted: true,
+        }
+    }
+
+    fn seated_generic_unavailable() -> SemanticRuntimeStatusV1 {
+        SemanticRuntimeStatusV1::new(
+            Some(semantic_status_pin()),
+            SemanticRuntimeStateV1::Unavailable {
+                reason: SemanticFallbackReasonV1::RuntimeUnavailable,
+            },
+        )
+    }
+
+    #[test]
+    fn seated_generic_unavailable_yields_to_lifecycle_downloading() {
+        let digest = "b".repeat(64);
+        let lifecycle = lifecycle_status(
+            Some("JinaEmbeddingsV2BaseCode"),
+            Some(
+                crate::semantic_code::SemanticModelLifecycleStateV1::Downloading {
+                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                    revision: "rev".to_owned(),
+                    artifact_digest: digest,
+                    bytes_received: 4,
+                    bytes_total: 16,
+                },
+            ),
+        );
+        let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
+            Some(seated_generic_unavailable()),
+            Some(&lifecycle),
+            Some(semantic_status_pin()),
+        );
+
+        assert_eq!(status.validate(), Ok(()));
+        match status.state {
+            SemanticRuntimeStateV1::Downloading {
+                bytes_received,
+                bytes_total,
+                ..
+            } => {
+                assert_eq!(bytes_received, 4);
+                assert_eq!(bytes_total, 16);
+            }
+            other => panic!("expected downloading, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seated_generic_unavailable_yields_to_lifecycle_failed() {
+        let digest = "c".repeat(64);
+        let lifecycle = lifecycle_status(
+            Some("JinaEmbeddingsV2BaseCode"),
+            Some(
+                crate::semantic_code::SemanticModelLifecycleStateV1::Failed {
+                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                    revision: "rev".to_owned(),
+                    artifact_digest: digest,
+                    detail: "artifact verify failed".to_owned(),
+                    retryable: false,
+                },
+            ),
+        );
+        let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
+            Some(seated_generic_unavailable()),
+            Some(&lifecycle),
+            Some(semantic_status_pin()),
+        );
+
+        assert_eq!(status.validate(), Ok(()));
+        match status.state {
+            SemanticRuntimeStateV1::Failed {
+                detail, retryable, ..
+            } => {
+                assert_eq!(detail, "artifact verify failed");
+                assert!(!retryable);
+            }
+            other => panic!("expected failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seated_runtime_failure_is_not_replaced_by_lifecycle_downloading() {
+        let broken = SemanticRuntimeStatusV1::new(
+            Some(semantic_status_pin()),
+            SemanticRuntimeStateV1::Degraded {
+                active_generation: None,
+                reason: SemanticFallbackReasonV1::RuntimeFailure,
+            },
+        );
+        let lifecycle = lifecycle_status(
+            Some("JinaEmbeddingsV2BaseCode"),
+            Some(
+                crate::semantic_code::SemanticModelLifecycleStateV1::Downloading {
+                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                    revision: "rev".to_owned(),
+                    artifact_digest: "d".repeat(64),
+                    bytes_received: 1,
+                    bytes_total: 2,
+                },
+            ),
+        );
+        let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
+            Some(broken.clone()),
+            Some(&lifecycle),
+            Some(semantic_status_pin()),
+        );
+
+        assert_eq!(status, broken);
+    }
+
+    #[test]
+    fn disabled_selection_keeps_the_configuration_pin() {
+        let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
+            Some(seated_generic_unavailable()),
+            Some(&lifecycle_status(None, None)),
+            Some(semantic_status_pin()),
+        );
+
+        assert_eq!(status.validate(), Ok(()));
+        assert!(
+            status.configuration.is_some(),
+            "deliberate selected_model: None keeps the pin so it is not a missing config"
+        );
+        assert!(matches!(
+            status.state,
+            SemanticRuntimeStateV1::Unavailable {
+                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
             }
         ));
     }

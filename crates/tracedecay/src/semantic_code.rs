@@ -6,12 +6,12 @@
 //! (owned by `tracedecay_usecases::semantic_runtime`). Re-exports stay
 //! `pub(crate)` so extraction does not widen the root's public API.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(crate) use tracedecay_semantic::*;
 
-use tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1 as Runtime;
+use tracedecay_usecases::semantic_runtime::{SemanticConfigurationPinV1, SemanticRuntimeStatusV1};
 
 /// Resolve the lifecycle store root under the user data directory.
 pub(crate) fn default_lifecycle_root() -> Option<PathBuf> {
@@ -35,79 +35,39 @@ pub(crate) fn apply_config_and_queue_startup(
     )
 }
 
-/// Map lifecycle state into the Doctor/status semantic runtime state surface.
-pub(crate) fn lifecycle_to_runtime_state(state: &SemanticModelLifecycleStateV1) -> Runtime {
-    match state {
-        SemanticModelLifecycleStateV1::SelectedNotDownloaded {
-            model_id,
-            artifact_digest,
-            ..
-        } => Runtime::SelectedNotDownloaded {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        SemanticModelLifecycleStateV1::Downloading {
-            model_id,
-            artifact_digest,
-            bytes_received,
-            bytes_total,
-            ..
-        } => Runtime::Downloading {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-            bytes_received: *bytes_received,
-            bytes_total: *bytes_total,
-        },
-        SemanticModelLifecycleStateV1::Verifying {
-            model_id,
-            artifact_digest,
-            ..
-        } => Runtime::Verifying {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        // Lifecycle Ready means the package is locally complete. Semantic
-        // search influence still requires a Current activation receipt.
-        SemanticModelLifecycleStateV1::Installed {
-            model_id,
-            artifact_digest,
-            ..
-        }
-        | SemanticModelLifecycleStateV1::Ready {
-            model_id,
-            artifact_digest,
-            ..
-        } => Runtime::Installed {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        // Vector-generation Indexing requires a configuration pin +
-        // generation id. Acquisition-phase indexing is reported as Loading
-        // until the semantic owner publishes an activation receipt.
-        SemanticModelLifecycleStateV1::Loading {
-            model_id,
-            artifact_digest,
-            ..
-        }
-        | SemanticModelLifecycleStateV1::Indexing {
-            model_id,
-            artifact_digest,
-            ..
-        } => Runtime::Loading {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        SemanticModelLifecycleStateV1::Failed {
-            model_id,
-            artifact_digest,
-            detail,
-            retryable,
-            ..
-        } => Runtime::Failed {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-            detail: detail.clone(),
-            retryable: *retryable,
-        },
+/// Doctor/MCP status for a seated or unseated project.
+///
+/// Seated scheduler views that only report generic unavailability yield to
+/// the model-lifecycle owner. A mounted-but-broken runtime keeps its error.
+pub(crate) fn resolve_project_semantic_runtime_status(
+    project_path: Option<&Path>,
+    configuration: Option<SemanticConfigurationPinV1>,
+) -> SemanticRuntimeStatusV1 {
+    let scheduler = project_path.and_then(|path| {
+        tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+            path,
+            configuration.clone(),
+        )
+    });
+    let lifecycle = match project_path {
+        Some(path) => project_or_shared_lifecycle_status(path),
+        None if configuration.is_none() => None,
+        None => shared_lifecycle_owner().map(|owner| owner.status()),
+    };
+    tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
+        scheduler,
+        lifecycle.as_ref(),
+        configuration,
+    )
+}
+
+fn project_or_shared_lifecycle_status(
+    project_path: &Path,
+) -> Option<SemanticModelLifecycleStatusV1> {
+    if let Some(runtime) =
+        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_path)
+    {
+        return Some(runtime.lifecycle_status());
     }
+    shared_lifecycle_owner().map(|owner| owner.status())
 }

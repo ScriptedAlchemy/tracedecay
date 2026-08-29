@@ -186,10 +186,33 @@ pub(super) fn semantic_mcp_reason(
         };
     }
     match runtime_state {
-        None
-        | Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
-            ..
-        }) => "semantic_runtime_unavailable",
+        None => "semantic_runtime_unavailable",
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
+            reason,
+        }) => match reason {
+            tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::ConfigurationUnavailable => {
+                "semantic_configuration_unavailable"
+            }
+            tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::Downloading => {
+                "semantic_model_downloading"
+            }
+            tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::Verifying => {
+                "semantic_model_verifying"
+            }
+            tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::Loading => {
+                "semantic_model_loading"
+            }
+            tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::SelectedNotDownloaded => {
+                "semantic_model_not_downloaded"
+            }
+            tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::ModelFailed => {
+                "semantic_failed"
+            }
+            tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::Indexing => {
+                "semantic_indexing"
+            }
+            _ => "semantic_runtime_unavailable",
+        },
         Some(
             tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::SelectedNotDownloaded {
                 ..
