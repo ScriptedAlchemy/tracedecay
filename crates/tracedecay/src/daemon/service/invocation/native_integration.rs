@@ -50,8 +50,8 @@ use tracedecay_usecases::observability::{
 use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
 use crate::application_surface::NativeIntegrationSurfaceRequest;
-use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
-use crate::daemon::native_integration::stack_signals::{
+use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
+use tracedecay_agent_hosts::native_integration::stack_signals::{
     signal_from_preflight, signal_from_receipt,
 };
 

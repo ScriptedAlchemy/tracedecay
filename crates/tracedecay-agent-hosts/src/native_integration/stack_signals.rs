@@ -17,7 +17,7 @@ use tracedecay_usecases::stack_coordinator::{
 
 /// Produces the one truthful transition represented by a sealed preflight.
 /// Independent-branch previews and non-transition dispositions remain silent.
-pub(crate) fn signal_from_preflight(
+pub fn signal_from_preflight(
     scope: &ResolvedScope,
     preview: &NativeIntegrationPreviewV1,
 ) -> Result<Option<StackSignalV1>, StackCoordinatorErrorV1> {
@@ -49,7 +49,7 @@ pub(crate) fn signal_from_preflight(
 
 /// Produces the one material transition represented by a sealed terminal
 /// receipt. No-change and rolled-back terminals never claim stack progress.
-pub(crate) fn signal_from_receipt(
+pub fn signal_from_receipt(
     scope: &ResolvedScope,
     preview: &NativeIntegrationPreviewV1,
     receipt: &NativeIntegrationReceiptV1,

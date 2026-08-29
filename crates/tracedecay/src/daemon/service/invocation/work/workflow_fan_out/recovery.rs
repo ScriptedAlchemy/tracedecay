@@ -267,7 +267,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
         observability_producer: Option<
             Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
         >,
-        holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
+        holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
     ) -> Result<Self, DaemonInvocationProblem> {
         let holder_root = project_root
             .canonicalize()

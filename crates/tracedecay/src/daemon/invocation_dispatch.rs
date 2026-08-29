@@ -27,7 +27,10 @@ fn semantic_invocation_interruption_response(
         })
 }
 
-fn record_project_open_refusal(operation: &str, error: &tracedecay_runtime_core::errors::TraceDecayError) {
+fn record_project_open_refusal(
+    operation: &str,
+    error: &tracedecay_runtime_core::errors::TraceDecayError,
+) {
     hotpath::gauge!("daemon.invocation.route.project_open_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
@@ -39,7 +42,10 @@ fn record_project_open_refusal(operation: &str, error: &tracedecay_runtime_core:
     );
 }
 
-fn record_project_route_refusal(operation: &str, error: &tracedecay_runtime_core::errors::TraceDecayError) {
+fn record_project_route_refusal(
+    operation: &str,
+    error: &tracedecay_runtime_core::errors::TraceDecayError,
+) {
     hotpath::gauge!("daemon.invocation.route.project_route_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
@@ -431,7 +437,7 @@ pub(super) async fn git_service_for_project_path(
 pub(super) async fn native_integration_service_for_project_path(
     store_administration: &StoreAdministration,
     project_path: Option<&Path>,
-) -> Option<native_integration::DaemonNativeIntegrationOwner> {
+) -> Option<tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner> {
     let project_path = project_path?;
     let repository_root = tracedecay_runtime_core::worktree::git_worktree_root(project_path)
         .unwrap_or_else(|| project_path.to_path_buf());
@@ -897,8 +903,10 @@ mod workflow_reset_tests {
 
     #[test]
     fn workflow_project_open_reset_remains_a_daemon_reset_problem() {
-        let error =
-            tracedecay_runtime_core::errors::TraceDecayError::reset_required("workflow", "partial workflow schema");
+        let error = tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+            "workflow",
+            "partial workflow schema",
+        );
         assert_eq!(
             project_open_problem(&error, true, false),
             service::invocation::DaemonInvocationProblem::ResetRequired

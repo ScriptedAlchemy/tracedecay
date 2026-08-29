@@ -744,7 +744,7 @@ impl OptionalStackPreflightPort for StackRuntimePortsV1 {
 
 /// One project-bound runtime with a bounded drain task, cancelled with its
 /// native-integration owner; no global task or fallback route is created.
-pub(crate) struct DaemonGitHubStackRuntimeV1 {
+pub struct DaemonGitHubStackRuntimeV1 {
     scope: ResolvedScope,
     coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
     ports: StackRuntimePortsV1,
@@ -755,7 +755,7 @@ pub(crate) struct DaemonGitHubStackRuntimeV1 {
 impl DaemonGitHubStackRuntimeV1 {
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "daemon.native_integration.stack_mount")]
-    pub(crate) fn mount(
+    pub fn mount(
         project_id: ProjectId,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
@@ -831,7 +831,7 @@ impl DaemonGitHubStackRuntimeV1 {
         Ok(runtime)
     }
 
-    pub(crate) fn enqueue_from_preflight(
+    pub fn enqueue_from_preflight(
         &self,
         signal: StackSignalV1,
         context: &RequestContext,
@@ -841,14 +841,14 @@ impl DaemonGitHubStackRuntimeV1 {
             .enqueue_transition(&self.ports, &self.ports, &self.scope, signal)
     }
 
-    pub(crate) fn refresh_access(
+    pub fn refresh_access(
         &self,
         access: ProjectSourceAccessSnapshot,
     ) -> Result<(), StackCoordinatorErrorV1> {
         self.ports.replace_access(access)
     }
 
-    pub(crate) fn enqueue_from_approval(
+    pub fn enqueue_from_approval(
         &self,
         signal: StackSignalV1,
         approval: &NativeIntegrationApprovalV1,
@@ -863,7 +863,7 @@ impl DaemonGitHubStackRuntimeV1 {
     /// Executes preflight through the coordinator's circuit and bounded
     /// admission path. The port stores the exact outcome produced by that
     /// invocation so callers do not bypass the circuit with a second Git run.
-    pub(crate) fn preflight(
+    pub fn preflight(
         &self,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
@@ -914,7 +914,7 @@ impl DaemonGitHubStackRuntimeV1 {
         }
     }
 
-    pub(crate) fn pending_host_deliveries(
+    pub fn pending_host_deliveries(
         &self,
     ) -> Result<Vec<GitHubStackDeliveryRecordV1>, StackCoordinatorErrorV1> {
         self.ports.pending_host_for_scope()

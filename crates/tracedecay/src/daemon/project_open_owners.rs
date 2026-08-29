@@ -39,11 +39,11 @@ use tracedecay_usecases::request_identity::{PreviewIdentityDomain, derive_previe
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
-use crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar;
 use crate::mcp::McpServer;
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
@@ -593,7 +593,7 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
     git_transactions: &DaemonGitIndexTransactionServiceRegistry,
-    native_integration: &DaemonNativeIntegrationServiceRegistry,
+    native_integration: &DaemonNativeIntegrationRuntimeRegistrar,
     project_root: &Path,
     project_id: &str,
     server: &McpServer,
@@ -895,7 +895,7 @@ pub(super) async fn register_project_open_production_owners(
                         "project-open GitHub stack delivery runtime registration failed: {error:?}"
                     ),
                 })?;
-            crate::daemon::native_integration::register_github_stack_hook_runtime(
+            tracedecay_agent_hosts::native_integration::register_github_stack_hook_runtime(
                 &scope,
                 &stack_runtime,
             );

@@ -8,7 +8,7 @@
 mod registry;
 mod stack_hook_wakeup;
 mod stack_runtime;
-pub(crate) mod stack_signals;
+pub mod stack_signals;
 mod store;
 mod worktree;
 mod worktree_cleanup;
@@ -16,8 +16,6 @@ mod worktree_cleanup;
 #[cfg(test)]
 mod journey_tests;
 
-pub(crate) use registry::{DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry};
-pub(crate) use stack_hook_wakeup::{
-    github_stack_hook_available, register_github_stack_hook_runtime,
-};
-pub(crate) use worktree::{WorktreeHolderAdmissionFenceV1, daemon_worktree_holder_admission_fence};
+pub use registry::{DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry};
+pub use stack_hook_wakeup::{github_stack_hook_available, register_github_stack_hook_runtime};
+pub use worktree::{WorktreeHolderAdmissionFenceV1, daemon_worktree_holder_admission_fence};

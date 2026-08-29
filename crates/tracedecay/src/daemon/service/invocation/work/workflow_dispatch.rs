@@ -40,7 +40,7 @@ pub(in crate::daemon::service::invocation) async fn execute_workflow_application
     _observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
-    worktree_holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
+    worktree_holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
 ) -> DaemonInvocationResponse {
     let Some(holder_root) = project_root.canonicalize().ok() else {
         return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);

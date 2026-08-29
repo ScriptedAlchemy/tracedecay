@@ -10,8 +10,6 @@ use std::path::Path;
 use std::process::Command;
 
 use super::registry::DaemonNativeIntegrationServiceRegistry;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use crate::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::{
     AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -28,6 +26,8 @@ use tracedecay_domain::{
     RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
     WorktreeInventorySnapshotId, canonical_sha256,
 };
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
@@ -310,7 +310,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
         .await
         .expect("canonical project test runtime");
         let database = runtime
-            .registered_database_arc(HostAdmissionScope::Project)
+            .registered_database_lease(HostAdmissionScope::Project)
             .expect("registered project database");
 
         let (registry, owner) = mount(database.clone(), repository_root.clone()).await;
@@ -442,7 +442,7 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
     .await
     .expect("canonical project test runtime");
     let database = runtime
-        .registered_database_arc(HostAdmissionScope::Project)
+        .registered_database_lease(HostAdmissionScope::Project)
         .expect("registered project database");
     let (registry, owner) = mount(database, repository_root.clone()).await;
     let request = preflight_request(

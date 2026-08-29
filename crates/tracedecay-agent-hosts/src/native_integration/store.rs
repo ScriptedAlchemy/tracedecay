@@ -544,7 +544,7 @@ fn run_store_actor(
 
 /// Cloneable handle over the one retained store actor for a project database.
 #[derive(Clone)]
-pub(crate) struct SharedDaemonNativeIntegrationStore {
+pub struct SharedDaemonNativeIntegrationStore {
     inner: Arc<DaemonNativeIntegrationStore>,
 }
 
@@ -557,14 +557,14 @@ impl SharedDaemonNativeIntegrationStore {
         self.inner.shutdown()
     }
 
-    pub(crate) fn save_approval(
+    pub fn save_approval(
         &self,
         approval: NativeIntegrationApprovalV1,
     ) -> NativeIntegrationStoreResult<()> {
         self.inner.save_approval(approval)
     }
 
-    pub(crate) fn read_approval(
+    pub fn read_approval(
         &self,
         approval_id: &NativeIntegrationApprovalId,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationApprovalV1>> {

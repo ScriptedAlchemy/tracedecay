@@ -92,7 +92,7 @@ impl DaemonNativeWorktreeAuthority {
         let fenced = self.observe_target(
             &request.target,
             scope_set,
-            crate::daemon_client::invocation_now_micros(),
+            tracedecay_application::now_micros(),
             true,
         )?;
         if fenced.presence != WorktreePresenceV1::Present
@@ -413,7 +413,7 @@ impl DaemonNativeWorktreeAuthority {
         let inspection = self.observe_target(
             &target,
             scope_set,
-            crate::daemon_client::invocation_now_micros(),
+            tracedecay_application::now_micros(),
             true,
         )?;
         Ok(match inspection.presence {
@@ -573,7 +573,7 @@ fn run_worktree_remove(repository_root: &Path, worktree_root: &Path) -> Result<O
 }
 
 fn now_at_least(floor: UtcMicros) -> UtcMicros {
-    let now = crate::daemon_client::invocation_now_micros();
+    let now = tracedecay_application::now_micros();
     UtcMicros(now.0.max(floor.0))
 }
 

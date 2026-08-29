@@ -630,6 +630,16 @@ impl HostAdmissionTestRuntimeV1 {
         }
     }
 
+    pub fn registered_database_lease(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Option<RegisteredGlobalDbLeaseV1> {
+        match scope {
+            HostAdmissionScope::Project => self.project_registered.clone(),
+            HostAdmissionScope::Profile => Some(self.profile_registered.clone()),
+        }
+    }
+
     pub fn database_path(&self, scope: HostAdmissionScope) -> Option<&std::path::Path> {
         self.registered_database(scope)
             .map(RegisteredGlobalDb::db_path)

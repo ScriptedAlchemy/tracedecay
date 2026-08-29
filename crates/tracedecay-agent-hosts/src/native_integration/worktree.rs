@@ -35,12 +35,12 @@ use super::store::SharedDaemonNativeIntegrationStore;
 type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
 
 #[derive(Clone)]
-pub(crate) struct DaemonAuthorizedScopeSetReader {
+pub struct DaemonAuthorizedScopeSetReader {
     storage: AuthorizedScopeSetSqliteStorage,
 }
 
 impl DaemonAuthorizedScopeSetReader {
-    pub(crate) const fn new(storage: AuthorizedScopeSetSqliteStorage) -> Self {
+    pub const fn new(storage: AuthorizedScopeSetSqliteStorage) -> Self {
         Self { storage }
     }
 }
@@ -81,7 +81,7 @@ impl Default for HolderFenceRootV1 {
 /// native cleanup. A durable cleanup journal keeps its write fence across
 /// requests and daemon-owned runtime mounts until reconciliation is terminal.
 #[derive(Clone)]
-pub(crate) struct WorktreeHolderAdmissionFenceV1 {
+pub struct WorktreeHolderAdmissionFenceV1 {
     state: Arc<ProfiledStdMutex<HolderFenceStateV1>>,
 }
 
@@ -98,7 +98,7 @@ impl Default for WorktreeHolderAdmissionFenceV1 {
 
 impl WorktreeHolderAdmissionFenceV1 {
     #[hotpath::measure(label = "daemon.git.worktree.admit", future = true)]
-    pub(crate) async fn admit_holders(
+    pub async fn admit_holders(
         &self,
         roots: impl IntoIterator<Item = PathBuf>,
     ) -> Option<Vec<OwnedRwLockReadGuard<()>>> {
@@ -130,7 +130,7 @@ impl WorktreeHolderAdmissionFenceV1 {
     }
 
     #[hotpath::measure(label = "daemon.git.worktree.mark_recovery", future = true)]
-    pub(crate) async fn mark_recovery_required(&self, roots: impl IntoIterator<Item = PathBuf>) {
+    pub async fn mark_recovery_required(&self, roots: impl IntoIterator<Item = PathBuf>) {
         let mut roots = roots.into_iter().collect::<Vec<_>>();
         roots.sort();
         roots.dedup();
@@ -256,12 +256,12 @@ impl Drop for WorktreeCleanupAdmissionV1 {
     }
 }
 
-pub(crate) fn daemon_worktree_holder_admission_fence() -> WorktreeHolderAdmissionFenceV1 {
+pub fn daemon_worktree_holder_admission_fence() -> WorktreeHolderAdmissionFenceV1 {
     static FENCE: OnceLock<WorktreeHolderAdmissionFenceV1> = OnceLock::new();
     FENCE.get_or_init(Default::default).clone()
 }
 
-pub(crate) struct DaemonNativeWorktreeAuthority {
+pub struct DaemonNativeWorktreeAuthority {
     pub(super) project_id: ProjectId,
     pub(super) repository_id: RepositoryId,
     pub(super) repository_root: PathBuf,
@@ -273,7 +273,7 @@ pub(crate) struct DaemonNativeWorktreeAuthority {
 
 impl DaemonNativeWorktreeAuthority {
     #[hotpath::measure(label = "daemon.git.worktree.open")]
-    pub(crate) fn open(
+    pub fn open(
         project_id: ProjectId,
         repository_id: RepositoryId,
         repository_root: &Path,
@@ -549,7 +549,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
             return Ok(WorktreeInventoryOutcomeV1::Unavailable);
         }
         let roots = self.scope_roots(&request.target, scope_set)?;
-        let observed_at = crate::daemon_client::invocation_now_micros();
+        let observed_at = tracedecay_application::now_micros();
         let mut entries = Vec::with_capacity(roots.len());
         for root in roots {
             if cancellation.is_cancelled() {
@@ -629,7 +629,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         let inspection = self.observe_target(
             &request.target,
             scope_set,
-            crate::daemon_client::invocation_now_micros(),
+            tracedecay_application::now_micros(),
             false,
         )?;
         Ok(match inspection.presence {
@@ -649,7 +649,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         if cancellation.is_cancelled() {
             return Ok(WorktreeConfirmationOutcomeV1::Unavailable);
         }
-        let confirmed_at = crate::daemon_client::invocation_now_micros();
+        let confirmed_at = tracedecay_application::now_micros();
         let inspection = self.observe_target(&request.target, scope_set, confirmed_at, false)?;
         if inspection.presence == WorktreePresenceV1::Foreign {
             return Ok(WorktreeConfirmationOutcomeV1::Denied);

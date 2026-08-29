@@ -50,17 +50,17 @@ use super::worktree::{DaemonAuthorizedScopeSetReader, DaemonNativeWorktreeAuthor
 const MAX_PENDING_WORKTREE_CLEANUPS: u32 = 4_096;
 
 /// The one exact composition served to invocation routing.
-pub(crate) type DaemonProjectNativeIntegrationCoordinator = NativeIntegrationTransactionCoordinator<
+pub type DaemonProjectNativeIntegrationCoordinator = NativeIntegrationTransactionCoordinator<
     SharedDaemonNativeIntegrationStore,
     SharedProjectNativeIntegrationTopology,
     GixNativeIntegrationAdapter,
     DaemonNativeIntegrationAuthorization,
 >;
 
-pub(crate) type DaemonProjectNativeIntegrationService =
+pub type DaemonProjectNativeIntegrationService =
     NativeIntegrationService<DaemonProjectNativeIntegrationCoordinator>;
 
-pub(crate) type DaemonProjectNativeWorktreeService =
+pub type DaemonProjectNativeWorktreeService =
     NativeWorktreeService<DaemonAuthorizedScopeSetReader, DaemonNativeWorktreeAuthority>;
 
 fn worktree_recovery_error(error: WorktreeContractError) -> NativeIntegrationPortError {
@@ -83,7 +83,7 @@ fn worktree_recovery_error(error: WorktreeContractError) -> NativeIntegrationPor
 /// Shares one enrolled topology resolver between the transaction coordinator
 /// and the stack-snapshot service without a second repository handle.
 #[derive(Clone)]
-pub(crate) struct SharedProjectNativeIntegrationTopology {
+pub struct SharedProjectNativeIntegrationTopology {
     inner: Arc<ExactPairNativeIntegrationTopology>,
 }
 
@@ -167,9 +167,9 @@ impl NativeIntegrationStoreRegistry {
 
 /// The per-project invocation owner handed to the daemon handler.
 #[derive(Clone)]
-pub(crate) struct DaemonNativeIntegrationOwner {
-    pub(crate) project_id: ProjectId,
-    pub(crate) repository_id: RepositoryId,
+pub struct DaemonNativeIntegrationOwner {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
     service: Arc<DaemonProjectNativeIntegrationService>,
     snapshots: Arc<NativeIntegrationStackSnapshotService<SharedProjectNativeIntegrationTopology>>,
     worktrees: Option<Arc<DaemonProjectNativeWorktreeService>>,
@@ -179,19 +179,19 @@ pub(crate) struct DaemonNativeIntegrationOwner {
 }
 
 impl DaemonNativeIntegrationOwner {
-    pub(crate) fn service(&self) -> &DaemonProjectNativeIntegrationService {
+    pub fn service(&self) -> &DaemonProjectNativeIntegrationService {
         &self.service
     }
 
-    pub(crate) fn service_arc(&self) -> Arc<DaemonProjectNativeIntegrationService> {
+    pub fn service_arc(&self) -> Arc<DaemonProjectNativeIntegrationService> {
         Arc::clone(&self.service)
     }
 
-    pub(crate) fn worktree_service_arc(&self) -> Option<Arc<DaemonProjectNativeWorktreeService>> {
+    pub fn worktree_service_arc(&self) -> Option<Arc<DaemonProjectNativeWorktreeService>> {
         self.worktrees.as_ref().map(Arc::clone)
     }
 
-    pub(crate) fn stack_snapshot(
+    pub fn stack_snapshot(
         &self,
         request: NativeIntegrationStackResolutionRequestV1,
         cancellation: &CancellationSignal,
@@ -199,13 +199,11 @@ impl DaemonNativeIntegrationOwner {
         self.snapshots.snapshot(request, cancellation)
     }
 
-    pub(crate) fn store(&self) -> &SharedDaemonNativeIntegrationStore {
+    pub fn store(&self) -> &SharedDaemonNativeIntegrationStore {
         &self.store
     }
 
-    pub(crate) fn cleanup_recovery_roots(
-        &self,
-    ) -> Result<Vec<PathBuf>, NativeIntegrationPortError> {
+    pub fn cleanup_recovery_roots(&self) -> Result<Vec<PathBuf>, NativeIntegrationPortError> {
         let mut roots = self
             .store
             .pending_worktree_cleanups(&self.repository_id, MAX_PENDING_WORKTREE_CLEANUPS)
@@ -222,9 +220,7 @@ impl DaemonNativeIntegrationOwner {
     /// runtimes are published. Any unresolved journal keeps its exact-root
     /// fence and fails project-open closed.
     #[hotpath::measure(label = "daemon.native_integration.worktree_recover", future = true)]
-    pub(crate) async fn recover_worktree_cleanups(
-        &self,
-    ) -> Result<usize, NativeIntegrationPortError> {
+    pub async fn recover_worktree_cleanups(&self) -> Result<usize, NativeIntegrationPortError> {
         let service = self
             .worktree_service_arc()
             .ok_or(NativeIntegrationPortError::Unavailable)?;
@@ -282,7 +278,7 @@ impl DaemonNativeIntegrationOwner {
         })
     }
 
-    pub(crate) fn authorized_scope_set(
+    pub fn authorized_scope_set(
         &self,
         scope_set_id: &ScopeSetId,
         revision: ScopeSetRevision,
@@ -305,7 +301,7 @@ impl DaemonNativeIntegrationOwner {
     /// Mounts exactly one stack-delivery runtime for one exact project scope.
     /// Re-opening the project refreshes its source-access expiry but never
     /// creates a second queue actor or a second background drain task.
-    pub(crate) fn mount_github_stack_runtime(
+    pub fn mount_github_stack_runtime(
         &self,
         database: RegisteredGlobalDbLeaseV1,
         scope: ResolvedScope,
@@ -338,7 +334,7 @@ impl DaemonNativeIntegrationOwner {
     /// Returns the runtime for a scope already admitted by project-open. A
     /// missing runtime is intentionally indistinguishable from an unmounted
     /// owner to callers that need to conceal stack signal existence.
-    pub(crate) fn github_stack_runtime(
+    pub fn github_stack_runtime(
         &self,
         scope: &ResolvedScope,
     ) -> Result<Option<Arc<DaemonGitHubStackRuntimeV1>>, NativeIntegrationPortError> {
@@ -367,7 +363,7 @@ struct OwnerKey {
 /// Owns the store actor, topology resolver, native mechanics, authorization,
 /// and coordinator for each exact project/repository identity.
 #[derive(Default)]
-pub(crate) struct DaemonNativeIntegrationServiceRegistry {
+pub struct DaemonNativeIntegrationServiceRegistry {
     stores: NativeIntegrationStoreRegistry,
     owners: tokio::sync::Mutex<HashMap<OwnerKey, OwnerEntry>>,
     creation_gate: tokio::sync::Mutex<()>,
@@ -379,7 +375,7 @@ impl DaemonNativeIntegrationServiceRegistry {
     /// one: store actor, topology, mechanics, pinned-policy authorization,
     /// then durable startup recovery. A failed recovery mounts nothing.
     #[hotpath::measure(label = "daemon.native_integration.native_ensure", future = true)]
-    pub(crate) async fn ensure(
+    pub async fn ensure(
         &self,
         database: RegisteredGlobalDbLeaseV1,
         repository_root: PathBuf,
@@ -473,9 +469,9 @@ impl DaemonNativeIntegrationServiceRegistry {
         if self.shutdown_fenced.load(Ordering::SeqCst) {
             return Err(NativeIntegrationPortError::Unavailable);
         }
-        let repository_root =
-            crate::daemon::git_transactions::canonicalize_repository_root(&repository_root)
-                .map_err(|_| NativeIntegrationPortError::Unavailable)?;
+        let repository_root = repository_root
+            .canonicalize()
+            .map_err(|_| NativeIntegrationPortError::Unavailable)?;
         if let Some(owner) = self
             .existing(&database_path, &repository_root, &project_id)
             .await?
@@ -624,16 +620,16 @@ impl DaemonNativeIntegrationServiceRegistry {
 
     /// Resolve only an owner already mounted by project-open admission.
     /// Missing and ambiguous roots deliberately share the same outcome.
-    pub(crate) async fn for_repository_root(
+    pub async fn for_repository_root(
         &self,
         repository_root: &Path,
     ) -> Result<Option<DaemonNativeIntegrationOwner>, NativeIntegrationPortError> {
         if self.shutdown_fenced.load(Ordering::SeqCst) {
             return Err(NativeIntegrationPortError::Unavailable);
         }
-        let repository_root =
-            crate::daemon::git_transactions::canonicalize_repository_root(repository_root)
-                .map_err(|_| NativeIntegrationPortError::Unavailable)?;
+        let repository_root = repository_root
+            .canonicalize()
+            .map_err(|_| NativeIntegrationPortError::Unavailable)?;
         let owners = self.owners.lock().await;
         let mut matches = owners
             .values()
@@ -648,7 +644,7 @@ impl DaemonNativeIntegrationServiceRegistry {
     }
 
     /// Retires every owner attached to one exact project-session database.
-    pub(crate) async fn retire_project_database(
+    pub async fn retire_project_database(
         &self,
         project_id: &ProjectId,
         database_path: &Path,
@@ -666,7 +662,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         Ok(())
     }
 
-    pub(crate) async fn shutdown(&self) -> Result<usize, NativeIntegrationPortError> {
+    pub async fn shutdown(&self) -> Result<usize, NativeIntegrationPortError> {
         self.shutdown_fenced.store(true, Ordering::SeqCst);
         let _creation = self.creation_gate.lock().await;
         self.owners.lock().await.clear();
@@ -692,7 +688,7 @@ mod tests {
     };
 
     use super::DaemonNativeIntegrationServiceRegistry;
-    use crate::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
     use tracedecay_usecases::host_admission::HostAdmissionScope;
 
     fn init_repository(root: &Path) {
@@ -731,7 +727,7 @@ mod tests {
         .await
         .expect("canonical project test runtime");
         let database = runtime
-            .registered_database_arc(HostAdmissionScope::Project)
+            .registered_database_lease(HostAdmissionScope::Project)
             .expect("registered project database");
         let owner = registry
             .ensure(

@@ -21,11 +21,11 @@ fn runtime_registry() -> &'static HookStackRuntimeRegistry {
 
 /// Associates a Hook V2 binding with its project-open runtime. The hook only
 /// receives an opaque availability bit after this exact lookup.
-pub(crate) fn register_github_stack_hook_runtime(
+pub fn register_github_stack_hook_runtime(
     scope: &ResolvedScope,
     runtime: &Arc<DaemonGitHubStackRuntimeV1>,
 ) {
-    let (project_id, worktree_id) = tracedecay_agent_hosts::hooks::hook_scope_locators(scope);
+    let (project_id, worktree_id) = crate::hooks::hook_scope_locators(scope);
     if let Ok(mut registry) = runtime_registry().lock() {
         registry.insert((project_id, worktree_id), Arc::downgrade(runtime));
     }
@@ -34,7 +34,7 @@ pub(crate) fn register_github_stack_hook_runtime(
 /// Returns only whether an authenticated `CursorDesktop` hook should wake its
 /// user. Store failures suppress a wakeup; durable `host_pending` rows remain
 /// available for a later hook admission and MCP expansion.
-pub(crate) fn github_stack_hook_available(project_id: [u8; 16], worktree_id: [u8; 16]) -> bool {
+pub fn github_stack_hook_available(project_id: [u8; 16], worktree_id: [u8; 16]) -> bool {
     let runtime = runtime_registry().lock().ok().and_then(|mut registry| {
         let runtime = registry
             .get(&(project_id, worktree_id))

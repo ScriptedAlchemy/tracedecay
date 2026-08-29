@@ -60,6 +60,7 @@ pub mod agents;
 pub mod analytics;
 pub mod automation;
 pub mod hooks;
+pub mod native_integration;
 pub mod ports;
 pub mod product_version;
 pub mod shell;
