@@ -1,14 +1,20 @@
 use crate::cli::Commands;
 
 #[hotpath::measure(label = "cli.hook.dispatch", future = true)]
-pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay_runtime_core::errors::Result<i32> {
+pub(crate) async fn handle_hook_command(
+    command: Commands,
+) -> tracedecay_runtime_core::errors::Result<i32> {
     handle_hook_command_inner(command).await
 }
 
 fn handle_hook_command_inner(
     command: Commands,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<i32>> + Send + 'static>,
+    Box<
+        dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<i32>>
+            + Send
+            + 'static,
+    >,
 > {
     // Erase the deeply nested hook-dispatch future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.

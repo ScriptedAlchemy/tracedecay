@@ -35,7 +35,7 @@ pub struct SemanticVectorGenerationReplay {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GraphGenerationReplaySource {
-    InlineManifest(GraphGenerationManifest),
+    InlineManifest(Box<GraphGenerationManifest>),
     MetadataOnlyManifest(GraphGenerationReplayMetadata),
     SealedCodeGeneration(SealedCodeGenerationReplay),
     SemanticVectorGeneration(SemanticVectorGenerationReplay),
@@ -211,7 +211,7 @@ pub(crate) fn validate_supplied_manifest_binding(
     })?;
     manifest.validate_checked(check)?;
     match checked_decode_replay_source(&publication.canonical_replay_source, check)? {
-        GraphGenerationReplaySource::InlineManifest(replayed) if replayed == *manifest => {
+        GraphGenerationReplaySource::InlineManifest(replayed) if replayed.as_ref() == manifest => {
             validate_publication_manifest_identity(
                 publication,
                 manifest,
@@ -542,7 +542,7 @@ mod tests {
         let decoded = checked_decode_replay_source(&payload, &|| Ok(())).unwrap();
         assert_eq!(
             decoded,
-            GraphGenerationReplaySource::InlineManifest(manifest)
+            GraphGenerationReplaySource::InlineManifest(Box::new(manifest))
         );
     }
 

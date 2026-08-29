@@ -10,10 +10,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::branch::BranchAdminAction;
-use crate::config::{CompactionThresholdConfig, RetentionConfig};
+use crate::config::RetentionConfig;
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
+use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
@@ -1790,7 +1791,9 @@ enum RetainedCompactionStore<'a> {
 }
 
 impl RetainedCompactionStore<'_> {
-    async fn storage_page_counts(&self) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
+    async fn storage_page_counts(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
         match self {
             Self::Registered(database) => database.storage_page_counts().await,
             Self::Project(database) => database.storage_page_counts().await,
@@ -1932,19 +1935,24 @@ pub(super) async fn run_branch_compaction(
     config: &CompactionThresholdConfig,
 ) -> bool {
     let layout = cg.store_layout();
-    let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root) else {
+    let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root)
+    else {
         return true;
     };
     let active_db_path = layout.graph_db_path.clone();
-    let candidates = crate::retention::branch_compaction::select_branch_db_candidates(
-        &layout.data_root,
-        &meta,
-        &active_db_path,
-    );
+    let candidates =
+        tracedecay_maintenance::retention::branch_compaction::select_branch_db_candidates(
+            &layout.data_root,
+            &meta,
+            &active_db_path,
+        );
     if candidates.is_empty() {
         return true;
     }
-    let report = crate::retention::branch_compaction::compact_branch_databases(&candidates, config);
+    let report = tracedecay_maintenance::retention::branch_compaction::compact_branch_databases(
+        &candidates,
+        config,
+    );
     if report.policy_invalid {
         // Never silent: an out-of-range threshold disables the pass entirely
         // and would otherwise be indistinguishable from "nothing to compact".
@@ -1974,7 +1982,7 @@ pub(super) async fn run_branch_compaction(
         .iter()
         .filter(|skip| {
             skip.reason
-                == crate::retention::branch_compaction::BranchCompactionSkipReason::IncrementalVacuumUnavailable
+                == tracedecay_maintenance::retention::branch_compaction::BranchCompactionSkipReason::IncrementalVacuumUnavailable
         })
         .count();
     log_daemon_event(
@@ -1993,7 +2001,7 @@ pub(super) async fn run_branch_compaction(
 }
 
 pub(super) fn branch_compaction_succeeded(
-    report: &crate::retention::branch_compaction::BranchCompactionReport,
+    report: &tracedecay_maintenance::retention::branch_compaction::BranchCompactionReport,
 ) -> bool {
     !report.policy_invalid && report.skipped.is_empty()
 }

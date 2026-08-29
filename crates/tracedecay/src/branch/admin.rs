@@ -96,11 +96,16 @@ impl PreparedBranchAdminMutation {
     /// CAS-publishes the exact prepared branch metadata, then unlinks every
     /// selected DB/WAL/SHM family. The caller must hold the canonical runtime
     /// destructive reservation until this returns.
-    pub(crate) fn commit_destructive(self) -> tracedecay_runtime_core::errors::Result<BranchAdminReport> {
+    pub(crate) fn commit_destructive(
+        self,
+    ) -> tracedecay_runtime_core::errors::Result<BranchAdminReport> {
         self.commit_with_hook(|_| Ok(()))
     }
 
-    fn commit_with_hook<H>(self, mut hook: H) -> tracedecay_runtime_core::errors::Result<BranchAdminReport>
+    fn commit_with_hook<H>(
+        self,
+        mut hook: H,
+    ) -> tracedecay_runtime_core::errors::Result<BranchAdminReport>
     where
         H: FnMut(BranchAdminCommitBoundary) -> tracedecay_runtime_core::errors::Result<()>,
     {
@@ -132,16 +137,20 @@ impl PreparedBranchAdminMutation {
                         .to_owned(),
                 }
             })?;
-            tracedecay_runtime_core::branch_meta::save_branch_meta_serialized(&self.tracedecay_dir, after).map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_runtime_core::branch_meta::save_branch_meta_serialized(
+                &self.tracedecay_dir,
+                after,
+            )
+            .map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!(
                         "cannot publish branch metadata '{}': {error}",
                         self.tracedecay_dir
                             .join(crate::storage::BRANCH_META_FILENAME)
                             .display()
                     ),
-                },
-            )?;
+                }
+            })?;
         }
         hook(BranchAdminCommitBoundary::AfterMetadataCas)?;
         for path in &self.database_paths {
@@ -319,11 +328,12 @@ pub fn prepare_branch_admin_mutation(
         metadata_before.clone()
     } else {
         Some(tracedecay_runtime_core::branch_meta::serialize_branch_meta(
-            meta.as_ref()
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            meta.as_ref().ok_or_else(|| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "tracked branch deletion lost branch metadata before commit"
                         .to_string(),
-                })?,
+                }
+            })?,
         )?)
     };
     Ok(PreparedBranchAdminMutation {
@@ -356,9 +366,14 @@ pub(super) fn rollback_published_branch_tracking(
 ) -> tracedecay_runtime_core::errors::Result<()> {
     let _branch_lock = acquire_branch_add_lock_blocking(tracedecay_dir)?;
     let (meta, metadata_before) = load_branch_meta_exact(tracedecay_dir)?;
-    let mut meta = meta.ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: format!("cannot roll back branch '{branch_name}': branch metadata is missing"),
-    })?;
+    let mut meta =
+        meta.ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!(
+                    "cannot roll back branch '{branch_name}': branch metadata is missing"
+                ),
+            },
+        )?;
     if meta
         .branches
         .get(branch_name)
@@ -371,21 +386,27 @@ pub(super) fn rollback_published_branch_tracking(
         });
     }
     meta.remove_branch(branch_name);
-    let metadata_after = Some(tracedecay_runtime_core::branch_meta::serialize_branch_meta(&meta)?);
+    let metadata_after = Some(tracedecay_runtime_core::branch_meta::serialize_branch_meta(
+        &meta,
+    )?);
     let (_, current_metadata) = load_branch_meta_exact(tracedecay_dir)?;
     if current_metadata != metadata_before {
         return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("cannot roll back branch '{branch_name}': branch metadata changed"),
         });
     }
-    let after = metadata_after.ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: format!("cannot roll back branch '{branch_name}': metadata disappeared"),
-    })?;
-    tracedecay_runtime_core::branch_meta::save_branch_meta_serialized(tracedecay_dir, &after).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: format!("cannot retire failed branch '{branch_name}': {error}"),
-        }
-    })
+    let after =
+        metadata_after.ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("cannot roll back branch '{branch_name}': metadata disappeared"),
+            },
+        )?;
+    tracedecay_runtime_core::branch_meta::save_branch_meta_serialized(tracedecay_dir, &after)
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("cannot retire failed branch '{branch_name}': {error}"),
+            },
+        )
 }
 
 /// Strict removal entry point used by daemon-owned administrative operations.
@@ -423,13 +444,14 @@ fn load_branch_meta_exact(
             ),
         });
     }
-    let serialized =
-        std::fs::read_to_string(&path).map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+    let serialized = std::fs::read_to_string(&path).map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
                 "cannot read branch metadata at '{}': {error}",
                 path.display()
             ),
-        })?;
+        }
+    })?;
     let meta = tracedecay_runtime_core::branch_meta::parse(&serialized).map_err(|error| {
         tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
@@ -451,7 +473,9 @@ fn branch_db_family_paths(db_path: &Path) -> [PathBuf; 3] {
     [db_path.to_path_buf(), wal, shm]
 }
 
-pub(super) fn remove_branch_db_files_checked(db_path: &Path) -> tracedecay_runtime_core::errors::Result<()> {
+pub(super) fn remove_branch_db_files_checked(
+    db_path: &Path,
+) -> tracedecay_runtime_core::errors::Result<()> {
     for path in branch_db_family_paths(db_path) {
         match std::fs::remove_file(&path) {
             Ok(()) => {}

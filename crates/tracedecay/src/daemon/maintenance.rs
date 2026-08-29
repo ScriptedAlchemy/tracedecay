@@ -1499,7 +1499,7 @@ async fn run_cold_store_page(
     let cursor = load_cursor(&checkpoint_path).unwrap_or(ColdStoreCursorV1 {
         after_project_id: None,
     });
-    let page = crate::retention::orphan_stores::build_store_census_page(
+    let page = tracedecay_maintenance::retention::orphan_stores::build_store_census_page(
         profile_database,
         profile_root,
         cursor.after_project_id.as_deref(),
@@ -1509,11 +1509,11 @@ async fn run_cold_store_page(
     let retention_now = if retention.orphan_store_gc_days.is_some()
         || retention.incident_debris_retention_days.is_some()
     {
-        Some(
-            now_secs_i64().map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Config {
+        Some(now_secs_i64().map_err(|message| {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: message.to_owned(),
-            })?,
-        )
+            }
+        })?)
     } else {
         None
     };
@@ -1543,20 +1543,25 @@ async fn run_cold_store_page(
         }
     }
     if let Some(days) = retention.orphan_store_gc_days {
-        let findings = crate::retention::orphan_stores::classify_stores(
+        let findings = tracedecay_maintenance::retention::orphan_stores::classify_stores(
             &page.entries,
-            retention_now.ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "maintenance retention clock unavailable".to_owned(),
+            retention_now.ok_or_else(|| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: "maintenance retention clock unavailable".to_owned(),
+                }
             })?,
         );
-        let plan =
-            crate::retention::orphan_stores::plan_collection(findings, retention_window_secs(days));
-        let (outcome, _) = crate::retention::orphan_stores::execute_registered_collection(
-            profile_database,
-            &plan,
-            profile_root,
-        )
-        .await?;
+        let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
+            findings,
+            retention_window_secs(days),
+        );
+        let (outcome, _) =
+            tracedecay_maintenance::retention::orphan_stores::execute_registered_collection(
+                profile_database,
+                &plan,
+                profile_root,
+            )
+            .await?;
         metrics.reclaimed_bytes = metrics
             .reclaimed_bytes
             .saturating_add(outcome.reclaimed_bytes);
@@ -1568,12 +1573,14 @@ async fn run_cold_store_page(
         }
     }
     if let Some(days) = retention.incident_debris_retention_days {
-        let report = crate::retention::incident_debris::sweep_incident_debris(
+        let report = tracedecay_maintenance::retention::incident_debris::sweep_incident_debris(
             &page.entries,
             profile_root,
             retention_window_secs(days),
-            retention_now.ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "maintenance retention clock unavailable".to_owned(),
+            retention_now.ok_or_else(|| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: "maintenance retention clock unavailable".to_owned(),
+                }
             })?,
         );
         metrics.reclaimed_bytes = metrics

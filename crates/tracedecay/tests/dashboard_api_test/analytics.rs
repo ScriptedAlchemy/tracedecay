@@ -14,13 +14,13 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
-use tracedecay_global_db::AnalyticsEventInsert;
 use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
     ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RejectedArgumentErrorClassV1,
     RejectedArgumentNameV1, RejectedArgumentObservedV1, RejectedArgumentSurfaceV1,
     RetrievalQueryObservedV1,
 };
+use tracedecay_global_db::AnalyticsEventInsert;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 

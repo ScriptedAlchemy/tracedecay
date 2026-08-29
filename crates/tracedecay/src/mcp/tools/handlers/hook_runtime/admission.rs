@@ -1,5 +1,3 @@
-use tracedecay_runtime_core::errors::Result;
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -7,6 +5,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tracedecay_domain::{ProviderId, SessionId, UtcMicros};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::Result;
 
 use super::context_scout::{
     admit_native_context_scout_lifecycle, hook_v2_context_scout_lifecycle_for_session,

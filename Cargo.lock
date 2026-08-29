@@ -5922,6 +5922,7 @@ dependencies = [
  "tracedecay-hooks",
  "tracedecay-jsonrpc",
  "tracedecay-lsp",
+ "tracedecay-maintenance",
  "tracedecay-policy",
  "tracedecay-private-fs",
  "tracedecay-query",
@@ -6087,6 +6088,7 @@ dependencies = [
  "tracedecay-hooks",
  "tracedecay-host-integration",
  "tracedecay-lsp",
+ "tracedecay-maintenance",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
@@ -6308,6 +6310,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-maintenance"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "filetime",
+ "hotpath",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-automation",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-graph-db",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-usecases",
+]
+
+[[package]]
 name = "tracedecay-policy"
 version = "0.1.0"
 dependencies = [
@@ -6392,7 +6420,6 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-domain",
  "tracedecay-graph-db",
- "tracedecay-lsp",
  "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",

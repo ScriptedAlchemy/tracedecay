@@ -134,7 +134,9 @@ struct ResetGraphDb {
 /// per tracked branch under `branches/`. Session archives and transcripts
 /// share the store directory but are never graph databases, so they are never
 /// candidates. Ordering is deterministic (root first, branches sorted).
-fn project_store_graph_db_paths(data_root: &Path) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
+fn project_store_graph_db_paths(
+    data_root: &Path,
+) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
     let mut candidates = Vec::new();
     let root_db = data_root.join(tracedecay::config::db_filename(data_root));
     if root_db.is_file() {
@@ -152,11 +154,13 @@ fn project_store_graph_db_paths(data_root: &Path) -> tracedecay_runtime_core::er
         })?;
         let mut branch_dbs = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: format!(
-                    "could not enumerate branch graph databases under {}: {error}",
-                    branches_dir.display()
-                ),
+            let entry = entry.map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: format!(
+                        "could not enumerate branch graph databases under {}: {error}",
+                        branches_dir.display()
+                    ),
+                }
             })?;
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) == Some("db") && path.is_file() {
@@ -172,7 +176,9 @@ fn project_store_graph_db_paths(data_root: &Path) -> tracedecay_runtime_core::er
 /// Reads the SQLite `user_version` of one graph database after the same
 /// fail-closed header verification the daemon's refusal performs. A file that
 /// is not a SQLite database is a typed error, never a deletion candidate.
-fn verified_graph_db_schema_version(graph_db_path: &Path) -> tracedecay_runtime_core::errors::Result<i64> {
+fn verified_graph_db_schema_version(
+    graph_db_path: &Path,
+) -> tracedecay_runtime_core::errors::Result<i64> {
     let has_header =
         tracedecay::storage::has_sqlite_database_header(graph_db_path).map_err(|error| {
             tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -195,16 +201,20 @@ fn verified_graph_db_schema_version(graph_db_path: &Path) -> tracedecay_runtime_
         graph_db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
-    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-        operation: "open project graph store for reset verification".to_string(),
-        message: error.to_string(),
-    })?;
+    .map_err(
+        |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "open project graph store for reset verification".to_string(),
+            message: error.to_string(),
+        },
+    )?;
     connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-            operation: "read project graph store schema version".to_string(),
-            message: error.to_string(),
-        })
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read project graph store schema version".to_string(),
+                message: error.to_string(),
+            },
+        )
 }
 
 /// Verifies every graph database in the project store under `profile_root` —
@@ -357,11 +367,13 @@ fn handle_reset_authority(
 async fn brokered_storage_report(
     project_id: Option<&str>,
     project_root: Option<&Path>,
-) -> tracedecay_runtime_core::errors::Result<tracedecay::retention::storage_report::StorageReport> {
+) -> tracedecay_runtime_core::errors::Result<
+    tracedecay_maintenance::retention::storage_report::StorageReport,
+> {
     const PAGE_LIMIT: usize = 8;
     const MAX_PAGES: usize = 4096;
 
-    let mut report = tracedecay::retention::storage_report::StorageReport::default();
+    let mut report = tracedecay_maintenance::retention::storage_report::StorageReport::default();
     let mut cursor = None;
     for _ in 0..MAX_PAGES {
         // One entry per page: the call count exposes how many pages a report
@@ -382,14 +394,17 @@ async fn brokered_storage_report(
         );
         let value = tokio::time::timeout(Duration::from_secs(10), request)
             .await
-            .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "daemon storage report authority timed out after 10 seconds".to_string(),
-            })??;
-        let page: tracedecay::retention::storage_report::StorageReport =
+            .map_err(
+                |_| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: "daemon storage report authority timed out after 10 seconds"
+                        .to_string(),
+                },
+            )??;
+        let page: tracedecay_maintenance::retention::storage_report::StorageReport =
             serde_json::from_value(value)?;
         merge_storage_report_page(&mut report, page);
         if report.coverage.state
-            == tracedecay::retention::storage_report::StorageReportCoverageState::Complete
+            == tracedecay_maintenance::retention::storage_report::StorageReportCoverageState::Complete
         {
             return Ok(report);
         }
@@ -404,8 +419,8 @@ async fn brokered_storage_report(
 }
 
 fn merge_storage_report_page(
-    report: &mut tracedecay::retention::storage_report::StorageReport,
-    page: tracedecay::retention::storage_report::StorageReport,
+    report: &mut tracedecay_maintenance::retention::storage_report::StorageReport,
+    page: tracedecay_maintenance::retention::storage_report::StorageReport,
 ) {
     if report.profile_root.is_empty() {
         report.profile_root = page.profile_root;
@@ -450,7 +465,7 @@ async fn handle_storage_report(
             (Some(project_id), Some(project_root)) => {
                 // Offline runs have no mounted code graph, so vector liveness
                 // is unprovable and the retention dry run reports unavailable.
-                tracedecay::retention::storage_report::build_project_storage_report(
+                tracedecay_maintenance::retention::storage_report::build_project_storage_report(
                     &profile_root,
                     project_id,
                     project_root,
@@ -458,7 +473,10 @@ async fn handle_storage_report(
                 )
             }
             (None, None) => {
-                tracedecay::retention::storage_report::build_storage_report(&profile_root).await
+                tracedecay_maintenance::retention::storage_report::build_storage_report(
+                    &profile_root,
+                )
+                .await
             }
             _ => unreachable!("clap requires project id and root together"),
         };
@@ -473,13 +491,13 @@ async fn handle_storage_report(
     // A partial total is a floor, not the profile size; say which families are
     // missing rather than printing a number that reads as complete.
     match profile_total.state {
-        tracedecay::retention::storage_report::ProfileTotalCoverageStateV1::Complete => {
+        tracedecay_maintenance::retention::storage_report::ProfileTotalCoverageStateV1::Complete => {
             println!(
                 "  profile total: {} bytes",
                 format_bytes(profile_total.accounted_bytes)
             );
         }
-        tracedecay::retention::storage_report::ProfileTotalCoverageStateV1::Partial => {
+        tracedecay_maintenance::retention::storage_report::ProfileTotalCoverageStateV1::Partial => {
             println!(
                 "  profile total: at least {} bytes (incomplete)",
                 format_bytes(profile_total.accounted_bytes)
@@ -544,7 +562,7 @@ async fn handle_storage_report(
     }
     for availability in &report.code_generation_retention_availability {
         if availability.state
-            == tracedecay::retention::storage_report::StorageReportAvailabilityState::Unavailable
+            == tracedecay_maintenance::retention::storage_report::StorageReportAvailabilityState::Unavailable
         {
             println!(
                 "  code-index retention unavailable for {}: {}",
@@ -565,7 +583,7 @@ async fn handle_storage_report(
         );
     }
     if report.coverage.state
-        == tracedecay::retention::storage_report::StorageReportCoverageState::Partial
+        == tracedecay_maintenance::retention::storage_report::StorageReportCoverageState::Partial
     {
         println!(
             "  coverage: partial; resume with cursor {}",
@@ -579,30 +597,39 @@ async fn handle_storage_report(
     Ok(())
 }
 
-fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay_runtime_core::errors::Result<()> {
+fn handle_backup_profile(
+    destination: String,
+    backup_id: String,
+) -> tracedecay_runtime_core::errors::Result<()> {
     let profile_root = tracedecay::storage::default_profile_root()?;
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: format!("system clock is before Unix epoch: {error}"),
-        })?
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("system clock is before Unix epoch: {error}"),
+            },
+        )?
         .as_secs()
         .try_into()
-        .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "system clock exceeds supported backup timestamp range".to_owned(),
-        })?;
+        .map_err(
+            |_| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "system clock exceeds supported backup timestamp range".to_owned(),
+            },
+        )?;
     let backup = tracedecay::daemon::with_quiesced_installed_service(
         "complete profile backup",
         |lifecycle| {
-            tracedecay::profile_backup::create_complete_profile_backup(
+            tracedecay_maintenance::profile_backup::create_complete_profile_backup(
                 &profile_root,
                 Path::new(&destination),
                 &backup_id,
                 created_at,
                 lifecycle,
             )
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: error.to_string(),
+            .map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: error.to_string(),
+                }
             })
         },
     )?;
@@ -617,13 +644,15 @@ fn handle_rehearse_profile_backup(
     backup: String,
     restore: String,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let manifest = tracedecay::profile_backup::rehearse_complete_profile_backup(
+    let manifest = tracedecay_maintenance::profile_backup::rehearse_complete_profile_backup(
         Path::new(&backup),
         Path::new(&restore),
     )
-    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: error.to_string(),
-    })?;
+    .map_err(
+        |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        },
+    )?;
     println!(
         "complete profile backup rehearsed: {} entries restored to {}",
         manifest.entries.len(),

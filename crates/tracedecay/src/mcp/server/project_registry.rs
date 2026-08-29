@@ -10,8 +10,6 @@
 use serde_json::Value;
 use std::path::Path;
 
-use tracedecay_runtime_core::errors::Result;
-use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
 use crate::mcp::tools::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
@@ -19,6 +17,8 @@ use crate::mcp::tools::{
     ProjectRegistryReadPort, ProjectRegistrySelector,
 };
 use crate::project_registry::{PublicCodeProject, build_project_registry_view};
+use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::errors::Result;
 
 #[derive(Clone)]
 pub(crate) struct DaemonProjectRegistryReadService {

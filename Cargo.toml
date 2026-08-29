@@ -17,6 +17,7 @@ members = [
     "crates/tracedecay-hooks",
     "crates/tracedecay-jsonrpc",
     "crates/tracedecay-lsp",
+    "crates/tracedecay-maintenance",
     "crates/tracedecay-policy",
     "crates/tracedecay-private-fs",
     "crates/tracedecay-query",

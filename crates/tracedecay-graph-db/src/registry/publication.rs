@@ -269,7 +269,7 @@ impl GraphDbRegistry {
                     clear_retiring_fence(&database, &locator)?;
                     return Err(error);
                 }
-                Ok(GraphReplayCollectionOutcome::Retired(source))
+                Ok(GraphReplayCollectionOutcome::Retired(Box::new(source)))
             }
             GraphReplayRetirementOutcomeV1::CurrentVerifiedHead { .. }
             | GraphReplayRetirementOutcomeV1::PendingReplay { .. } => {

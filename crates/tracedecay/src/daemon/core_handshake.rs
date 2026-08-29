@@ -70,7 +70,8 @@ impl DaemonHandshake {
             allow_initialize_root_routing: false,
             client_identity: DaemonClientIdentity::current()?,
             client_version: binary_version().to_string(),
-            client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
+            client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id()
+                .to_string(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
             moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,

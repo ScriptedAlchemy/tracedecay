@@ -9,8 +9,8 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Debug, Serialize)]
 pub struct QueryResult {

@@ -201,12 +201,15 @@ fn restart_daemon_service_with<Lease, Quiesce, Acquire, Refresh, Restore>(
     restore: Restore,
 ) -> tracedecay_runtime_core::errors::Result<Option<(PathBuf, PathBuf)>>
 where
-    Quiesce: FnOnce() -> tracedecay_runtime_core::errors::Result<tracedecay::daemon::DaemonServiceState>,
+    Quiesce:
+        FnOnce() -> tracedecay_runtime_core::errors::Result<tracedecay::daemon::DaemonServiceState>,
     Acquire: FnOnce() -> tracedecay_runtime_core::errors::Result<Lease>,
     Refresh: FnOnce(
         tracedecay::daemon::DaemonServiceState,
     ) -> tracedecay_runtime_core::errors::Result<Option<(PathBuf, PathBuf)>>,
-    Restore: FnOnce(tracedecay::daemon::DaemonServiceState) -> tracedecay_runtime_core::errors::Result<()>,
+    Restore: FnOnce(
+        tracedecay::daemon::DaemonServiceState,
+    ) -> tracedecay_runtime_core::errors::Result<()>,
 {
     let previous_state = quiesce()?;
     let _lifecycle_lease = match acquire() {
@@ -274,8 +277,10 @@ pub(crate) fn restart_daemon_service() -> tracedecay_runtime_core::errors::Resul
 }
 
 fn tracedecay_home_dir() -> tracedecay_runtime_core::errors::Result<PathBuf> {
-    tracedecay::agents::home_dir().ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: "could not determine home directory".to_string(),
+    tracedecay::agents::home_dir().ok_or_else(|| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
+            message: "could not determine home directory".to_string(),
+        }
     })
 }
 
@@ -369,12 +374,16 @@ where
 }
 
 #[hotpath::measure(label = "cli.update.run")]
-pub(crate) fn run_update_command(no_reinstall: bool) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) fn run_update_command(
+    no_reinstall: bool,
+) -> tracedecay_runtime_core::errors::Result<()> {
     run_update_flow("update", RefreshPolicy::Always, no_reinstall)
 }
 
 #[hotpath::measure(label = "cli.upgrade.run")]
-pub(crate) fn run_upgrade_command(no_reinstall: bool) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) fn run_upgrade_command(
+    no_reinstall: bool,
+) -> tracedecay_runtime_core::errors::Result<()> {
     run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
 }
 
@@ -415,10 +424,11 @@ pub(crate) async fn run_post_update_command(
     lifecycle_lease_token: Option<&str>,
 ) -> tracedecay_runtime_core::errors::Result<()> {
     if let Some(token) = lifecycle_lease_token {
-        let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_or_inherited(
-            "post-update",
-            Some(token),
-        )?;
+        let lifecycle_lease =
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_or_inherited(
+                "post-update",
+                Some(token),
+            )?;
         return run_post_update_tasks(no_reinstall, &lifecycle_lease).await;
     }
 
@@ -477,11 +487,12 @@ fn run_post_update_subcommand(
     if no_reinstall {
         command.arg("--no-reinstall");
     }
-    let status = command
-        .status()
-        .map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: format!("failed to run post-update with '{tracedecay_bin}': {e}"),
-        })?;
+    let status =
+        command.status().map_err(
+            |e| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("failed to run post-update with '{tracedecay_bin}': {e}"),
+            },
+        )?;
     if status.success() {
         return Ok(());
     }
@@ -540,11 +551,11 @@ pub(crate) fn record_completed_reinstall_pass(
     config: &mut UserConfig,
 ) -> tracedecay_runtime_core::errors::Result<()> {
     if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
-        config
-            .save()
-            .map_err(|err| tracedecay_runtime_core::errors::TraceDecayError::Config {
+        config.save().map_err(
+            |err| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("could not save tracedecay config: {err}"),
-            })?;
+            },
+        )?;
     }
     Ok(())
 }
@@ -714,8 +725,8 @@ mod tests {
         prepare_post_update_lease, refresh_generated_plugins_at, restart_daemon_service_with,
         run_install_then_refresh,
     };
-    use tempfile::TempDir;
     use crate::upgrade::UpgradeOutcome;
+    use tempfile::TempDir;
 
     #[test]
     fn daemon_restart_quiesces_service_before_acquiring_exclusive_lease() {
@@ -806,9 +817,11 @@ mod tests {
     #[test]
     fn post_update_lease_handoff_matches_platform_contract() {
         let profile = TempDir::new().unwrap();
-        let lease =
-            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(profile.path(), "update")
-                .unwrap();
+        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+            profile.path(),
+            "update",
+        )
+        .unwrap();
 
         let held = prepare_post_update_lease(lease);
         let reacquired = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
@@ -992,10 +1005,11 @@ mod tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let home = TempDir::new()?;
         let lease_root = TempDir::new()?;
-        let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-            lease_root.path(),
-            "post-update-test",
-        )?;
+        let lifecycle_lease =
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+                lease_root.path(),
+                "post-update-test",
+            )?;
         let results = crate::agent_cmd::reinstall_agent_integrations_under_lease(
             &["unknown-agent".to_string()],
             home.path(),

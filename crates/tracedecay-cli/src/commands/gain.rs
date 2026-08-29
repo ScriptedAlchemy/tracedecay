@@ -44,17 +44,21 @@ fn handle_gain_inner(
     history: bool,
     range: &str,
     json_output: bool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + '_>>
-{
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + '_>,
+> {
     // Erase the deeply nested gain-read future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let since = tracedecay_usecases::provider_usage::provider_usage_range_start(range)
-            .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Config { message })?;
-        let since =
-            i64::try_from(since).map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            .map_err(
+                |message| tracedecay_runtime_core::errors::TraceDecayError::Config { message },
+            )?;
+        let since = i64::try_from(since).map_err(|_| {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "savings range exceeds the supported timestamp domain".to_owned(),
-            })?;
+            }
+        })?;
         let project_filter: Option<String> = if all {
             None
         } else {
@@ -78,9 +82,11 @@ fn handle_gain_inner(
             let rows = result
                 .get("history")
                 .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: "daemon gain history response is missing history rows".to_owned(),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: "daemon gain history response is missing history rows".to_owned(),
+                    },
+                )?;
             let rows = rows
                 .iter()
                 .cloned()

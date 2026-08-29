@@ -1,6 +1,3 @@
-use tracedecay_runtime_core::errors::Result;
-use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -12,6 +9,11 @@ use tracedecay_domain::{
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     ProviderId, RetentionClass, SessionId, UtcMicros,
+};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::Result;
+use tracedecay_runtime_core::privacy::{
+    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
 use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
 use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};

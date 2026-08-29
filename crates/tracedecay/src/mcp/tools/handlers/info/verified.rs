@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
 use crate::types::NodeKind;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub(super) const INFO_SYMBOL_CENSUS_LIMIT: usize = 500_000;
 pub(super) const INFO_RELATION_LIMIT: usize = 2_000_000;

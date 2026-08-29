@@ -95,9 +95,9 @@ use crate::daemon::service::invocation::{
     unregister_hook_orchestration_runtime,
 };
 use crate::daemon::service::project_runtime::RegisteredDeliveryReadAuthorityV1;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 mod deferred;
 mod model;
@@ -1667,7 +1667,8 @@ async fn resolve_github_stack_observability(
     // Mirrors the native-integration mount condition at project open: the
     // standard pull-request fallback exists exactly when this project is an
     // admitted Git worktree (project open fails earlier otherwise).
-    let native_git_fallback_mounted = tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some();
+    let native_git_fallback_mounted =
+        tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some();
     let probe_owner = match tracedecay_usecases::observability::GitHubStackProbeOwnerV1::mount(
         state.scope.clone(),
         topology_policy,
