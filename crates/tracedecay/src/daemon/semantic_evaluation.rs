@@ -281,12 +281,11 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
             label = "daemon.semantic.evaluation.candidate.vector_generation"
         ))
         .await
-        .map_err(|error| {
+        .inspect_err(|_| {
             hotpath::measure_block!(
                 "daemon.semantic.evaluation.candidate.vector_generation.control_interrupted",
                 ()
             );
-            error
         })?
         .map_err(|error| {
             record_vector_generation_failure(&error);

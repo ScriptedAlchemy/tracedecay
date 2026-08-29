@@ -94,17 +94,15 @@ use super::acceptance_calibration::{
 use super::graph_provider::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphProviderV1,
 };
+use super::ports::{
+    SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticConfigurationPinV1,
+    SemanticExecutableGenerationLeaseV1, SemanticExecutableGenerationV1, SemanticRollbackCommandV1,
+    SemanticRollbackReceiptV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1,
+    SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStateV1,
+    SemanticRuntimeStatusV1,
+};
 #[cfg(test)]
-use super::ports::{
-    SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticActivationRequestV1,
-    SemanticFallbackReasonV1, SemanticRollbackCommandV1, SemanticRollbackReceiptV1,
-    SemanticRuntimeBackendV1, SemanticRuntimeStateV1,
-};
-use super::ports::{
-    SemanticConfigurationPinV1, SemanticExecutableGenerationLeaseV1,
-    SemanticExecutableGenerationV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
-    SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStatusV1,
-};
+use super::ports::{SemanticActivationRequestV1, SemanticFallbackReasonV1};
 use super::{
     DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
     SemanticProjectionLeaseV1, SemanticProjectionScheduleErrorV1,
@@ -337,7 +335,7 @@ pub struct PreparedProductionSemanticCacheCommitV1 {
 enum PreparedProductionSemanticCacheActionV1 {
     Observation(PreparedSemanticRuntimeObservationV1),
     Restore {
-        prepared: PreparedSemanticRuntimeRestoreV1,
+        prepared: Box<PreparedSemanticRuntimeRestoreV1>,
         cache: Arc<Mutex<Option<CachedPublishedVectorsV1>>>,
         vectors: CachedPublishedVectorsV1,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
@@ -360,7 +358,7 @@ impl PreparedProductionSemanticCacheCommitV1 {
                     return false;
                 };
                 let previous = cached.replace(vectors);
-                let committed = self.handle.commit_restore(prepared);
+                let committed = self.handle.commit_restore(*prepared);
                 if !committed {
                     *cached = previous;
                     return false;
@@ -524,7 +522,7 @@ impl ProductionSemanticRuntimeV1 {
         Ok(Some(PreparedProductionSemanticCacheCommitV1 {
             handle,
             prepared: PreparedProductionSemanticCacheActionV1::Restore {
-                prepared,
+                prepared: Box::new(prepared),
                 cache: Arc::clone(&self.vector_read_cache),
                 vectors,
                 lifecycle: Arc::clone(&self.lifecycle),
@@ -1304,7 +1302,7 @@ impl ProductionSemanticRuntimeV1 {
             label = "semantic.evaluation.snapshot.executable_generation"
         )
         .await
-        .map_err(|error| {
+        .inspect_err(|error| {
             tracing::warn!(
                 event = "semantic_evaluation_target_snapshot",
                 stage = "executable_generation",
@@ -1314,7 +1312,6 @@ impl ProductionSemanticRuntimeV1 {
                     SemanticRuntimeBackendErrorV1::Conflict => "conflict",
                 },
             );
-            error
         })?;
         // Publication identity stays i64 on the wire; the graph adapter's
         // monotonic u64 revision maps 1:1 into it and can only overflow after
