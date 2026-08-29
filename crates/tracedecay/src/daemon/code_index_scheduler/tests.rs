@@ -8313,6 +8313,29 @@ async fn wait_for_initial_generation(
     .expect("initial generation published")
 }
 
+/// Publication now broadcasts as soon as reconcile publishes, before graph
+/// seating. Callers that need the complete serving generation must wait for
+/// that seat, not only the publication event.
+///
+/// Poll the serving slot only. `latest_complete_fresh` opens git (advancing
+/// `.git/index` mtime) and may post a freshness wake, which is exactly the
+/// false-stale / extra-receipt failure the post-reconcile witness exists to
+/// prevent.
+async fn wait_for_live_complete_generation(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+) -> super::LatestCompleteCodeIndexV1 {
+    wait_for_initial_generation(registry, path).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(latest) = registry.latest_complete_serving_for_test(path).await {
+            return latest;
+        }
+        assert!(Instant::now() <= deadline, "live generation");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
