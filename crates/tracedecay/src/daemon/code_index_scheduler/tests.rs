@@ -9260,7 +9260,9 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
             .await
             .expect("mount daemon-owned scheduler")
     );
-    wait_for_initial_generation(&registry, fixture.path()).await;
+    // Publication broadcasts before graph seating. Identity resolve reads the
+    // seated snapshot, so wait for that seat rather than the publish event.
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
 
     // The one mint: file identity and generation both come from the registry.
     let identity =
