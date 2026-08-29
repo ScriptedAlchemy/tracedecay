@@ -20,12 +20,12 @@ use tracedecay_code_extraction::ExtractionArtifactV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-    CodeSearchChunkV1, CodeSearchDocumentV1, CodeSearchEligibilityV1, EdgeAuthorityV1,
-    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, ExtractionBatchV1,
-    FileIdentityDigest, FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES,
-    ParseOutcomeV1, PolicyRevisionId, RelationEdgeKindV1, RepositoryId, SanitizerRevision,
-    SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
-    ValidatedCodeFileV1, canonical_sha256,
+    CodeSearchChunkV1, ContentDigest, Edge, EdgeAuthorityV1, EdgeKind, ExactTechnicalTermKindV1,
+    ExactTechnicalTermV1, ExtractionAdmittedChunkV1, FileIdentityDigest, FileOccurrenceId,
+    LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, Node, NodeKind, PolicyRevisionId,
+    RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+    SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef, ValidatedCodeFileV1,
+    canonical_sha256,
 };
 
 use super::{
@@ -33,7 +33,7 @@ use super::{
     intake::ReceiptBoundCodeFileV1,
     lineage::LineageSymbolRecordV1,
 };
-use tracedecay_domain::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef};
+use crate::extract::{ExtractionBatchV1, ParseOutcomeV1};
 
 mod artifacts;
 
@@ -41,6 +41,36 @@ pub use artifacts::{
     CodeFileIndexArtifactsV1, CodeIndexEdgeAbstentionReasonV1, CodeIndexEdgeAbstentionV1,
     CodeIndexImportEvidenceV1,
 };
+
+/// Eligibility of one generation-bound file document for chunk production.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "eligibility", content = "reason", rename_all = "snake_case")]
+pub enum CodeSearchEligibilityV1 {
+    Eligible,
+    /// Explicitly excluded; every excluded byte range is declared.
+    Excluded {
+        reason: String,
+    },
+    /// Partially eligible; unsupported ranges are declared evidence.
+    Partial {
+        reason: String,
+    },
+    Unsupported {
+        reason: String,
+    },
+}
+
+/// One generation-bound file manifest — the scheduling/checkpoint unit.
+/// Chunks are the projection and receipt unit.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeSearchDocumentV1 {
+    pub generation_id: CodeGenerationId,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub content_digest: ContentDigest,
+    pub eligibility: CodeSearchEligibilityV1,
+    pub chunk_ids: Vec<CodeSearchChunkId>,
+}
 
 /// Chunker failures. Partial coverage is evidence, not an error; errors are
 /// reserved for contract violations.
@@ -1994,14 +2024,14 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::extract::ExtractionCoverageV1;
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-        CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchEligibilityV1, ContentDigest,
-        ExtractionCoverageV1, FileIdentityDigest, FileOccurrenceId, GrammarRevision,
-        LanguageDescriptorRevision, LanguageId, ManifestDigest, ParseOutcomeV1, PolicyRevisionId,
-        ProjectId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
-        SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
+        CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest, FileIdentityDigest,
+        FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest,
+        PolicyRevisionId, ProjectId, SanitizationReceiptId, SanitizedCodeFileV1,
+        SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+        SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
     };
 
     use crate::extract::{
