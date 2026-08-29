@@ -21,11 +21,10 @@ use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CodeSearchChunkV1, CodeSearchDocumentV1, CodeSearchEligibilityV1, EdgeAuthorityV1,
-    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, ExtractionBatchV1,
-    FileIdentityDigest, FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES,
-    ParseOutcomeV1, PolicyRevisionId, RelationEdgeKindV1, RepositoryId, SanitizerRevision,
-    SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
-    ValidatedCodeFileV1, canonical_sha256,
+    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, FileIdentityDigest,
+    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, PolicyRevisionId,
+    RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+    SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, ValidatedCodeFileV1, canonical_sha256,
 };
 
 use super::{
@@ -33,6 +32,7 @@ use super::{
     intake::ReceiptBoundCodeFileV1,
     lineage::LineageSymbolRecordV1,
 };
+use crate::extract::{ExtractionBatchV1, ParseOutcomeV1};
 use tracedecay_domain::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef};
 
 mod artifacts;
@@ -1994,14 +1994,15 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::extract::ExtractionCoverageV1;
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
         CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchEligibilityV1, ContentDigest,
-        ExtractionCoverageV1, FileIdentityDigest, FileOccurrenceId, GrammarRevision,
-        LanguageDescriptorRevision, LanguageId, ManifestDigest, ParseOutcomeV1, PolicyRevisionId,
-        ProjectId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
-        SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
+        FileIdentityDigest, FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision,
+        LanguageId, ManifestDigest, PolicyRevisionId, ProjectId, SanitizationReceiptId,
+        SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityDecision,
+        SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, UtcMicros,
+        ValidatedCodeFileV1,
     };
 
     use crate::extract::{

@@ -9,10 +9,11 @@ use tracedecay_domain::{
     CodeGenerationManifestV1, ContentDigest, DiagnosticEvidenceClassV1, DiagnosticProducerKindV1,
     DiagnosticProvenanceV1, DiagnosticRecordStateV1, DiagnosticSeverityV1, GenerationDiagnosticV1,
     ManifestDigest, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
-    SourceSpan, UtcMicros, ValidatedCodeSnapshotV1,
+    SourceSpan, UtcMicros,
 };
 
 use super::support::{id, registry};
+use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
 
 fn content(byte: char) -> ContentDigest {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))

@@ -8,10 +8,11 @@ use tracedecay_code_index::test_attribution::{
 use tracedecay_domain::{
     CodeGenerationManifestV1, ContentDigest, GenerationTestAttributionV1, ManifestDigest,
     SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
-    TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeSnapshotV1,
+    TestAttributionEvidenceClassV1, UtcMicros,
 };
 
 use super::support::{id, registry};
+use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
 
 fn content(byte: char) -> ContentDigest {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))

@@ -1,13 +1,13 @@
 use tracedecay_code_index::chunks::content_digest as source_digest;
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, IntakeRejectionV1, LanguageId,
-    ProjectId, RefId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
-    ValidatedCodeFileV1, WorktreeId,
+    CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, LanguageId, ProjectId, RefId,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1, WorktreeId,
 };
 
 use crate::support::{id, registry};
+use tracedecay_code_index::intake::IntakeRejectionV1;
 
 fn content_digest(byte: char) -> ContentDigest {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))
