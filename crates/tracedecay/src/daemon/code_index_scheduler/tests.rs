@@ -294,10 +294,10 @@ fn retention_generations(
 }
 
 fn remove_historical_pointer_entries(store_root: &Path) {
-    use tracedecay_usecases::retention::code_index_generations::durable_generation_index_digest;
+    use tracedecay_code_index_retention::code_index_generations::durable_generation_index_digest;
 
     let pointer_path = store_root.join("active-code-generation-v1.json");
-    let mut pointer: tracedecay_usecases::retention::code_index_generations::DurablePublicationPointerV1 =
+    let mut pointer: tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read publication pointer"))
             .expect("decode publication pointer");
     pointer
@@ -320,7 +320,7 @@ fn remove_historical_pointer_entries(store_root: &Path) {
 
 #[test]
 fn code_generation_retention_preserves_every_pointer_addressable_generation() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         run_code_generation_retention,
     };
@@ -360,7 +360,7 @@ fn code_generation_retention_preserves_every_pointer_addressable_generation() {
 
 #[test]
 fn bounded_pointer_history_collects_evicted_clean_and_dirty_generations() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         DurablePublicationPointerV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
         MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, run_code_generation_retention,
@@ -445,7 +445,7 @@ fn bounded_pointer_history_collects_evicted_clean_and_dirty_generations() {
 
 #[test]
 fn code_generation_retention_dry_run_reports_without_deleting() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         run_code_generation_retention,
     };
@@ -497,7 +497,7 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
 
 #[test]
 fn code_generation_retention_never_sweeps_vector_readable_source() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         run_code_generation_retention,
     };
@@ -554,7 +554,7 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
 
 #[test]
 fn code_generation_retention_emits_durable_reclaim_receipt() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         observe_code_generation_retention, run_code_generation_retention,
     };
@@ -634,14 +634,14 @@ fn execute_scope_retention_with_test_binding_cleanup(
     store_root: &Path,
     live_roots: &BTreeSet<PathBuf>,
     minimum_stranding_age_secs: i64,
-    mode: tracedecay_usecases::retention::code_index_generations::CodeGenerationRetentionModeV1,
+    mode: tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1,
     now_secs: i64,
     completed_at: UtcMicros,
 ) -> Result<
-    tracedecay_usecases::retention::code_index_generations::ScopeRootRetentionReportV1,
-    tracedecay_usecases::retention::code_index_generations::CodeGenerationRetentionErrorV1,
+    tracedecay_code_index_retention::code_index_generations::ScopeRootRetentionReportV1,
+    tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionErrorV1,
 > {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, ScopeRootAuthorityReceiptV1,
         ScopeRootBindingCleanupReplayV1, ScopeRootCandidateBindingV1, ScopeRootLivenessProofV1,
         complete_scope_root_binding_cleanup, execute_scope_root_retention,
@@ -672,7 +672,7 @@ fn execute_scope_retention_with_test_binding_cleanup(
         live_roots
             .iter()
             .map(|root| {
-                tracedecay_usecases::retention::code_index_generations::code_index_scope_hash(root)
+                tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(root)
             })
             .collect(),
         receipt("registry", '1'),
@@ -725,7 +725,7 @@ fn execute_scope_retention_with_test_binding_cleanup(
 
 #[test]
 fn stranded_code_index_scope_is_collected_while_its_live_sibling_is_untouched() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
     };
 
@@ -776,7 +776,7 @@ fn stranded_code_index_scope_is_collected_while_its_live_sibling_is_untouched() 
 
 #[test]
 fn code_index_scope_matching_a_live_worktree_is_never_collected() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, plan_scope_root_retention,
     };
 
@@ -808,7 +808,7 @@ fn code_index_scope_matching_a_live_worktree_is_never_collected() {
 
 #[test]
 fn code_index_scope_with_a_pending_generation_journal_is_refused() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
         StrandedScopeRefusalV1,
     };
@@ -862,7 +862,7 @@ fn code_index_scope_with_a_pending_generation_journal_is_refused() {
 
 #[test]
 fn freshly_stranded_code_index_scope_is_retained_until_the_age_gate_passes() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
     };
 
@@ -900,7 +900,7 @@ fn freshly_stranded_code_index_scope_is_retained_until_the_age_gate_passes() {
 
 #[test]
 fn scope_reconciliation_refuses_to_collect_without_a_proven_live_root_set() {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
         plan_scope_root_retention,
     };
@@ -946,7 +946,7 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
         CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
         code_generation_retention_finding,
     };
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         DEFAULT_SUPERSEDED_GENERATION_FLOOR, GenerationDigestVerificationV1,
         plan_code_generation_retention_with_verification,
     };
@@ -969,7 +969,7 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
         file.set_len(ONE_GIB).expect("grow sealed generation");
     }
     let pointer_path = store.path().join("active-code-generation-v1.json");
-    let mut pointer: tracedecay_usecases::retention::code_index_generations::DurablePublicationPointerV1 =
+    let mut pointer: tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read publication pointer"))
             .expect("decode publication pointer");
     // Every generation stays pointer-addressable — this test is about census
@@ -979,7 +979,7 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
         entry.size_bytes = ONE_GIB;
     }
     pointer.generation_index_digest = Some(
-        tracedecay_usecases::retention::code_index_generations::durable_generation_index_digest(
+        tracedecay_code_index_retention::code_index_generations::durable_generation_index_digest(
             &pointer.generation_index,
             pointer.generation_index_truncated,
         )
@@ -2731,7 +2731,7 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     use std::sync::{Condvar, Mutex, mpsc};
     use std::thread;
 
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         execute_code_generation_retention, plan_code_generation_retention,
     };
@@ -3047,7 +3047,7 @@ fn active_text_artifact_path(store_root: &Path) -> PathBuf {
 }
 
 fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64) -> PathBuf {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         DurablePublicationPointerV1, durable_generation_index_digest,
     };
 

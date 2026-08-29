@@ -116,6 +116,7 @@ impl ScopeQuarantineAuthority {
         &self.scope_identities
     }
 
+    #[hotpath::measure(label = "code_index_retention.quarantine")]
     pub(super) fn stage(
         &mut self,
         scopes: &[StrandedCodeIndexScopeV1],

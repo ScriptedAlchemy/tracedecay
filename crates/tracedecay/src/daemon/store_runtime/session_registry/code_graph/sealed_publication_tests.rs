@@ -27,7 +27,7 @@ use tracedecay_store::{
     RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
 };
-use tracedecay_usecases::retention::code_index_generations::DurablePublicationPointerV1;
+use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 use super::{

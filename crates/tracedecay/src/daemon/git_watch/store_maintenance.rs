@@ -31,17 +31,17 @@ const MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY: usize = 256;
 struct ScopeRootProofInputsV1 {
     live_roots: std::collections::BTreeSet<PathBuf>,
     registered_roots:
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1,
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1,
     git_worktrees:
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1,
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1,
     mounted_leases:
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1,
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1,
     configuration_roots:
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1,
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1,
     vector_census:
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1,
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1,
     vector_dependencies:
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1,
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1,
     vector_sources: std::collections::BTreeSet<tracedecay_domain::CodeGenerationId>,
 }
 
@@ -52,17 +52,17 @@ impl ScopeRootProofInputsV1 {
         source_scope: tracedecay_store::StoreShardIdV1,
         vector_revision: tracedecay_store::SemanticVectorStageCensusRevision,
     ) -> Result<
-        tracedecay_usecases::retention::code_index_generations::ScopeRootLivenessProofV1,
+        tracedecay_code_index_retention::code_index_generations::ScopeRootLivenessProofV1,
         &'static str,
     > {
         let live_scope_hashes = self
             .live_roots
             .iter()
             .map(|root| {
-                tracedecay_usecases::retention::code_index_generations::code_index_scope_hash(root)
+                tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(root)
             })
             .collect();
-        tracedecay_usecases::retention::code_index_generations::ScopeRootLivenessProofV1::new(
+        tracedecay_code_index_retention::code_index_generations::ScopeRootLivenessProofV1::new(
             live_scope_hashes,
             self.registered_roots.clone(),
             self.git_worktrees.clone(),
@@ -70,7 +70,7 @@ impl ScopeRootProofInputsV1 {
             self.configuration_roots.clone(),
             self.vector_census.clone(),
             self.vector_dependencies.clone(),
-            tracedecay_usecases::retention::code_index_generations::ScopeRootCandidateBindingV1 {
+            tracedecay_code_index_retention::code_index_generations::ScopeRootCandidateBindingV1 {
                 scope_hash,
                 source_scope,
                 vector_census_revision: vector_revision.get().to_string(),
@@ -485,7 +485,7 @@ async fn apply_code_generation_retention(
     vector_inventory: VectorRetentionInventoryV1,
     cancellation: &tracedecay_usecases::context::CancellationToken,
 ) -> bool {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
         DEFAULT_SUPERSEDED_GENERATION_FLOOR, execute_code_generation_retention_cancellable,
         prepare_next_code_generation_retention_cancellable,
@@ -544,7 +544,7 @@ async fn apply_code_generation_retention(
     let plan = match plan {
         Ok(Ok(plan)) => plan,
         Ok(Err(
-            tracedecay_usecases::retention::code_index_generations::CodeGenerationRetentionErrorV1::Cancelled,
+            tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionErrorV1::Cancelled,
         )) => {
             log_code_generation_retention_degraded("retention_cancelled");
             return false;
@@ -801,7 +801,7 @@ fn git_worktree_root_inventory(
 ) -> Result<
     (
         std::collections::BTreeSet<PathBuf>,
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1,
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1,
     ),
     &'static str,
 > {
@@ -847,7 +847,7 @@ fn git_worktree_root_inventory(
     let digest = tracedecay_domain::canonical_sha256(&material)
         .map_err(|_| "git_worktree_inventory_digest_failed")?;
     let receipt =
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
             revision: digest.as_str().to_owned(),
             terminal_count,
             digest: digest.as_str().to_owned(),
@@ -899,7 +899,7 @@ async fn collect_scope_root_proof_inputs(
     ))
     .map_err(|_| "registered_enrollment_inventory_digest_failed")?;
     let registered_receipt =
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
             revision: registered.inventory_digest.as_str().to_owned(),
             terminal_count: u64::try_from(enrolled_roots.len())
                 .map_err(|_| "registered_enrollment_count_overflow")?,
@@ -929,7 +929,7 @@ async fn collect_scope_root_proof_inputs(
     ))
     .map_err(|_| "mounted_root_inventory_digest_failed")?;
     let mounted_receipt =
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
             revision: mounted_digest.as_str().to_owned(),
             terminal_count: mounted_count,
             digest: mounted_digest.as_str().to_owned(),
@@ -976,7 +976,7 @@ async fn collect_scope_root_proof_inputs(
         ) => return Err("scope_vector_inventory_denied"),
     };
     let configuration_roots =
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
             revision: configuration_receipt.revision().to_string(),
             terminal_count: configuration_receipt.root_binding_count(),
             digest: configuration_receipt.inventory_digest().as_str().to_owned(),
@@ -988,7 +988,7 @@ async fn collect_scope_root_proof_inputs(
     ))
     .map_err(|_| "vector_dependency_inventory_digest_failed")?;
     let vector_dependencies =
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
             revision: configured_root_receipt.revision().to_string(),
             terminal_count: configured_root_receipt.root_count(),
             digest: vector_dependency_digest.as_str().to_owned(),
@@ -1001,7 +1001,7 @@ async fn collect_scope_root_proof_inputs(
         .and_then(|count| count.checked_add(vector_receipt.counts.cancelled))
         .ok_or("vector_census_count_overflow")?;
     let vector_census =
-        tracedecay_usecases::retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
+        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
             revision: vector_receipt.revision.get().to_string(),
             terminal_count: vector_count,
             digest: vector_receipt.record_digest.as_str().to_owned(),
@@ -1040,7 +1040,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
     schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
 ) -> bool {
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
         complete_scope_root_binding_cleanup, execute_scope_root_retention,
         plan_scope_root_retention, plan_scope_root_retention_with_liveness_proof,
@@ -1597,7 +1597,7 @@ fn log_code_index_scope_reconciliation_degraded(failure: &str) {
 /// generations and silently reclaim nothing, which is the failure this pass
 /// exists to end.
 pub(super) fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
-    tracedecay_usecases::retention::code_index_generations::scoped_code_index_store_root(
+    tracedecay_code_index_retention::code_index_generations::scoped_code_index_store_root(
         &code_index_scope_store_root(data_root),
         project_root,
     )

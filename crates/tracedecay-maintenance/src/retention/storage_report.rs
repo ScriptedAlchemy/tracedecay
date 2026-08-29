@@ -31,7 +31,7 @@ use tracedecay_runtime_core::sqlite_read_snapshot::{
     BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
 };
 
-use tracedecay_usecases::retention::code_index_generations::{
+use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
     GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
     scoped_code_index_store_root,
@@ -261,7 +261,9 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// blocking pool so this CLI path matches the daemon-paged sibling and does
 /// not stall the async runtime.
 #[hotpath::measure(label = "maintenance.storage_report.build", future = true)]
-pub async fn build_storage_report(profile_root: &Path) -> tracedecay_runtime_core::errors::Result<StorageReport> {
+pub async fn build_storage_report(
+    profile_root: &Path,
+) -> tracedecay_runtime_core::errors::Result<StorageReport> {
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // Capture the profile's physical footprint before opening any SQLite
     // readers. A report must describe the profile supplied by its caller, not
@@ -885,7 +887,9 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if tracedecay_runtime_core::storage::validate_project_id(&name).is_err() || registered_ids.contains(&name) {
+        if tracedecay_runtime_core::storage::validate_project_id(&name).is_err()
+            || registered_ids.contains(&name)
+        {
             continue;
         }
         count += 1;
@@ -1096,8 +1100,10 @@ mod tests {
     fn seed_graph_db(profile_root: &Path, project_id: &str) {
         let data_root = profile_root.join("projects").join(project_id);
         std::fs::create_dir_all(&data_root).unwrap();
-        let connection =
-            rusqlite::Connection::open(data_root.join(tracedecay_runtime_core::config::DB_FILENAME)).unwrap();
+        let connection = rusqlite::Connection::open(
+            data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
+        )
+        .unwrap();
         connection
             .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
             .unwrap();
@@ -1314,7 +1320,11 @@ mod tests {
         let data_root = profile_root.join("projects").join("proj_a");
         std::fs::create_dir_all(&data_root).unwrap();
         // Not a SQLite database at all.
-        std::fs::write(data_root.join(tracedecay_runtime_core::config::DB_FILENAME), vec![9u8; 4096]).unwrap();
+        std::fs::write(
+            data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
+            vec![9u8; 4096],
+        )
+        .unwrap();
 
         let report = build_storage_report(&profile_root).await.unwrap();
 

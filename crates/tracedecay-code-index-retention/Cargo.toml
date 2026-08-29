@@ -1,0 +1,55 @@
+[package]
+name = "tracedecay-code-index-retention"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Liveness-based retention for immutable code-index generations"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-store/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+]
+
+[dependencies]
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
+fs2 = "0.4"
+hotpath.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -16,7 +16,7 @@ use crate::daemon::maintenance::{
     StoreTelemetrySamplingRegistry,
 };
 use crate::tracedecay::TraceDecay;
-use tracedecay_usecases::retention::code_index_generations::{
+use tracedecay_code_index_retention::code_index_generations::{
     DurableGenerationIndexEntryV1, DurablePublicationPointerV1, durable_generation_index_digest,
 };
 

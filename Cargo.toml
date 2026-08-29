@@ -9,6 +9,7 @@ members = [
     "crates/tracedecay-cli",
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
+    "crates/tracedecay-code-index-retention",
     "crates/tracedecay-dashboard-api",
     "crates/tracedecay-domain",
     "crates/tracedecay-global-db",

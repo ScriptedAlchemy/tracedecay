@@ -92,7 +92,7 @@ use crate::{
     },
 };
 use tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
-use tracedecay_usecases::retention::code_index_generations::{
+use tracedecay_code_index_retention::code_index_generations::{
     DurableCodeTextArtifactDescriptorV1, DurableGenerationCardinalityV1,
     DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
     DurableSealedCodeGenerationIdentityV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
@@ -176,7 +176,7 @@ pub(in crate::daemon) fn scoped_code_index_store_root(
     store_root: &Path,
     canonical_project_root: &Path,
 ) -> PathBuf {
-    tracedecay_usecases::retention::code_index_generations::scoped_code_index_store_root(
+    tracedecay_code_index_retention::code_index_generations::scoped_code_index_store_root(
         store_root,
         canonical_project_root,
     )

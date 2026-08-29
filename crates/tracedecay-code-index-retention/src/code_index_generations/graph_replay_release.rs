@@ -272,6 +272,7 @@ fn validate_receipt(
     Ok(())
 }
 
+#[hotpath::measure(label = "code_index_retention.complete_replay_release")]
 pub fn complete_code_generation_graph_replay_release(
     store_root: &Path,
     release: &CodeGenerationGraphReplayReleaseV1,

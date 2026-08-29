@@ -57,6 +57,7 @@ pub(super) fn acquire_scope_retention_lock(
     lock_file(store_root, SCOPE_RETENTION_LOCK_FILE, false)
 }
 
+#[hotpath::measure(label = "code_index_retention.lock")]
 fn lock_file(
     store_root: &Path,
     lock_file: &str,

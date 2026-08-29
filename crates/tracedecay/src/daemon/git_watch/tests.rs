@@ -204,7 +204,7 @@ fn scope_fixture_git(root: &Path, args: &[&str]) {
 /// Missing one would classify a scope in daily use as stranded.
 #[test]
 fn live_code_index_roots_cover_every_linked_worktree() {
-    use tracedecay_usecases::retention::code_index_generations::code_index_scope_hash;
+    use tracedecay_code_index_retention::code_index_generations::code_index_scope_hash;
 
     let tmp = tempfile::TempDir::new().expect("repository root");
     let primary = tmp.path().join("primary");

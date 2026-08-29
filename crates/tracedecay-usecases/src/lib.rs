@@ -101,7 +101,6 @@ pub mod provider_pricing;
 pub mod provider_usage;
 pub mod request_identity;
 pub mod response_handles;
-pub mod retention;
 pub mod semantic_runtime;
 pub mod session;
 pub mod settings_control;

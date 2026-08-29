@@ -3,7 +3,6 @@
 use super::*;
 
 mod graph_replay_release_tests;
-mod process_local_release_tests;
 
 const TEST_ROLLBACK_FLOOR: usize = 3;
 

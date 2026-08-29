@@ -21,7 +21,7 @@ hotpath = [
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-usecases/hotpath",
+    "tracedecay-code-index-retention/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
@@ -34,7 +34,7 @@ hotpath-alloc = [
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
+    "tracedecay-code-index-retention/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
@@ -47,7 +47,7 @@ hotpath-cpu = [
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
+    "tracedecay-code-index-retention/hotpath-cpu",
 ]
 # Forwards the registered global-db test harness so this crate's unit tests
 # can open a profile store without daemon session-registry types.
@@ -74,7 +74,7 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
 
 [target.'cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))'.dependencies]
 libc = "0.2"

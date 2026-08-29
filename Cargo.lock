@@ -5915,6 +5915,7 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-code-index-retention",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -6146,6 +6147,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-code-index-retention"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "fs2",
+ "hotpath",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracedecay-code-index",
+ "tracedecay-domain",
+ "tracedecay-private-fs",
+ "tracedecay-store",
+]
+
+[[package]]
 name = "tracedecay-dashboard-api"
 version = "0.1.0"
 dependencies = [
@@ -6326,13 +6347,13 @@ dependencies = [
  "tokio",
  "tracedecay-application",
  "tracedecay-automation",
+ "tracedecay-code-index-retention",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
- "tracedecay-usecases",
 ]
 
 [[package]]
