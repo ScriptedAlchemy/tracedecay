@@ -43,7 +43,7 @@ pub(super) fn run_command_with_stdin(
     let mut child = command
         .spawn()
         .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    let Some(mut stdin) = child.stdin.take() else {
+    let Some(stdin) = child.stdin.take() else {
         return Err(NativeGitIndexError::Io(
             "native Git stdin was not available".to_owned(),
         ));
