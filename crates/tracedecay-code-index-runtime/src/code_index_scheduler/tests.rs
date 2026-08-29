@@ -10139,7 +10139,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     let (scope, privacy_domain) = {
         let mut scheduler = scheduler(
             &fixture,
-            scoped_store,
+            scoped_store.clone(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
         published(scheduler.reconcile_now().expect("seed retained generation"));
@@ -10156,11 +10156,13 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             latest.generation.manifest().privacy_domain.clone(),
         )
     };
-    std::fs::remove_file(
-        super::scoped_code_index_store_root(store.path(), fixture.path())
-            .join("freshness_witness.v1"),
-    )
-    .expect("remove restore witness to reproduce a cold preserved-profile mount");
+    let freshness_witness = scoped_store.join("freshness_witness.v1");
+    assert!(
+        freshness_witness.is_file(),
+        "seeding the preserved profile persists its restore witness"
+    );
+    std::fs::remove_file(freshness_witness)
+        .expect("remove restore witness to reproduce a cold preserved-profile mount");
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
@@ -10369,13 +10371,11 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         decode_count, 0,
         "graph-off text serving must not decode the full generation"
     );
-    let artifact_names = std::fs::read_dir(super::code_text_artifacts_root(
-        &super::scoped_code_index_store_root(store.path(), fixture.path()),
-    ))
-    .expect("read text artifact root")
-    .filter_map(Result::ok)
-    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-    .collect::<Vec<_>>();
+    let artifact_names = std::fs::read_dir(super::code_text_artifacts_root(&scoped_store))
+        .expect("read text artifact root")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     assert_eq!(
         artifact_names
             .iter()
