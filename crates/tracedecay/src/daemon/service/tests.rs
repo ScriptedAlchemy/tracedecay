@@ -197,6 +197,33 @@ fn after_update_restore_heals_stopped_installed_units() {
 }
 
 #[test]
+fn unavailable_socket_advice_names_stopped_disabled_enable_now() {
+    let socket = PathBuf::from("/tmp/tracedecay.sock");
+    let advice = super::unavailable_daemon_socket_advice(
+        &socket,
+        Some(DaemonServiceState::StoppedDisabled),
+    );
+    assert!(
+        advice.contains("stopped and disabled"),
+        "advice must distinguish stopped+disabled, got: {advice}"
+    );
+    assert!(
+        advice.contains("tracedecay daemon install-service"),
+        "advice must name install-service, got: {advice}"
+    );
+    if cfg!(target_os = "linux") {
+        assert!(
+            advice.contains("systemctl --user enable --now tracedecay.service"),
+            "advice must name enable --now, got: {advice}"
+        );
+    }
+    assert!(
+        !advice.contains("ensure the service is running"),
+        "installed-but-dead must not keep the generic ensure-running text, got: {advice}"
+    );
+}
+
+#[test]
 fn strict_restoration_requires_readiness_only_for_running_state() {
     assert!(super::restored_service_matches(
         DaemonServiceState::RunningEnabled,

@@ -281,6 +281,31 @@ impl DaemonServiceState {
         matches!(self, Self::RunningEnabled | Self::StoppedEnabled)
     }
 
+    pub(crate) fn lifecycle_operator_advice(self) -> String {
+        let remedy = daemon_service_enable_now_remedy();
+        match self {
+            Self::RunningEnabled => {
+                "TraceDecay daemon unit is installed, enabled, and running.".to_string()
+            }
+            Self::RunningDisabled => format!(
+                "TraceDecay daemon unit is running but disabled, so it will not return after an exit. Run {remedy}."
+            ),
+            Self::StoppedEnabled => {
+                format!("TraceDecay daemon unit is installed but stopped. Run {remedy}.")
+            }
+            Self::StoppedDisabled => format!(
+                "TraceDecay daemon unit is installed but stopped and disabled. Run {remedy}."
+            ),
+            Self::Masked => {
+                format!("TraceDecay daemon unit is masked. Unmask it, then run {remedy}.")
+            }
+            Self::Missing => {
+                "Run `tracedecay daemon install-service` and ensure the service is running."
+                    .to_string()
+            }
+        }
+    }
+
     /// State to restore after `tracedecay update` / `upgrade`.
     ///
     /// The supervisor snapshot cannot tell "operator stopped this on purpose"
@@ -298,6 +323,32 @@ impl DaemonServiceState {
             Self::RunningEnabled | Self::StoppedEnabled | Self::StoppedDisabled => {
                 Self::RunningEnabled
             }
+        }
+    }
+}
+
+pub(crate) fn daemon_service_enable_now_remedy() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "`tracedecay daemon install-service` or `systemctl --user enable --now tracedecay.service`"
+    } else {
+        "`tracedecay daemon install-service`"
+    }
+}
+
+pub(crate) fn unavailable_daemon_socket_advice(
+    socket_path: &Path,
+    state: Option<DaemonServiceState>,
+) -> String {
+    match state {
+        Some(DaemonServiceState::RunningEnabled | DaemonServiceState::RunningDisabled) => {
+            format!(
+                "The unit reports running, but socket '{}' is not available. Check `tracedecay daemon status`.",
+                socket_path.display()
+            )
+        }
+        Some(state) => state.lifecycle_operator_advice(),
+        None => {
+            "Run `tracedecay daemon install-service` and ensure the service is running.".to_string()
         }
     }
 }
@@ -985,7 +1036,7 @@ pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
     operation_result
 }
 
-fn installed_service_state() -> Result<DaemonServiceState> {
+pub(crate) fn installed_service_state() -> Result<DaemonServiceState> {
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
         return Ok(DaemonServiceState::Missing);
