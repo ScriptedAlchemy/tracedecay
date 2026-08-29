@@ -5456,8 +5456,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// [`Self::latest_complete_ready_for_query`] under an explicit decode
-    /// admission. The freshness checks are identical; only whether an
-    /// undecoded active generation is awaited or abstained on differs.
+    /// admission. Unverified restore, git-metadata drift, and an elapsed
+    /// staleness threshold abstain and schedule background work. They do not
+    /// share [`Self::freshness_probe_requires_reconcile`]'s elapsed-threshold
+    /// scan: that witness refresh belongs to the query/background ladder.
     fn latest_complete_ready_for_query_with(
         &mut self,
         admission: GenerationDecodeAdmissionV1,
@@ -5465,7 +5467,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        if self.freshness_probe_requires_reconcile() {
+        if !self.verified_against_source
+            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
+                .differs_from(&self.git_metadata)
+            || self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
+        {
             self.request_background_reconcile();
             return Ok(None);
         }
@@ -5602,9 +5608,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// tier-2 bounded staleness — but where `ensure_fresh_for_query` calls
     /// `reconcile_now()` inline this only *requests* the background worker.
     /// The ladder's checks are cheap (stat-level metadata); its remedy is not,
-    /// and a query must never pay for it. This mirrors what
-    /// [`Self::latest_complete_ready_for_query_with`] already does for the
-    /// latency-sensitive application paths.
+    /// and a query must never pay for it. Unlike
+    /// [`Self::latest_complete_ready_for_query_with`], this arm still scans the
+    /// stat witness on an elapsed threshold so a quiet repository can reset
+    /// its clock without a capture.
     ///
     /// Returns whether a reconcile was actually requested. A quiet repository
     /// must answer `false` and wake nothing: the ladder suppressing work is the

@@ -5892,16 +5892,22 @@ fn unchanged_ready_query_refreshes_its_stat_witness_without_reconcile() {
     let published = published(scheduler.reconcile_now().expect("initial publish"));
     scheduler.policy.staleness_threshold = Duration::ZERO;
 
-    let ready = scheduler
-        .latest_complete_ready_for_query()
-        .expect("unchanged ready query");
-
+    // Ready admission abstains on elapsed without scanning (July 29
+    // `perf(index): defer stale query probes`). The August 26 scan-and-admit
+    // contract lives on the query/background ladder: a matching stat witness
+    // resets the clock and must not overflow into a capture.
+    assert!(
+        !scheduler.request_fresh_for_query_background(),
+        "elapsed time alone must not enqueue authoritative capture on an unchanged tree"
+    );
     assert_eq!(
-        ready
-            .as_ref()
-            .map(|latest| &latest.generation.manifest().generation_id),
-        Some(&published.generation_id),
-        "elapsed time alone must not make an unchanged generation unavailable"
+        scheduler.latest_complete().map(|latest| latest
+            .generation
+            .manifest()
+            .generation_id
+            .clone()),
+        Some(published.generation_id),
+        "the sealed generation stays current after a matching stat witness"
     );
     assert_eq!(
         scheduler.pending_hint_count(),
