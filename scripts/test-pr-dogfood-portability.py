@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""Behavioral tests for the portable PR dogfood process harness."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import unittest
+
+
+ROOT = Path(__file__).resolve().parent.parent
+HELPER = ROOT / "scripts/lib/portable_process.py"
+DAEMON_HARNESS = ROOT / "scripts/with-isolated-tracedecay-daemon.sh"
+DOGFOOD_SCRIPT = ROOT / "scripts/ci-pr-dogfood-smoke.sh"
+
+
+def helper(*args: str, timeout: float = 10) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-S", str(HELPER), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+class PortableProcessTests(unittest.TestCase):
+    def test_run_preserves_output_and_exit_status(self) -> None:
+        completed = helper(
+            "run",
+            "--timeout",
+            "2",
+            "--kill-after",
+            "0.2",
+            "--",
+            sys.executable,
+            "-S",
+            "-c",
+            "import sys; print('phase stdout'); print('phase stderr', file=sys.stderr); sys.exit(7)",
+        )
+        self.assertEqual(completed.returncode, 7)
+        self.assertEqual(completed.stdout, "phase stdout\n")
+        self.assertEqual(completed.stderr, "phase stderr\n")
+
+    def test_timeout_returns_124_and_kills_the_process_tree(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="portable-timeout-") as tmp:
+            survived = Path(tmp) / "descendant-survived"
+            descendant = textwrap.dedent(
+                f"""
+                import pathlib, signal, time
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                time.sleep(0.8)
+                pathlib.Path({str(survived)!r}).write_text("survived", encoding="utf-8")
+                """
+            )
+            parent = textwrap.dedent(
+                f"""
+                import signal, subprocess, sys, time
+                subprocess.Popen([sys.executable, "-S", "-c", {descendant!r}])
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                time.sleep(10)
+                """
+            )
+            started = time.monotonic()
+            completed = helper(
+                "run",
+                "--timeout",
+                "0.15",
+                "--kill-after",
+                "0.15",
+                "--",
+                sys.executable,
+                "-S",
+                "-c",
+                parent,
+                timeout=3,
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(completed.returncode, 124, completed.stderr)
+            self.assertLess(elapsed, 1.5)
+            time.sleep(0.7)
+            self.assertFalse(survived.exists(), "timed-out descendant escaped cleanup")
+
+    def test_successful_command_cannot_leave_background_work(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="portable-background-") as tmp:
+            survived = Path(tmp) / "background-survived"
+            descendant = textwrap.dedent(
+                f"""
+                import pathlib, signal, time
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                time.sleep(0.6)
+                pathlib.Path({str(survived)!r}).write_text("survived", encoding="utf-8")
+                """
+            )
+            parent = (
+                "import subprocess, sys; "
+                f"subprocess.Popen([sys.executable, '-S', '-c', {descendant!r}])"
+            )
+            completed = helper(
+                "run",
+                "--timeout",
+                "2",
+                "--kill-after",
+                "0.1",
+                "--",
+                sys.executable,
+                "-S",
+                "-c",
+                parent,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            time.sleep(0.6)
+            self.assertFalse(survived.exists(), "background descendant escaped cleanup")
+
+    def test_monotonic_clock_and_realpath_are_portable(self) -> None:
+        first = helper("monotonic-ms")
+        second = helper("monotonic-ms")
+        self.assertEqual(first.returncode, 0)
+        self.assertGreaterEqual(int(second.stdout), int(first.stdout))
+
+        resolved = helper("realpath", str(HELPER.parent / ".." / "lib" / HELPER.name))
+        self.assertEqual(resolved.returncode, 0)
+        self.assertEqual(Path(resolved.stdout.strip()), HELPER.resolve())
+
+    def test_missing_command_has_bounded_error_output(self) -> None:
+        completed = helper(
+            "run",
+            "--timeout",
+            "1",
+            "--kill-after",
+            "0.1",
+            "--",
+            "/definitely/not/a/command",
+        )
+        self.assertEqual(completed.returncode, 127)
+        self.assertIn("No such file or directory", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
+
+class IsolatedDaemonHarnessTests(unittest.TestCase):
+    def make_fake_daemon(self, directory: Path) -> Path:
+        daemon = directory / "fake-tracedecay"
+        daemon.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import os
+                from pathlib import Path
+                import signal
+                import socket
+                import subprocess
+                import sys
+                import time
+
+                socket_path = sys.argv[sys.argv.index("--socket") + 1]
+                print("fake daemon boot", flush=True)
+                if os.environ.get("FAKE_DAEMON_NO_SOCKET") == "1":
+                    time.sleep(30)
+                    raise SystemExit(0)
+
+                term_marker = os.environ.get("FAKE_DESCENDANT_TERM_MARKER")
+                ready_marker = os.environ.get("FAKE_DESCENDANT_READY_MARKER")
+                survived_marker = os.environ.get("FAKE_DESCENDANT_SURVIVED_MARKER")
+                if term_marker and ready_marker and survived_marker:
+                    child = '''
+                from pathlib import Path
+                import os, signal, time
+                def on_term(_signum, _frame):
+                    Path(os.environ["FAKE_DESCENDANT_TERM_MARKER"]).write_text("term", encoding="utf-8")
+                signal.signal(signal.SIGTERM, on_term)
+                Path(os.environ["FAKE_DESCENDANT_READY_MARKER"]).write_text("ready", encoding="utf-8")
+                time.sleep(1.5)
+                Path(os.environ["FAKE_DESCENDANT_SURVIVED_MARKER"]).write_text("survived", encoding="utf-8")
+                '''
+                    subprocess.Popen([sys.executable, "-S", "-c", child])
+                    deadline = time.monotonic() + 2
+                    while not Path(ready_marker).exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if not Path(ready_marker).exists():
+                        raise RuntimeError("fake daemon descendant did not start")
+
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                listener.bind(socket_path)
+                listener.listen()
+                signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
+                while True:
+                    listener.accept()[0].close()
+                """
+            ),
+            encoding="utf-8",
+        )
+        daemon.chmod(0o755)
+        return daemon
+
+    def test_harness_waits_for_readiness_forwards_output_and_cleans_tree(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="daemon-harness-") as tmp:
+            tmp_path = Path(tmp)
+            daemon = self.make_fake_daemon(tmp_path)
+            term_marker = tmp_path / "descendant-term"
+            ready_marker = tmp_path / "descendant-ready"
+            survived_marker = tmp_path / "descendant-survived"
+            env = os.environ.copy()
+            env["FAKE_DESCENDANT_TERM_MARKER"] = str(term_marker)
+            env["FAKE_DESCENDANT_READY_MARKER"] = str(ready_marker)
+            env["FAKE_DESCENDANT_SURVIVED_MARKER"] = str(survived_marker)
+            completed = subprocess.run(
+                [
+                    str(DAEMON_HARNESS),
+                    "--bin",
+                    str(daemon),
+                    "--ready-timeout",
+                    "2",
+                    "--stop-timeout",
+                    "1",
+                    "--lifecycle-label",
+                    "fake daemon",
+                    "--",
+                    sys.executable,
+                    "-S",
+                    "-c",
+                    "import os; assert os.path.exists(os.environ['TRACEDECAY_DAEMON_SOCKET']); print('smoke command output')",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=6,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("== starting fake daemon", completed.stdout)
+            self.assertIn("smoke command output", completed.stdout)
+            self.assertIn("== stopping fake daemon", completed.stderr)
+            self.assertTrue(
+                term_marker.exists(), "descendant did not receive group TERM"
+            )
+            time.sleep(0.6)
+            self.assertFalse(
+                survived_marker.exists(), "daemon descendant escaped group KILL"
+            )
+
+    def test_readiness_timeout_is_bounded_and_surfaces_daemon_output(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="daemon-not-ready-") as tmp:
+            daemon = self.make_fake_daemon(Path(tmp))
+            env = os.environ.copy()
+            env["FAKE_DAEMON_NO_SOCKET"] = "1"
+            started = time.monotonic()
+            completed = subprocess.run(
+                [
+                    str(DAEMON_HARNESS),
+                    "--bin",
+                    str(daemon),
+                    "--ready-timeout",
+                    "1",
+                    "--stop-timeout",
+                    "1",
+                    "--",
+                    sys.executable,
+                    "-S",
+                    "-c",
+                    "raise SystemExit('command must not run')",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=5,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertLess(time.monotonic() - started, 4)
+            self.assertIn("did not become ready within 1 seconds", completed.stderr)
+            self.assertIn("fake daemon boot", completed.stderr)
+            self.assertNotIn("command must not run", completed.stderr)
+
+    def test_shell_drivers_do_not_require_gnu_or_linux_only_commands(self) -> None:
+        forbidden = ("setsid", "timeout --", "readlink -f", "date +%s%N")
+        for script in (DAEMON_HARNESS, DOGFOOD_SCRIPT):
+            source = script.read_text(encoding="utf-8")
+            for token in forbidden:
+                self.assertNotIn(token, source, f"{script.name} still requires {token}")
+            syntax = subprocess.run(
+                ["bash", "-n", str(script)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+
+class DogfoodJourneyOutputTests(unittest.TestCase):
+    def test_run_mode_emits_validated_phase_output_and_timings(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dogfood-output-") as tmp:
+            tmp_path = Path(tmp)
+            project = tmp_path / "project"
+            output = tmp_path / "output"
+            project.mkdir()
+            output.mkdir()
+            subprocess.run(["git", "init", "-q", str(project)], check=True)
+            hooks = tmp_path / "empty-hooks"
+            hooks.mkdir()
+            subprocess.run(
+                ["git", "-C", str(project), "config", "core.hooksPath", str(hooks)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(project), "config", "user.name", "Dogfood Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(project),
+                    "config",
+                    "user.email",
+                    "dogfood@example.invalid",
+                ],
+                check=True,
+            )
+            tracked = project / "fixture.txt"
+            tracked.write_text("base\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(project), "add", "fixture.txt"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(project), "commit", "-qm", "base"], check=True
+            )
+            base_oid = subprocess.check_output(
+                ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
+            ).strip()
+            tracked.write_text("head\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(project), "commit", "-qam", "head"], check=True
+            )
+            head_oid = subprocess.check_output(
+                ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            fake_binary = tmp_path / "fake-tracedecay"
+            fake_binary.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    if [[ "${1:-}" == "--version" ]]; then
+                      echo "tracedecay fake-test"
+                    elif [[ "${1:-}" == "init" ]]; then
+                      :
+                    elif [[ "${1:-}" == "status" ]]; then
+                      echo '{"status":"ready"}'
+                    elif [[ "${1:-} ${2:-}" == "tool context" ]]; then
+                      echo '{"coverage":{"state":"complete"}}'
+                    elif [[ "${1:-} ${2:-}" == "tool pr_context" ]]; then
+                      project=""
+                      base=""
+                      head=""
+                      shift 2
+                      while (($#)); do
+                        case "$1" in
+                          --project) project="$2"; shift 2 ;;
+                          --base-ref) base="$2"; shift 2 ;;
+                          --head-ref) head="$2"; shift 2 ;;
+                          *) shift ;;
+                        esac
+                      done
+                      base_oid="$(git -C "$project" rev-parse "$base^{commit}")"
+                      head_oid="$(git -C "$project" rev-parse "$head^{commit}")"
+                      merge_base="$(git -C "$project" merge-base "$base" "$head")"
+                      printf '{"base_oid":"%s","head_oid":"%s","merge_base":"%s","files_changed":1,"changes":[{"path":"fixture.txt","status":"modified"}],"analysis_coverage":{"complete":true}}\\n' \\
+                        "$base_oid" "$head_oid" "$merge_base"
+                    else
+                      echo "unexpected fake TraceDecay arguments: $*" >&2
+                      exit 2
+                    fi
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_binary.chmod(0o755)
+            env = os.environ.copy()
+            env["TRACEDECAY_BIN"] = str(fake_binary)
+            completed = subprocess.run(
+                [
+                    str(DOGFOOD_SCRIPT),
+                    "--run",
+                    str(project),
+                    base_oid,
+                    head_oid,
+                    str(output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=10,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            for phase in ("init", "status", "context", "pr_context", "runtime_status"):
+                self.assertRegex(
+                    completed.stdout,
+                    rf"tracedecay_ci_timing phase={phase} elapsed_ms=\d+ status=0",
+                )
+            self.assertIn(
+                "TraceDecay PR dogfood pr_context output is valid", completed.stdout
+            )
+            self.assertIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
