@@ -270,7 +270,10 @@ fn marker_path(container: &Path) -> PathBuf {
 ///
 /// Every rejection is silent and returns an empty set: a marker is a cache of
 /// completed proofs, and the absence of one only ever costs a full proof.
-fn load(container: &Path, observed: ContainerIdentity) -> BTreeMap<GenerationKey, ProvenGeneration> {
+fn load(
+    container: &Path,
+    observed: ContainerIdentity,
+) -> BTreeMap<GenerationKey, ProvenGeneration> {
     let path = marker_path(container);
     let Ok(Some(bytes)) = tracedecay_private_fs::framed_log::read_bounded(&path, MAX_MARKER_BYTES)
     else {

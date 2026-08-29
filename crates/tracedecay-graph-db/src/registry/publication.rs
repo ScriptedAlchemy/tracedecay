@@ -19,9 +19,7 @@ use super::publication_support::{
     retain_lease_closure, validate_exact_dependency_closure, validate_replay_cursor,
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
-use crate::generation::{
-    metadata_manifest_from_replay, validate_supplied_manifest_binding,
-};
+use crate::generation::{metadata_manifest_from_replay, validate_supplied_manifest_binding};
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };

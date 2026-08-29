@@ -24,14 +24,13 @@ use super::{
     DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
     GenerationDigestVerificationV1, MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1,
     MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1, MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1,
-    MAX_TRANSACTION_BYTES, TEXT_ARTIFACT_QUARANTINE_DIRECTORY,
-    TEXT_ARTIFACT_RECEIPTS_DIRECTORY, TEXT_ARTIFACT_RECEIPT_SCHEMA,
-    TEXT_ARTIFACT_TRANSACTION_FILE, TEXT_ARTIFACT_TRANSACTION_SCHEMA,
-    code_text_artifacts_root, durable_generation_index_digest, generation_file_digest,
-    observe_cancel, open_file_sha256_hex_cancellable, path_still_names_open_file,
-    read_active_pointer, regular_file_exists, remove_empty_stage_root,
-    retain_bounded_generation_index_with_text_head, sha256_file_component, storage,
-    sync_directory, validate_durable_generation_index, validate_sealed_generation_identity,
+    MAX_TRANSACTION_BYTES, TEXT_ARTIFACT_QUARANTINE_DIRECTORY, TEXT_ARTIFACT_RECEIPT_SCHEMA,
+    TEXT_ARTIFACT_RECEIPTS_DIRECTORY, TEXT_ARTIFACT_TRANSACTION_FILE,
+    TEXT_ARTIFACT_TRANSACTION_SCHEMA, code_text_artifacts_root, durable_generation_index_digest,
+    generation_file_digest, observe_cancel, open_file_sha256_hex_cancellable,
+    path_still_names_open_file, read_active_pointer, regular_file_exists, remove_empty_stage_root,
+    retain_bounded_generation_index_with_text_head, sha256_file_component, storage, sync_directory,
+    validate_durable_generation_index, validate_sealed_generation_identity,
     validate_text_artifact_descriptor,
 };
 
@@ -838,7 +837,8 @@ pub(super) fn build_text_artifact_receipt(
     };
     let digest = canonical_sha256(&material)
         .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-    let receipt_digest = receipt_digest_file_component(&TEXT_ARTIFACT_RECEIPT_STORE, digest.as_str())?;
+    let receipt_digest =
+        receipt_digest_file_component(&TEXT_ARTIFACT_RECEIPT_STORE, digest.as_str())?;
     Ok(CodeTextArtifactRetentionReceiptV1 {
         schema: TEXT_ARTIFACT_RECEIPT_SCHEMA.to_owned(),
         receipt_digest,

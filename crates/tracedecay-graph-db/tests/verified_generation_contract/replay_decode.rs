@@ -12,10 +12,7 @@ fn inline_replay_hydrates_the_identical_manifest() {
     entities.push(entity("entity:anchor", "anchor"));
     let relation = GraphGenerationRelation::new(
         GraphRelationId::new("relation:anchor").unwrap(),
-        GraphEntityRef::new(
-            identity.clone(),
-            GraphEntityId::new("entity:0000").unwrap(),
-        ),
+        GraphEntityRef::new(identity.clone(), GraphEntityId::new("entity:0000").unwrap()),
         GraphEntityRef::new(
             identity.clone(),
             GraphEntityId::new("entity:anchor").unwrap(),

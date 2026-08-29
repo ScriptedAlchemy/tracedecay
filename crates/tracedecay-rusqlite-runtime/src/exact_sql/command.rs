@@ -226,21 +226,19 @@ pub(crate) fn run_writer_command(
                     // write and command behind it waits inside this span, so
                     // it — not SQLite execution — is what explains begin
                     // latency elsewhere while an interactive lease is open.
-                    Ok(transaction) if reply.send(Ok(())).is_ok() => {
-                        Some(hotpath::measure_block!(
-                            "rusqlite.exact_sql.transaction",
-                            run_transaction(
-                                transaction,
-                                receiver,
-                                before,
-                                shutdown_requested,
-                                &last_insert_rowid,
-                                &expired,
-                                authority,
-                                policy,
-                            )
-                        ))
-                    }
+                    Ok(transaction) if reply.send(Ok(())).is_ok() => Some(hotpath::measure_block!(
+                        "rusqlite.exact_sql.transaction",
+                        run_transaction(
+                            transaction,
+                            receiver,
+                            before,
+                            shutdown_requested,
+                            &last_insert_rowid,
+                            &expired,
+                            authority,
+                            policy,
+                        )
+                    )),
                     Ok(_) => {
                         crate::hotpath_observe::record_exact_sql_transaction_outcome(
                             crate::hotpath_observe::ExactSqlTransactionOutcome::Abandoned,

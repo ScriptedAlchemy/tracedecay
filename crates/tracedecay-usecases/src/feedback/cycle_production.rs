@@ -176,17 +176,18 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
         context: &'a RequestContext,
         input: &'a FeedbackEvaluationInputV1,
     ) -> FeedbackPortFuture<'a, Result<FeedbackCycleAdvisoryV1, LspRuntimeFailure>> {
-        Box::pin(hotpath::future!(async move {
-            let current = self
-                .document_identity
-                .resolve(self.project_root.clone(), None)
-                .await?;
-            require_current_saved_identity(input, &current)?;
-            let request = ProximityEvaluationRequestV1 {
-                scope: input.request.scope.clone(),
-                observed_at: input.observed_at,
-            };
-            match self
+        Box::pin(hotpath::future!(
+            async move {
+                let current = self
+                    .document_identity
+                    .resolve(self.project_root.clone(), None)
+                    .await?;
+                require_current_saved_identity(input, &current)?;
+                let request = ProximityEvaluationRequestV1 {
+                    scope: input.request.scope.clone(),
+                    observed_at: input.observed_at,
+                };
+                match self
                 .owner
                 .evaluate_with_threshold_pin(context, &request, &self.threshold_pin)
                 .await
@@ -253,7 +254,9 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                     Err(LspRuntimeFailure::new("feedback-cycle-proximity-timed-out"))
                 }
             }
-        }, label = "usecases.feedback.proximity_advisory"))
+            },
+            label = "usecases.feedback.proximity_advisory"
+        ))
     }
 }
 
@@ -797,95 +800,98 @@ fn production_lsp_input(
         let project_root = project_root.clone();
         let root_path = root_path.clone();
         let document_identity = Arc::clone(&document_identity);
-        Box::pin(hotpath::future!(async move {
-            if url::Url::parse(&request.root_uri)
-                .ok()
-                .and_then(|url| url.to_file_path().ok())
-                .as_ref()
-                != Some(&root_path)
-            {
-                return Err(LspRuntimeFailure::new("feedback-cycle-root-mismatch"));
-            }
-            let trigger = match request.trigger {
-                DiagnosticTrigger::DocumentSave => FeedbackTriggerV1::DocumentSave,
-                DiagnosticTrigger::ExplicitDocumentDiagnostics => {
-                    FeedbackTriggerV1::ExplicitDiagnostics
+        Box::pin(hotpath::future!(
+            async move {
+                if url::Url::parse(&request.root_uri)
+                    .ok()
+                    .and_then(|url| url.to_file_path().ok())
+                    .as_ref()
+                    != Some(&root_path)
+                {
+                    return Err(LspRuntimeFailure::new("feedback-cycle-root-mismatch"));
                 }
-            };
-            let observed_at = now_micros();
-            let access = authorization.authorize(observed_at).await?;
-            if access.configuration_revision != threshold_pin.configuration_revision
-                || access.configuration_digest != threshold_pin.configuration_digest
-            {
-                return Err(LspRuntimeFailure::new("feedback-cycle-configuration-drift"));
-            }
-            let context =
-                authorized_daemon_request_context(&scope, &requester, access, observed_at)
-                    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-request-context"))?;
-            let document = document_identity
-                .resolve(project_root, Some(request.document_uri))
-                .await?;
-            let file_digest = document.file_digest()?;
-            let generation_digest = document.generation_digest.clone();
-            let providers = providers
-                .iter()
-                .map(|provider| provider_for_document(provider, &document, observed_at))
-                .collect::<Result<Vec<_>, _>>()?;
-            let cycle_digest = canonical_sha256(&(
-                "tracedecay.project-open.feedback-cycle.v2",
-                &feedback_scope,
-                &document.generation_id,
-                &document.file,
-                &document.content_digest,
-                trigger,
-            ))
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-id"))?;
-            let cycle_id = FeedbackCycleId::new(format!(
-                "cycle.project-open.{}",
-                cycle_digest.as_str().trim_start_matches("sha256:")
-            ))
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-id"))?;
-            let cycle_request = FeedbackCycleRequestV1::new(
-                cycle_id,
-                feedback_scope,
-                FeedbackContentIdentityV1::SavedContent {
-                    generation_digest: generation_digest.clone(),
-                    file_digest: file_digest.clone(),
-                },
-                trigger,
-                policy_digest,
-                threshold_pin.configuration_digest,
-                FeedbackBudgetV1::bounded(1_000, 1_000, 10_000, 10_000),
-            )
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-request"))?;
-            if cycle_request.durability() != FeedbackDurabilityV1::Durable {
-                return Err(LspRuntimeFailure::new("feedback-cycle-non-durable"));
-            }
-            let input = FeedbackEvaluationInputV1 {
-                request: cycle_request,
-                target: FeedbackTargetV1 {
-                    file: document.file,
-                    span: None,
-                    symbol: None,
-                    generation_id: Some(document.generation_id),
-                },
-                actor: FeedbackActorContextV1::default(),
-                observed_at,
-            };
-            let execution = FeedbackCycleExecutionRequest {
-                input,
-                providers,
-                maximum_returned_findings: 64,
-                usage: FeedbackBudgetUsage {
-                    completed_at: now_micros(),
-                    tokens_consumed: 0,
-                    cost_microunits: 0,
-                },
-                control: FeedbackCycleControl::Continue,
-            };
-            FeedbackCycleInvocation::new(context, execution)
-                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-invocation"))
-        }, label = "usecases.feedback.lsp_cycle_input"))
+                let trigger = match request.trigger {
+                    DiagnosticTrigger::DocumentSave => FeedbackTriggerV1::DocumentSave,
+                    DiagnosticTrigger::ExplicitDocumentDiagnostics => {
+                        FeedbackTriggerV1::ExplicitDiagnostics
+                    }
+                };
+                let observed_at = now_micros();
+                let access = authorization.authorize(observed_at).await?;
+                if access.configuration_revision != threshold_pin.configuration_revision
+                    || access.configuration_digest != threshold_pin.configuration_digest
+                {
+                    return Err(LspRuntimeFailure::new("feedback-cycle-configuration-drift"));
+                }
+                let context =
+                    authorized_daemon_request_context(&scope, &requester, access, observed_at)
+                        .map_err(|_| LspRuntimeFailure::new("feedback-cycle-request-context"))?;
+                let document = document_identity
+                    .resolve(project_root, Some(request.document_uri))
+                    .await?;
+                let file_digest = document.file_digest()?;
+                let generation_digest = document.generation_digest.clone();
+                let providers = providers
+                    .iter()
+                    .map(|provider| provider_for_document(provider, &document, observed_at))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let cycle_digest = canonical_sha256(&(
+                    "tracedecay.project-open.feedback-cycle.v2",
+                    &feedback_scope,
+                    &document.generation_id,
+                    &document.file,
+                    &document.content_digest,
+                    trigger,
+                ))
+                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-id"))?;
+                let cycle_id = FeedbackCycleId::new(format!(
+                    "cycle.project-open.{}",
+                    cycle_digest.as_str().trim_start_matches("sha256:")
+                ))
+                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-id"))?;
+                let cycle_request = FeedbackCycleRequestV1::new(
+                    cycle_id,
+                    feedback_scope,
+                    FeedbackContentIdentityV1::SavedContent {
+                        generation_digest: generation_digest.clone(),
+                        file_digest: file_digest.clone(),
+                    },
+                    trigger,
+                    policy_digest,
+                    threshold_pin.configuration_digest,
+                    FeedbackBudgetV1::bounded(1_000, 1_000, 10_000, 10_000),
+                )
+                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-request"))?;
+                if cycle_request.durability() != FeedbackDurabilityV1::Durable {
+                    return Err(LspRuntimeFailure::new("feedback-cycle-non-durable"));
+                }
+                let input = FeedbackEvaluationInputV1 {
+                    request: cycle_request,
+                    target: FeedbackTargetV1 {
+                        file: document.file,
+                        span: None,
+                        symbol: None,
+                        generation_id: Some(document.generation_id),
+                    },
+                    actor: FeedbackActorContextV1::default(),
+                    observed_at,
+                };
+                let execution = FeedbackCycleExecutionRequest {
+                    input,
+                    providers,
+                    maximum_returned_findings: 64,
+                    usage: FeedbackBudgetUsage {
+                        completed_at: now_micros(),
+                        tokens_consumed: 0,
+                        cost_microunits: 0,
+                    },
+                    control: FeedbackCycleControl::Continue,
+                };
+                FeedbackCycleInvocation::new(context, execution)
+                    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-invocation"))
+            },
+            label = "usecases.feedback.lsp_cycle_input"
+        ))
     }))
 }
 

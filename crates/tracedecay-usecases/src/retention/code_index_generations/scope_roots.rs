@@ -33,10 +33,10 @@ use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
     MAX_SCOPE_BINDING_CLEANUP_INTENT_BYTES, MAX_SCOPE_TRANSACTION_BYTES,
     SCOPE_BINDING_CLEANUP_INTENT_FILE, SCOPE_BINDING_CLEANUP_INTENT_SCHEMA,
-    SCOPE_RETENTION_RECEIPT_SCHEMA,
-    SCOPE_RETENTION_RECEIPTS_DIRECTORY, SCOPE_RETENTION_TRANSACTION_FILE,
-    SCOPE_RETENTION_TRANSACTION_SCHEMA, SCOPE_ROOT_LIVENESS_PROOF_SCHEMA, STORE_LOCK_FILE,
-    TRANSACTION_FILE, code_index_scope_hash, storage,
+    SCOPE_RETENTION_RECEIPT_SCHEMA, SCOPE_RETENTION_RECEIPTS_DIRECTORY,
+    SCOPE_RETENTION_TRANSACTION_FILE, SCOPE_RETENTION_TRANSACTION_SCHEMA,
+    SCOPE_ROOT_LIVENESS_PROOF_SCHEMA, STORE_LOCK_FILE, TRANSACTION_FILE, code_index_scope_hash,
+    storage,
 };
 
 const SCOPE_TRANSACTION_JOURNAL: BoundedJournalSpec<ScopeRootRetentionTransactionV1> =
@@ -745,14 +745,20 @@ pub(super) fn scope_transaction_path(store_root: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-pub(super) fn scope_stage_root(store_root: &Path, receipt: &ScopeRootRetentionReceiptV1) -> PathBuf {
+pub(super) fn scope_stage_root(
+    store_root: &Path,
+    receipt: &ScopeRootRetentionReceiptV1,
+) -> PathBuf {
     store_root
         .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
         .join(&receipt.receipt_digest)
 }
 
 #[cfg(test)]
-pub(super) fn scope_receipt_path(store_root: &Path, receipt: &ScopeRootRetentionReceiptV1) -> PathBuf {
+pub(super) fn scope_receipt_path(
+    store_root: &Path,
+    receipt: &ScopeRootRetentionReceiptV1,
+) -> PathBuf {
     receipt_store::receipt_path(store_root, &SCOPE_RECEIPT_STORE, &receipt.receipt_digest)
 }
 
@@ -783,7 +789,9 @@ pub(super) fn is_code_index_scope_hash(value: &str) -> bool {
 /// since the mark phase" fence unsatisfiable. Symlinks are refused outright —
 /// nothing in a code-index scope creates them, and a tree that is about to be
 /// renamed and unlinked is the wrong place to start interpreting them.
-pub(super) fn measure_scope_tree(scope_root: &Path) -> Result<(u64, i64), CodeGenerationRetentionErrorV1> {
+pub(super) fn measure_scope_tree(
+    scope_root: &Path,
+) -> Result<(u64, i64), CodeGenerationRetentionErrorV1> {
     let mut total_bytes = 0_u64;
     let mut newest_mtime = i64::MIN;
     let mut pending = vec![scope_root.to_path_buf()];
@@ -832,7 +840,9 @@ pub(super) fn directory_mtime_secs(path: &Path) -> Result<i64, CodeGenerationRet
     mtime_secs(&std::fs::symlink_metadata(path).map_err(storage)?)
 }
 
-pub(super) fn mtime_secs(metadata: &std::fs::Metadata) -> Result<i64, CodeGenerationRetentionErrorV1> {
+pub(super) fn mtime_secs(
+    metadata: &std::fs::Metadata,
+) -> Result<i64, CodeGenerationRetentionErrorV1> {
     let modified = metadata.modified().map_err(storage)?;
     let seconds = match modified.duration_since(UNIX_EPOCH) {
         Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
@@ -1111,7 +1121,9 @@ pub(super) fn load_scope_transaction(
     load_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)
 }
 
-pub(super) fn clear_scope_transaction(store_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
+pub(super) fn clear_scope_transaction(
+    store_root: &Path,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
     clear_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)
 }
 
@@ -1176,4 +1188,3 @@ pub(super) fn scope_directory_exists(path: &Path) -> Result<bool, CodeGeneration
         Err(error) => Err(storage(error)),
     }
 }
-

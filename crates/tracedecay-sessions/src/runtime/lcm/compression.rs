@@ -1135,7 +1135,10 @@ async fn assemble_replay_context(
 /// Mirrors hermes-lcm `_assemble_overflow_recovery_context`: assemble under
 /// the cap; when nothing beyond the anchors fits, fall back to anchors plus
 /// the most recent message even if that stays over budget.
-#[hotpath::measure(label = "sessions.lcm.compress.assemble_overflow_replay", future = true)]
+#[hotpath::measure(
+    label = "sessions.lcm.compress.assemble_overflow_replay",
+    future = true
+)]
 async fn assemble_overflow_recovery_replay(
     conn: &impl QueryExecutor,
     provider: &str,

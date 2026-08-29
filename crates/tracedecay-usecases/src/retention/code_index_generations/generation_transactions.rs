@@ -476,7 +476,10 @@ pub(super) fn path_still_names_open_file(
 /// modification time double as the cross-check that the content did not
 /// change between the snapshots. Windows file-index identity is compared
 /// from retained handles via `windows_file::information`, not MetadataExt.
-pub(super) fn metadata_identity_matches(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+pub(super) fn metadata_identity_matches(
+    left: &std::fs::Metadata,
+    right: &std::fs::Metadata,
+) -> bool {
     #[cfg(unix)]
     {
         if left.dev() != right.dev()
@@ -766,7 +769,9 @@ pub(super) fn clear_transaction(store_root: &Path) -> Result<(), CodeGenerationR
     clear_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)
 }
 
-pub(super) fn remove_empty_stage_root(stage_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
+pub(super) fn remove_empty_stage_root(
+    stage_root: &Path,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
     let mut entries = match std::fs::read_dir(stage_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -802,4 +807,3 @@ pub(super) fn regular_file_exists(path: &Path) -> Result<bool, CodeGenerationRet
         Err(error) => Err(storage(error)),
     }
 }
-

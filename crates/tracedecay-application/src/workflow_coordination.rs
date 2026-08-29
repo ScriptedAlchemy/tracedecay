@@ -1178,8 +1178,7 @@ where
                     Err(TaskHandoffError::Missing)
                 }
                 TaskHandoffConsumeOutcome::ScopeMismatch => {
-                    hotpath::gauge!("application.workflow.handoff.redeem.scope_mismatch")
-                        .inc(1u64);
+                    hotpath::gauge!("application.workflow.handoff.redeem.scope_mismatch").inc(1u64);
                     Err(TaskHandoffError::ScopeMismatch)
                 }
                 TaskHandoffConsumeOutcome::Expired => {

@@ -440,7 +440,8 @@ fn at_rest_reopen_probe() {
     // always printed, including on the runs where the at-rest form is the thing
     // that breaks.
     assert_eq!(
-        reads.hits, POINT_READS,
+        reads.hits,
+        POINT_READS,
         "reopened store lost point reads (mode: {})",
         mode.label()
     );

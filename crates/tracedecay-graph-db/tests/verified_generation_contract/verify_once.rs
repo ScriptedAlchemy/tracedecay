@@ -78,10 +78,7 @@ fn remount_and_recover(published: &mut Published) -> Result<(), GraphDbError> {
         .registered
         .registry
         .recover_verified_snapshot(
-            registration(
-                published.registered.binding.clone(),
-                published.temp.path(),
-            ),
+            registration(published.registered.binding.clone(), published.temp.path()),
             &mut published.authority,
             &context,
             &published.key.projection,
@@ -122,7 +119,12 @@ fn publishing_and_closing_writes_the_verified_marker() {
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     // The marker binds itself to its own contents, and records the identity of
     // the container it was proven against.
-    assert!(parsed["body_digest"].as_str().unwrap().starts_with("sha256:"));
+    assert!(
+        parsed["body_digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
     assert_eq!(parsed["body"]["generations"].as_array().unwrap().len(), 1);
     assert!(parsed["body"]["container"]["len"].as_u64().unwrap() > 0);
 }
@@ -390,7 +392,9 @@ fn activation_verify_cost_probe() {
     let marker = marker_path(temp.path());
     assert!(marker.is_file(), "the publication must leave a marker");
     let marker_bytes = fs::metadata(&marker).unwrap().len();
-    let container_bytes = fs::metadata(support::graph_path(temp.path())).unwrap().len();
+    let container_bytes = fs::metadata(support::graph_path(temp.path()))
+        .unwrap()
+        .len();
     let retained = fs::read(&marker).unwrap();
 
     // --- activation with the marker present ---
