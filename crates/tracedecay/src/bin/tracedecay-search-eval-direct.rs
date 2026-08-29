@@ -4,7 +4,6 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
-use tracedecay_daemon_protocol::SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS;
 use tracedecay::search_eval::{
     DirectEvaluationStatusV1, DirectWorkloadSummaryV1, GenerateCandidateOutputsOptions,
     SearchEvalError, compare_default_direct, compare_direct, generate_candidate_outputs,
@@ -12,6 +11,7 @@ use tracedecay::search_eval::{
     write_daemon_native_qualification, write_generate_outputs,
 };
 use tracedecay_application::CancellationSignal;
+use tracedecay_daemon_protocol::SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS;
 
 #[cfg(feature = "hotpath")]
 const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
@@ -239,11 +239,15 @@ fn evaluate_and_publish(project_root: PathBuf, evaluated_profile_id: String) -> 
     #[cfg(feature = "hotpath")]
     hotpath::tokio_runtime!(runtime.handle());
     runtime.block_on(async move {
-        let handshake =
-            match tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false) {
-                Ok(handshake) => handshake,
-                Err(error) => return invalid("evaluate_and_publish", error),
-            };
+        let handshake = match tracedecay::daemon::handshake_for_current_client(
+            Some(project_root),
+            None,
+            false,
+            false,
+        ) {
+            Ok(handshake) => handshake,
+            Err(error) => return invalid("evaluate_and_publish", error),
+        };
         let client = match tracedecay::daemon::invocation_client_for_current(handshake) {
             Ok(client) => client,
             Err(error) => return invalid("evaluate_and_publish", error),
@@ -276,11 +280,15 @@ fn qualify_native(
     #[cfg(feature = "hotpath")]
     hotpath::tokio_runtime!(runtime.handle());
     runtime.block_on(async move {
-        let handshake =
-            match tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false) {
-                Ok(handshake) => handshake,
-                Err(error) => return invalid("qualify_native", error),
-            };
+        let handshake = match tracedecay::daemon::handshake_for_current_client(
+            Some(project_root),
+            None,
+            false,
+            false,
+        ) {
+            Ok(handshake) => handshake,
+            Err(error) => return invalid("qualify_native", error),
+        };
         let client = match tracedecay::daemon::invocation_client_for_current(handshake) {
             Ok(client) => client,
             Err(error) => return invalid("qualify_native", error),

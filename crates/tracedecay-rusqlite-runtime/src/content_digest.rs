@@ -45,7 +45,7 @@ impl CanonicalContentDigestError {
 /// Analytics rows are excluded because they are observational: they record how
 /// a store was used rather than what it holds, so they must not perturb an
 /// identity comparison.
-#[hotpath::measure]
+#[hotpath::measure(label = "rusqlite_runtime.content_digest.canonical_sha256")]
 pub fn canonical_session_domain_content_sha256(
     path: &Path,
 ) -> Result<[u8; 32], CanonicalContentDigestError> {

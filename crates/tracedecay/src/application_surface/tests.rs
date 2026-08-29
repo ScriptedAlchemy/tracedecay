@@ -1035,8 +1035,9 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
     let normalization_revision =
         QueryNormalizationRevision::new("normalization.daemon-owned-test.v1")
             .expect("normalization revision");
-    let PrimitiveRequest::SymbolSearch(symbol_search) = crate::application_surface::primitive_code_into_primitive(
-        symbol_search,
+    let PrimitiveRequest::SymbolSearch(symbol_search) =
+        crate::application_surface::primitive_code_into_primitive(
+            symbol_search,
             sanitizer_revision.clone(),
             normalization_revision.clone(),
             PageRequest::first(25).expect("page"),

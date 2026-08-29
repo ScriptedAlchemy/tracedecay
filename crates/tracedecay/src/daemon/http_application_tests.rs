@@ -1068,8 +1068,9 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
-    let endpoint =
-        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-provisioning.sock"));
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(
+        profile_root.join("remote-provisioning.sock"),
+    );
     #[cfg(not(unix))]
     let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
     let daemon_authority =
@@ -1208,7 +1209,8 @@ async fn local_remote_status_reads_the_mounted_runtime() {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
-    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-status.sock"));
+    let endpoint =
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-status.sock"));
     #[cfg(not(unix))]
     let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
     let daemon_authority =

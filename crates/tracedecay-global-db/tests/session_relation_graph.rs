@@ -8,7 +8,7 @@ use tracedecay_domain::{
     CopyProofV1, MessageOccurrenceIdV1, ProjectId, RetrievalAnchorId, SessionId,
     TemporalValidityV1, ThreadId, UserProfileId, UtcMicros,
 };
-use tracedecay_global_db::session_temporal::relations::{
+use tracedecay_session_temporal_store::relations::{
     LogicalCopyRelation, SessionRelationError, SessionRelationGraphStore,
     SessionRelationProjection, SessionRelationScope, SummaryRelationNode, SummarySourceRef,
     SummarySourceVisitKind, ThreadHierarchyRelation, WorkflowAgentMembership,
