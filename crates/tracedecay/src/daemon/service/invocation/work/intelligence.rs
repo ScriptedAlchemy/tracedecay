@@ -42,9 +42,7 @@ pub(super) fn generate_proposal(
         )
     })?;
     let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    registered
-        .database
-        .work_intelligence_service(binding)
+    tracedecay_usecases::work::work_intelligence_service(&registered.database, binding)
         .map_err(|_| {
             work_product_problem(
                 tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
@@ -63,7 +61,7 @@ pub(super) fn generate_proposal(
 #[hotpath::measure(label = "daemon.service.work.execution_history")]
 pub(super) fn execution_history(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
@@ -134,10 +132,11 @@ pub(super) async fn experience(
         return unavailable(request_id);
     };
     let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence = match registered.database.work_intelligence_service(binding) {
-        Ok(service) => service,
-        Err(_) => return unavailable(request_id),
-    };
+    let intelligence =
+        match tracedecay_usecases::work::work_intelligence_service(&registered.database, binding) {
+            Ok(service) => service,
+            Err(_) => return unavailable(request_id),
+        };
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         registered.database.clone(),
     );
@@ -188,10 +187,11 @@ pub(super) fn compare_proposal(
         return unavailable(request_id);
     };
     let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence = match registered.database.work_intelligence_service(binding) {
-        Ok(service) => service,
-        Err(_) => return unavailable(request_id),
-    };
+    let intelligence =
+        match tracedecay_usecases::work::work_intelligence_service(&registered.database, binding) {
+            Ok(service) => service,
+            Err(_) => return unavailable(request_id),
+        };
     complete_work_read(
         registered,
         request_id,
