@@ -22,9 +22,8 @@ use tracedecay_mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_sessions::admission::{
-    HostAdmissionOutcome, HostAdmissionStatus, is_wire_oversized_io_error,
-};
+use tracedecay_daemon_protocol::wire::is_wire_oversized_io_error;
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,

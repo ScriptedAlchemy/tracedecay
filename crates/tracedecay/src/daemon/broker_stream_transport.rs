@@ -15,6 +15,10 @@ use tracedecay_mcp::{JsonRpcResponse, McpTransport};
 
 use super::BrokerStream;
 use super::*;
+use tracedecay_daemon_protocol::wire::{
+    BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, MCP_OVERSIZE_ID_INSPECT_BYTES,
+    is_wire_oversized_io_error, wire_oversized_io_error_with_prefix,
+};
 use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerWriteHalf};
 
 pub(super) struct BrokerStreamTransport {
@@ -23,7 +27,7 @@ pub(super) struct BrokerStreamTransport {
     // bounded reader owns the partial-frame accumulator so a read dropped by a
     // lost race resumes instead of restarting mid-frame and desynchronizing
     // JSON-RPC framing for the rest of the connection.
-    reader: tracedecay_sessions::admission::BoundedLineReader<tokio::io::BufReader<BrokerReadHalf>>,
+    reader: BoundedLineReader<tokio::io::BufReader<BrokerReadHalf>>,
     writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
     active_requests: Arc<
         std::sync::Mutex<HashMap<String, Option<tracedecay_domain::DeliverySettlementAttemptV1>>>,
@@ -60,7 +64,7 @@ impl BrokerStreamTransport {
     pub(super) fn new(stream: BrokerStream) -> Self {
         let (reader, writer) = stream.into_owned_split();
         Self {
-            reader: tracedecay_sessions::admission::BoundedLineReader::new(
+            reader: BoundedLineReader::new(
                 tokio::io::BufReader::new(reader),
             ),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
@@ -73,14 +77,9 @@ impl BrokerStreamTransport {
     }
 
     pub(super) fn push_replay(&mut self, line: String) -> std::io::Result<()> {
-        if line.len() > tracedecay_sessions::admission::MAX_MCP_JSONRPC_FRAME_BYTES {
-            let prefix = line.as_bytes()[..line
-                .len()
-                .min(tracedecay_sessions::admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
-                .to_vec();
-            return Err(
-                tracedecay_sessions::admission::wire_oversized_io_error_with_prefix(prefix),
-            );
+        if line.len() > MAX_MCP_JSONRPC_FRAME_BYTES {
+            let prefix = line.as_bytes()[..line.len().min(MCP_OVERSIZE_ID_INSPECT_BYTES)].to_vec();
+            return Err(wire_oversized_io_error_with_prefix(prefix));
         }
         self.replay.push_back(line);
         Ok(())
@@ -422,7 +421,7 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     return None;
                 }
                 Err(error)
-                    if tracedecay_sessions::admission::is_wire_oversized_io_error(&error) =>
+                    if is_wire_oversized_io_error(&error) =>
                 {
                     let _ = tracedecay_mcp::transport::write_wire_oversized_rejection(self, &error)
                         .await;

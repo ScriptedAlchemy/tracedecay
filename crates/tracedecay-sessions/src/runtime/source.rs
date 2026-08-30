@@ -52,7 +52,8 @@ use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 /// it from.
 pub use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
-use crate::admission::{HostAdmission, WireReadOutcome, read_bounded_to_string};
+use crate::admission::HostAdmission;
+use tracedecay_daemon_protocol::wire::{WireReadOutcome, read_bounded_to_string};
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{SessionMessageRecord, SessionRecord};
