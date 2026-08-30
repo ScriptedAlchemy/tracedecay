@@ -739,7 +739,7 @@ where
         request: &SemanticRetrievalRequestV1<'request>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalError> {
         self.retrieve_semantic(request)
-            .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
+            .map_err(RetrievalError::from)
     }
 }
 
