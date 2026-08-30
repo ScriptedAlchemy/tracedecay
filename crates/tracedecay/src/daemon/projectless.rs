@@ -271,7 +271,7 @@ async fn projectless_tools_call_response_with_connection(
             session_runtime_registry,
             global_db.as_ref(),
             crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
-                .with_profile_identity(Some(profile_identity))
+                .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
                 .with_registered_databases(None, Some(&user_session_db)),
             host_admission_broker,
         )

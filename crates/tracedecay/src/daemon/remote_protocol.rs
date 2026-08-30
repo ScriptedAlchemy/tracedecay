@@ -125,7 +125,7 @@ pub(crate) enum DaemonRemoteCredentialRegistryErrorV1 {
 /// composition root builds exactly one from the mounted session runtime
 /// registry; MCP, dashboard, and Doctor surfaces all read through it.
 pub(crate) type RemoteOperationalStatusProviderV1 =
-    Arc<dyn Fn() -> RemoteOperationalStatusReadV1 + Send + Sync>;
+    Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>;
 
 const REMOTE_LISTENER_STOPPED: u8 = 0;
 const REMOTE_LISTENER_SERVING: u8 = 1;

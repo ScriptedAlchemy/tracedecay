@@ -399,7 +399,7 @@ fn dispatch_info_tools_inner<'a>(
             "tracedecay_remote_status" => info::handle_remote_status(
                 cg.project_root(),
                 &args,
-                options.remote_operational_status.as_ref(),
+                options.remote_operational_status.as_deref(),
             ),
             "tracedecay_status" => {
                 info::handle_status(
