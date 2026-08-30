@@ -31,10 +31,10 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 use tracedecay_usecases::request_identity::McpConnectionIdentityAuthority;
 
-use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     ProjectRegistryReadPort, SessionRefreshServicePort, default_catalog_discovery_authority,
 };
+use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
     project_catalog_discovery_scope,

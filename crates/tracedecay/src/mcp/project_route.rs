@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
 
-use super::hook_events;
 use crate::mcp::server::McpProjectServerResolvePort;
 use tracedecay_global_db::ProjectRegistryContext;
+use tracedecay_mcp::hook_events;
 
 const MAX_HOOK_ROUTE_CACHE_ENTRIES: usize = 256;
 
@@ -567,9 +567,9 @@ mod tests {
         WorkspaceProjectRoute, project_route_identity_matches,
     };
     use crate::daemon::ProductionProjectCompositionHarnessV1;
-    use crate::mcp::hook_events::{HookEvent, HookEventKind};
     use crate::mcp::server::McpServer;
     use tracedecay_hooks::core_events::{HookAgent, HookRouteMetadata};
+    use tracedecay_mcp::hook_events::{HookEvent, HookEventKind};
 
     struct ResolvedRouteFixture {
         _isolation: TempDir,

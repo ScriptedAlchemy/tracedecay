@@ -3,8 +3,8 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_domain::canonical_text::sha256_hex;
 
-use crate::mcp::hook_events::HookEvent;
 use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
+use tracedecay_mcp::hook_events::HookEvent;
 
 pub(super) struct McpToolAnalyticsEvent<'a> {
     pub(super) project_root: &'a std::path::Path,
@@ -268,8 +268,8 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::mcp::hook_events::{HookAgent, HookEvent, HookEventKind};
     use tracedecay_hooks::core_events::HookRouteMetadata;
+    use tracedecay_mcp::hook_events::{HookAgent, HookEvent, HookEventKind};
 
     use super::{
         FAILURE_REASON_MAX_CHARS, McpToolAnalyticsEvent, bounded_failure_reason,
