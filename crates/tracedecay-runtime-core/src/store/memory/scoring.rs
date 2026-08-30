@@ -17,6 +17,17 @@ const HOLOGRAPHIC_SCORE_WEIGHT: f64 = 0.30;
 const RETRIEVAL_REINFORCEMENT_WEIGHT: f64 = 0.02;
 const RETRIEVAL_REINFORCEMENT_CAP: f64 = 0.50;
 
+/// Tokenize project-memory text for fact-search scoring and FTS queries.
+///
+/// Keeps path-like punctuation (`_`, `/`, `:`, `.`) so identifiers such as
+/// `crate::foo`, `src/lib.rs`, and `foo.bar` stay one token. Does not strip
+/// English stopwords: a query term like "the" or "and" must still match.
+/// Output is a sorted unique `Vec` so Jaccard can walk two-pointer without
+/// building sets.
+///
+/// Not the dashboard/write-time similarity tokenizer in
+/// `memory::similarity`: that one splits on `/` `:` `.`, keeps hyphens and
+/// apostrophes, and drops stopwords for near-duplicate classification.
 pub(super) fn project_memory_tokens(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
