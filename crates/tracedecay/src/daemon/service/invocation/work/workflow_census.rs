@@ -9,7 +9,7 @@ use super::RegisteredWorkRuntime;
 
 pub(super) fn persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,
-    workflow: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
+    workflow: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     projection: &tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
@@ -34,7 +34,7 @@ pub(super) fn persist_workflow_fan_out_census(
 
 fn try_persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,
-    workflow: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
+    workflow: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     projection: &tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
@@ -43,10 +43,10 @@ fn try_persist_workflow_fan_out_census(
     if projection.fan_out_plans().is_empty() {
         return Ok(());
     }
-    let work = registered
-        .database
-        .work_application_services()
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+        &registered.database,
+    )
+    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let snapshot = work
         .projections()
         .snapshot(
@@ -265,7 +265,7 @@ fn try_persist_workflow_fan_out_census(
 
 fn census_readiness(
     registered: &RegisteredWorkRuntime,
-    work: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
+    work: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     projection: &tracedecay_domain::WorkflowRunProjection,
     attempts: &[tracedecay_domain::WorkAttemptV1],
@@ -568,9 +568,9 @@ fn read_pending_census_observations(
     Vec<tracedecay_application::WorkflowFanOutCensusObservationV1>,
     tracedecay_application::WorkflowFanOutCensusError,
 > {
-    let workflow = database
-        .workflow_application_services()
-        .map_err(|_| tracedecay_application::WorkflowFanOutCensusError::Unavailable)?;
+    let workflow =
+        tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(database)
+            .map_err(|_| tracedecay_application::WorkflowFanOutCensusError::Unavailable)?;
     tracedecay_application::WorkflowFanOutCensusStoragePort::pending_census_observations(
         workflow.effects(),
         32,
@@ -616,9 +616,9 @@ fn mark_durable_census_observations(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     observations: &[tracedecay_application::WorkflowFanOutCensusObservationV1],
 ) -> Result<(), tracedecay_application::WorkflowFanOutCensusError> {
-    let workflow = database
-        .workflow_application_services()
-        .map_err(|_| tracedecay_application::WorkflowFanOutCensusError::Unavailable)?;
+    let workflow =
+        tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(database)
+            .map_err(|_| tracedecay_application::WorkflowFanOutCensusError::Unavailable)?;
     for observation in observations {
         tracedecay_application::WorkflowFanOutCensusStoragePort::mark_census_observability_durable(
             workflow.effects(),

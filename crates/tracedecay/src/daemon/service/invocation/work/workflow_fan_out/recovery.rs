@@ -47,10 +47,10 @@ fn reconcile_active_workflow_fan_out_page(
     Option<tracedecay_application::WorkflowActiveRunRecoveryCursorV1>,
     DaemonInvocationProblem,
 > {
-    let services = registered
-        .database
-        .workflow_application_services()
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let services = tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
+        &registered.database,
+    )
+    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let registered_authority = tracedecay_domain::WorkAuthority::new(
         registered.grant.scope.project_id.clone(),
         registered.grant.scope.repository_id.clone(),
@@ -124,7 +124,7 @@ fn reconcile_active_workflow_fan_out_page(
 
 fn resume_work_attempts_for_workflow_recovery(
     registered: &RegisteredWorkRuntime,
-    workflows: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
+    workflows: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     attempt_processes: &Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
     project_root: &Path,
@@ -132,17 +132,17 @@ fn resume_work_attempts_for_workflow_recovery(
         Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
     >,
 ) -> Result<(), DaemonInvocationProblem> {
-    let work = registered
-        .database
-        .work_application_services()
-        .map_err(|error| {
-            tracing::error!(
-                ?error,
-                stage = "work_application_services",
-                "workflow fan-out startup recovery authority failed"
-            );
-            DaemonInvocationProblem::Unavailable
-        })?;
+    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+        &registered.database,
+    )
+    .map_err(|error| {
+        tracing::error!(
+            ?error,
+            stage = "work_application_services",
+            "workflow fan-out startup recovery authority failed"
+        );
+        DaemonInvocationProblem::Unavailable
+    })?;
     let recovery = work
         .attempts()
         .resume(
@@ -199,17 +199,17 @@ fn recover_workflow_fan_out_startup(
         Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
     >,
 ) -> Result<(), DaemonInvocationProblem> {
-    let workflows = registered
-        .database
-        .workflow_application_services()
-        .map_err(|error| {
-            tracing::error!(
-                ?error,
-                stage = "workflow_application_services",
-                "workflow fan-out startup recovery authority failed"
-            );
-            DaemonInvocationProblem::Unavailable
-        })?;
+    let workflows = tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
+        &registered.database,
+    )
+    .map_err(|error| {
+        tracing::error!(
+            ?error,
+            stage = "workflow_application_services",
+            "workflow fan-out startup recovery authority failed"
+        );
+        DaemonInvocationProblem::Unavailable
+    })?;
     let context = workflow_fan_out_recovery_context(registered).map_err(|error| {
         tracing::error!(
             ?error,

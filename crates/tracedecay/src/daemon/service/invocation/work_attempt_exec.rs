@@ -472,7 +472,9 @@ async fn run_attempt(
         );
         return;
     };
-    let services = match registered.database.work_application_services() {
+    let services = match tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+        &registered.database,
+    ) {
         Ok(services) => services,
         Err(error) => {
             tracing::warn!(
