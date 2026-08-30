@@ -126,9 +126,9 @@ pub fn is_qualified_name_token(value: &str) -> bool {
 pub fn is_path_shape(value: &str) -> bool {
     value.split('/').all(|segment| {
         !segment.is_empty()
-            && segment
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+            && segment.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+            })
     })
 }
 
@@ -187,9 +187,7 @@ pub fn is_configuration_key_token(value: &str) -> bool {
         && value.split('.').all(|segment| {
             !segment.is_empty()
                 && segment.chars().all(|character| {
-                    character.is_ascii_lowercase()
-                        || character.is_ascii_digit()
-                        || character == '_'
+                    character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
                 })
         })
 }
@@ -207,8 +205,7 @@ pub fn is_tool_name_token(value: &str) -> bool {
 /// query-side bare form (the exact projection strips the prefix from
 /// posting keys).
 pub fn is_commit_hash(value: &str) -> bool {
-    (7..=40).contains(&value.len())
-        && value.chars().all(|character| character.is_ascii_hexdigit())
+    (7..=40).contains(&value.len()) && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
 /// Extraction commit-identifier grammar: `commit:` plus a mintable hash.

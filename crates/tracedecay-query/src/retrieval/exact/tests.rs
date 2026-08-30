@@ -241,12 +241,16 @@ fn central_authority_classification_matches_extraction_grammar() {
     // uppercase posting form.
     assert_eq!(field_for("e0308"), Some(ExactFieldV1::DiagnosticCode));
     assert_eq!(
-        literal_for("e0308").expect("diagnostic literal").canonical_bytes,
+        literal_for("e0308")
+            .expect("diagnostic literal")
+            .canonical_bytes,
         b"E0308"
     );
     assert_eq!(field_for("err_x"), Some(ExactFieldV1::DiagnosticCode));
     assert_eq!(
-        literal_for("err_x").expect("runtime code literal").canonical_bytes,
+        literal_for("err_x")
+            .expect("runtime code literal")
+            .canonical_bytes,
         b"ERR_X"
     );
     // Deliberate divergences stay explicit: extensionless logical paths and

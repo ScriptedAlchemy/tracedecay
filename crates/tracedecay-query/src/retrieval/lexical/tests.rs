@@ -78,7 +78,9 @@ fn query_tokenization_matches_index_tokenization_for_separator_terms() {
     expected_whole.sort();
     expected_whole.dedup();
     assert_eq!(parts.whole_terms, expected_whole);
-    for term in ["foo-bar", "a::b", "p/q.rs", "--flag", "E0308", "TS1234", "ERR_X"] {
+    for term in [
+        "foo-bar", "a::b", "p/q.rs", "--flag", "E0308", "TS1234", "ERR_X",
+    ] {
         assert!(
             parts.whole_terms.contains(&term.to_owned()),
             "{term} must stay one whole query term"
