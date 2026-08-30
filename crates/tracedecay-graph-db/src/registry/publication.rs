@@ -75,7 +75,7 @@ pub struct ProvenGraphPublicationV1 {
 pub enum GraphPublicationPreparationV1 {
     /// The publication was already durably linearized (an idempotent replay
     /// or a historical head); the snapshot is ready and no CAS is pending.
-    Settled(VerifiedGraphCommit),
+    Settled(Box<VerifiedGraphCommit>),
     /// The durable proof completed; the relational CAS and read-side install
     /// remain, through [`GraphDbRegistry::complete_verified_publication`].
     Proven(Box<ProvenGraphPublicationV1>),
@@ -695,7 +695,7 @@ impl GraphDbRegistry {
             publication_key,
             mode,
         )? {
-            GraphPublicationPreparationV1::Settled(commit) => Ok(commit),
+            GraphPublicationPreparationV1::Settled(commit) => Ok(*commit),
             GraphPublicationPreparationV1::Proven(proven) => {
                 self.complete_verified_publication_inner(operation, authority, context, *proven)
             }
@@ -835,7 +835,7 @@ impl GraphDbRegistry {
                         commit,
                         recovered_digest,
                     )
-                    .map(GraphPublicationPreparationV1::Settled);
+                    .map(|commit| GraphPublicationPreparationV1::Settled(Box::new(commit)));
                 }
                 let mut visiting = BTreeSet::new();
                 let dependencies = self.load_dependencies(
@@ -942,7 +942,7 @@ impl GraphDbRegistry {
                     historical_commit,
                     recovered_digest,
                 )
-                .map(GraphPublicationPreparationV1::Settled);
+                .map(|commit| GraphPublicationPreparationV1::Settled(Box::new(commit)));
             }
             return Err(GraphDbError::Conflict);
         }

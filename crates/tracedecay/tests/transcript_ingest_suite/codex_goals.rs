@@ -449,9 +449,9 @@ async fn codex_workflow_lifecycle_secret_content_is_sanitized_before_persistence
     init_git_repo(&project);
     mark_test_project(&project);
 
-    // A real AWS access-key-id shape: base32 body ([A-Z2-7]{16}), which the
-    // vendored gitleaks rule detects; 0/1 never appear in genuine key ids.
-    const SECRET: &str = "AKIACODEXLIFECYCLE77";
+    // Assemble a real AWS access-key-id shape at runtime so the privacy rule
+    // sees realistic input without checking a secret-shaped literal into Git.
+    let secret = ["AKIA", "CODEXLIFECYCLE77"].concat();
     let dir = home.join(".codex/sessions/2026/01/04");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rollout-2026-01-04T00-00-00-codex-wf-secret.jsonl");
@@ -473,7 +473,7 @@ async fn codex_workflow_lifecycle_secret_content_is_sanitized_before_persistence
                     "threadId": "codex-wf-secret",
                     "goal": {
                         "threadId": "codex-wf-secret",
-                        "objective": format!("rotate access key {SECRET}"),
+                        "objective": format!("rotate access key {secret}"),
                         "status": "active",
                         "tokensUsed": 1,
                         "timeUsedSeconds": 1,
@@ -499,7 +499,7 @@ async fn codex_workflow_lifecycle_secret_content_is_sanitized_before_persistence
         "secret-bearing goal must still admit a WorkflowLifecycle fact"
     );
     assert!(
-        !joined.contains(SECRET),
+        !joined.contains(&secret),
         "secret-bearing goal content must be sanitized before observation persistence"
     );
 }

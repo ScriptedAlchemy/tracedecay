@@ -1294,7 +1294,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 prepared.durable_stage_boundary,
             )?;
             let proven = match preparation {
-                GraphPublicationPreparationV1::Settled(commit) => return Ok(commit),
+                GraphPublicationPreparationV1::Settled(commit) => return Ok(*commit),
                 GraphPublicationPreparationV1::Proven(proven) => proven,
             };
             let completion = publish_registration();

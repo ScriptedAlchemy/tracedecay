@@ -433,38 +433,40 @@ fn compose_graph_authority(
         generation.clone(),
         seed.nodes
             .iter()
-            .map(|node| LineageSymbolRecordV1 {
-                occurrence: SymbolOccurrenceId::new(node.id.clone())
-                    .unwrap_or_else(|error| panic!("fixture symbol occurrence: {error}")),
-                identity: SymbolIdentityDigest::new(fixture_digest(
-                    "dashboard-symbol-identity",
-                    &node.id,
-                ))
-                .unwrap_or_else(|error| panic!("fixture symbol identity: {error}")),
-                qualified_name: node.qualified_name.clone(),
-                simple_name: node.name.clone(),
-                kind: node.kind.as_str().to_owned(),
-                visibility: node.visibility.as_str().to_owned(),
-                branches: node.branches,
-                loops: node.loops,
-                max_nesting: node.max_nesting,
-                line_span: node
-                    .end_line
-                    .saturating_sub(node.start_line)
-                    .saturating_add(1),
-                start_line: node.start_line,
-                signature: node.signature.clone(),
-                skip_test_coverage: false,
-                file_identity: FileIdentityDigest::new(fixture_digest(
-                    "dashboard-file-identity",
-                    &node.file_path,
-                ))
-                .unwrap_or_else(|error| panic!("fixture file identity: {error}")),
-                content_digest: ContentDigest::new(fixture_digest(
-                    "dashboard-symbol-content",
-                    &node.id,
-                ))
-                .unwrap_or_else(|error| panic!("fixture symbol digest: {error}")),
+            .map(|node| {
+                Arc::new(LineageSymbolRecordV1 {
+                    occurrence: SymbolOccurrenceId::new(node.id.clone())
+                        .unwrap_or_else(|error| panic!("fixture symbol occurrence: {error}")),
+                    identity: SymbolIdentityDigest::new(fixture_digest(
+                        "dashboard-symbol-identity",
+                        &node.id,
+                    ))
+                    .unwrap_or_else(|error| panic!("fixture symbol identity: {error}")),
+                    qualified_name: node.qualified_name.clone(),
+                    simple_name: node.name.clone(),
+                    kind: node.kind.as_str().to_owned(),
+                    visibility: node.visibility.as_str().to_owned(),
+                    branches: node.branches,
+                    loops: node.loops,
+                    max_nesting: node.max_nesting,
+                    line_span: node
+                        .end_line
+                        .saturating_sub(node.start_line)
+                        .saturating_add(1),
+                    start_line: node.start_line,
+                    signature: node.signature.clone(),
+                    skip_test_coverage: false,
+                    file_identity: FileIdentityDigest::new(fixture_digest(
+                        "dashboard-file-identity",
+                        &node.file_path,
+                    ))
+                    .unwrap_or_else(|error| panic!("fixture file identity: {error}")),
+                    content_digest: ContentDigest::new(fixture_digest(
+                        "dashboard-symbol-content",
+                        &node.id,
+                    ))
+                    .unwrap_or_else(|error| panic!("fixture symbol digest: {error}")),
+                })
             })
             .collect(),
     )
@@ -479,7 +481,7 @@ fn compose_graph_authority(
             let file = file_occurrences
                 .get(&node.file_path)
                 .unwrap_or_else(|| panic!("fixture node file is registered: {}", node.file_path));
-            CodeSearchChunkV1 {
+            Arc::new(CodeSearchChunkV1 {
                 id: CodeSearchChunkId::new(format!("chunk:dashboard:{}", node.id))
                     .unwrap_or_else(|error| panic!("fixture chunk identity: {error}")),
                 anchor: CodeSearchChunkAnchorV1 {
@@ -513,7 +515,7 @@ fn compose_graph_authority(
                 subtokens: Vec::new(),
                 sanitized_text: BoundedSanitizedText::new("fixture")
                     .unwrap_or_else(|error| panic!("fixture sanitized text: {error}")),
-            }
+            })
         })
         .collect();
     let edges: Vec<_> = seed
