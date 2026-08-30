@@ -1706,6 +1706,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tracedecay_application::context_scout::ContextScoutEvidenceEnvelopeV1;
 
     use tracedecay_application::context_scout::ContextScoutEvidenceEnvelopeV1;
 
