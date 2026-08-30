@@ -6277,6 +6277,7 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "hotpath",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

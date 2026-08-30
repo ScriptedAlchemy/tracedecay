@@ -90,7 +90,8 @@ pub use contract::{
     parse_daemon_invocation_delivery_ack_request, parse_daemon_invocation_request,
 };
 pub use handshake::{
-    DaemonHandshake, MovedStoreAdoption, client_version_skew, version_skew_action,
+    DAEMON_HANDSHAKE_REFUSAL_PROTOCOL, DaemonHandshake, DaemonHandshakeRefusal,
+    DaemonHandshakeRefusalReason, MovedStoreAdoption, client_version_skew, version_skew_action,
 };
 pub use lsp_wire::{
     ConnectionLocalRequestSequence, FramePoll, FrameSend, LspFrame, LspSessionAccess,
