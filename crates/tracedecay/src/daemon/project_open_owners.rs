@@ -1926,8 +1926,12 @@ impl tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeResolverV1
         &self,
         project_root: &Path,
         project_id: &ProjectId,
-    ) -> Option<ResolvedScope> {
-        resolved_scope_for_project(project_root, project_id).ok()
+    ) -> std::result::Result<
+        ResolvedScope,
+        tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeUnavailableV1,
+    > {
+        resolved_scope_for_project(project_root, project_id)
+            .map_err(|_| tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeUnavailableV1)
     }
 }
 

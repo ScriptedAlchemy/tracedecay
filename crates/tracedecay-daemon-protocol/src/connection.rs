@@ -11,6 +11,7 @@ use tokio::time::{Instant, timeout};
 
 use crate::handshake::DaemonHandshake;
 use crate::transport::{BrokerStream, DaemonAuthPreface, DaemonEndpoint};
+use crate::wire::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -189,8 +190,6 @@ pub async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    use tracedecay_sessions::admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
-
     let read = read_bounded_mcp_line(reader);
     tokio::pin!(read);
     loop {
@@ -202,7 +201,7 @@ where
                         Err(TraceDecayError::Config {
                             message: format!(
                                 "daemon {request_label} response exceeded wire message bound ({})",
-                                tracedecay_sessions::admission::WIRE_RECORD_TOO_LARGE
+                                WIRE_RECORD_TOO_LARGE
                             ),
                         })
                     }

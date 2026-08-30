@@ -4,7 +4,10 @@
 use serde_json::json;
 
 use tracedecay_daemon_protocol::DaemonClientIdentity;
-use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, tool_error_response,
+    tool_result_has_semantic_error,
+};
 use tracedecay_runtime_core::errors::Result;
 
 use super::*;
@@ -355,7 +358,7 @@ async fn projectless_hook_runtime_response(
     ))
     .await
     {
-        Ok(result) if crate::mcp::server::tool_result_has_semantic_error(&result) => {
+        Ok(result) if tool_result_has_semantic_error(&result) => {
             JsonRpcResponse::success(id, result.value)
         }
         Ok(result) => match boxed_projectless_phase(
@@ -376,9 +379,7 @@ async fn projectless_hook_runtime_response(
                 refresh_wake.wake();
                 JsonRpcResponse::success(id, result.value)
             }
-            Err(error) => {
-                crate::mcp::server::tool_error_response(id, "tracedecay_hook_runtime", &error)
-            }
+            Err(error) => tool_error_response(id, "tracedecay_hook_runtime", &error),
         },
         Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
@@ -458,7 +459,7 @@ async fn projectless_profile_retained_response(
         match boxed_projectless_phase(store_administration.registered_runtime_registry()).await {
             Ok(registry) => registry,
             Err(error) => {
-                return crate::mcp::server::tool_error_response(id, tool_name, &error);
+                return tool_error_response(id, tool_name, &error);
             }
         };
     let result = boxed_projectless_phase(crate::mcp::tools::execute_profile_retained_mcp_tool(
@@ -476,7 +477,7 @@ async fn projectless_profile_retained_response(
     .await;
     match result {
         Ok(result) => JsonRpcResponse::success(id, result.value),
-        Err(error) => crate::mcp::server::tool_error_response(id, tool_name, &error),
+        Err(error) => tool_error_response(id, tool_name, &error),
     }
 }
 

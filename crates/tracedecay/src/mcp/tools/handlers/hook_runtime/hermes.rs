@@ -322,7 +322,7 @@ pub(super) async fn hermes_receipt(
         ));
     }
     let payload = tracedecay_mcp::hook_events::encode_durable_hook_event_plan(&plan)
-        .map_err(|error| config_error(format!("invalid Hermes receipt host event plan: {error:?}")))?;
+        .map_err(|_| config_error("invalid Hermes receipt host event plan"))?;
     let admitted = broker
         .admit(&hook_event.admission_source(), &payload)
         .await

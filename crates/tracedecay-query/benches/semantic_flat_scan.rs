@@ -335,10 +335,7 @@ fn semantic_flat_scan(criterion: &mut Criterion) {
         );
 
         group.bench_with_input(
-            BenchmarkId::new(
-                format!("cosine_{dimension}d_top_{RESULT_LIMIT}"),
-                ROW_COUNT,
-            ),
+            BenchmarkId::new(format!("cosine_{dimension}d_top_{RESULT_LIMIT}"), ROW_COUNT),
             &ROW_COUNT,
             |bencher, _| {
                 bencher.iter(|| {

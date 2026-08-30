@@ -653,14 +653,6 @@ fn cursor_after_file_edit_rel_paths_from_parsed(
     rels
 }
 
-/// Coalesces back-to-back `afterShellExecution` syncs against the last marker.
-pub fn cursor_should_run_sync(now_secs: i64, last_secs: Option<i64>, debounce_secs: i64) -> bool {
-    match last_secs {
-        Some(last) => now_secs - last >= debounce_secs,
-        None => true,
-    }
-}
-
 /// Exposes a known project root as `TRACEDECAY_PROJECT_ROOT` so later session
 /// hooks can reuse it.
 pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context: &str) -> String {

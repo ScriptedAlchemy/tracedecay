@@ -106,9 +106,8 @@ use tracedecay_usecases::advisory::proximity_runtime::{
 #[cfg(feature = "test-transport")]
 use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
 
-#[path = "advisory_runtime_acceptance/code_graph.rs"]
 mod code_graph;
-mod common;
+use crate::common;
 
 use code_graph::hermetic_advisory_code_graph;
 // Only the `test-transport` CI-localization tests build a hermetic CI graph.
@@ -289,7 +288,7 @@ fn github_source_access_uses_owner_bound_ureq_dtos() {
 #[tokio::test]
 async fn authentic_github_and_ci_responses_use_production_decoders() {
     let pull_request = captured_response(include_str!(
-        "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
+        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
     ));
     let request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::RestGetPullRequest,
@@ -332,7 +331,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
         ..request.clone()
     };
     let review = captured_response(include_str!(
-        "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review.json"
+        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review.json"
     ));
     assert!(
         decoder
@@ -361,7 +360,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     )
     .unwrap();
     let thread = captured_response(include_str!(
-        "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
+        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
     ));
     let thread_request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
@@ -402,16 +401,16 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 
     let ci = GitHubCiOfficialResponseDecoderV1::decode(
         include_str!(
-            "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_run.json"
+            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_run.json"
         ),
         include_str!(
-            "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_job.json"
+            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_job.json"
         ),
         include_str!(
-            "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_run.json"
+            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_run.json"
         ),
         include_str!(
-            "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_annotations.json"
+            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_annotations.json"
         ),
     )
     .expect("authentic CI responses decode");
@@ -422,7 +421,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 #[tokio::test]
 async fn corrupt_provider_identity_fails_production_decoder() {
     let mut pull_request = captured_response(include_str!(
-        "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
+        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
     ));
     pull_request["id"] = json!(0);
     let request = GitHubReviewReadRequestV1 {
@@ -617,7 +616,7 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
         pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
     };
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_comment.json"
+        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_comment.json"
     ))
     .unwrap();
     let body = fixture.pointer("/response/body").unwrap().as_str().unwrap();
@@ -960,7 +959,7 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     )
     .unwrap();
     let mut event: Value = serde_json::from_str(include_str!(
-        "../../../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
     ))
     .unwrap();
     event["conversation_id"] = json!("conversation-advisory-proximity");
@@ -1035,13 +1034,13 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     let codex_sessions = environment.home().join(".codex/sessions");
     std::fs::create_dir_all(&codex_sessions).unwrap();
     let mut codex_meta: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
+        "../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
     ))
     .unwrap();
     codex_meta["payload"]["id"] = json!("session-advisory-proximity");
     codex_meta["payload"]["cwd"] = json!(project.clone());
     let codex_message: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
+        "../../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
     ))
     .unwrap();
     std::fs::write(
@@ -1051,7 +1050,7 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     .unwrap();
 
     let mut stop: Value = serde_json::from_str(include_str!(
-        "../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
     ))
     .unwrap();
     stop["session_id"] = json!("session-advisory-proximity");
@@ -1683,7 +1682,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     // ---- Pillar 3: an existing GitHub review finding, through the production
     // decoder, sanitizer, and canonical anchor authority ----
     let mut thread = captured_response(include_str!(
-        "../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
+        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
     ));
     let pull_request = thread
         .pointer_mut("/data/repository/pullRequest")

@@ -708,4 +708,3 @@ impl FeedbackObservationEnvelopeV1 {
         }
     }
 }
-

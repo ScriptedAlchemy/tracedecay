@@ -2,7 +2,7 @@ use std::path::Path;
 
 use tracedecay_agent_hosts::hooks::{
     HookWorkspaceStatus, build_codex_session_context_for_workspace, codex_apply_patch_rel_paths,
-    cursor_session_start_json, cursor_should_run_sync, native_capture_material,
+    cursor_session_start_json, native_capture_material,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{HookHostV1, NativeHookCaptureSourceV1, NativeHookDecodeError};
@@ -32,11 +32,7 @@ fn codex_apply_patch_paths_stay_inside_the_project() {
 }
 
 #[test]
-fn cursor_session_behavior_preserves_debounce_and_workspace_identity() {
-    assert!(cursor_should_run_sync(120, None, 30));
-    assert!(!cursor_should_run_sync(120, Some(100), 30));
-    assert!(cursor_should_run_sync(130, Some(100), 30));
-
+fn cursor_session_behavior_preserves_workspace_identity() {
     let response = cursor_session_start_json(Some(Path::new("/workspace/project")), "ready");
     let response: serde_json::Value = serde_json::from_str(&response).expect("valid hook response");
     assert_eq!(response["additional_context"], "ready");

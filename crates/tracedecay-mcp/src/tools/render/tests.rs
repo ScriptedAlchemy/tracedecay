@@ -1,10 +1,10 @@
 use super::*;
-use tracedecay_daemon_protocol::RequestedOutputFormat;
 use crate::response_handles::{
     ResponseHandleLookup, lock_response_handle_store, retrieve_response_handle,
 };
 use serde_json::json;
 use std::ffi::OsString;
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Restores one environment variable on drop. Callers must already hold

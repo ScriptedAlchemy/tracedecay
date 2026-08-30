@@ -1,9 +1,9 @@
+#[cfg(test)]
+use tracedecay_application::context_scout::ContextScoutEvidenceSourceKindV1;
 use tracedecay_application::context_scout::{
     ContextScoutEvidenceAvailabilityV1, ContextScoutEvidenceEnvelopeV1,
     ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
 };
-#[cfg(test)]
-use tracedecay_application::context_scout::ContextScoutEvidenceSourceKindV1;
 use tracedecay_application::{
     AuthorityReceipt, CoverageCompleteness, OmissionReason, ResolvedScope,
     RetrieverContributionState,

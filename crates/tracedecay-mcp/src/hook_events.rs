@@ -229,12 +229,18 @@ pub enum DurableHookEventDecodeError {
     UnsupportedVersion,
 }
 
-/// The runtime plan carried a field that violates the durable envelope's
-/// bounds (over-long, empty-required, control bytes) and cannot be persisted.
+/// The runtime plan violated durable-envelope bounds (oversized or
+/// control-character identifiers) and cannot be persisted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DurableHookEventEncodeError {
-    UnencodablePlan,
+pub struct DurableHookEventEncodeError;
+
+impl std::fmt::Display for DurableHookEventEncodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("hook event plan exceeds durable envelope bounds")
+    }
 }
+
+impl std::error::Error for DurableHookEventEncodeError {}
 
 fn durable_bound_optional_str(value: Option<&str>, max_bytes: usize) -> Result<Option<String>, ()> {
     match value {
@@ -480,13 +486,12 @@ fn runtime_plan_from_durable(
 pub fn encode_durable_hook_event_plan(
     plan: &HookEventPlan,
 ) -> Result<Vec<u8>, DurableHookEventEncodeError> {
-    let plan = durable_plan_from_runtime(plan)
-        .map_err(|()| DurableHookEventEncodeError::UnencodablePlan)?;
+    let plan = durable_plan_from_runtime(plan).map_err(|()| DurableHookEventEncodeError)?;
     serde_json::to_vec(&DurableHookEventEnvelope {
         version: DURABLE_HOOK_EVENT_ENVELOPE_VERSION,
         plan,
     })
-    .map_err(|_| DurableHookEventEncodeError::UnencodablePlan)
+    .map_err(|_| DurableHookEventEncodeError)
 }
 
 pub fn decode_durable_hook_event_plan(
@@ -957,6 +962,26 @@ mod tests {
         );
         assert_eq!(branch, expected_branch);
         assert_eq!(agent, HookAgent::Codex);
+    }
+
+    #[test]
+    fn should_run_sync_respects_debounce_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing.marker");
+        assert!(super::should_run_sync(&missing, 1_000, 3));
+        assert!(super::should_run_sync(&missing, 120, 30));
+
+        let marker = dir.path().join("sync.marker");
+        super::write_sync_marker(&marker, 996);
+        assert!(super::should_run_sync(&marker, 1_000, 3));
+        super::write_sync_marker(&marker, 998);
+        assert!(!super::should_run_sync(&marker, 1_000, 3));
+        super::write_sync_marker(&marker, 1_000);
+        assert!(!super::should_run_sync(&marker, 1_000, 3));
+
+        super::write_sync_marker(&marker, 100);
+        assert!(!super::should_run_sync(&marker, 120, 30));
+        assert!(super::should_run_sync(&marker, 130, 30));
     }
 
     #[test]

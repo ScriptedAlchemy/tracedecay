@@ -5,7 +5,7 @@
 //! the path stops executing; source text and catalog declarations are not
 //! accepted as reachability evidence.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::process::{Output, Stdio};

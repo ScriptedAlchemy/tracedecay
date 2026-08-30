@@ -119,7 +119,7 @@ pub fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: b
 fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
     injected_resident_memory_refusals()
         .lock()
-        .expect("injected resident-memory refusal gate must not be poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains(worktree_id.as_str())
 }
 
@@ -128,7 +128,7 @@ fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
 fn take_injected_activation_failure(worktree_id: &WorktreeId) -> bool {
     let mut injected = injected_activation_failures()
         .lock()
-        .expect("injected activation failure gate must not be poisoned");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match injected.get_mut(worktree_id.as_str()) {
         Some(remaining) if *remaining > 0 => {
             *remaining = remaining.saturating_sub(1);
@@ -145,7 +145,7 @@ fn take_injected_activation_gate(
 ) -> Option<Arc<InjectedActivationGateStateV1>> {
     injected_activation_gates()
         .lock()
-        .expect("injected activation gate map must not be poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(worktree_id.as_str())
 }
 
@@ -353,13 +353,72 @@ impl GraphCancellation for SchedulerGraphCancellation {
 }
 
 struct PendingInteractiveCatalogWarmV1 {
+    retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,
+    generation_id: tracedecay_domain::CodeGenerationId,
     store: Arc<CodeGraphProjectionStore>,
+    request_cancelled: Arc<AtomicBool>,
     cancellation: Arc<dyn GraphCancellation>,
 }
 
 impl PendingInteractiveCatalogWarmV1 {
     #[hotpath::measure(label = "code_graph.catalog.background_warm")]
     fn run(self) -> Result<(), CodeGraphProjectionError> {
+        let catalog_loaded = match self
+            .retained
+            .load_sealed_read_bundle_catalog(&self.request_cancelled)
+        {
+            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Loaded {
+                artifact,
+                bytes,
+            }) => match self
+                .store
+                .install_interactive_catalog_artifact(&bytes, Arc::clone(&self.cancellation))
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        generation = %self.generation_id,
+                        bytes = artifact.bytes,
+                        "code graph interactive catalog loaded from sealed read bundle"
+                    );
+                    true
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        generation = %self.generation_id,
+                        "sealed read bundle catalog failed to install; re-deriving the catalog from the projection"
+                    );
+                    false
+                }
+            },
+            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Absent { reason }) => {
+                tracing::info!(
+                    generation = %self.generation_id,
+                    reason = %reason,
+                    "no sealed read bundle catalog; re-deriving the catalog from the projection"
+                );
+                false
+            }
+            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Stale { detail }) => {
+                tracing::warn!(
+                    generation = %self.generation_id,
+                    detail = %detail,
+                    "sealed read bundle catalog is stale; re-deriving the catalog from the projection"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    generation = %self.generation_id,
+                    "sealed read bundle load failed; re-deriving the catalog from the projection"
+                );
+                false
+            }
+        };
+        if catalog_loaded {
+            return Ok(());
+        }
         self.store
             .warm_interactive_catalog_with_cancellation(self.cancellation)
     }
@@ -388,67 +447,10 @@ impl LatestCompleteCodeIndexV1 {
         )?);
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
-        // A bundled generation loads its interactive catalog from the sealed
-        // read bundle and never runs the projection warm scan. Absent and
-        // stale bundles are typed states: the fallback to the background
-        // re-derivation is explicit and logged, so generations sealed before
-        // bundles existed keep serving exactly as before.
-        let catalog_loaded = match retained.load_sealed_read_bundle_catalog(&cancellation) {
-            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Loaded {
-                artifact,
-                bytes,
-            }) => match store
-                .install_interactive_catalog_artifact(&bytes, Arc::clone(&graph_cancellation))
-            {
-                Ok(()) => {
-                    tracing::info!(
-                        generation = %generation_id,
-                        bytes = artifact.bytes,
-                        "code graph interactive catalog loaded from sealed read bundle"
-                    );
-                    true
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        generation = %generation_id,
-                        "sealed read bundle catalog failed to install; re-deriving the catalog from the projection"
-                    );
-                    false
-                }
-            },
-            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Absent { reason }) => {
-                tracing::info!(
-                    generation = %generation_id,
-                    reason = %reason,
-                    "no sealed read bundle catalog; re-deriving the catalog from the projection"
-                );
-                false
-            }
-            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Stale { detail }) => {
-                tracing::warn!(
-                    generation = %generation_id,
-                    detail = %detail,
-                    "sealed read bundle catalog is stale; re-deriving the catalog from the projection"
-                );
-                false
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    generation = %generation_id,
-                    "sealed read bundle load failed; re-deriving the catalog from the projection"
-                );
-                false
-            }
-        };
-        if !catalog_loaded {
-            // Install occurrence-seeded graph serving before the derived
-            // catalog scan. Marking first prevents a request from racing the
-            // background worker and performing the whole scan on its own
-            // thread.
-            store.mark_interactive_catalog_warming()?;
-        }
+        // Bundle IO and catalog materialization are optional accelerators. The
+        // immutable occurrence graph is already verified, so publish it first
+        // and keep only catalog-dependent lookups in the typed warming state.
+        store.mark_interactive_catalog_warming()?;
         let reader = hotpath::measure_block!("code_graph.activation.evidence_reader", {
             store.evidence_reader_with_cancellation(
                 &generation_id,
@@ -467,13 +469,11 @@ impl LatestCompleteCodeIndexV1 {
         .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         let _ = self.generation.test_attribution_authority();
         let _ = self.record_index();
-        if catalog_loaded {
-            // A bundled generation skips the warm entirely: the catalog is
-            // already ready, so there is no background scan to run.
-            return Ok(None);
-        }
         Ok(Some(PendingInteractiveCatalogWarmV1 {
+            retained,
+            generation_id,
             store,
+            request_cancelled: cancellation,
             cancellation: graph_cancellation,
         }))
     }
