@@ -232,7 +232,11 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
     // Empty discovery means PR 5 closed, but no scheduler retirement authority
     // is injected into this state-only fixture. Reconciliation must fail closed
     // without deleting its durable state or Git-adjacent artifacts.
-    let identity = crate::daemon::profile_identity::load_or_create(data_root.path()).unwrap();
+    // The profile identity root must be a directory `load_or_create` creates
+    // (and restricts to 0700) itself; a umask-default tempdir trips the
+    // fail-closed private-root validation.
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&data_root.path().join("profile")).unwrap();
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,
