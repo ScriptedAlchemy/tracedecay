@@ -5,7 +5,7 @@ use serde_json::Value as JsonValue;
 
 use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_runtime_core::errors::TraceDecayError;
-use tracedecay_store::{SessionMessageRecord, SessionRecord};
+use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
@@ -609,7 +609,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                            ORDER BY w.observation_sequence DESC, w.fact_ordinal DESC
                        ) AS goal_rank
                 FROM observation_workflow_facts w
-                WHERE w.projector_version = 'claude-session-message-v4'
+                WHERE w.projector_version = ?1
                   AND w.semantic_kind = 'goal'
             )
              SELECT
@@ -625,7 +625,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
              JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
              WHERE w.goal_rank = 1"
             .to_owned();
-        let mut query_params = Vec::new();
+        let mut query_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
             query_params.push(Value::Text(project_key.to_owned()));
             let _ = write!(
@@ -681,13 +681,13 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                )
                AND NOT EXISTS (
                    SELECT 1 FROM observation_workflow_facts w
-                   WHERE w.projector_version = 'claude-session-message-v4'
+                   WHERE w.projector_version = ?1
                      AND w.provider = m.provider
                      AND w.session_id = m.session_id
                      AND w.semantic_kind = 'goal'
                )"
         .to_owned();
-        let mut legacy_params = Vec::new();
+        let mut legacy_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
             legacy_params.push(Value::Text(project_key.to_owned()));
             let _ = write!(
@@ -822,9 +822,12 @@ async fn search_workflow_facts(
             w.ordering_domain, w.content_json, w.content_text
          FROM observation_workflow_facts w
          JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
-         WHERE w.projector_version = 'claude-session-message-v4'"
+         WHERE w.projector_version = ?1"
         .to_owned();
-    let mut query_params = vec![Value::Text(provider.to_owned())];
+    let mut query_params = vec![
+        Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
+        Value::Text(provider.to_owned()),
+    ];
     let _ = write!(sql, " AND w.provider = ?{}", query_params.len());
     if let Some(project_key) = project_key {
         query_params.push(Value::Text(project_key.to_owned()));
