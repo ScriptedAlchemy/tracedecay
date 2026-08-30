@@ -424,8 +424,8 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                 Err(error)
                     if tracedecay_sessions::admission::is_wire_oversized_io_error(&error) =>
                 {
-                    let _ =
-                        crate::mcp::transport::write_wire_oversized_rejection(self, &error).await;
+                    let _ = tracedecay_mcp::transport::write_wire_oversized_rejection(self, &error)
+                        .await;
                     return None;
                 }
                 Err(error) => {

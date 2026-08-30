@@ -6,7 +6,7 @@
 use std::fs;
 
 use serde_json::{Value, json};
-use tracedecay::mcp::ToolResult;
+use tracedecay_mcp::ToolResult;
 
 use super::support::{
     ProductionCompositionFixture, extract_json, extract_text, production_composition_fixture,

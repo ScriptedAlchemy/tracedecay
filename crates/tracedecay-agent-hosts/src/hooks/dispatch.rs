@@ -4,6 +4,11 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::ResolvedScope;
+use tracedecay_application::context_scout::{
+    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
+};
+#[cfg(test)]
+use tracedecay_application::context_scout::ContextScoutFeedbackV1;
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
 use tracedecay_hooks::{
     AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
@@ -18,7 +23,11 @@ use tracedecay_hooks::{
 #[cfg(test)]
 use tracedecay_hooks::{HookImmediateAdmissionStateV1, HookScopedFeedbackV1};
 
-use crate::agents::context_scout_v2::context_scout_delivery_receipt_id;
+use crate::agents::context_scout_v2::{
+    ContextScoutDeliveryReceiptHookV1, context_scout_delivery_receipt_id,
+};
+#[cfg(test)]
+use crate::agents::context_scout_v2::context_scout_delivery_receipt_matches_envelope;
 
 use super::analytics::{HookTimingSpan, elapsed_us};
 #[cfg(test)]
@@ -692,14 +701,16 @@ async fn dispatch_decoded(
             let deadline = HookSynchronousDeadlineV1::after_elapsed(elapsed_us(started));
             let scout_receipt = match (result.rendered_guidance.as_ref(), guidance_envelope_id) {
                 (Some(_), Some(envelope_id)) => Some(
-                    crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
-                        receipt_id: context_scout_delivery_receipt_id(
-                            envelope.event_id,
+                    ContextScoutDeliveryReceiptHookV1 {
+                        receipt: ContextScoutDeliveryReceiptV1 {
+                            receipt_id: context_scout_delivery_receipt_id(
+                                envelope.event_id,
+                                envelope_id,
+                            ),
                             envelope_id,
-                        ),
-                        envelope_id,
-                        delivered_at: now_utc(),
-                        outcome: crate::agents::context_scout_v2::ContextScoutOutcomeV1::Attempted,
+                            delivered_at: now_utc(),
+                            outcome: ContextScoutDeliveryOutcomeV1::Attempted,
+                        },
                     },
                 ),
                 _ => None,
@@ -747,14 +758,14 @@ async fn dispatch_decoded(
 impl HookScopedFeedbackV1 for ContextScoutFeedbackCommitV1 {
     fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
         self.feedback.receipt_id == self.receipt.receipt_id
-            && self.receipt.matches_envelope(envelope)
+            && context_scout_delivery_receipt_matches_envelope(&self.receipt, envelope)
     }
 }
 
 #[cfg(test)]
 pub(crate) async fn record_context_scout_delivery(
     project_root: &Path,
-    receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+    receipt: &ContextScoutDeliveryReceiptV1,
 ) -> bool {
     let Some(deadline) = HookSynchronousDeadlineV1::after_elapsed(0) else {
         return false;
@@ -769,8 +780,8 @@ pub(crate) async fn record_context_scout_delivery(
 #[cfg(test)]
 pub(crate) async fn commit_context_scout_feedback(
     project_root: &Path,
-    receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
-    feedback: crate::agents::context_scout_v2::ContextScoutFeedbackV1,
+    receipt: &ContextScoutDeliveryReceiptV1,
+    feedback: ContextScoutFeedbackV1,
 ) -> bool {
     let Some(deadline) = HookSynchronousDeadlineV1::after_elapsed(0) else {
         return false;

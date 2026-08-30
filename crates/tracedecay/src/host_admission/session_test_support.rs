@@ -205,10 +205,9 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> tracedecay_runtime_core::errors::Result<
         Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
     > {
-        Ok(self
-            .session_database_for_test(scope)?
+        self.session_database_for_test(scope)?
             .search_session_messages(provider, project_key, query, limit)
-            .await)
+            .await
     }
 
     #[doc(hidden)]
@@ -227,7 +226,7 @@ impl HostAdmissionTestRuntimeV1 {
         let mut results = self
             .session_database_for_test(scope)?
             .search_session_messages(provider, project_key, query, fetch_limit)
-            .await;
+            .await?;
         results.retain(|result| {
             let scope_matches = match filters.scope {
                 tracedecay_sessions::runtime::SessionSearchScope::All => true,
@@ -443,10 +442,9 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> tracedecay_runtime_core::errors::Result<
         Option<tracedecay_sessions::runtime::SessionMessageRecord>,
     > {
-        Ok(self
-            .project_database_for_test()?
+        self.project_database_for_test()?
             .get_session_message(provider, message_id)
-            .await)
+            .await
     }
 
     #[doc(hidden)]
@@ -459,10 +457,9 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> tracedecay_runtime_core::errors::Result<
         Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
     > {
-        Ok(self
-            .project_database_for_test()?
+        self.project_database_for_test()?
             .search_session_messages(provider, project_key, query, limit)
-            .await)
+            .await
     }
 
     #[doc(hidden)]
@@ -473,10 +470,9 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> tracedecay_runtime_core::errors::Result<
         Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
     > {
-        Ok(self
-            .project_database_for_test()?
+        self.project_database_for_test()?
             .recent_session_goals(Some(project_key), limit)
-            .await)
+            .await
     }
 
     #[doc(hidden)]

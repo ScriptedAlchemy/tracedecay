@@ -6,7 +6,8 @@ use tracedecay_application::retained_surfaces::{
     FactCategoryV1, FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1,
     FactContradictionV1, FactFeedbackActionV1, FactFeedbackDetailsAvailabilityV1,
     FactFeedbackRequestV1, FactFeedbackV1, FactIdentitySourceResultV1, FactPayloadAccessV1,
-    FactProjectionV1, FactReadOptionsV1, FactSearchCursorV1, FactSearchGraphCoverageV1,
+    FactProjectionV1, FactReadOptionsV1, FactRetrievalTelemetryDegradationV1,
+    FactRetrievalTelemetryV1, FactSearchCursorV1, FactSearchGraphCoverageV1,
     FactSearchGraphDegradationV1, FactSearchHitV1, FactSearchScoresV1, FactSourceLabelPatchV1,
     FactStatusV1, FactStoreAddCommitV1, FactStoreAddRequestV1, FactStoreAddResultV1,
     FactStoreContradictResultV1, FactStoreGetResultV1, FactStoreListResultV1,
@@ -417,7 +418,7 @@ fn unavailable_fact(
     })
 }
 
-pub(super) fn search_page(
+pub(crate) fn search_page(
     page: &ProjectMemoryFactSearchPageV1,
 ) -> Result<MappedSearchPageV1, RetainedSurfaceExecutionErrorV1> {
     Ok(MappedSearchPageV1 {
@@ -432,23 +433,11 @@ pub(super) fn search_page(
     })
 }
 
-pub(crate) fn public_search_page(
-    page: &ProjectMemoryFactSearchPageV1,
-) -> Result<FactStoreSearchResultV1, RetainedSurfaceExecutionErrorV1> {
-    let page = search_page(page)?;
-    Ok(FactStoreSearchResultV1 {
-        owner: page.owner,
-        hits: page.hits,
-        next_after: page.next_after,
-        graph_coverage: page.graph_coverage,
-    })
-}
-
-pub(super) struct MappedSearchPageV1 {
-    pub(super) owner: FactCommitOwnerV1,
-    pub(super) hits: Vec<FactSearchHitV1>,
-    pub(super) next_after: Option<FactSearchCursorV1>,
-    pub(super) graph_coverage: FactSearchGraphCoverageV1,
+pub(crate) struct MappedSearchPageV1 {
+    pub(crate) owner: FactCommitOwnerV1,
+    pub(crate) hits: Vec<FactSearchHitV1>,
+    pub(crate) next_after: Option<FactSearchCursorV1>,
+    pub(crate) graph_coverage: FactSearchGraphCoverageV1,
 }
 
 pub(super) fn probe_result(page: MappedSearchPageV1) -> FactStoreProbeResultV1 {
@@ -478,13 +467,35 @@ pub(super) fn reason_result(page: MappedSearchPageV1) -> FactStoreReasonResultV1
     }
 }
 
-pub(super) fn exact_search_result(page: MappedSearchPageV1) -> RetainedSurfaceResultV1 {
+pub(super) fn exact_search_result(
+    page: MappedSearchPageV1,
+    retrieval_telemetry: FactRetrievalTelemetryV1,
+) -> RetainedSurfaceResultV1 {
     RetainedSurfaceResultV1::FactStoreSearch(FactStoreSearchResultV1 {
         owner: page.owner,
         hits: page.hits,
         next_after: page.next_after,
         graph_coverage: page.graph_coverage,
+        retrieval_telemetry,
     })
+}
+
+/// Degradations of the retrieval-telemetry write lane that a served search
+/// result absorbs as a typed state instead of a refusal. Request-scoped
+/// terminals (cancellation, timeout, invalid request) and store-health
+/// signals (reset required) still fail the operation.
+pub(super) fn retrieval_telemetry_degradation(
+    error: &RetainedSurfaceExecutionErrorV1,
+) -> Option<FactRetrievalTelemetryDegradationV1> {
+    match error {
+        RetainedSurfaceExecutionErrorV1::Unavailable => {
+            Some(FactRetrievalTelemetryDegradationV1::Unavailable)
+        }
+        RetainedSurfaceExecutionErrorV1::Saturated => {
+            Some(FactRetrievalTelemetryDegradationV1::Saturated)
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn semantic_search_result(
@@ -895,7 +906,10 @@ mod tests {
     use tracedecay_domain::{FactOwnerV1, ProjectId};
     use tracedecay_store::FactStoreError;
 
-    use super::{MAX_RETAINED_FACT_LIMIT, fact_limit, map_store_error, search_logical_effect};
+    use super::{
+        FactRetrievalTelemetryDegradationV1, MAX_RETAINED_FACT_LIMIT, fact_limit, map_store_error,
+        retrieval_telemetry_degradation, search_logical_effect,
+    };
 
     #[test]
     fn retained_limits_reject_zero_and_oversized_pages() {
@@ -956,6 +970,40 @@ mod tests {
             }),
             RetainedSurfaceExecutionErrorV1::ProjectResetRequired
         );
+    }
+
+    /// A served search absorbs only unavailability-class telemetry failures;
+    /// request-scoped and store-health terminals still fail the operation.
+    #[test]
+    fn retrieval_telemetry_degrades_only_on_unavailability() {
+        assert_eq!(
+            retrieval_telemetry_degradation(&RetainedSurfaceExecutionErrorV1::Unavailable),
+            Some(FactRetrievalTelemetryDegradationV1::Unavailable)
+        );
+        assert_eq!(
+            retrieval_telemetry_degradation(&RetainedSurfaceExecutionErrorV1::Saturated),
+            Some(FactRetrievalTelemetryDegradationV1::Saturated)
+        );
+        for terminal in [
+            RetainedSurfaceExecutionErrorV1::InvalidRequest,
+            RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized,
+            RetainedSurfaceExecutionErrorV1::Conflict,
+            RetainedSurfaceExecutionErrorV1::Stale,
+            RetainedSurfaceExecutionErrorV1::ProfileResetRequired,
+            RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
+            RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_application::CancellationStage::DuringRead,
+            ),
+            RetainedSurfaceExecutionErrorV1::TimedOut(
+                tracedecay_application::CancellationStage::DuringRead,
+            ),
+        ] {
+            assert_eq!(
+                retrieval_telemetry_degradation(&terminal),
+                None,
+                "{terminal:?} must fail the search instead of degrading telemetry"
+            );
+        }
     }
 
     #[test]

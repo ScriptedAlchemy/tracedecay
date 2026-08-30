@@ -13,11 +13,7 @@ mod plugin_conformance_tests;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-// Phase 2 removes these composition-root re-exports once callers import mcp directly.
-pub use tracedecay_mcp::tools::{render, renderers};
-pub use tracedecay_mcp::{
-    RESERVED_FLAGS_FOOTER, ToolDefinition, ToolResult, render_tool_cli_help, short_tool_name,
-};
+use tracedecay_mcp::get_tool_definitions;
 
 pub(crate) use binding::{
     mcp_dispatch_contract, tool_dispatches_registered_project_reader,
@@ -27,8 +23,6 @@ pub use catalog_discovery::{
     default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
     get_catalog_filtered_tool_definitions_with_warming_budget,
 };
-// Phase 2 removes these composition-root re-exports once callers import mcp directly.
-pub(crate) use handlers::hook_runtime::structured_hook_error_data;
 pub(crate) use handlers::retained_catalog::{
     execute_profile_retained_mcp_tool, retained_mcp_operation,
 };
@@ -45,12 +39,6 @@ pub(crate) use handlers::{
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,
     handle_tool_call_with_registry_options,
-};
-pub use tracedecay_mcp::{
-    ToolRegistryMode, ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available,
-    context_description, explore_call_budget, format_capable_tool_names, get_tool_definitions,
-    get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
-    internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,
 };
 
 /// Explicit owner for advertised tools awaiting typed application contracts.

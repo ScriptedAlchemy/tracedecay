@@ -98,7 +98,6 @@ pub mod operation_stream;
 pub mod primitives;
 pub mod provider_pricing;
 pub mod provider_usage;
-pub mod request_identity;
 pub mod response_handles;
 pub mod runtime_telemetry;
 pub mod semantic_runtime;

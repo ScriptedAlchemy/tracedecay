@@ -19,7 +19,7 @@ use crate::application_surface::{
 use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_runtime_core::text::format_token_count;
-use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 // Consumed by the unix-only daemon git-watch maintenance path; on other
 // targets only the module's tests reference it.
@@ -740,7 +740,7 @@ fn check_user_config(
 #[hotpath::measure(label = "doctor.check.external_tools")]
 fn check_external_tools(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mExternal tools\x1b[0m");
-    let diagnostics = crate::mcp::tools::ast_grep_diagnostics_json();
+    let diagnostics = tracedecay_mcp::ast_grep_diagnostics_json();
     let installed = json_bool(&diagnostics, "installed");
     let rewrite_available = json_bool(&diagnostics, "rewrite_available");
     let outline_available = json_bool(&diagnostics, "outline_available");

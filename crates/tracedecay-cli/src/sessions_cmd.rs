@@ -1257,7 +1257,7 @@ mod tests {
         .await
         .unwrap();
         let payload = &transport.calls()[2].arguments;
-        let definition = tracedecay::mcp::tools::get_tool_definitions()
+        let definition = tracedecay_mcp::get_tool_definitions()
             .expect("tool definitions")
             .into_iter()
             .find(|definition| definition.name == "tracedecay_session_refresh")

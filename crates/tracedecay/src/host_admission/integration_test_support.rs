@@ -29,7 +29,7 @@ impl HostAdmissionTestRuntimeV1 {
         arguments: serde_json::Value,
         server_stats: Option<serde_json::Value>,
         scope_prefix: Option<&str>,
-    ) -> Result<crate::mcp::ToolResult> {
+    ) -> Result<tracedecay_mcp::ToolResult> {
         let project_registry_reads = crate::mcp::server::DaemonProjectRegistryReadService::new(
             self.profile_database.clone(),
         );
@@ -324,8 +324,8 @@ impl HostAdmissionTestRuntimeV1 {
         let binding_identity = binding
             .immutable_identity()
             .map_err(external_source_read_failed)?;
-        let idempotency_key = tracedecay_usecases::request_identity::derive_logical_effect_idempotency(
-            tracedecay_usecases::request_identity::LogicalEffectIdempotencyDomain::HostObservation,
+        let idempotency_key = tracedecay_application::request_identity::derive_logical_effect_idempotency(
+            tracedecay_application::request_identity::LogicalEffectIdempotencyDomain::HostObservation,
             observation.observation().observation_id(),
         )
         .map_err(external_source_read_failed)?;

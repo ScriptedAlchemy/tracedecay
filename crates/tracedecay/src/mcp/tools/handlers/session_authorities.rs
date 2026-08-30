@@ -4,6 +4,11 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 /// Database authorities retained by the owning MCP server for its lifetime.
 /// Hook and LCM handlers borrow these capabilities; they never rediscover or
 /// reopen a session database while dispatching an action.
+///
+/// `profile_retained_authority` stays a daemon lease because
+/// `retained_catalog` still calls `execute_profile_retained_application`
+/// with `DaemonSessionRuntimeRegistryV1`. Identity reads go through
+/// [`tracedecay_mcp::ProfileRetainedLeasePort`].
 #[derive(Clone, Default)]
 pub struct SessionAuthorities<'a> {
     pub(crate) project: Option<&'a RegisteredGlobalDbLeaseV1>,

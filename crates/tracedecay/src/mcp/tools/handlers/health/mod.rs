@@ -26,11 +26,11 @@ use tracedecay_usecases::graph::health::{
     dependency_depth, depth_score, dsm_clusters, gini_coefficient, gini_label,
 };
 
-use super::super::ToolResult;
-use super::super::render::{self, Md};
 use super::support::{
     effective_path, generic_tool_result, rendered_tool_result, unique_file_paths,
 };
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render::{self, Md};
 
 /// Coarse human label for a modularity score in [0,1].
 fn modularity_label(score: f64) -> &'static str {

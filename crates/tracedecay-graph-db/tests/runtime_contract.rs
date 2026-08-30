@@ -1049,10 +1049,10 @@ fn vector_upsert_clears_prior_dimension_and_metric_keys() {
         GraphVectorIndexStatus::Missing,
         "a new vector shape must wait for the retained index owner"
     );
-    assert_eq!(
+    assert!(matches!(
         db.ensure_vector_index(current_index).unwrap(),
-        GraphVectorIndexStatus::Available
-    );
+        GraphVectorIndexStatus::Available { .. }
+    ));
     let current = db
         .vector_search(vector_request(VectorMetric::Euclidean, vec![1.0, 0.0]))
         .unwrap();
@@ -1364,9 +1364,11 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
     // pinned grafeo restores it at open, so the reopened store serves
     // vector search with no `ensure_vector_index` step and no rebuild.
     // Gated in the fork by `vector_index_reopen` / `torn_vector_checkpoint`.
-    assert_eq!(
-        reopened.vector_index_status(index).unwrap(),
-        GraphVectorIndexStatus::Available,
+    assert!(
+        matches!(
+            reopened.vector_index_status(index).unwrap(),
+            GraphVectorIndexStatus::Available { .. }
+        ),
         "reopen must restore the persisted vector index"
     );
     assert_eq!(
@@ -1416,7 +1418,7 @@ fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
                 cancellation: live(),
             })
             .unwrap(),
-        GraphVectorIndexStatus::Available,
+        GraphVectorIndexStatus::Available { vectors: 2_049 },
         "the persisted corpus index must come back restored"
     );
     // Both assertions carry weight: the admission bound above proves the
@@ -1454,7 +1456,7 @@ fn vector_write_after_reopen_updates_the_restored_index() {
     };
     assert_eq!(
         reopened.vector_index_status(index.clone()).unwrap(),
-        GraphVectorIndexStatus::Available,
+        GraphVectorIndexStatus::Available { vectors: 1 },
         "reopen must restore the persisted vector index"
     );
     reopened
@@ -1471,7 +1473,7 @@ fn vector_write_after_reopen_updates_the_restored_index() {
         .unwrap();
     assert_eq!(
         reopened.vector_index_status(index).unwrap(),
-        GraphVectorIndexStatus::Available,
+        GraphVectorIndexStatus::Available { vectors: 2 },
         "an ordinary write lands in the restored index, no rebuild step"
     );
     assert_eq!(
@@ -1642,12 +1644,12 @@ fn a_stale_index_rebuilds_once_its_vectors_arrive() {
 
     assert_eq!(
         db.ensure_vector_index(index.clone()).unwrap(),
-        GraphVectorIndexStatus::Available,
+        GraphVectorIndexStatus::Available { vectors: 1 },
         "the rebuild must pick up the vectors that have since landed"
     );
     assert_eq!(
         db.vector_index_status(index).unwrap(),
-        GraphVectorIndexStatus::Available
+        GraphVectorIndexStatus::Available { vectors: 1 }
     );
     assert_eq!(
         db.vector_search(vector_request(VectorMetric::Cosine, vec![1.0, 0.0]))
@@ -1684,6 +1686,6 @@ fn a_populated_index_reports_available_and_needs_no_build() {
             cancellation: live(),
         })
         .unwrap();
-    assert_eq!(status, GraphVectorIndexStatus::Available);
+    assert_eq!(status, GraphVectorIndexStatus::Available { vectors: 1 });
     assert!(!status.needs_build());
 }
