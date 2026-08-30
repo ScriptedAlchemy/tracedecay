@@ -83,10 +83,6 @@ pub(crate) use rmcp::{
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
-pub(crate) use tracedecay_mcp::{
-    mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
-    tool_error_response, tool_result_has_semantic_error,
-};
 
 pub struct ServerStats {
     started_at: Instant,
