@@ -619,7 +619,9 @@ fn park_convergence(
     remediation: &str,
     retries_on_wake: bool,
 ) {
-    let mut slot = slot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut slot = slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match slot.as_mut() {
         Some(parked) if parked.reason == reason => {
             parked.observed_passes = parked.observed_passes.saturating_add(1);
@@ -655,7 +657,9 @@ fn clear_convergence_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
     {
         return;
     }
-    *slot.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 /// The sealed-generation identity half of a freshness reading. Every other

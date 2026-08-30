@@ -33,7 +33,11 @@ fn proc_status_kib(field: &str) -> Option<u64> {
 fn report_memory(stage: &str) {
     let rss = proc_status_kib("VmRSS").unwrap_or(0);
     let peak = proc_status_kib("VmHWM").unwrap_or(0);
-    println!("{stage}: VmRSS {} MiB, VmHWM {} MiB", rss / 1024, peak / 1024);
+    println!(
+        "{stage}: VmRSS {} MiB, VmHWM {} MiB",
+        rss / 1024,
+        peak / 1024
+    );
 }
 
 fn main() -> ExitCode {

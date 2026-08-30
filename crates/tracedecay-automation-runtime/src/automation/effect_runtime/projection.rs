@@ -1,5 +1,6 @@
 //! Projection from automation/store authority receipts into the application terminal.
 
+use crate::automation::AutomationCommittedReceipt;
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationExternalEffectReceiptV1, AutomationRunRequestV1,
     AutomationRunSummaryV1, AutomationSkipReasonV1, AutomationTaskRequestV1, AutomationTaskV1,
@@ -14,7 +15,6 @@ use tracedecay_application::retained_surfaces::{
     MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
     MemoryAutomationFactTargetV1,
 };
-use crate::automation::AutomationCommittedReceipt;
 use tracedecay_domain::{FactOwnerV1, FactRelationKindV1, RunId, canonical_sha256};
 use tracedecay_store::{
     ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
@@ -209,10 +209,7 @@ pub fn project_recovered_committed_receipts(
         }
         (None, false) => {
             let results = recovered.automatic_fact_results().map_err(contract_error)?;
-            let receipts =
-                crate::automation::NonEmptyAutomaticFactReceipts::from_vec(
-                    results,
-                )
+            let receipts = crate::automation::NonEmptyAutomaticFactReceipts::from_vec(results)
                 .ok_or_else(|| contract_error("recovered automatic-fact receipt set is empty"))?;
             project_committed_receipts(
                 request,

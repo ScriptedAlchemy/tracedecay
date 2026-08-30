@@ -5,6 +5,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
+use crate::automation::run_ledger::ExactRunPublication;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,6 @@ use tracedecay_application::{
     ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
-use crate::automation::run_ledger::ExactRunPublication;
 use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
@@ -508,9 +508,7 @@ pub fn read_indexed_record_blocking(path: &Path) -> Result<Option<DurableAutomat
     with_journal_lock(path, || read_stabilized_record(path))
 }
 
-pub fn read_indexed_terminal_blocking(
-    path: &Path,
-) -> Result<Option<AutomationSettledTerminal>> {
+pub fn read_indexed_terminal_blocking(path: &Path) -> Result<Option<AutomationSettledTerminal>> {
     with_journal_lock(path, || {
         let Some(record) = read_stabilized_record(path)? else {
             return Ok(None);

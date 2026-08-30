@@ -279,10 +279,7 @@ fn read_projection(
     )
 }
 
-fn projection_chunks(
-    request: &GraphLaneRequest,
-    symbols: &[&str],
-) -> Vec<Arc<CodeSearchChunkV1>> {
+fn projection_chunks(request: &GraphLaneRequest, symbols: &[&str]) -> Vec<Arc<CodeSearchChunkV1>> {
     let chunks: Vec<_> = symbols
         .iter()
         .map(|symbol| projection_chunk(request, &format!("chunk.{symbol}"), symbol))

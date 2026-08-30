@@ -77,7 +77,13 @@ fn bounded_statement(statement: &str) -> String {
     const TRUNCATION_MARK: &str = "…";
     let sanitized = statement
         .chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect::<String>();
     let sanitized = sanitized.trim();
     if sanitized.len() <= STATEMENT_LIMIT_BYTES {
@@ -1646,8 +1652,7 @@ mod tests {
     #[test]
     fn code_index_parked_names_the_violation_typed() {
         let finding = code_index_finding(&CodeIndexMountReadV1::Parked {
-            reason: "code text artifacts root is not owner-private (mode 775, need 700)"
-                .to_owned(),
+            reason: "code text artifacts root is not owner-private (mode 775, need 700)".to_owned(),
             coverage: DoctorCoverageCompletenessV1::Complete,
         })
         .expect("finding");

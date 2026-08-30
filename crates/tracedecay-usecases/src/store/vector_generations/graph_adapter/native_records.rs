@@ -303,7 +303,10 @@ pub(crate) fn encode_generation_batch_delta(
                     GENERATION_ID,
                     string_property(generation_id.as_digest().as_str()),
                 ),
-                (RECEIPT, generation_receipt_property(staged_commit.receipt())?),
+                (
+                    RECEIPT,
+                    generation_receipt_property(staged_commit.receipt())?,
+                ),
                 (ORDINAL, i64_property(staged_commit.batch_ordinal())?),
             ],
         )?,

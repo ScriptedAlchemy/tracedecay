@@ -1262,11 +1262,15 @@ fn authentic_host_fixtures_use_production_typed_decoders() {
         ),
         (
             HookHostV1::ClaudeCode,
-            include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"),
+            include_str!(
+                "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
+            ),
         ),
         (
             HookHostV1::Codex,
-            include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"),
+            include_str!(
+                "../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
+            ),
         ),
         (
             HookHostV1::CursorDesktop,
@@ -1282,7 +1286,9 @@ fn authentic_host_fixtures_use_production_typed_decoders() {
         ),
         (
             HookHostV1::Hermes,
-            include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json"),
+            include_str!(
+                "../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json"
+            ),
         ),
         (
             HookHostV1::KimiCode,

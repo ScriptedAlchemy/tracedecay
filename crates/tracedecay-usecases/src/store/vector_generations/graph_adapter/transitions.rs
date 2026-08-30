@@ -557,7 +557,8 @@ impl GraphVectorGenerationStoreV1 {
         let native_output = batch
             .semantic_vector_output_digest()
             .map_err(map_graph_error)?;
-        let receipt = stage_batch_receipt(&pending.stage, &prepared, &staged_commit, native_output)?;
+        let receipt =
+            stage_batch_receipt(&pending.stage, &prepared, &staged_commit, native_output)?;
         self.runtime
             .append_stage_batch(&receipt, batch, &authority)
             .map_err(map_graph_error)?;
@@ -799,8 +800,7 @@ fn stage_batch_receipt(
         &prepared.receipt,
     ))
     .map_err(storage_error)?;
-    let checkpoint_digest =
-        canonical_sha256(staged_commit.checkpoint()).map_err(storage_error)?;
+    let checkpoint_digest = canonical_sha256(staged_commit.checkpoint()).map_err(storage_error)?;
     let chunks = semantic_stage_chunk_receipts(prepared, staged_commit)?;
     SemanticVectorStageBatchReceipt::new(
         SemanticVectorStageBatchKey {
@@ -925,10 +925,9 @@ pub(super) fn transition_state<'a>(
     // entities, so staged retention is elided and no physical reuse index is
     // derived. Hydrated base generations keep their payloads — reused-row
     // lineage checks read them.
-    let mut state =
-        VectorGenerationStateMachineV1::with_staged_value_retention(
-            StagedVectorValueRetentionV1::Elided,
-        );
+    let mut state = VectorGenerationStateMachineV1::with_staged_value_retention(
+        StagedVectorValueRetentionV1::Elided,
+    );
     state.staged = staged;
     state.published = PublishedStateV1::immutable_graph_generation(generations);
     Ok(state)

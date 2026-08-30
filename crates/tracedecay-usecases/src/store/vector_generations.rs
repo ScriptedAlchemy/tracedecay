@@ -1507,9 +1507,7 @@ impl VectorGenerationStateMachineV1 {
             .checked_add(vector_effects)
             .ok_or_else(overflow)?;
         let vector_bytes_after = row_count_after
-            .checked_mul(u64::from(
-                prepared.embedding_key.embedding_key().dimensions,
-            ))
+            .checked_mul(u64::from(prepared.embedding_key.embedding_key().dimensions))
             .and_then(|scalars| scalars.checked_mul(4))
             .ok_or_else(overflow)?;
         let tombstone_count_after = u64::try_from(current.tombstones.len())
@@ -2633,11 +2631,9 @@ mod tests {
         else {
             panic!("fresh split batch must not replay");
         };
-        let durable_chunks = graph_adapter::transitions::semantic_stage_chunk_receipts(
-            &compatible,
-            &staged_commit,
-        )
-        .expect("reused batch binds lineage without a local vector effect");
+        let durable_chunks =
+            graph_adapter::transitions::semantic_stage_chunk_receipts(&compatible, &staged_commit)
+                .expect("reused batch binds lineage without a local vector effect");
         store
             .apply_batch(&split_build, staged_commit)
             .expect("a per-batch changed-set digest commits against the plan");

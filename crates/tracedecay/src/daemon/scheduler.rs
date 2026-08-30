@@ -1993,8 +1993,7 @@ async fn run_user_jobs_scheduler_pass(
             configuration_digest.clone(),
             |run_id| {
                 tracedecay_automation_runtime::automation::effect_runtime::user_job_run_request(
-                    run_id,
-                    &job.id,
+                    run_id, &job.id,
                 )
             },
         )

@@ -1064,13 +1064,8 @@ fn sealed_copy_proof(
     expected: &GraphRecoveredGenerationDigestV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<u64, GraphDbError> {
-    let locator =
-        GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
-    if let Some(canonical_bytes) = database
-        .inner
-        .markers
-        .lookup(&locator, expected.as_str())
-    {
+    let locator = GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+    if let Some(canonical_bytes) = database.inner.markers.lookup(&locator, expected.as_str()) {
         database.inner.markers.record_fresh(&locator);
         #[cfg(test)]
         crate::generation::record_sealed_copy_marker_hit();

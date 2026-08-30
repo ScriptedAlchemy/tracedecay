@@ -51,12 +51,13 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
         None,
     )
     .unwrap();
-    let request = tracedecay_automation_runtime::automation::effect_runtime::memory_curator_run_request(
-        "run.scheduler-log-privacy",
-        24,
-        0.72,
-    )
-    .unwrap();
+    let request =
+        tracedecay_automation_runtime::automation::effect_runtime::memory_curator_run_request(
+            "run.scheduler-log-privacy",
+            24,
+            0.72,
+        )
+        .unwrap();
     let problem =
         AutomationRunProblemV1::new(&request, scope, envelope, Vec::new(), &request_id).unwrap();
     let fields = super::super::scheduler::scheduler_application_problem_log_fields(

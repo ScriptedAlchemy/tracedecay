@@ -6,9 +6,7 @@ use tracedecay_application::retained_surfaces::{
 };
 use tracedecay_domain::{RunId, UtcMicros};
 
-use crate::automation::runner::{
-    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-};
+use crate::automation::runner::{SessionReflectorAutomationOptions, SkillWriterAutomationOptions};
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 
 use super::contract::contract_error;

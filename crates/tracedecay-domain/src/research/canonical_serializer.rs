@@ -548,8 +548,10 @@ impl<'sink, S: CanonicalSink> ObjectWriter<'sink, S> {
             self.sink.write(&self.values[range.clone()]);
         }
         self.sink.write(self.close);
-        self.pool
-            .release(std::mem::take(&mut self.values), std::mem::take(&mut self.entries));
+        self.pool.release(
+            std::mem::take(&mut self.values),
+            std::mem::take(&mut self.entries),
+        );
         Ok(())
     }
 }

@@ -211,6 +211,7 @@ fn zero_effect_terminal(
 
 #[cfg(test)]
 mod tests {
+    use crate::automation::run_ledger::AutomationRunLedgerRecord;
     use serde_json::json;
     use tracedecay_application::{
         ApplicationExecutionFailureClassV1, ApplicationProblemKind, ApplicationUnavailableClassV1,
@@ -219,7 +220,6 @@ mod tests {
         ResolvedScope,
     };
     use tracedecay_automation::backend::AgentTaskFailureClass;
-    use crate::automation::run_ledger::AutomationRunLedgerRecord;
     use tracedecay_domain::{
         ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
     };

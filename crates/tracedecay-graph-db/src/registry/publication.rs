@@ -708,7 +708,10 @@ impl GraphDbRegistry {
     /// head or installs a read-side lease, so a caller that serializes
     /// publication against readers holds its gate only across
     /// [`Self::complete_verified_publication`].
-    #[hotpath::measure(label = "graph_db.generation.publish.prepare", impl_type = "GraphDbRegistry")]
+    #[hotpath::measure(
+        label = "graph_db.generation.publish.prepare",
+        impl_type = "GraphDbRegistry"
+    )]
     fn prepare_verified_publication_inner(
         &self,
         operation: &RegisteredGraphDbOperationV1,

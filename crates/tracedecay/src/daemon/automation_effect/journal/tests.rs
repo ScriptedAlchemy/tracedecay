@@ -26,8 +26,8 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::EffectClass;
 
 use crate::daemon::automation_effect::recovery_index;
-use tracedecay_automation_runtime::automation::effect_runtime::journal::*;
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
+use tracedecay_automation_runtime::automation::effect_runtime::journal::*;
 
 struct NeverAutomationBackend;
 
@@ -2049,17 +2049,11 @@ fn project_open_crash_recovery_defers_retirement_until_exact_finalization() {
         .expect("reserved retirement");
     assert_eq!(reopened_record.admission().retirement(), Some(&binding));
     assert_eq!(
-        super::recovery_index::special_recovery_defer_reason(
-            reopened_record.admission(),
-            true,
-        ),
+        super::recovery_index::special_recovery_defer_reason(reopened_record.admission(), true,),
         Some("retirement_requires_exact_finalization")
     );
     assert_eq!(
-        super::recovery_index::special_recovery_defer_reason(
-            reopened_record.admission(),
-            false,
-        ),
+        super::recovery_index::special_recovery_defer_reason(reopened_record.admission(), false,),
         None
     );
     assert!(!reopened_record.is_terminal());
@@ -2207,12 +2201,9 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     );
 
     write_private_test_file(&source_path, &source_bytes);
-    let pending_retirement = super::retirement::finalize_after_terminal(
-        &dashboard_root,
-        &plan.binding,
-        Some(&plan),
-    )
-    .expect("finalize exact retirement through source capture");
+    let pending_retirement =
+        super::retirement::finalize_after_terminal(&dashboard_root, &plan.binding, Some(&plan))
+            .expect("finalize exact retirement through source capture");
     assert!(!source_path.exists());
     assert_eq!(retirement_capture_count(&dashboard_root), 1);
 
@@ -2254,12 +2245,9 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     write_private_test_file(&source_path, &source_bytes);
     recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
         .expect("re-index Terminal before pending-absent crash");
-    let orphaned_retirement = super::retirement::finalize_after_terminal(
-        &dashboard_root,
-        &plan.binding,
-        Some(&plan),
-    )
-    .expect("capture exact source before pending-absent crash");
+    let orphaned_retirement =
+        super::retirement::finalize_after_terminal(&dashboard_root, &plan.binding, Some(&plan))
+            .expect("capture exact source before pending-absent crash");
     assert!(!source_path.exists());
     assert_eq!(retirement_capture_count(&dashboard_root), 1);
     recovery_index::remove_pending_for_retirement_blocking(
@@ -2349,12 +2337,9 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     write_private_test_file(&source_path, &source_bytes);
     recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
         .expect("re-index Terminal before entry-plus-marker restart");
-    let entry_plus_marker_retirement = super::retirement::finalize_after_terminal(
-        &dashboard_root,
-        &plan.binding,
-        Some(&plan),
-    )
-    .expect("capture exact source before entry-plus-marker restart");
+    let entry_plus_marker_retirement =
+        super::retirement::finalize_after_terminal(&dashboard_root, &plan.binding, Some(&plan))
+            .expect("capture exact source before entry-plus-marker restart");
     recovery_index::remove_pending_for_retirement_blocking(
         &dashboard_root,
         &journal_path,
@@ -2523,10 +2508,7 @@ fn project_open_crash_recovery_preserves_shipped_reset_digest_until_exact_diagno
         Some(reset_digest.as_str())
     );
     assert_eq!(
-        super::recovery_index::special_recovery_defer_reason(
-            reopened_record.admission(),
-            true,
-        ),
+        super::recovery_index::special_recovery_defer_reason(reopened_record.admission(), true,),
         Some("shipped_proposals_require_exact_reset_diagnostic")
     );
     assert!(!reopened_record.is_terminal());
@@ -3125,9 +3107,7 @@ fn retained_settlement_waiter_is_send_and_static() {
     assert_send_static::<super::DeferredSettlementPairSubmission<()>>();
     assert_send_static::<
         super::RetainedSettlementWaiter<
-            tracedecay_runtime_core::errors::Result<
-                super::RetainedAutomationSettlementOutcome,
-            >,
+            tracedecay_runtime_core::errors::Result<super::RetainedAutomationSettlementOutcome>,
         >,
     >();
 }
@@ -4114,24 +4094,20 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         );
     let waiter = submission
         .submit(
-            super::DeferredSettlementRequest::Run(Box::new(
-                super::DeferredRunSettlementRequest {
-                    ledger: first_run.ledger_record,
-                    committed: first_run.committed_receipt,
-                    observer: None,
-                },
-            )),
-            super::DeferredSettlementRequest::Run(Box::new(
-                super::DeferredRunSettlementRequest {
-                    ledger: second_run.ledger_record,
-                    committed: second_run.committed_receipt,
-                    observer: Some(Box::new(move |record| {
-                        second_observed_tx
-                            .send(record.clone())
-                            .expect("second exact observation");
-                    })),
-                },
-            )),
+            super::DeferredSettlementRequest::Run(Box::new(super::DeferredRunSettlementRequest {
+                ledger: first_run.ledger_record,
+                committed: first_run.committed_receipt,
+                observer: None,
+            })),
+            super::DeferredSettlementRequest::Run(Box::new(super::DeferredRunSettlementRequest {
+                ledger: second_run.ledger_record,
+                committed: second_run.committed_receipt,
+                observer: Some(Box::new(move |record| {
+                    second_observed_tx
+                        .send(record.clone())
+                        .expect("second exact observation");
+                })),
+            })),
         )
         .expect("submit both pair terminals");
 
@@ -4170,8 +4146,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         .await
         .expect("second pair owner must finish")
         .expect("second pair settlement");
-    let super::DeferredSettlementOutcome::Settled(second_outcome) = &second_owned.outcome
-    else {
+    let super::DeferredSettlementOutcome::Settled(second_outcome) = &second_owned.outcome else {
         panic!("second pair leg must settle its exact terminal")
     };
     assert_eq!(

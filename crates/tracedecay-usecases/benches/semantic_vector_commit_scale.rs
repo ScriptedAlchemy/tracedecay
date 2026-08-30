@@ -289,11 +289,7 @@ fn main() {
         }
     }
     if pattern == "machine" {
-        publication = Some(
-            state
-                .publish_generation(&build)
-                .expect("bench publication"),
-        );
+        publication = Some(state.publish_generation(&build).expect("bench publication"));
     }
     let publication = publication.expect("bench run publishes");
     report("published", batch_count, committed_rows, &started);

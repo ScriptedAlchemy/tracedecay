@@ -132,7 +132,9 @@ pub(crate) async fn execute_retained_memory_curator(
 }
 
 fn automation_problem(
-    problem: Box<tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem>,
+    problem: Box<
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
+    >,
 ) -> RetainedSurfaceExecutionErrorV1 {
     RetainedSurfaceExecutionErrorV1::ApplicationProblem(problem.problem.problem.source().clone())
 }

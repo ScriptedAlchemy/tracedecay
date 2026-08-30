@@ -202,8 +202,18 @@ fn fixture_symbols() -> GenerationSymbolIndexV1 {
     GenerationSymbolIndexV1::new(
         generation(),
         vec![
-            Arc::new(symbol_metadata("sym.alpha.run", "alpha::run", "function", '1')),
-            Arc::new(symbol_metadata("sym.beta.run", "beta::run", "function", '2')),
+            Arc::new(symbol_metadata(
+                "sym.alpha.run",
+                "alpha::run",
+                "function",
+                '1',
+            )),
+            Arc::new(symbol_metadata(
+                "sym.beta.run",
+                "beta::run",
+                "function",
+                '2',
+            )),
             Arc::new(symbol_metadata(
                 "sym.beta.runner",
                 "beta::Runner",

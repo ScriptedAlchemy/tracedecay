@@ -555,8 +555,7 @@ mod tests {
     };
 
     use super::{
-        code_index_freshness_projection, graph_statistics_value,
-        historical_session_catch_up_state,
+        code_index_freshness_projection, graph_statistics_value, historical_session_catch_up_state,
     };
 
     /// The daemon serializes `graph_statistics` and `tracedecay status`
@@ -664,7 +663,11 @@ mod tests {
         let (status, warning) = code_index_freshness_projection(&freshness);
 
         assert_eq!(status, "warming");
-        assert!(warning.expect("warming names itself").contains("not authoritative"));
+        assert!(
+            warning
+                .expect("warming names itself")
+                .contains("not authoritative")
+        );
     }
 
     #[test]

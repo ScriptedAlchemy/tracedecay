@@ -1265,16 +1265,16 @@ impl RetainedCodeGraphRuntimeV1 {
             // corpus-sized prepare, then resumes through prepare's idempotent
             // historical arm on the winner's instance-cached proof instead of
             // duplicating staging and the sealed-store build.
-            let _flight = self
-                .publication_locks
-                .flight
-                .claim(key, &|| match probe.interruption() {
-                    Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                    Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                        Err(GraphDbError::DeadlineExceeded)
-                    }
-                    None => Ok(()),
-                })?;
+            let _flight =
+                self.publication_locks
+                    .flight
+                    .claim(key, &|| match probe.interruption() {
+                        Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                        Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                            Err(GraphDbError::DeadlineExceeded)
+                        }
+                        None => Ok(()),
+                    })?;
             // The already-built projection manifest rides along so first
             // publication does not re-read and re-project the sealed artifact
             // through the replay manifest provider; a pending predecessor
@@ -1301,12 +1301,8 @@ impl RetainedCodeGraphRuntimeV1 {
             let _gate = self.hold_publication_gate();
             hotpath::measure_block!(
                 "daemon.session_registry.publish_snapshot.gate_hold",
-                self.graph_registry.complete_verified_publication(
-                    completion,
-                    storage,
-                    &context,
-                    *proven,
-                )
+                self.graph_registry
+                    .complete_verified_publication(completion, storage, &context, *proven,)
             )
         };
         // Classification slice: the manifest-provider bind (a shared-map
