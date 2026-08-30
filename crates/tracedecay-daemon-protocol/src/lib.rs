@@ -50,6 +50,7 @@ pub mod client_identity;
 pub mod connection;
 pub mod contract;
 pub mod handshake;
+pub mod lsp_wire;
 pub mod output_format;
 pub mod surface;
 pub mod transport;
@@ -90,6 +91,11 @@ pub use contract::{
 };
 pub use handshake::{
     DaemonHandshake, MovedStoreAdoption, client_version_skew, version_skew_action,
+};
+pub use lsp_wire::{
+    ConnectionLocalRequestSequence, FramePoll, FrameSend, LspFrame, LspSessionAccess,
+    LspSessionCredential, LspSessionId, LspSessionIdentityError, MAX_LSP_FRAME_BYTES,
+    MAX_LSP_WORKSPACE_ROOTS, ProcessLocalRequestSequence, SequenceExhausted,
 };
 pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use surface::{

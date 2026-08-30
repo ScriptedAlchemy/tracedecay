@@ -8,6 +8,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
+use tracedecay_daemon_protocol::ProcessLocalRequestSequence;
+use tracedecay_domain::{ContentDigest, ManifestDigest, canonical_sha256};
+
 use crate::diagnostics::{LspRange, PositionError};
 use crate::gateway::operation_table::{BoundedOperationTable, OperationAdmission, OperationPoll};
 use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner};
@@ -15,11 +19,8 @@ use crate::provider::{
     DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
     DiagnosticSnapshotPort,
 };
-use crate::request_sequence::ProcessLocalRequestSequence;
 use crate::session::AuthorizedLspWorkspace;
 use crate::workspace_diagnostics::WorkspaceDiagnosticSnapshotOutcome;
-use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
-use tracedecay_domain::{ContentDigest, ManifestDigest, canonical_sha256};
 
 mod diagnostic_authority;
 mod retained_parse;
@@ -474,7 +475,7 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
             expected_snapshot_digest: None,
         };
         let authority = Arc::clone(&self.authority);
-        let admission: Result<_, crate::request_sequence::SequenceExhausted> =
+        let admission: Result<_, tracedecay_daemon_protocol::SequenceExhausted> =
             self.operations.admit_with(key, self.runtime.as_ref(), || {
                 let operation_id = self.next_operation.next_string("lsp-diagnostic-")?;
                 let identity = DiagnosticRefreshIdentity {

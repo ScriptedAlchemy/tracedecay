@@ -11,12 +11,14 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use tracedecay_daemon_protocol::{
+    ConnectionLocalRequestSequence, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
+    ProcessLocalRequestSequence,
+};
 use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
 use tracedecay_tool_catalog::BindingId;
 
-use crate::bridge::{
-    DaemonLspSessionTransport, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
-};
+use crate::bridge::DaemonLspSessionTransport;
 use crate::capabilities::{
     CapabilityAvailability, CapabilityParseError, ClientCapabilities, EffectiveCapabilities,
     GatewayCapabilities, UpstreamCapabilities, is_supported_context_projection,
@@ -50,7 +52,6 @@ use crate::provider::{
     DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
     UnavailableDiagnosticSnapshotProvider,
 };
-use crate::request_sequence::{ConnectionLocalRequestSequence, ProcessLocalRequestSequence};
 use crate::rpc::{
     DiagnosticSerializationCapabilities, RpcFailure, diagnostic_result_id, diagnostic_value,
     document_diagnostic_report_value, error_response, initialized_workspace_uris, overlay_failure,

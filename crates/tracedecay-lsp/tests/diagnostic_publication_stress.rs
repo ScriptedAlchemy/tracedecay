@@ -1,13 +1,13 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
+use tracedecay_daemon_protocol::FramePoll;
 use tracedecay_lsp::{
     AdmittedRoot, ClientCapabilities, DaemonLspGateway, DaemonLspProtocolSession,
     DaemonLspSessionTransport, DiagnosticSeverity, DiagnosticSnapshotOutcome,
     DiagnosticSnapshotPort, FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse,
-    FramePoll, GatewayCapabilities, GatewayDiagnostic, GenerationDiagnostics, LspPosition,
-    LspRange, MAX_PUBLICATION_BYTES, SemanticProviderPort, UpstreamCapabilities,
-    negotiate_capabilities,
+    GatewayCapabilities, GatewayDiagnostic, GenerationDiagnostics, LspPosition, LspRange,
+    MAX_PUBLICATION_BYTES, SemanticProviderPort, UpstreamCapabilities, negotiate_capabilities,
 };
 
 const ROOT_URI: &str = "file:///stress";
