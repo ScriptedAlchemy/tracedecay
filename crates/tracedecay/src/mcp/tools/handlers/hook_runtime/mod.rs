@@ -31,7 +31,7 @@ pub(crate) use admission::{
 };
 pub(crate) use envelope::daemon_mint_hook_v2_file_id;
 #[cfg(test)]
-pub(crate) use errors::structured_hook_error_data;
+pub(crate) use tracedecay_mcp::structured_hook_error_data;
 pub(crate) use hermes::replay_projectless_hermes_host_admission;
 
 use admission::{hook_v2_admit, hook_v2_profile_admit};
