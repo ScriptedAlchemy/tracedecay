@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -28,8 +28,8 @@ use tracedecay_store::{
 };
 
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
-use common::{daemon_socket_path, spawn_tracedecay_daemon, tracedecay_command_with_home};
-use common::{isolated_lcm_db_path, open_lcm_db, spawn_tracedecay_daemon_with, tempdir_or_panic};
+use crate::common::{daemon_socket_path, spawn_tracedecay_daemon, tracedecay_command_with_home};
+use crate::common::{isolated_lcm_db_path, open_lcm_db, spawn_tracedecay_daemon_with, tempdir_or_panic};
 
 const GENERATION: u64 = 23;
 
