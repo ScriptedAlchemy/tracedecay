@@ -1477,3 +1477,23 @@ fn jsonl_file_identity_is_stable_for_an_unchanged_file() {
     assert_eq!(first, second);
     assert_ne!(first, 0);
 }
+
+#[test]
+fn content_hash_stays_inside_the_persisted_cursor_domain() {
+    let probes = ["", "a", "cline ui_messages", "{\"ts\":1}", "kiro chat"];
+    for content in probes {
+        assert!(
+            content_hash64(content) <= i64::MAX as u64,
+            "hash for {content:?} must fit the typed non-negative cursor column"
+        );
+    }
+    // Anti-vacuity: at least one probe's raw digest sets the top bit, so this
+    // test fails if the 63-bit mask is removed.
+    assert!(
+        probes.iter().any(|content| {
+            let digest = Sha256::digest(content.as_bytes());
+            digest[0] & 0x80 != 0
+        }),
+        "probe set must include a digest with the top bit set"
+    );
+}
