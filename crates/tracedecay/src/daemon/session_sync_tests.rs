@@ -22,7 +22,7 @@ use tracedecay_code_index::git_projection::{
     git_topology_namespace, git_topology_projection_identity,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
+    ActorId, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
     BranchStackRevisionV1, BranchStackSourceV1, CommitId, ManifestDigest, ProjectId, RefId,
     RepositoryId, ScopeSetId, ScopeSetRevision, StackNodeId, UserProfileId, UtcMicros, WorktreeId,
     WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
@@ -430,7 +430,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     let feature_worktree =
         WorktreeId::new("worktree.session-sync.feature").expect("feature worktree");
     for root in [&repository_root, &linked_root] {
-        crate::storage::pin_fixture_repository_identity(root, project.as_str())
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, project.as_str())
             .expect("project enrollment");
     }
     let roots = vec![
@@ -831,7 +831,6 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
     let project_root = profile_root.path().join("project");
     std::fs::create_dir_all(&project_root).unwrap();
     let project_id = ProjectId::new("project.cancel-alias-race").unwrap();
-    let profile_id = UserProfileId::new("profile.cancel-alias-race").unwrap();
     let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
         profile_root.path(),
         &project_root,
@@ -845,10 +844,15 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
     let profile_sessions = runtime
         .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Profile)
         .unwrap();
+    // The lifecycle fence refuses foreign shards, so registration must carry
+    // the registered shard's own identity, exactly as production composition
+    // reads it from the profile identity authority.
+    let brain_id = project_sessions.binding().shard_id.brain_id.clone();
+    let profile_id = project_sessions.binding().shard_id.profile_id.clone();
     let service = DaemonSessionSyncService::default();
     service
         .register_project(DaemonSessionSyncConfig {
-            brain_id: BrainId::new("brain.cancel-alias-race").unwrap(),
+            brain_id,
             profile_id: profile_id.clone(),
             project_id: project_id.clone(),
             profile_root: profile_root.path().to_path_buf(),

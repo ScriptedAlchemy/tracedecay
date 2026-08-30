@@ -262,7 +262,7 @@ pub struct McpServer {
     /// the handle instead of opening a new connection per call.
     global_db: Option<RegisteredGlobalDbLeaseV1>,
     profile_root: Option<PathBuf>,
-    profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    profile_identity: Option<Arc<dyn tracedecay_application::ProfileIdentityReadPort>>,
     profile_retained_authority:
         Option<crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
     accounting_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
@@ -278,9 +278,9 @@ pub struct McpServer {
     /// Direct servers do not create an independent spool authority.
     host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
     project_session_refresh_wake:
-        Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
+        Option<Arc<dyn tracedecay_application::SessionTemporalRefreshWakePort>>,
     user_session_refresh_wake:
-        Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
+        Option<Arc<dyn tracedecay_application::SessionTemporalRefreshWakePort>>,
     project_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     /// Exact registered session-store coordinates retained with the project
     /// refresh authority. V2 refresh requests must match these values; caller
@@ -303,17 +303,19 @@ pub struct McpServer {
     /// Registry-read service handed to MCP handlers so they read registered
     /// projects through a port instead of holding [`Self::registry_db`].
     project_registry_reads: Option<Arc<dyn ProjectRegistryReadPort>>,
-    automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    automation_scheduler_reconciler:
+        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
-    dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     remote_operational_status:
-        Option<crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1>,
-    dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+        Option<Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>>,
+    dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
-        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
-    dashboard_explorer_semantic_reader: Option<crate::dashboard::ExplorerSemanticReader>,
-    dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
+        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+    dashboard_explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
+    dashboard_feedback_status_reader:
+        Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
     /// scheduler queue. `None` for direct servers with no scheduler registry.
@@ -334,7 +336,7 @@ pub struct McpServer {
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
     generation_census_reader:
-        tokio::sync::OnceCell<crate::runtime_telemetry::GenerationCensusReader>,
+        tokio::sync::OnceCell<tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -543,7 +545,7 @@ impl McpServer {
         use_default_profile_root: bool,
     ) -> Arc<Self> {
         let profile_root = use_default_profile_root
-            .then(crate::storage::default_profile_root)
+            .then(tracedecay_runtime_core::storage::default_profile_root)
             .and_then(std::result::Result::ok);
         let context =
             Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
@@ -755,6 +757,8 @@ impl McpServer {
             host_admission_broker,
             project_session_refresh_wake,
             user_session_refresh_wake,
+            project_session_refresh_serving,
+            user_session_refresh_serving: _user_session_refresh_serving,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
             automation_scheduler_reconciler,
@@ -866,7 +870,7 @@ impl McpServer {
             })
         });
         let project_session_retrieval_root =
-            project_session_retrieval_root.and_then(|root| match profile_identity.as_ref() {
+            project_session_retrieval_root.and_then(|root| match profile_identity.as_deref() {
                 Some(identity) => root.with_project_runtime_shard(identity),
                 None => Some(root),
             });
@@ -878,7 +882,7 @@ impl McpServer {
             .map(|root| root.identity().root_id().clone());
         let profile_session_retrieval_root =
             crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::profile().and_then(
-                |root| match profile_identity.as_ref() {
+                |root| match profile_identity.as_deref() {
                     Some(identity) => root.with_profile_runtime_shard(identity),
                     None => Some(root),
                 },
@@ -890,7 +894,7 @@ impl McpServer {
             .map(|((database, wake), project_id)| {
                 Arc::new(DaemonSessionRefreshService::new(
                     database.clone(),
-                    wake.clone(),
+                    Arc::clone(wake),
                     Some(project_id),
                 )) as Arc<dyn SessionRefreshServicePort>
             });
@@ -905,17 +909,17 @@ impl McpServer {
                 let identity = root.identity().clone();
                 let service = match registered_session_db.as_ref() {
                     Some(registered) => {
-                    crate::daemon::session_retrieval::DaemonSessionRetrievalService::new_registered(
+                    crate::daemon::session_retrieval::DaemonSessionRetrievalService::new_registered_with_serving_port(
                         database.clone(),
                         registered.clone(),
                         root,
-                        project_session_refresh_wake.clone(),
+                        project_session_refresh_serving.clone(),
                     )
                     }
-                    None => crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
+                    None => crate::daemon::session_retrieval::DaemonSessionRetrievalService::new_with_serving_port(
                         database.clone(),
                         root,
-                        project_session_refresh_wake.clone(),
+                        project_session_refresh_serving.clone(),
                     ),
                 }?;
                 Some(MountedProjectApplicationRetrievalV1 {
@@ -952,7 +956,7 @@ impl McpServer {
         {
             Some((identity, root)) => {
                 match crate::daemon::retained_owner::profile_retained_connection_authority(
-                    identity,
+                    identity.as_ref(),
                     root.identity(),
                 ) {
                     Ok(authority) => Some(authority),
@@ -1130,10 +1134,10 @@ impl McpServer {
 
     pub(crate) async fn reconcile_automation_scheduler(
         &self,
-    ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
+    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
         match &self.automation_scheduler_reconciler {
             Some(reconcile) => reconcile().await,
-            None => crate::dashboard::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
+            None => tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
         }
     }
 
@@ -1168,8 +1172,8 @@ impl McpServer {
 
     pub(crate) fn profile_identity(
         &self,
-    ) -> Option<&crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1> {
-        self.profile_identity.as_ref()
+    ) -> Option<&dyn tracedecay_application::ProfileIdentityReadPort> {
+        self.profile_identity.as_deref()
     }
 
     pub fn diagnostics_lsp(

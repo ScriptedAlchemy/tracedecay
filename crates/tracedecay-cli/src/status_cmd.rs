@@ -172,11 +172,11 @@ async fn handle_status_command_within(
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
         } else {
-            let snapshot: tracedecay::runtime_telemetry::RuntimeSnapshot =
+            let snapshot: tracedecay_usecases::runtime_telemetry::RuntimeSnapshot =
                 serde_json::from_value(result)?;
             print!(
                 "{}",
-                tracedecay::runtime_telemetry::to_text_report(&snapshot)
+                tracedecay_usecases::runtime_telemetry::to_text_report(&snapshot)
             );
         }
         return Ok(());
@@ -197,14 +197,14 @@ async fn handle_status_command_within(
     // the same Rust contracts (`GenerationCensusSnapshot`,
     // `CodeIndexWorktreeFreshnessV1`), so absence or drift is a typed decode
     // failure rather than a silently defaulted table.
-    let census: tracedecay::runtime_telemetry::GenerationCensusSnapshot =
+    let census: tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot =
         serde_json::from_value(daemon_status.get("graph_statistics").cloned().ok_or_else(
             || tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "daemon status response omitted graph_statistics".to_string(),
             },
         )?)?;
     let freshness: Option<
-        tracedecay::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1,
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1,
     > = daemon_status
         .get("code_index_freshness")
         .and_then(|freshness| freshness.get("worktree"))
@@ -291,7 +291,7 @@ async fn handle_status_command_within(
         let branch_info = daemon_status
             .get("serving_branch")
             .and_then(Value::as_str)
-            .map(|branch| tracedecay::display::BranchInfo {
+            .map(|branch| crate::display::BranchInfo {
                 branch: branch.to_string(),
                 parent: daemon_status
                     .get("parent_branch")
@@ -301,7 +301,7 @@ async fn handle_status_command_within(
             });
         let cost_info = None;
         if short {
-            tracedecay::display::print_status_header(
+            crate::display::print_status_header(
                 &census,
                 freshness.as_ref(),
                 tokens_saved,
@@ -312,7 +312,7 @@ async fn handle_status_command_within(
                 cost_info.as_ref(),
             );
         } else {
-            tracedecay::display::print_status_table_with(tracedecay::display::StatusTable {
+            crate::display::print_status_table_with(crate::display::StatusTable {
                 census: &census,
                 freshness: freshness.as_ref(),
                 tokens_saved,

@@ -459,21 +459,34 @@ fn semantic_evaluation_response(
     use tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1;
 
     match evaluation {
-        Ok(publication) => DaemonInvocationResponse::with_outcome(
-            request_id,
-            DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
-                scope: publication.snapshot.scope,
-                profile_digest: publication.accepted_profile.profile_digest().clone(),
-                report_digest: publication
-                    .accepted_profile
-                    .evaluation()
-                    .report_digest()
-                    .clone(),
-                report: publication.report,
-                source_generation: publication.snapshot.code_generation,
-                snapshot_digest: publication.snapshot.code_snapshot_digest,
-            },
-        ),
+        Ok(publication) => {
+            let report = match serde_json::to_value(&publication.report) {
+                Ok(report) => report,
+                Err(_) => {
+                    return application_problem(
+                        request_id,
+                        semantic_evaluation_rejection_problem(
+                            &SemanticActivationCoordinationErrorV1::Rejected,
+                        ),
+                    );
+                }
+            };
+            DaemonInvocationResponse::with_outcome(
+                request_id,
+                DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
+                    scope: publication.snapshot.scope,
+                    profile_digest: publication.accepted_profile.profile_digest().clone(),
+                    report_digest: publication
+                        .accepted_profile
+                        .evaluation()
+                        .report_digest()
+                        .clone(),
+                    report,
+                    source_generation: publication.snapshot.code_generation,
+                    snapshot_digest: publication.snapshot.code_snapshot_digest,
+                },
+            )
+        }
         Err(DaemonSemanticEvaluationExecutionErrorV1::Cancelled) => application_problem(
             request_id,
             ApplicationProblem::Cancelled {

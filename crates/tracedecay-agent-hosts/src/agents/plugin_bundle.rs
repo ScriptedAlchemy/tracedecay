@@ -5,11 +5,12 @@
 //! agent format.
 //!
 //! Layout of `plugin/`:
-//! - `plugin/skills/*/SKILL.md` — the 17 shared model-invocable skills. All
-//!   four hosts deploy the full set; the workflow dispatcher skills were
-//!   removed (their behavior lives in the native slash commands below), so no
-//!   host filters the skill set today. The `cursor_skill_files` filter is kept
-//!   as a guard against a dispatcher skill being reintroduced.
+//! - `plugin/skills/*/SKILL.md` — the shared model-invocable skills (every
+//!   `SKILL.md` directory under `plugin/skills/`). All five hosts deploy the
+//!   full set; the workflow dispatcher skills were removed (their behavior
+//!   lives in the native slash commands below), so no host filters the skill
+//!   set today. The `cursor_skill_files` filter is kept as a guard against a
+//!   dispatcher skill being reintroduced.
 //! - `plugin/overlays/cursor/commands/tracedecay-*.md` — Cursor 1.6+ native
 //!   slash commands, one per workflow slug, deployed to `commands/<slug>.md`.
 //!   These provide the explicit workflow dispatch (no dispatcher *skills*).
@@ -22,11 +23,16 @@
 //! - `plugin/.claude-plugin/{plugin,marketplace}.json`,
 //!   `plugin/.cursor-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`,
 //!   `plugin/.kimi-plugin/plugin.json` — host manifests (deploy to the same
-//!   dot-dir path). Kimi's manifest also carries its MCP server inline
-//!   (`mcpServers.tracedecay`), so there is no separate Kimi MCP config file.
+//!   dot-dir path). Kimi's manifest also carries its MCP server and hooks
+//!   inline (`mcpServers.tracedecay`, `PostToolUse`/`Stop`), so there is no
+//!   separate Kimi MCP or hooks file.
+//! - `plugin/opencode/{tracedecay.ts,tracedecay-mcp.ts,opencode.registration.json}`
+//!   — OpenCode native plugin, MCP companion, and MCP/LSP registration.
+//!   OpenCode has no `plugin.json`.
 //! - `plugin/.mcp.json` — shared Claude/Codex MCP config (byte-identical);
 //!   `plugin/mcp-cursor.json` — Cursor MCP config (deploys to `mcp.json`).
-//! - `plugin/README-<host>.md` — per-host README (deploys to `README.md`).
+//! - `plugin/README-<host>.md` — per-host README (Claude/Cursor/Codex/Kimi
+//!   deploy to `README.md`; OpenCode's README is source documentation).
 //!
 //! Composed per-host view = `GENERATED_SKILL_FILES` (recursively embedded from
 //! `plugin/skills/`, filtered per host) ∪ `<HOST>_MANIFEST_FILES` and extras.
@@ -157,7 +163,7 @@ pub(crate) fn codex_agent_files() -> &'static [PluginFile] {
 }
 
 /// Prefix of the dispatcher skills that Cursor does **not** deploy (they are
-/// native commands on Cursor). Claude/Codex deploy every skill.
+/// native commands on Cursor). Claude/Codex/Kimi/OpenCode deploy every skill.
 const CURSOR_EXCLUDED_SKILL_PREFIX: &str = "skills/tracedecay-";
 
 fn all_skill_files() -> impl Iterator<Item = &'static PluginFile> {
@@ -319,7 +325,7 @@ fn compose(
 }
 
 /// Files Claude deploys: manifest + Claude agents + Claude commands + every
-/// skill file (all 30 skills incl. dispatchers, plus any support files).
+/// file under `plugin/skills/` (`SKILL.md` plus support files).
 pub fn claude_files() -> Vec<(&'static str, &'static str)> {
     compose(
         &[
@@ -379,8 +385,8 @@ pub fn cursor_native_extension_files() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// Files Codex deploys: manifest + every skill file (all 30 skills incl.
-/// dispatchers, plus any support files). Codex ships no agents/commands/rules.
+/// Files Codex deploys: manifest + every file under `plugin/skills/`
+/// (`SKILL.md` plus support files). Codex ships no agents/commands/rules.
 /// The host-bundle catalog deploys the rendered variants of this inventory via
 /// `agents::codex::rendered_global_plugin_files` — the raw templates here are
 /// not directly installable (`hooks/hooks.json` is an empty scaffold).
@@ -390,8 +396,9 @@ pub fn codex_files() -> Vec<(&'static str, &'static str)> {
 
 /// Files Kimi deploys: manifest + README + the shared Claude command Markdown
 /// (Kimi plugin commands use the same frontmatter/`$ARGUMENTS` format, so the
-/// shared sources ship verbatim) + every skill file. Kimi ships no
-/// agents/rules/hooks in v1.
+/// shared sources ship verbatim) + every skill file. Hooks live inline in
+/// `.kimi-plugin/plugin.json` (`PostToolUse`, `Stop`); Kimi ships no
+/// agents/rules and no separate hooks file.
 pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
     compose(
         &[KIMI_MANIFEST_FILES, CLAUDE_COMMAND_FILES],
@@ -620,6 +627,8 @@ mod tests {
             ("claude", claude_files()),
             ("cursor", cursor_files()),
             ("codex", codex_files()),
+            ("kimi", kimi_files()),
+            ("opencode", opencode_agent_files()),
         ] {
             let deployed = files
                 .iter()

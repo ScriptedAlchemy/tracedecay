@@ -44,6 +44,7 @@ REQUIRED_CLI_FEATURE_MEMBERS = {
 REQUIRED_ROOT_SEMANTIC_MEMBERS = {
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-usecases/semantic-fastembed",
+    "tracedecay-code-index-runtime/semantic-fastembed",
 }
 REQUIRED_SEMANTIC_MEMBERS = {
     "dep:fastembed",
@@ -54,6 +55,13 @@ CODE_INDEX_LOCAL_TIER_MEMBERS = {
     "lite": {"lang-markdown"},
     "medium": set(),
     "full": {"lang-markdown"},
+}
+# Composition-root tiers forward to every crate that actually owns that
+# tier. `medium` still lives only on tracedecay-code-index.
+ROOT_TIER_FORWARDING = {
+    "lite": {"tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"},
+    "medium": {"tracedecay-code-index/medium"},
+    "full": {"tracedecay-code-index/full", "tracedecay-code-index-runtime/full"},
 }
 
 
@@ -163,11 +171,10 @@ def require_language_forwarding(
 def require_tier_forwarding(
     name: str,
     features: dict,
-    dependency: str,
-    local_members: dict[str, set[str]],
+    expected_by_tier: dict[str, set[str]],
 ) -> None:
     for tier in LANGUAGE_TIERS:
-        expected = {f"{dependency}/{tier}", *local_members.get(tier, set())}
+        expected = expected_by_tier[tier]
         members = features.get(tier)
         if (
             not isinstance(members, list)
@@ -278,14 +285,17 @@ def validate(
         language_features,
         "tracedecay-code-extraction",
     )
-    require_tier_forwarding(
-        "root", root_features, "tracedecay-code-index", {}
-    )
+    require_tier_forwarding("root", root_features, ROOT_TIER_FORWARDING)
     require_tier_forwarding(
         "code-index",
         code_index_features,
-        "tracedecay-code-extraction",
-        CODE_INDEX_LOCAL_TIER_MEMBERS,
+        {
+            tier: {
+                f"tracedecay-code-extraction/{tier}",
+                *CODE_INDEX_LOCAL_TIER_MEMBERS.get(tier, set()),
+            }
+            for tier in LANGUAGE_TIERS
+        },
     )
     require_optional_dependencies_wired(
         "tracedecay-code-extraction", extraction_packaged, extraction_features
@@ -329,11 +339,9 @@ def validate(
         )
     for feature, expected in REQUIRED_CLI_FEATURE_MEMBERS.items():
         members = cli_features.get(feature)
-        if (
-            not isinstance(members, list)
-            or len(members) != len(expected)
-            or set(members) != expected
-        ):
+        # Extra crate passthroughs are allowed; the contract is the required
+        # Hotpath/release members, not an exhaustive crate inventory.
+        if not isinstance(members, list) or not expected.issubset(members):
             raise SystemExit(
                 f"distribution acceptance: tracedecay-cli {feature} must enable "
                 + ", ".join(sorted(expected))
@@ -344,17 +352,23 @@ def validate(
 
 
 def main() -> int:
+    repo = Path(__file__).resolve().parent.parent
+    root_manifest = repo / "crates/tracedecay/Cargo.toml"
+    code_index_manifest = repo / "crates/tracedecay-code-index/Cargo.toml"
+    extraction_manifest = repo / "crates/tracedecay-code-extraction/Cargo.toml"
+    semantic_manifest = repo / "crates/tracedecay-semantic/Cargo.toml"
+    cli_manifest = repo / "crates/tracedecay-cli/Cargo.toml"
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root-source", type=Path, required=True)
-    parser.add_argument("--root-packaged", type=Path, required=True)
-    parser.add_argument("--code-index-source", type=Path, required=True)
-    parser.add_argument("--code-index-packaged", type=Path, required=True)
-    parser.add_argument("--extraction-source", type=Path, required=True)
-    parser.add_argument("--extraction-packaged", type=Path, required=True)
-    parser.add_argument("--semantic-source", type=Path, required=True)
-    parser.add_argument("--semantic-packaged", type=Path, required=True)
-    parser.add_argument("--cli-source", type=Path, required=True)
-    parser.add_argument("--cli-packaged", type=Path, required=True)
+    parser.add_argument("--root-source", type=Path, default=root_manifest)
+    parser.add_argument("--root-packaged", type=Path, default=root_manifest)
+    parser.add_argument("--code-index-source", type=Path, default=code_index_manifest)
+    parser.add_argument("--code-index-packaged", type=Path, default=code_index_manifest)
+    parser.add_argument("--extraction-source", type=Path, default=extraction_manifest)
+    parser.add_argument("--extraction-packaged", type=Path, default=extraction_manifest)
+    parser.add_argument("--semantic-source", type=Path, default=semantic_manifest)
+    parser.add_argument("--semantic-packaged", type=Path, default=semantic_manifest)
+    parser.add_argument("--cli-source", type=Path, default=cli_manifest)
+    parser.add_argument("--cli-packaged", type=Path, default=cli_manifest)
     parser.add_argument("--check-extraction-manifest", type=Path)
     parser.add_argument("--cargo-config", type=Path)
     parser.add_argument("--offline", action="store_true")

@@ -34,11 +34,9 @@
 //!
 //! Nothing here is destructive: `incremental_vacuum` only returns already-free
 //! pages to the filesystem and never touches live rows, so this pass has no
-//! dry-run mode to gate -- there is no state it can destroy. It deliberately
-//! does not consult
-//! [`tracedecay_runtime_core::durability`]: branch databases are project graph stores
-//! (durable `memory_*` tables and all), and compaction is safe on them
-//! precisely because it preserves every row.
+//! dry-run mode to gate -- there is no state it can destroy. Branch databases
+//! are project graph stores (durable `memory_*` tables and all); compaction is
+//! safe on them precisely because it preserves every row.
 
 use std::path::{Path, PathBuf};
 

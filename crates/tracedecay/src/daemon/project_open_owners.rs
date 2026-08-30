@@ -1949,7 +1949,7 @@ pub(crate) fn resolved_scope_for_project(
         .map_err(|_| ApplicationContractError::Inconsistent {
             field: "project-open worktree id",
         })?;
-    let reference = crate::branch::current_branch(project_root)
+    let reference = tracedecay_runtime_core::branch::current_branch(project_root)
         .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
     ResolvedScope::new(project_id.clone(), repository_id, worktree_id, reference).map_err(|_| {
         ApplicationContractError::Inconsistent {

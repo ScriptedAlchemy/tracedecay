@@ -33,7 +33,7 @@ TMP_ROOT="${TMPDIR:-/tmp}"
 TMP_ROOT="${TMP_ROOT%/}"
 
 # Default project to index/eval against: the main tracedecay checkout.
-DEFAULT_PROJECT="/home/zack/projects/tracedecay"
+DEFAULT_PROJECT="/fast/projects/tracedecay"
 
 log()  { printf '[hermetic] %s\n' "$*" >&2; }
 die()  { printf '[hermetic] ERROR: %s\n' "$*" >&2; exit 1; }

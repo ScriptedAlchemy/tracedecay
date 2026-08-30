@@ -216,13 +216,13 @@ mod tests {
         )
         .unwrap();
 
-        let config = super::super::load_json_file_strict(&config_path).unwrap();
+        let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert_eq!(config["plugin"], host_written);
         assert!(config.pointer("/mcp/tracedecay").is_some());
 
         super::super::remove_registration_entries(&config_path, true, true, true).unwrap();
 
-        let config = super::super::load_json_file_strict(&config_path).unwrap();
+        let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert_eq!(
             config["plugin"], host_written,
             "uninstall must not disturb the host-recorded plugin registration"
@@ -245,7 +245,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = super::super::load_json_file_strict(&config_path).unwrap();
+        let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert!(
             config.get(HOST_OWNED_PLUGIN_KEY).is_none(),
             "TraceDecay must leave the plugin registration to `opencode plugin`"

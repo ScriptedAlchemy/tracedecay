@@ -1466,3 +1466,14 @@ fn parsed_transcript_structural_ids_are_protected_before_store_writes() {
     assert_eq!(parsed.messages[0].message_id, protected);
     assert_eq!(parsed.messages[0].session_id, protected);
 }
+
+#[test]
+fn jsonl_file_identity_is_stable_for_an_unchanged_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    std::fs::write(&path, "{\"role\":\"user\"}\n").unwrap();
+    let first = jsonl_file_identity(&path).expect("file identity");
+    let second = jsonl_file_identity(&path).expect("file identity");
+    assert_eq!(first, second);
+    assert_ne!(first, 0);
+}

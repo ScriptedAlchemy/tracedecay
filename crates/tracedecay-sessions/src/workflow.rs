@@ -2,7 +2,18 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_runtime_core::serde_util::is_default;
+
+/// `skip_serializing_if` predicate that drops a field when it equals its type's
+/// [`Default`] (e.g. a `0` counter or timestamp), keeping serialized workflow
+/// rows compact and stable.
+///
+/// serde's `skip_serializing_if` requires the `fn(&T) -> bool` shape, so this
+/// takes `&T`; the `trivially_copy_pass_by_ref` lint is expected for `Copy`
+/// scalars and allowed here once for every caller.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
 
 /// Search scope for messages emitted by one workflow run or agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -288,5 +299,39 @@ mod tests {
             WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt),
             WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt)
         ));
+    }
+
+    #[test]
+    fn default_counters_are_omitted_from_serialized_workflow_rows() {
+        let run = super::WorkflowRun {
+            run_id: "run.1".into(),
+            parent_session_id: "session.1".into(),
+            name: None,
+            description: None,
+            phase_json: None,
+            status: WorkflowStatus::Running,
+            started_ts: None,
+            ended_ts: None,
+            result_summary: None,
+            agent_count: 0,
+        };
+        let json = serde_json::to_value(&run).expect("workflow run serializes");
+        assert!(json.get("agent_count").is_none());
+
+        let agent = super::WorkflowAgent {
+            run_id: "run.1".into(),
+            agent_label: "worker".into(),
+            agent_id: "agent.1".into(),
+            phase: None,
+            transcript_path: None,
+            agent_session_id: None,
+            status: WorkflowStatus::Running,
+            model: None,
+            tokens: 0,
+            started_ts: None,
+            ended_ts: None,
+        };
+        let json = serde_json::to_value(&agent).expect("workflow agent serializes");
+        assert!(json.get("tokens").is_none());
     }
 }

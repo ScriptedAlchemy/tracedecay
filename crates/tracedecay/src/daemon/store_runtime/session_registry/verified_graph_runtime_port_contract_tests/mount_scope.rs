@@ -14,8 +14,8 @@ use tracedecay_usecases::memory::{
 
 use super::{ContractFixture, await_mounted_graph_operation, project_id};
 use crate::daemon::profile_identity;
-use crate::store::DatabaseFactStore;
 use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 async fn publish_foreign_memory_owner(
     path: &Path,
@@ -183,8 +183,11 @@ async fn cold_read_only_mount_denies_publication_and_degrades_graph_assist_truth
     let project_id = project_id("cold-read-only");
     let project_root = temporary.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
-        .expect("project enrollment");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
     let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,

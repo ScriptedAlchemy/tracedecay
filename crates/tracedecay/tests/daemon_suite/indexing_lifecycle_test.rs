@@ -585,8 +585,9 @@ async fn wait_for_refreshing_old_generation(
 }
 
 fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGenerationV1 {
-    let layout = tracedecay::storage::resolve_layout(project, &home.join(".tracedecay"))
-        .expect("profile-sharded project layout");
+    let layout =
+        tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay"))
+            .expect("profile-sharded project layout");
     let scope = scoped_code_index_store_root(&layout.data_root.join("code-index-v1"), project);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &fs::read(scope.join("active-code-generation-v1.json"))
@@ -806,7 +807,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |command| {
         command.env(
             "RUST_LOG",
-            "tracedecay::daemon::code_index_scheduler::registry=debug",
+            "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
         );
     });
     let project_id = initialize_tracedecay(environment.home(), &project);
@@ -1010,7 +1011,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     daemon = spawn_tracedecay_daemon_with(environment.home(), |command| {
         command.env(
             "RUST_LOG",
-            "tracedecay::daemon::code_index_scheduler::registry=debug",
+            "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
         );
     });
     let restarted = wait_for_terminal_generation(

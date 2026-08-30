@@ -591,9 +591,9 @@ pub fn unique_mounted_for_scope<'a>(
 /// `Option<String>` — matched by name rather than by position.
 fn dashboard_freshness_identity(
     latest: Option<&LatestCompleteCodeIndexV1>,
-) -> crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
     let mut identity =
-        crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1::default();
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1::default();
     if let Some(latest) = latest {
         let generation = &latest.generation;
         let snapshot = generation.snapshot();
@@ -620,9 +620,9 @@ fn dashboard_freshness_identity(
 
 fn dashboard_text_freshness_identity(
     latest: Option<&LatestCodeTextGenerationV1>,
-) -> crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
     let mut identity =
-        crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1::default();
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1::default();
     if let Some(latest) = latest {
         let metadata = latest.metadata();
         let snapshot = metadata.snapshot();
@@ -4175,7 +4175,8 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn dashboard_freshness(
         &self,
         project_root: &Path,
-    ) -> Option<crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
+    ) -> Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1>
+    {
         let canonical_root = project_root.canonicalize().ok()?;
         let (
             scheduler,
@@ -4249,7 +4250,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         0 => None,
                         micros => Some(micros),
                     };
-                    return crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                    return tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
                         last_reconcile_micros,
                         staleness_state: Some(
@@ -4316,7 +4317,7 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 dashboard_text_freshness_identity(text.as_ref())
             };
-            crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
                 staleness_state: Some(staleness_state.to_owned()),

@@ -201,9 +201,9 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
             }));
         }
         run_session(
-            session
-                .as_mut()
-                .unwrap_or_else(|| panic!("rerank session initialized above")),
+            session.as_mut().ok_or(LocalRerankFailureV1::Unavailable(
+                SanitizedStageFailure::Internal,
+            ))?,
             query,
             &documents,
             inputs,

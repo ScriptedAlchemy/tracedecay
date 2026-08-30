@@ -751,12 +751,18 @@ pub struct LcmSummaryRequest {
     pub extraction_request: Option<LcmExtractionRequest>,
 }
 
+/// Grafeo relation-projection outcome for one compression journey.
+///
+/// Persist creates summaries as `Pending`. The guarded commit applies the
+/// projection in the same journey and settles the receipt as `Applied`.
+/// `NotApplicable` means no summary nodes were created.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LcmRelationProjectionStatus {
     #[default]
     NotApplicable,
     Pending,
+    Applied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

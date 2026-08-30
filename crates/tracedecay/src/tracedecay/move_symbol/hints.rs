@@ -3,7 +3,7 @@
 //! and a heuristic warning when moving a symbol risks forming a two-way
 //! module dependency with the destination.
 
-use crate::types::MoveHint;
+use tracedecay_application::source_edit::MoveHint;
 
 use super::use_parsing::parse_use_statements;
 

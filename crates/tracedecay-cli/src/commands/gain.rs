@@ -113,7 +113,7 @@ fn handle_gain_inner(
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&arr)?);
             } else {
-                tracedecay::display::print_gain_history(&rows, estimate_dollars_saved);
+                crate::display::print_gain_history(&rows, estimate_dollars_saved);
             }
             return Ok(());
         }
@@ -133,7 +133,7 @@ fn handle_gain_inner(
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
         } else {
-            tracedecay::display::print_gain_total(
+            crate::display::print_gain_total(
                 project_filter.as_deref().unwrap_or("ALL projects"),
                 range,
                 saved_tokens,

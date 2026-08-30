@@ -567,7 +567,7 @@ fn implicit_discovery_never_selects_the_user_profile_root() {
 #[tokio::test]
 async fn discover_project_root_with_identity_does_not_open_registry_only_store() {
     let _profile = super::PinnedUserDataDir::new();
-    let profile_root = crate::storage::default_profile_root().unwrap();
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
 
     let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
@@ -593,12 +593,12 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     .await
     .unwrap();
 
-    let layout = crate::storage::profile_sharded_layout(
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         &project_root,
         &profile_root,
-        &crate::storage::EnrollmentMarker {
+        &tracedecay_runtime_core::storage::EnrollmentMarker {
             project_id: project_id.to_string(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
         },
     )
     .unwrap();
@@ -645,7 +645,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
 #[tokio::test]
 async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
     let _profile = super::PinnedUserDataDir::new();
-    let profile_root = crate::storage::default_profile_root().unwrap();
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
@@ -682,12 +682,12 @@ async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
     })
     .await
     .unwrap();
-    let identity_layout = crate::storage::profile_sharded_layout(
+    let identity_layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         &project_root,
         &profile_root,
-        &crate::storage::EnrollmentMarker {
+        &tracedecay_runtime_core::storage::EnrollmentMarker {
             project_id: project_id.to_string(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
         },
     )
     .unwrap();
@@ -716,7 +716,7 @@ async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
 #[tokio::test]
 async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_parent_store() {
     let _profile = super::PinnedUserDataDir::new();
-    let profile_root = crate::storage::default_profile_root().unwrap();
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
@@ -739,12 +739,12 @@ async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_pare
     })
     .await
     .unwrap();
-    let layout = crate::storage::profile_sharded_layout(
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         &parent_root,
         &profile_root,
-        &crate::storage::EnrollmentMarker {
+        &tracedecay_runtime_core::storage::EnrollmentMarker {
             project_id: project_id.to_string(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
         },
     )
     .unwrap();
@@ -1249,13 +1249,17 @@ mod runtime_configuration_cutover {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("project.configuration-runtime-drift");
-        crate::storage::pin_fixture_repository_identity(root.path(), project_id.as_str())
-            .expect("write enrollment marker");
-        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
-            .expect("resolve store layout");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root.path(),
+            project_id.as_str(),
+        )
+        .expect("write enrollment marker");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
+                .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         let host_runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             root.path(),
             project_id.clone(),
         )
@@ -1326,13 +1330,14 @@ mod runtime_configuration_cutover {
     async fn ensure_runtime_configuration_persists_initial_resolution_when_cache_is_empty() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
-        crate::storage::pin_fixture_repository_identity(
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
             root.path(),
             "proj_ensure_runtime_bootstrap",
         )
         .expect("write enrollment marker");
-        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
-            .expect("resolve store layout");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
+                .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         // Write the opposite of the typed registry default so the stale input
         // stays distinguishable from the canonical resolution regardless of
@@ -1350,7 +1355,7 @@ mod runtime_configuration_cutover {
         );
 
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             root.path(),
             project_id("proj_ensure_runtime_bootstrap"),
         )
@@ -1403,13 +1408,17 @@ mod runtime_configuration_cutover {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("proj_configuration_native_graph_default_upgrade");
-        crate::storage::pin_fixture_repository_identity(root.path(), project_id.as_str())
-            .expect("write enrollment marker");
-        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
-            .expect("resolve store layout");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root.path(),
+            project_id.as_str(),
+        )
+        .expect("write enrollment marker");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
+                .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             root.path(),
             project_id,
         )
@@ -1509,13 +1518,17 @@ mod runtime_configuration_cutover {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("proj_runtime_binding_required");
-        crate::storage::pin_fixture_repository_identity(root.path(), project_id.as_str())
-            .expect("write enrollment marker");
-        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
-            .expect("resolve store layout");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root.path(),
+            project_id.as_str(),
+        )
+        .expect("write enrollment marker");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
+                .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             root.path(),
             project_id,
         )
@@ -1591,13 +1604,16 @@ mod runtime_configuration_cutover {
         );
 
         let project_id = project_id("proj_runtime_linked_binding");
-        crate::storage::pin_fixture_repository_identity(&primary, project_id.as_str())
-            .expect("write enrollment marker");
-        let layout = crate::storage::resolve_layout_for_current_profile(&primary)
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &primary,
+            project_id.as_str(),
+        )
+        .expect("write enrollment marker");
+        let layout = tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&primary)
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             &primary,
             project_id.clone(),
         )
@@ -1651,13 +1667,17 @@ mod runtime_configuration_cutover {
         let renamed = root.path().join("checkout-renamed");
         std::fs::create_dir_all(&original).expect("create original checkout");
         let project_id = project_id("proj_runtime_rebind_rename");
-        crate::storage::pin_fixture_repository_identity(&original, project_id.as_str())
-            .expect("write enrollment marker");
-        let layout = crate::storage::resolve_layout_for_current_profile(&original)
-            .expect("resolve store layout");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &original,
+            project_id.as_str(),
+        )
+        .expect("write enrollment marker");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&original)
+                .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             &original,
             project_id.clone(),
         )
@@ -1704,13 +1724,17 @@ mod runtime_configuration_cutover {
         std::fs::create_dir_all(&elsewhere).expect("create foreign locator root");
         let other_project = project_id("proj_runtime_rebind_other");
         let project_id = project_id("proj_runtime_rebind_denied");
-        crate::storage::pin_fixture_repository_identity(&checkout, project_id.as_str())
-            .expect("write enrollment marker");
-        let layout = crate::storage::resolve_layout_for_current_profile(&checkout)
-            .expect("resolve store layout");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &checkout,
+            project_id.as_str(),
+        )
+        .expect("write enrollment marker");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&checkout)
+                .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             &checkout,
             project_id.clone(),
         )
@@ -1784,10 +1808,14 @@ mod runtime_configuration_cutover {
     async fn resolve_runtime_configuration_pins_registered_project_when_cache_is_cold() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
-        crate::storage::pin_fixture_repository_identity(root.path(), "proj_resolve_cold_cache")
-            .expect("write enrollment marker");
-        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
-            .expect("resolve store layout");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root.path(),
+            "proj_resolve_cold_cache",
+        )
+        .expect("write enrollment marker");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
+                .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
 
         // A freshly registered project has no pinned snapshot in this process's
@@ -1802,7 +1830,7 @@ mod runtime_configuration_cutover {
         // The daemon authority path resolves and pins on demand instead of
         // erroring, so branch administration and other daemon operations run.
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             root.path(),
             project_id("proj_resolve_cold_cache"),
         )
@@ -1834,14 +1862,18 @@ mod runtime_configuration_cutover {
     async fn resolve_runtime_configuration_errors_typed_when_authority_is_unresolvable() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
-        crate::storage::pin_fixture_repository_identity(root.path(), "proj_resolve_unresolvable")
-            .expect("write enrollment marker");
-        let mut layout = crate::storage::resolve_layout_for_current_profile(root.path())
-            .expect("resolve store layout");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root.path(),
+            "proj_resolve_unresolvable",
+        )
+        .expect("write enrollment marker");
+        let mut layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
+                .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
 
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             root.path(),
             project_id("proj_resolve_unresolvable"),
         )
@@ -1869,13 +1901,14 @@ mod runtime_configuration_cutover {
     async fn read_only_open_rejects_an_uninitialized_store_without_fabricated_defaults() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
-        crate::storage::pin_fixture_repository_identity(
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
             root.path(),
             "proj_read_only_uninitialized",
         )
         .expect("write enrollment marker");
-        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
-            .expect("resolve store layout");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
+                .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         if let Some(parent) = layout.sessions_db_path.parent() {
             std::fs::create_dir_all(parent).expect("create sessions db parent");
@@ -1886,7 +1919,7 @@ mod runtime_configuration_cutover {
         // left in after a repository move, when its configuration authority was
         // never migrated in.
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().unwrap(),
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
             root.path(),
             project_id("proj_read_only_uninitialized"),
         )

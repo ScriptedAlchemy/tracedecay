@@ -37,7 +37,7 @@ impl SessionTemporalRefreshTestAuthority {
     fn project<'a>(
         &'a self,
         projector: &'a dyn projector::SessionTemporalRefreshProjector,
-        recovery: crate::store::SessionRefreshRecoveryV1,
+        recovery: tracedecay_session_temporal_store::SessionRefreshRecoveryV1,
     ) -> projector::SessionTemporalRefreshProjectionFuture<'a> {
         projector.project(&self.database, recovery)
     }

@@ -3084,7 +3084,7 @@ pub enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         profile_digest: ManifestDigest,
         report_digest: ManifestDigest,
-        report: tracedecay_search_eval::DirectEvaluationReportV1,
+        report: serde_json::Value,
         source_generation: tracedecay_domain::CodeGenerationId,
         snapshot_digest: ManifestDigest,
     },

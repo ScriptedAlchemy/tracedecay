@@ -69,7 +69,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.work.core-invocation").expect("project id");
     let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
-        crate::storage::default_profile_root().expect("profile root"),
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         project.path(),
         project_id.clone(),
     )
@@ -490,7 +490,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.work.task-activity").expect("project id");
     let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
-        crate::storage::default_profile_root().expect("profile root"),
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         project.path(),
         project_id.clone(),
     )

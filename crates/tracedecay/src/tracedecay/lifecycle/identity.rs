@@ -3,9 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::storage::{self, StoreLayout};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_store::ProjectId;
 
 use super::{MovedStoreAdoption, TraceDecay, TraceDecayOpenOptions};
@@ -295,9 +295,11 @@ impl TraceDecay {
     ) -> bool {
         let option_resolved_store_exists = open_options
             .resolved_profile_root()
-            .and_then(|profile_root| crate::storage::resolve_layout(project_root, &profile_root))
+            .and_then(|profile_root| {
+                tracedecay_runtime_core::storage::resolve_layout(project_root, &profile_root)
+            })
             .is_ok_and(|layout| {
-                layout.storage_mode == crate::storage::StorageMode::ProfileSharded
+                layout.storage_mode == tracedecay_runtime_core::storage::StorageMode::ProfileSharded
                     && layout.graph_db_path.exists()
             });
         if open_options.profile_root.is_some() || open_options.global_db_path.is_some() {
@@ -305,7 +307,7 @@ impl TraceDecay {
         }
         option_resolved_store_exists
             || crate::config::has_project_database(project_root)
-            || crate::storage::has_repository_identity_marker(project_root)
+            || tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
     }
 
     pub async fn has_initialized_store(project_root: &Path) -> bool {

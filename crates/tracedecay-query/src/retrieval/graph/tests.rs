@@ -172,7 +172,7 @@ fn graph_pair(
         evidence_role: EvidenceRole::Primary,
         retriever: RetrieverKind::Graph,
         retriever_revision: id("retriever.graph.v1"),
-        score_domain: id("score.graph.v1"),
+        score_domain: id(crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1),
         raw_score: FixedPointScore(score_micros),
         ordinal_rank: 0,
         exact_admission_proof: None,

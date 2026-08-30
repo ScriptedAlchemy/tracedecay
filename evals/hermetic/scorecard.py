@@ -12,8 +12,8 @@ an agent actually reach for the fact store when it has the opportunity to?**
 
 The corpus tags fact-store scenarios with a category of ``factstore-<bucket>``:
 
-    factstore-write     -> the agent should call ``tracedecay_fact_store``
-    factstore-recall    -> the agent should recall a durable fact
+    factstore-write     -> the agent should call ``tracedecay_fact_store_add``
+    factstore-recall    -> the agent should call ``tracedecay_fact_store_search``
     factstore-feedback  -> the agent should call ``tracedecay_fact_feedback``
 
 For each bucket we report:

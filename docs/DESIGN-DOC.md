@@ -1,5 +1,7 @@
 # TraceDecay Design Document
 
+This document is a historical snapshot of the pre-crate-split design, not current
+layout or ownership authority (`AGENTS.md` and the V2 plan set are).
 TraceDecay is a code intelligence tool that builds semantic knowledge graphs from source code.
 It parses source files with tree-sitter, extracts symbols and relationships into
 `tracedecay-graph-db` (Grafeo), and exposes the graph through a CLI, MCP, LSP, and an

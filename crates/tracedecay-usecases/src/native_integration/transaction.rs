@@ -668,7 +668,7 @@ fn map_store_error(error: NativeIntegrationStoreError) -> NativeIntegrationPortE
         NativeIntegrationStoreError::RepositoryQuarantined => {
             NativeIntegrationPortError::NeedsInspection
         }
-        NativeIntegrationStoreError::Unavailable => NativeIntegrationPortError::Unavailable,
+        NativeIntegrationStoreError::Unavailable(_) => NativeIntegrationPortError::Unavailable,
         NativeIntegrationStoreError::ResetRequired => NativeIntegrationPortError::ResetRequired,
         NativeIntegrationStoreError::DurabilityUncertain => {
             NativeIntegrationPortError::DurabilityUncertain

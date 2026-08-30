@@ -34,6 +34,7 @@ pub struct SemanticGenerationPointerV1 {
 #[serde(rename_all = "snake_case")]
 pub enum SemanticRuntimeScheduleFailureV1 {
     Artifact,
+    ArtifactDetail(String),
     Runtime,
     Projection,
     ProjectionDetail(String),
@@ -44,6 +45,10 @@ pub enum SemanticRuntimeScheduleFailureV1 {
 }
 
 impl SemanticRuntimeScheduleFailureV1 {
+    pub fn artifact(error: impl fmt::Display) -> Self {
+        Self::ArtifactDetail(error.to_string())
+    }
+
     pub fn projection(error: impl fmt::Display) -> Self {
         Self::ProjectionDetail(error.to_string())
     }
@@ -65,6 +70,7 @@ impl fmt::Display for SemanticRuntimeScheduleFailureV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Artifact => write!(f, "Artifact"),
+            Self::ArtifactDetail(detail) => write!(f, "Artifact: {detail}"),
             Self::Runtime => write!(f, "Runtime"),
             Self::Projection => write!(f, "Projection"),
             Self::ProjectionDetail(detail) => write!(f, "Projection: {detail}"),

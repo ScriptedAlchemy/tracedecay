@@ -17,13 +17,13 @@ use tracedecay_store::{
 };
 use tracedecay_usecases::memory::memory_application_error;
 
-use crate::context::{
+use crate::tracedecay::TraceDecay;
+use tracedecay_mcp::context_headings::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
     CONTEXT_INDEX_COVERAGE_HINT_HEADING, CONTEXT_MEMORY_FEEDBACK_HINT,
     CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
     CONTEXT_TEST_COVERAGE_HEADING,
 };
-use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 
