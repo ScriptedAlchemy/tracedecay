@@ -28,6 +28,14 @@ fn deadline_after(duration: Duration) -> Deadline {
     Deadline::new(UtcMicros(now.0.saturating_add(delta))).expect("deadline")
 }
 
+/// Worst-case join: `invoke_controlled` may sleep the full remaining
+/// deadline before it starts the authoritative response grace. The test
+/// timeout must cover both, or a paused-clock auto-advance that fires the
+/// deadline first looks like an unbounded hang.
+fn authoritative_join_bound(deadline: Duration) -> Duration {
+    deadline + crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1)
+}
+
 fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationRequest {
     let observed_at = now_micros();
     DaemonInvocationRequest::feedback(
@@ -564,12 +572,12 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
     });
     let deadline = deadline_after(Duration::from_secs(10));
 
-    // The unsettled server never answers, so the join bound must outlive the
-    // full authoritative response grace. The paused clock auto-advances that
-    // grace only while every task is idle on loopback I/O that will never
-    // arrive, so the join is virtual instead of a real 30s wait.
+    // The unsettled server never answers, so the join bound must outlive
+    // deadline-remaining plus the authoritative response grace. The paused
+    // clock auto-advances those sleeps only while every task is idle on
+    // loopback I/O that will never arrive, so the join is virtual.
     let response = tokio::time::timeout(
-        crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
+        authoritative_join_bound(Duration::from_secs(10)),
         client.invoke_controlled(
             invocation_request(REQUEST_ID, deadline.clone()),
             deadline,
@@ -600,10 +608,10 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     });
     let deadline = deadline_after(Duration::from_secs(10));
 
-    // The paused clock virtualizes the full response grace; see the
-    // no-settlement test above.
+    // The paused clock virtualizes deadline-remaining plus response grace;
+    // see the no-settlement test above.
     let response = tokio::time::timeout(
-        crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
+        authoritative_join_bound(Duration::from_secs(10)),
         client.invoke_controlled(
             invocation_request(REQUEST_ID, deadline.clone()),
             deadline,
