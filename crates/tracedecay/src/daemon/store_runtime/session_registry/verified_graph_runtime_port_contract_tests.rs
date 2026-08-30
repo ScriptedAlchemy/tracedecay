@@ -94,7 +94,6 @@ impl ContractFixture {
             .expect("project sessions database");
         (project_database, sessions)
     }
-
 }
 
 fn project_id(label: &str) -> ProjectId {
@@ -251,7 +250,9 @@ async fn mount_installs_the_project_graph_binding_and_rebinds_stay_idempotent() 
     ));
 
     assert!(
-        sessions.bind_project_graph_runtime(resolved.clone()).is_ok(),
+        sessions
+            .bind_project_graph_runtime(resolved.clone())
+            .is_ok(),
         "rebinding the resolved route of the bound runtime is idempotent"
     );
     assert!(
