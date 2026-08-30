@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc::{Receiver, Sender, channel},
 };
 use std::time::Duration;
@@ -218,6 +218,79 @@ async fn semantic_schedule_reuses_the_serving_generation_handle() {
         Arc::ptr_eq(&scheduled_generation, &serving_generation),
         "semantic scheduling must share the immutable serving generation instead of deep-cloning it"
     );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_selection() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let lifecycle_ready = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let scheduled_generation = Arc::new(Mutex::new(None));
+    let semantic_hook = {
+        let lifecycle_ready = Arc::clone(&lifecycle_ready);
+        let attempts = Arc::clone(&attempts);
+        let scheduled_generation = Arc::clone(&scheduled_generation);
+        Arc::new(move |generation: Arc<CodeIndexPublishedGenerationV1>| {
+            attempts.fetch_add(1, Ordering::AcqRel);
+            if !lifecycle_ready.load(Ordering::Acquire) {
+                return false;
+            }
+            *scheduled_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(generation);
+            true
+        }) as SavedCodeGenerationScheduleHookV1
+    };
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                Some(semantic_hook),
+            )
+            .await
+            .expect("mount scheduler")
+    );
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let attempts_before_selection = attempts.load(Ordering::Acquire);
+    assert!(
+        attempts_before_selection > 0,
+        "the serving generation must have reached the not-yet-selected lifecycle"
+    );
+
+    lifecycle_ready.store(true, Ordering::Release);
+    assert!(
+        registry
+            .reschedule_semantic_generation(fixture.path())
+            .await,
+        "selection completion must re-offer the already-serving generation"
+    );
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let serving_generation = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .latest_complete()
+        .expect("serving generation")
+        .generation_handle();
+    let scheduled_generation = scheduled_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .expect("lifecycle-ready schedule");
+    assert_eq!(
+        attempts.load(Ordering::Acquire),
+        attempts_before_selection + 1,
+        "selection completion must trigger exactly one bounded retry"
+    );
+    assert!(Arc::ptr_eq(&scheduled_generation, &serving_generation));
     registry.shutdown().await;
 }
 

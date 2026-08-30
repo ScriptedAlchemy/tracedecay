@@ -4387,6 +4387,52 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|latest| latest.generation.manifest().generation_id.clone())
     }
 
+    /// Re-offer the exact serving generation to its installed semantic hook.
+    ///
+    /// Model selection is deliberately background work and can settle after
+    /// text/graph publication first offered this generation. That first offer
+    /// truthfully refuses while the artifact is unavailable; selection
+    /// completion calls this bounded retry so an unchanged repository does
+    /// not need another source reconciliation before vector indexing starts.
+    #[hotpath::measure(
+        label = "daemon.code_index.semantic_generation_reschedule",
+        future = true
+    )]
+    pub async fn reschedule_semantic_generation(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let (scheduler, shutting_down, generation) = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return false;
+            };
+            let generation = worktree
+                .serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(LatestCompleteCodeIndexV1::generation_handle);
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.shutting_down),
+                generation,
+            )
+        };
+        let Some(generation) = generation else {
+            return false;
+        };
+        tokio::task::spawn_blocking(move || {
+            let scheduler =
+                Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down).ok()?;
+            Some(scheduler.schedule_semantic_generation(generation))
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+    }
+
     /// Exact bounded dashboard projection for one mounted worktree.
     ///
     /// This is a status read, not a query-admission boundary: it reports the
