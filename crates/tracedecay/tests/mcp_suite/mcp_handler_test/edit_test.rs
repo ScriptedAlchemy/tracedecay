@@ -264,7 +264,7 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
         "read should serve indexed source behind symlink: {read_payload:?}"
     );
 
-    if !tracedecay::mcp::tools::ast_grep_outline_available() {
+    if !tracedecay_mcp::ast_grep_outline_available() {
         return;
     }
 
@@ -292,7 +292,7 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
 
 #[tokio::test]
 async fn outline_preserves_generation_payload_and_adds_ast_grep_outline_when_available() {
-    if !tracedecay::mcp::tools::ast_grep_outline_available() {
+    if !tracedecay_mcp::ast_grep_outline_available() {
         return;
     }
 
@@ -333,7 +333,7 @@ async fn outline_preserves_generation_payload_and_adds_ast_grep_outline_when_ava
 
 #[tokio::test]
 async fn outline_markdown_uses_context_style_bullets_not_table() {
-    if !tracedecay::mcp::tools::ast_grep_outline_available() {
+    if !tracedecay_mcp::ast_grep_outline_available() {
         return;
     }
 
@@ -364,7 +364,7 @@ async fn outline_markdown_uses_context_style_bullets_not_table() {
 /// through the existing `tracedecay_retrieve` handle cache — not a new tool.
 #[tokio::test]
 async fn outline_markdown_section_carries_preview_handle_and_checklist_state() {
-    if !tracedecay::mcp::tools::ast_grep_outline_available() {
+    if !tracedecay_mcp::ast_grep_outline_available() {
         return;
     }
 
@@ -933,7 +933,7 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
 
 #[tokio::test]
 async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
-    if tracedecay::mcp::tools::ast_grep_available() {
+    if tracedecay_mcp::ast_grep_available() {
         return;
     }
     let dir = test_temp_dir();
@@ -965,7 +965,7 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
 
 #[tokio::test]
 async fn ast_grep_rewrite_uses_current_cli_update_flag() {
-    if !tracedecay::mcp::tools::ast_grep_available() {
+    if !tracedecay_mcp::ast_grep_available() {
         return;
     }
     let dir = test_temp_dir();
@@ -1012,7 +1012,7 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
 /// must explain the likely cause so the caller can act on it.
 #[tokio::test]
 async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
-    if !tracedecay::mcp::tools::ast_grep_available() {
+    if !tracedecay_mcp::ast_grep_available() {
         return;
     }
     let dir = test_temp_dir();

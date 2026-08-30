@@ -41,9 +41,11 @@ pub trait AutomationSessionStore: Send + Sync {
     /// Unix seconds of the most recent session activity, or `None` when the
     /// store holds no timestamped messages.
     ///
-    /// The scheduler uses this to decide whether an automation run has
-    /// anything new to look at, so "no activity" and "read failed" both
-    /// correctly collapse to `None`.
+    /// The scheduler uses this as a gate: no observed activity means nothing
+    /// new to run against. The registered adapter maps a failed read to
+    /// `None` with a logged warning — a store the scheduler cannot read has
+    /// no observable new activity, so automation stays idle instead of
+    /// running against a broken store.
     fn latest_session_activity_secs(&self) -> StoreFuture<'_, Option<i64>>;
 
     /// Opens a read snapshot for a bounded direct query.
@@ -66,7 +68,19 @@ impl AutomationSessionStore for tracedecay_global_db::RegisteredGlobalDb {
     }
 
     fn latest_session_activity_secs(&self) -> StoreFuture<'_, Option<i64>> {
-        Box::pin(self.latest_session_activity_secs())
+        Box::pin(async move {
+            match self.latest_session_activity_secs().await {
+                Ok(latest) => latest,
+                Err(error) => {
+                    tracing::warn!(
+                        database = %self.db_path().display(),
+                        %error,
+                        "session-activity read failed; scheduler observes no new activity"
+                    );
+                    None
+                }
+            }
+        })
     }
 
     fn read_snapshot(&self) -> StoreFuture<'_, Result<DatabaseEngineReadSnapshot, String>> {

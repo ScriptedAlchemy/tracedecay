@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-use crate::mcp::tools::ToolDefinition;
+use tracedecay_mcp::ToolDefinition;
 
 use super::*;
 

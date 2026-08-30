@@ -10,14 +10,14 @@ const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 
 #[hotpath::measure(label = "mcp.server.connection.read", future = true)]
 async fn read_connection_line(
-    transport: &mut impl crate::mcp::transport::McpTransport,
+    transport: &mut impl tracedecay_mcp::transport::McpTransport,
 ) -> std::io::Result<Option<String>> {
     transport.read_line().await
 }
 
 #[hotpath::measure(label = "mcp.server.connection.inflight_read", future = true)]
 async fn read_inflight_connection_line(
-    transport: &mut impl crate::mcp::transport::McpTransport,
+    transport: &mut impl tracedecay_mcp::transport::McpTransport,
 ) -> std::io::Result<Option<String>> {
     transport.read_line().await
 }
@@ -360,7 +360,7 @@ impl McpServer {
     #[hotpath::measure(label = "mcp.server.write", future = true)]
     async fn write_response_line_or_revoke(
         &self,
-        transport: &mut impl crate::mcp::transport::McpTransport,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
         output: &str,
         response_revoked: Option<&tracedecay_usecases::context::CancellationToken>,
     ) -> std::io::Result<bool> {
@@ -389,7 +389,7 @@ impl McpServer {
         request: &JsonRpcRequest,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
-        transport: &mut impl crate::mcp::transport::McpTransport,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
         pending_lines: &mut VecDeque<QueuedRequestLine>,
         pending_cancellations: &mut HashSet<String>,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
@@ -547,7 +547,7 @@ impl McpServer {
         request: &JsonRpcRequest,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
-        transport: &mut impl crate::mcp::transport::McpTransport,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
         pending_lines: &mut VecDeque<QueuedRequestLine>,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
     ) -> Result<(Option<JsonRpcResponse>, bool)> {
@@ -636,7 +636,7 @@ impl McpServer {
     /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
     pub async fn run(
         self: &Arc<Self>,
-        transport: &mut impl crate::mcp::transport::McpTransport,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
     ) -> Result<()> {
         self.run_with_shutdown_policy(transport, true, true, None, None)
             .await
@@ -649,7 +649,7 @@ impl McpServer {
     #[cfg(any(test, feature = "test-transport"))]
     pub async fn run_connection(
         self: &Arc<Self>,
-        transport: &mut impl crate::mcp::transport::McpTransport,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
     ) -> Result<()> {
         self.run_with_shutdown_policy(transport, false, false, None, None)
             .await
@@ -657,7 +657,7 @@ impl McpServer {
 
     pub(crate) async fn run_daemon_connection_with_timings(
         self: &Arc<Self>,
-        transport: &mut impl crate::mcp::transport::McpTransport,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
         timings_enabled: bool,
         lifecycle: &dyn tracedecay_mcp::McpConnectionLifecyclePort,
     ) -> Result<()> {
@@ -674,7 +674,7 @@ impl McpServer {
     #[hotpath::measure(label = "mcp.server.connection", future = true)]
     pub(crate) async fn run_with_shutdown_policy(
         self: &Arc<Self>,
-        transport: &mut impl crate::mcp::transport::McpTransport,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
         shutdown_on_exit: bool,
         listen_for_process_signals: bool,
         timings_override: Option<bool>,
@@ -1010,11 +1010,16 @@ impl McpServer {
                 failures.push(format!("persist tokens saved: {e}"));
             }
 
-            if let Some(ref gdb) = self.accounting_db {
-                gdb.upsert(cg.project_root(), tokens_saved).await;
-                gdb.checkpoint().await;
-            } else if let Some(ref gdb) = self.global_db {
-                gdb.upsert(cg.project_root(), tokens_saved).await;
+            // A failed global-ledger flush joins the shutdown failure report
+            // beside the local persistence failures instead of vanishing.
+            if let Some(gdb) = self.accounting_db.as_ref().or(self.global_db.as_ref()) {
+                if let Err(error) = gdb
+                    .try_upsert_project_tokens(cg.project_root(), tokens_saved)
+                    .await
+                {
+                    tracing::warn!(error = %error, "failed to flush tokens saved to the global ledger during shutdown");
+                    failures.push(format!("flush global ledger tokens saved: {error}"));
+                }
                 gdb.checkpoint().await;
             }
 
@@ -1292,11 +1297,11 @@ mod cancellable_queue_tests {
     use super::*;
 
     struct ObservedTransport {
-        inner: crate::mcp::transport::ChannelTransport,
+        inner: tracedecay_mcp::transport::ChannelTransport,
         reads: Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    impl crate::mcp::transport::McpTransport for ObservedTransport {
+    impl tracedecay_mcp::transport::McpTransport for ObservedTransport {
         async fn read_line(&mut self) -> std::io::Result<Option<String>> {
             let line = self.inner.read_line().await?;
             if line.is_some() {
@@ -1426,16 +1431,17 @@ mod cancellable_queue_tests {
         let resolver_target = Arc::clone(&target);
         let resolver_entered = Arc::clone(&route_entered);
         let resolver_release = Arc::clone(&release_route);
-        let resolver: super::super::RetainedProjectServerResolver = Arc::new(move |_request| {
-            let target = Arc::clone(&resolver_target);
-            let entered = Arc::clone(&resolver_entered);
-            let release = Arc::clone(&resolver_release);
-            Box::pin(async move {
-                entered.notify_one();
-                release.notified().await;
-                Ok(Some(target))
-            })
-        });
+        let resolver: super::super::RetainedProjectServerResolver =
+            super::super::install_retained_project_server_resolver(move |_request| {
+                let target = Arc::clone(&resolver_target);
+                let entered = Arc::clone(&resolver_entered);
+                let release = Arc::clone(&resolver_release);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(Some(target))
+                })
+            });
         let context = super::super::McpServerConstructionContext::direct(
             mounted_active.cg_snapshot().await,
             None,
@@ -1449,7 +1455,7 @@ mod cancellable_queue_tests {
         .with_retained_project_server_resolver(resolver);
         let caller = super::super::McpServer::new_with_context(context).await;
         let (inner_transport, sender, mut responses) =
-            crate::mcp::transport::ChannelTransport::new();
+            tracedecay_mcp::transport::ChannelTransport::new();
         let transport_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut transport = ObservedTransport {
             inner: inner_transport,

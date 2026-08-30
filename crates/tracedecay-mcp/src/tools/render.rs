@@ -6,7 +6,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::context_headings::CONTEXT_PRIORITY_HEADINGS;
-use crate::output_format::{RequestedOutputFormat, requested_output_format};
+use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
 use crate::path_tree::format_compact_path_list;
 use crate::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL, ResponseHandleRecord,

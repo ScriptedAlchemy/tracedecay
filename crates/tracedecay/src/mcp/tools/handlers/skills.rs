@@ -7,7 +7,6 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_automation_runtime::ports::session_store::AutomationSessionStore;
 
-use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::hermes_skill_bridge::{
     HermesSkillBridgeOptions, load_standard_hermes_skill_bridge,
@@ -24,10 +23,11 @@ use tracedecay_automation_runtime::automation::skill_usage::{
     summarize_skill_usage, summarize_skill_usage_for,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_mcp::ToolResult;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::renderers;
 use super::support::{tool_json, tool_json_with_md};
+use tracedecay_mcp::tools::renderers;
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
 const STALE_SKILL_AFTER_SECS: i64 = 60 * 60 * 24 * 90;

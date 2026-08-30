@@ -1,10 +1,13 @@
-//! Portable MCP catalog, rendering, and JSON-RPC transport.
+//! Portable MCP catalog, rendering, JSON-RPC transport, and server-adjacent
+//! protocol helpers.
 //!
 //! This crate owns daemon-free MCP surface: JSON-RPC contracts, concrete
 //! stdio/channel/replay transports, tool definitions, response truncation,
-//! and canonical application-result presentation. Server construction,
-//! connection lifecycle, and handlers that reach daemon internals stay in
-//! the composition root.
+//! canonical application-result presentation, request-deadline decoding,
+//! tool-error classification, hook-event plan decoding, and construction
+//! ports that need MCP-adjacent types. Server construction, connection
+//! lifecycle adapters, and handlers that reach daemon internals stay in the
+//! composition root.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -47,18 +50,22 @@
 
 pub mod application_output;
 mod catalog_error;
+pub mod construction_ports;
 pub mod context_headings;
+pub mod hook_events;
 pub mod host_cli;
 pub mod jsonrpc;
 pub mod lifecycle;
-pub mod output_format;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
+pub mod tool_call_deadline;
+pub mod tool_errors;
 pub mod tools;
 pub mod transport;
 
 pub use catalog_error::McpCatalogError;
+pub use construction_ports::ProfileRetainedLeasePort;
 pub use context_headings::{
     CODE_CONTEXT_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
     CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
@@ -69,8 +76,14 @@ pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpT
 pub use lifecycle::{
     McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity, McpShutdownStatus,
 };
-pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use project_access::registered_project_reader_tool_names;
+pub use tool_call_deadline::{
+    TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, tool_call_deadline_meta,
+};
+pub use tool_errors::{
+    mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
+    structured_hook_error_data, tool_error_response, tool_result_has_semantic_error,
+};
 pub use tools::render::format_relative_time;
 pub use tools::{
     MAX_RESPONSE_CHARS, RESERVED_FLAGS_FOOTER, ToolDefinition, ToolRegistryMode, ToolResult,
@@ -80,5 +93,6 @@ pub use tools::{
     get_maximal_tool_definitions_with_budget, get_tool_definitions,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
     internal_daemon_tool_definition, project_catalog_discovery_scope, render_tool_cli_help,
-    retain_host_available_tool_definitions, short_tool_name, tool_defaults_to_markdown,
+    resolve_property_schema, retain_host_available_tool_definitions, short_tool_name,
+    tool_defaults_to_markdown,
 };

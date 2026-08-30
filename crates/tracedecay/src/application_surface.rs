@@ -76,7 +76,7 @@ use tracedecay_daemon_protocol::{
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
     InvocationControls, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
-pub use tracedecay_mcp::{RequestedOutputFormat, requested_output_format};
+use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
 use tracedecay_usecases::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
     FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,

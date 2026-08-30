@@ -4,27 +4,15 @@
 //! query the code graph interactively. Exposes tools for searching, context
 //! building, call graph traversal, impact analysis, and more.
 
-pub(crate) mod hook_events;
 pub(crate) mod project_route;
-// Phase 2 removes these composition-root re-exports once callers import mcp directly.
-pub use tracedecay_mcp::response_handles;
 pub(crate) mod scope;
 /// MCP server implementation.
 pub mod server;
 mod tool_analytics;
-pub(crate) mod tool_call_deadline;
 
-/// Tool definitions and dispatch.
+/// Tool dispatch and daemon-coupled handlers.
 pub mod tools;
-
-/// JSON-RPC 2.0 transport types.
-/// Phase 2 removes these composition-root re-exports once callers import mcp directly.
-pub use tracedecay_mcp::transport;
 
 pub(crate) use server::DatabaseOwnerReconciler;
 pub use server::McpServer;
-pub use tools::{ToolDefinition, ToolResult, get_tool_definitions, handle_tool_call};
-pub use tracedecay_mcp::transport::{
-    ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport, ReplayTransport,
-    StdioTransport,
-};
+pub use tools::handle_tool_call;

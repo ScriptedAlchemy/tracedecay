@@ -796,11 +796,17 @@ fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
     let crash_sidecar = sidecar_wal_path(&crash_path);
     let debt_segment = newest_wal_segment(&crash_sidecar)
         .expect("the crash image carries staged history in the sidecar WAL");
+    // Earlier checkpoints may exist (the sealed-store build checkpoints g1's
+    // history under `graph-sealed-store`); the debt is that none of them
+    // covers the staged g2 segments.
+    let checkpoint_before = grafeo_storage::wal::WalRecovery::new(&crash_sidecar).checkpoint();
     assert!(
-        grafeo_storage::wal::WalRecovery::new(&crash_sidecar)
-            .checkpoint()
-            .is_none(),
-        "no checkpoint covers the staged history in the crash image"
+        checkpoint_before
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.log_sequence < debt_segment),
+        "no checkpoint covers the staged history in the crash image \
+         (checkpoint {:?} vs newest segment {debt_segment})",
+        checkpoint_before.map(|checkpoint| checkpoint.log_sequence),
     );
     let container_before = std::fs::metadata(&crash_path).unwrap().len();
 
@@ -833,6 +839,83 @@ fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
             &mut authority,
             &context,
             &projection_key,
+        )
+        .unwrap();
+    assert_eq!(
+        recovered.generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+    assert_eq!(marker_of(&recovered, &identity), "g1");
+}
+
+/// A deadline that fires at the durable stage boundary must not make the
+/// retry redo the projection: the staged pages and the finalized commit are
+/// already durable, so the retry reseats them and pays only verification and
+/// lease seating. The boundary variant is its own probe — it fails with
+/// `DeadlineExceeded` exactly when staging (re)applied work — so a retry
+/// through the same boundary succeeding proves nothing was restaged. A retry
+/// that redid the staging would trip the boundary on every attempt and the
+/// publication would never converge.
+#[test]
+fn retry_after_durable_stage_boundary_reseats_without_restaging() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("crash", "boundary-resume");
+
+    let manifest = manifest(identity.clone(), "g1", "g1");
+    let record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:g1",
+        None,
+        'a',
+    );
+
+    // First attempt: staging applies pages and finalizes durably, then the
+    // deadline fires at the stage boundary before verification.
+    let boundary = registered
+        .registry
+        .publish_verified_with_durable_stage_boundary(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(
+        boundary,
+        GraphDbError::DeadlineExceeded,
+        "the first attempt must actually apply the staged generation"
+    );
+
+    // Retry through the same boundary: a resuming retry reseats the durable
+    // generation (`was_applied` is false) and completes; a redoing retry
+    // would return `DeadlineExceeded` again here.
+    let retried = registered
+        .registry
+        .publish_verified_with_durable_stage_boundary(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            None,
+        )
+        .expect("the retry must resume from the durable staged generation");
+    assert_eq!(retried.head.key.generation.as_str(), "g1");
+
+    // The resumed publication serves the generation it staged once.
+    let recovered = registered
+        .registry
+        .recover_verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key.projection,
         )
         .unwrap();
     assert_eq!(

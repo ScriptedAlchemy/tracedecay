@@ -110,15 +110,15 @@ fn add_branch_payload() -> Vec<u8> {
 }
 
 fn add_branch_payload_for(branch: &str) -> Vec<u8> {
-    crate::mcp::hook_events::encode_durable_hook_event_plan(
-        &crate::mcp::hook_events::HookEventPlan::AddBranch(branch.to_string()),
+    tracedecay_mcp::hook_events::encode_durable_hook_event_plan(
+        &tracedecay_mcp::hook_events::HookEventPlan::AddBranch(branch.to_string()),
     )
     .expect("add_branch plan should encode")
 }
 
 fn sync_current_branch_payload(branch: &str) -> Vec<u8> {
-    crate::mcp::hook_events::encode_durable_hook_event_plan(
-        &crate::mcp::hook_events::HookEventPlan::SyncCurrentBranch {
+    tracedecay_mcp::hook_events::encode_durable_hook_event_plan(
+        &tracedecay_mcp::hook_events::HookEventPlan::SyncCurrentBranch {
             branch: branch.to_string(),
             agent: HookAgent::Codex,
         },
@@ -488,8 +488,8 @@ async fn malformed_source_does_not_starve_valid_sibling_source() {
         .unwrap()
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let valid_payload = crate::mcp::hook_events::encode_durable_hook_event_plan(
-        &crate::mcp::hook_events::HookEventPlan::AddBranch("main".to_string()),
+    let valid_payload = tracedecay_mcp::hook_events::encode_durable_hook_event_plan(
+        &tracedecay_mcp::hook_events::HookEventPlan::AddBranch("main".to_string()),
     )
     .unwrap();
     let attempts = Arc::new(Mutex::new(0usize));
@@ -592,8 +592,8 @@ async fn cancelled_canonical_attempt_is_recovered_and_replayed() {
 }
 
 fn add_branch_at_payload(root: PathBuf, branch: &str) -> Vec<u8> {
-    crate::mcp::hook_events::encode_durable_hook_event_plan(
-        &crate::mcp::hook_events::HookEventPlan::AddBranchAt {
+    tracedecay_mcp::hook_events::encode_durable_hook_event_plan(
+        &tracedecay_mcp::hook_events::HookEventPlan::AddBranchAt {
             root,
             branch: branch.to_string(),
             agent: HookAgent::Codex,
