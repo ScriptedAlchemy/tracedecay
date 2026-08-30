@@ -764,6 +764,7 @@ function codeIndexWorktree() {
     staleness_state: 'fresh',
     hook_hint_count: 0,
     coverage: 'complete',
+    parked: null,
   };
 }
 
