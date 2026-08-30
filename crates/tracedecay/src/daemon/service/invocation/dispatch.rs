@@ -1,6 +1,7 @@
 //! The daemon invocation dispatcher: `DaemonInvocationService::invoke`.
 
 use super::*;
+use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// Upper bound for the size of the `DaemonInvocationService::invoke` future.
@@ -576,7 +577,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
-                    crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact,
+                    ApplicationSurfaceOperation::FeedbackImpact,
                     PrimitiveRequest::Impact(request),
                     observed_at,
                     deadline,
@@ -594,7 +595,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
-                    crate::application_surface::ApplicationSurfaceOperation::AffectedTests,
+                    ApplicationSurfaceOperation::AffectedTests,
                     PrimitiveRequest::AffectedFileTests(request),
                     observed_at,
                     deadline,
@@ -612,7 +613,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
-                    crate::application_surface::ApplicationSurfaceOperation::TestResults,
+                    ApplicationSurfaceOperation::TestResults,
                     PrimitiveRequest::RecentTestResults(page),
                     observed_at,
                     deadline,

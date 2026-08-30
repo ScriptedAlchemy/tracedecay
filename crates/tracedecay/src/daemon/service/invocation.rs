@@ -79,14 +79,12 @@ use super::project_runtime::{
     ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1,
     StoreObservabilityMountV1, StoreObservabilityRegistryV1,
 };
-use crate::agents::context_scout_ports::{
+use tracedecay_agent_hosts::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
 };
-use crate::application_surface::{
-    ContextScoutSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
-    GitReadSurfaceRequest,
-};
+use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
+use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 use tracedecay_application::ConfigurationWireRequestV1;

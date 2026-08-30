@@ -252,7 +252,7 @@ pub(super) fn feedback_scope_matches(
     let (Some(project_root), Some(owner)) = (project_root, owner) else {
         return false;
     };
-    crate::daemon::project_open_owners::resolved_scope_for_project(project_root, &owner.project_id)
+    tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &owner.project_id)
         .is_ok_and(|scope| &scope == expected)
 }
 
