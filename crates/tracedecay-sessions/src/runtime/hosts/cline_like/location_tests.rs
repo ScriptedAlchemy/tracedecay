@@ -1,12 +1,15 @@
 use super::*;
-use tracedecay_runtime_core::worktree::{GitRepoIdentity, GitRepoIdentityOutcome};
+use tracedecay_runtime_core::git_discovery::{
+    GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
+};
 
-fn mixed_identity(path: &Path) -> GitRepoIdentityOutcome {
+fn mixed_identity(path: &Path) -> GitRepositoryIdentityOutcome {
     if path == Path::new("/unavailable") {
-        GitRepoIdentityOutcome::Unknown
+        GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
     } else {
-        GitRepoIdentityOutcome::Resolved(GitRepoIdentity {
+        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
             worktree_root: path.to_path_buf(),
+            git_dir: path.join(".git"),
             common_dir: PathBuf::from("/shared/.git"),
         })
     }

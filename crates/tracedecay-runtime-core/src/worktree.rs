@@ -12,8 +12,10 @@
 //! Symbols added or changed only in the worktree are invisible to the agent.
 //! This module detects that "borrowed index" situation so callers can warn.
 //!
-//! Detection is best-effort: when git is unavailable or the path isn't a
-//! repo, it reports "no mismatch" and callers carry on unchanged.
+//! [`detect_worktree_index_mismatch`] is best-effort: [`git_worktree_root`]
+//! still returns `None` when discovery fails, so a borrowed-index warning is
+//! withheld rather than invented. Repository membership for ingest and
+//! layout matching uses [`crate::git_discovery`] so uncertainty stays typed.
 
 use std::path::{Path, PathBuf};
 
@@ -28,106 +30,6 @@ pub struct WorktreeIndexMismatch {
     /// The (different) working tree whose data-dir index is being
     /// served.
     pub index_root: PathBuf,
-}
-
-/// Paired git identity used by hot paths that need both the per-worktree root
-/// and repository-wide common directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitRepoIdentity {
-    pub worktree_root: PathBuf,
-    pub common_dir: PathBuf,
-}
-
-/// Tri-state repository identity used by session ingest.
-///
-/// `Unknown` is reserved for bounded git timeouts. Callers that decide whether
-/// to persist a transcript cursor must retry later rather than treating it as
-/// the definitive absence of a repository.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GitRepoIdentityOutcome {
-    Resolved(GitRepoIdentity),
-    NotFound,
-    Unknown,
-}
-
-/// Resolve both halves of a repository identity with one cheap git subprocess.
-///
-/// In-process discovery can open and scan every pack index in a large
-/// repository. Session ingestion only needs these two paths, which `rev-parse`
-/// returns without opening the object database. If git is unavailable or
-/// rejects the path, one authority discovery preserves the previous fail-open
-/// behavior.
-pub fn git_repo_identity(dir: &Path) -> Option<GitRepoIdentity> {
-    match git_repo_identity_outcome(dir) {
-        GitRepoIdentityOutcome::Resolved(identity) => Some(identity),
-        GitRepoIdentityOutcome::NotFound | GitRepoIdentityOutcome::Unknown => None,
-    }
-}
-
-pub fn git_repo_identity_outcome(dir: &Path) -> GitRepoIdentityOutcome {
-    if !git_may_resolve_repo(dir) {
-        return GitRepoIdentityOutcome::NotFound;
-    }
-    resolve_git_identity_outcome_with(
-        dir,
-        || crate::git::git_capture_at(dir, &["rev-parse", "--show-toplevel", "--git-common-dir"]),
-        || git_repo_identity_from_authority(dir),
-    )
-}
-
-fn resolve_git_identity_outcome_with(
-    dir: &Path,
-    cli_output: impl FnOnce() -> crate::git::GitCaptureAtResult,
-    authority_fallback: impl FnOnce() -> Option<GitRepoIdentity>,
-) -> GitRepoIdentityOutcome {
-    let fallback = || {
-        authority_fallback().map_or(
-            GitRepoIdentityOutcome::NotFound,
-            GitRepoIdentityOutcome::Resolved,
-        )
-    };
-    match cli_output() {
-        crate::git::GitCaptureAtResult::Captured(output) => {
-            git_repo_identity_from_cli_output(dir, &output)
-                .map_or_else(fallback, GitRepoIdentityOutcome::Resolved)
-        }
-        crate::git::GitCaptureAtResult::Failed => fallback(),
-        crate::git::GitCaptureAtResult::TimedOut => GitRepoIdentityOutcome::Unknown,
-    }
-}
-
-fn git_repo_identity_from_cli_output(dir: &Path, output: &str) -> Option<GitRepoIdentity> {
-    let mut lines = output.lines();
-    let worktree_root = PathBuf::from(lines.next()?.trim());
-    let common_dir = PathBuf::from(lines.next()?.trim());
-    if worktree_root.as_os_str().is_empty() || common_dir.as_os_str().is_empty() {
-        return None;
-    }
-    let worktree_root = if worktree_root.is_absolute() {
-        worktree_root
-    } else {
-        dir.join(worktree_root)
-    };
-    let common_dir = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        dir.join(common_dir)
-    };
-    Some(GitRepoIdentity {
-        worktree_root: realpath(&worktree_root)?,
-        common_dir: common_dir.canonicalize().unwrap_or(common_dir),
-    })
-}
-
-fn git_repo_identity_from_authority(dir: &Path) -> Option<GitRepoIdentity> {
-    let repository = crate::git_repository::GitRepositoryAuthority::discover(dir).ok()?;
-    // A discovered bare repository (no workdir) matches `--show-toplevel`
-    // failing: the path has no worktree identity.
-    let worktree_root = repository.worktree_root()?.to_path_buf();
-    Some(GitRepoIdentity {
-        worktree_root,
-        common_dir: repository.common_dir().to_path_buf(),
-    })
 }
 
 /// Absolute, symlink-resolved toplevel of the git working tree that `dir`
@@ -163,6 +65,40 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
         .map(|repository| repository.common_dir().to_path_buf())
 }
 
+/// Derives the primary checkout root for a linked worktree from its git
+/// common directory, or `None` when this checkout already is the primary one
+/// or the repository has a shape whose primary checkout cannot be derived
+/// safely (bare repos, submodule gitlinks).
+///
+/// Canonicalize of `project_root` is best-effort. This helper's contract is
+/// "redirect to the derived primary when that checkout still exists", not a
+/// typed filesystem probe. A failed canonicalize must not return `None`
+/// ("already primary") — that would mint a second store for a linked
+/// worktree whose path could not be resolved. The unresolved path is
+/// compared instead, and `Some(primary)` is still returned when that
+/// directory exists.
+pub fn primary_checkout_root(
+    project_root: &Path,
+    git_common_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let common_dir = git_common_dir?;
+    // Only a plain, non-bare `<repo>/.git` common dir has a parent that is
+    // reliably the checkout root. Bare repos and submodule gitlinks (whose
+    // common dir lives under `.git/modules/...`) are left alone rather than
+    // risk deriving a bogus "primary" and redirecting registration there.
+    if common_dir.file_name().and_then(|name| name.to_str()) != Some(".git") {
+        return None;
+    }
+    let primary_root = common_dir.parent()?;
+    let canonical_project_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    if primary_root == canonical_project_root {
+        return None;
+    }
+    primary_root.is_dir().then(|| primary_root.to_path_buf())
+}
+
 /// The checkout that owns `dir`'s **repository** identity, or `None` when
 /// `dir` already owns it.
 ///
@@ -185,7 +121,7 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
         return None;
     }
     let common_dir = git_common_dir(dir)?;
-    crate::project_registry::primary_checkout_root(&worktree_root, Some(&common_dir))
+    primary_checkout_root(&worktree_root, Some(&common_dir))
 }
 
 pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
@@ -369,86 +305,6 @@ mod tests {
     }
 
     #[test]
-    fn paired_cli_identity_resolves_relative_common_dir_without_discovery() {
-        let tmp = tempdir().unwrap();
-        let worktree = tmp.path().join("worktree");
-        let nested = worktree.join("src/deep");
-        let common_dir = tmp.path().join("main/.git");
-        fs::create_dir_all(&nested).unwrap();
-        fs::create_dir_all(&common_dir).unwrap();
-        let output = format!("{}\n../../../main/.git", worktree.display());
-
-        let outcome = resolve_git_identity_outcome_with(
-            &nested,
-            || crate::git::GitCaptureAtResult::Captured(output),
-            || panic!("valid CLI identity must short-circuit in-process discovery"),
-        );
-        let GitRepoIdentityOutcome::Resolved(identity) = outcome else {
-            panic!("paired CLI identity should resolve");
-        };
-
-        assert_eq!(
-            identity.worktree_root,
-            std::fs::canonicalize(&worktree).unwrap()
-        );
-        assert_eq!(
-            identity.common_dir,
-            std::fs::canonicalize(&common_dir).unwrap()
-        );
-    }
-
-    #[test]
-    fn timed_out_cli_identity_does_not_fallback_to_discovery() {
-        let tmp = tempdir().unwrap();
-        let outcome = resolve_git_identity_outcome_with(
-            tmp.path(),
-            || crate::git::GitCaptureAtResult::TimedOut,
-            || panic!("timed-out CLI identity must not fall through to in-process discovery"),
-        );
-        assert_eq!(outcome, GitRepoIdentityOutcome::Unknown);
-    }
-
-    #[test]
-    fn paired_identity_resolves_nested_linked_worktree() {
-        let tmp = tempdir().unwrap();
-        let main = tmp.path().join("main");
-        fs::create_dir_all(&main).unwrap();
-        run_git(&main, &["init", "--quiet"]);
-        fs::write(main.join("README.md"), "hi").unwrap();
-        run_git(&main, &["add", "."]);
-        run_git(
-            &main,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "--quiet",
-                "-m",
-                "init",
-            ],
-        );
-        let worktree = tmp.path().join("wt");
-        run_git(
-            &main,
-            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
-        );
-        let nested = worktree.join("src/deep");
-        fs::create_dir_all(&nested).unwrap();
-
-        let identity = git_repo_identity(&nested).expect("linked worktree identity");
-        assert_eq!(
-            identity.worktree_root,
-            std::fs::canonicalize(&worktree).unwrap()
-        );
-        assert_eq!(
-            identity.common_dir,
-            std::fs::canonicalize(main.join(".git")).unwrap()
-        );
-    }
-
-    #[test]
     fn flags_mismatch_when_started_from_linked_worktree() {
         // Two real git working trees: a main checkout and a linked
         // worktree. start_path = the linked worktree; index_root = the
@@ -564,6 +420,112 @@ mod tests {
         assert_eq!(
             mismatch.worktree_root,
             std::fs::canonicalize(&worktree).unwrap()
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_does_not_treat_uncanonicalizable_worktree_as_primary() {
+        let tmp = tempdir().unwrap();
+        let primary = tmp.path().join("main");
+        fs::create_dir_all(&primary).unwrap();
+        let primary = fs::canonicalize(&primary).unwrap();
+        let common_dir = primary.join(".git");
+        fs::create_dir_all(&common_dir).unwrap();
+        let missing_worktree = tmp.path().join("deleted-wt");
+
+        assert_eq!(
+            primary_checkout_root(&missing_worktree, Some(&common_dir)),
+            Some(primary),
+            "a worktree path that cannot be canonicalized must still redirect to a live primary"
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_redirects_linked_worktree_to_existing_primary() {
+        let tmp = tempdir().unwrap();
+        let primary = tmp.path().join("main");
+        let worktree = tmp.path().join("main-wt");
+        fs::create_dir_all(&primary).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        // `git_common_dir` always returns a canonicalized path — mirror that
+        // guarantee here rather than a raw join.
+        let primary = fs::canonicalize(&primary).unwrap();
+        let common_dir = primary.join(".git");
+        fs::create_dir_all(&common_dir).unwrap();
+
+        let redirected = primary_checkout_root(&worktree, Some(&common_dir));
+
+        assert_eq!(
+            redirected,
+            Some(primary),
+            "a linked worktree with a live primary checkout must redirect to it"
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_is_none_when_project_root_is_already_primary() {
+        let tmp = tempdir().unwrap();
+        let primary = tmp.path().join("main");
+        fs::create_dir_all(&primary).unwrap();
+        let primary = fs::canonicalize(&primary).unwrap();
+        let common_dir = primary.join(".git");
+        fs::create_dir_all(&common_dir).unwrap();
+
+        assert_eq!(
+            primary_checkout_root(&primary, Some(&common_dir)),
+            None,
+            "the primary checkout must never be redirected to itself"
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_is_none_without_git_common_dir() {
+        let tmp = tempdir().unwrap();
+        let project_root = tmp.path().join("not-a-worktree");
+        fs::create_dir_all(&project_root).unwrap();
+
+        assert_eq!(
+            primary_checkout_root(&project_root, None),
+            None,
+            "non-git projects must register themselves unchanged"
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_keeps_worktree_when_primary_checkout_is_missing() {
+        // The primary checkout no longer exists on disk (deleted, moved off
+        // this machine, ...). A worktree-only project is legitimate and
+        // must keep registering its own root rather than redirecting to a
+        // path that doesn't exist.
+        let tmp = tempdir().unwrap();
+        let missing_primary = tmp.path().join("deleted-main");
+        let worktree = tmp.path().join("main-wt");
+        fs::create_dir_all(&worktree).unwrap();
+        let common_dir = missing_primary.join(".git");
+
+        assert_eq!(
+            primary_checkout_root(&worktree, Some(&common_dir)),
+            None,
+            "a missing primary checkout must not be adopted as canonical_root"
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_ignores_non_dot_git_common_dirs() {
+        // Bare repos and submodule gitlinks resolve `git_common_dir` to a
+        // path that isn't a plain `<repo>/.git`, so the parent directory
+        // isn't reliably a checkout root — leave registration alone rather
+        // than risk deriving a bogus "primary".
+        let tmp = tempdir().unwrap();
+        let worktree = tmp.path().join("checkout");
+        fs::create_dir_all(&worktree).unwrap();
+        let submodule_common_dir = tmp.path().join("main/.git/modules/sub");
+        fs::create_dir_all(&submodule_common_dir).unwrap();
+
+        assert_eq!(
+            primary_checkout_root(&worktree, Some(&submodule_common_dir)),
+            None,
+            "non-`.git` common dirs must not redirect registration"
         );
     }
 

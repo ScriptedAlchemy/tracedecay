@@ -93,7 +93,6 @@ pub mod path_safety;
 pub mod path_scope;
 pub mod privacy;
 mod profiled_lock;
-pub mod project_registry;
 pub mod resident_memory;
 pub mod runtime_identity;
 pub mod sqlite_read_snapshot;
