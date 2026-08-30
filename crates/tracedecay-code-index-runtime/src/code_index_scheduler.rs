@@ -1231,6 +1231,22 @@ impl DaemonCodeIndexPublicationStoreV1 {
         )
     }
 
+    /// Prove that the durable active publication sealed exactly the same
+    /// source content as an already-decoded serving handle, without reading
+    /// or decoding its sealed payload. A convergence or repair republication
+    /// advances the pointer to a successor generation built from unchanged
+    /// bytes; that successor supersedes the seat for publishers without
+    /// staling it for readers.
+    fn active_pointer_covers_snapshot_content(
+        &self,
+        content_identity: &ContentDigest,
+    ) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
+        let Some(pointer) = self.read_publication_pointer()? else {
+            return Ok(false);
+        };
+        Ok(pointer.snapshot_content_identity == content_identity.as_str())
+    }
+
     /// Occupy the active-generation decode barrier exactly as a cold activation
     /// does: the pinned slot is empty and one decode is in flight. Restores both
     /// on drop, so a parked reader is never stranded.
@@ -4207,6 +4223,40 @@ impl Drop for ReconcilePassGuard {
     }
 }
 
+/// Direct evidence that one seated generation was proven current against the
+/// exact source, carried outside the scheduler mutex so verified reads can
+/// re-prove currency while a background reconcile owns the scheduler for its
+/// whole pass. The witness records the git-metadata fingerprint and stat
+/// signature the proving reconcile or probe established, plus the ignored
+/// admissions that signature was computed over; a busy read recomputes both
+/// against the live checkout, so drift after the proof refuses instead of
+/// serving a stale claim.
+#[derive(Clone, Debug)]
+pub(crate) struct ServingSourceWitnessV1 {
+    pub(crate) generation_id: CodeGenerationId,
+    git_fingerprint: identity::GitMetadataFingerprintV1,
+    stat_signature: String,
+    ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+}
+
+impl ServingSourceWitnessV1 {
+    /// Re-run the exact-source fences against the live checkout without the
+    /// scheduler mutex: the git-metadata fingerprint and the stat-level
+    /// signature must both still match what the proving pass established.
+    pub(crate) fn proves_current(&self, project_root: &Path) -> bool {
+        if identity::GitMetadataFingerprintV1::capture(project_root)
+            .differs_from(&self.git_fingerprint)
+        {
+            return false;
+        }
+        freshness_witness::worktree_stat_signature_for(
+            project_root,
+            &self.ignored_source_admissions,
+        )
+        .is_ok_and(|live| live == self.stat_signature)
+    }
+}
+
 pub struct CodeIndexWorktreeSchedulerV1 {
     project_id: ProjectId,
     project_root: PathBuf,
@@ -5823,9 +5873,12 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Admit the already-decoded serving generation under the exact source
-    /// and durable-publication fences. This is intentionally independent of
-    /// the publication decoder cache: the serving slot itself owns the
-    /// decoded generation and its activated graph authority.
+    /// and durable-publication fences. Currency is measured against source
+    /// content, not pointer position: a same-content successor that has
+    /// published but not yet seated does not stale the seat. This is
+    /// intentionally independent of the publication decoder cache: the
+    /// serving slot itself owns the decoded generation and its activated
+    /// graph authority.
     fn serving_generation_ready_for_exact_source(
         &mut self,
         serving: &LatestCompleteCodeIndexV1,
@@ -5833,10 +5886,47 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !self.exact_source_is_ready()? {
             return Ok(false);
         }
-        self.publication
+        if self
+            .publication
             .active_pointer_matches_generation(serving.generation())
             .map_err(CodeIndexProductionErrorV1::Publication)
+            .map_err(CodeIndexSchedulerErrorV1::from)?
+        {
+            return Ok(true);
+        }
+        // The durable pointer names a successor. When that successor sealed
+        // exactly the same source content — a convergence or repair
+        // republication, not an edit — the seat still describes the bytes on
+        // disk: the stat fence above proved the live tree unchanged since the
+        // reconcile that published it. The seat keeps serving through the
+        // successor's O(store) decode and native activation, which on a
+        // production-scale corpus take minutes per generation. A successor
+        // sealed from different content means the seat lags the reconciled
+        // truth and stays refused.
+        self.publication
+            .active_pointer_covers_snapshot_content(&serving.generation().snapshot().content_identity)
+            .map_err(CodeIndexProductionErrorV1::Publication)
             .map_err(Into::into)
+    }
+
+    /// Mint the exact-source currency witness for one generation from the
+    /// freshness state the last completed reconcile proved against gix truth.
+    /// `None` is a typed abstention (nothing was ever proven), never a default:
+    /// a busy verified read holding no witness refuses instead of serving.
+    fn source_currency_witness_for(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Option<ServingSourceWitnessV1> {
+        if !self.verified_against_source {
+            return None;
+        }
+        let stat_signature = self.last_stat_signature.clone()?;
+        Some(ServingSourceWitnessV1 {
+            generation_id: generation_id.clone(),
+            git_fingerprint: self.git_metadata.clone(),
+            stat_signature,
+            ignored_source_admissions: self.ignored_source_admissions.clone(),
+        })
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
