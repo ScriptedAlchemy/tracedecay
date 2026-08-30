@@ -94,14 +94,16 @@ fn test_helper() { assert!(!helper().is_empty()); }
 /// initialized (schema-complete, empty) store from the on-disk template and
 /// opens it. Falls back to the real init when seeding is not possible.
 pub async fn init_project_from_template(project_root: &Path) -> TdResult<TraceDecay> {
+    // Boxed open/init futures: the production graph composition is the
+    // mega-future whose inline layout overflows perf-profile test stacks.
     if let Some(template) = template_root().await
         && let Some(targets) = SeedTargets::from_env()
         && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
-        && let Ok(cg) = TraceDecay::open(project_root).await
+        && let Ok(cg) = Box::pin(TraceDecay::open(project_root)).await
     {
         return Ok(cg);
     }
-    TraceDecay::init(project_root).await
+    Box::pin(TraceDecay::init(project_root)).await
 }
 
 /// Like [`init_project_from_template`] but for callers that pass an explicit
@@ -113,11 +115,11 @@ pub async fn init_project_from_template_with_options(
     if let (Some(template), Some(targets)) =
         (template_root().await, SeedTargets::from_options(&options))
         && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
-        && let Ok(cg) = TraceDecay::open_with_options(project_root, options.clone()).await
+        && let Ok(cg) = Box::pin(TraceDecay::open_with_options(project_root, options.clone())).await
     {
         return Ok(cg);
     }
-    TraceDecay::init_with_options(project_root, options).await
+    Box::pin(TraceDecay::init_with_options(project_root, options)).await
 }
 
 struct SeedTargets {
@@ -274,7 +276,7 @@ async fn build_template(dest: &Path) -> io::Result<()> {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(global_db_path.clone()),
     };
-    let cg = TraceDecay::init_with_options(&project, options)
+    let cg = Box::pin(TraceDecay::init_with_options(&project, options))
         .await
         .map_err(io_other)?;
     let sessions_db_path = cg.store_layout().sessions_db_path.clone();

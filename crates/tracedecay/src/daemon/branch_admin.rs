@@ -599,11 +599,11 @@ impl StoreAdministration {
     pub(super) async fn registered_profile_session_database(
         &self,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
-        self.ensure_account_active().await?;
-        self.session_runtime_registry()
-            .await?
-            .profile_sessions()
-            .await
+        // Boxed per-await: the measured wrapper embeds this body by value, so
+        // an inline registry-mount future here overflows 2MB runtime stacks.
+        Box::pin(self.ensure_account_active()).await?;
+        let registry = Box::pin(self.session_runtime_registry()).await?;
+        Box::pin(registry.profile_sessions()).await
     }
 
     #[hotpath::measure(
@@ -613,7 +613,7 @@ impl StoreAdministration {
     pub(super) async fn registered_profile_database(
         &self,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
-        let database = self.raw_registered_profile_database().await?;
+        let database = Box::pin(self.raw_registered_profile_database()).await?;
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
             .remote_account_deletion_tombstone(profile_id)
@@ -632,15 +632,13 @@ impl StoreAdministration {
     async fn raw_registered_profile_database(
         &self,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
-        self.session_runtime_registry()
-            .await?
-            .profile_database()
-            .await
+        let registry = Box::pin(self.session_runtime_registry()).await?;
+        Box::pin(registry.profile_database()).await
     }
 
     #[hotpath::measure(label = "daemon.branch_admin.ensure_account_active", future = true)]
     pub(super) async fn ensure_account_active(&self) -> Result<()> {
-        let database = self.raw_registered_profile_database().await?;
+        let database = Box::pin(self.raw_registered_profile_database()).await?;
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
             .remote_account_deletion_tombstone(profile_id)
@@ -744,8 +742,8 @@ impl StoreAdministration {
                     }
                 })
             })?;
-        let registry = self.session_runtime_registry().await?;
-        let profile_database = self.registered_profile_database().await?;
+        let registry = Box::pin(self.session_runtime_registry()).await?;
+        let profile_database = Box::pin(self.registered_profile_database()).await?;
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if profile_database
             .remote_deletion_tombstone_for_project(profile_id, project_id.as_str())
@@ -764,16 +762,14 @@ impl StoreAdministration {
         if let Some(database) = registry.mounted_project_sessions(&project_id).await {
             return Ok(database);
         }
-        let enrollment_roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
+        let enrollment_roots = Box::pin(crate::tracedecay::TraceDecay::registered_enrollment_roots(
             project_root,
             store_layout,
             &project_id,
             profile_database.as_ref(),
-        )
+        ))
         .await?;
-        registry
-            .project_sessions(project_id, enrollment_roots)
-            .await
+        Box::pin(registry.project_sessions(project_id, enrollment_roots)).await
     }
 
     #[cfg(test)]

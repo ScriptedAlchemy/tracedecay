@@ -668,7 +668,7 @@ async fn socket_client_requires_user_storage_scope_without_project() {
         enter_test_daemon_database_scope(&client_identity.profile_root, "projectless-socket-test");
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
 
     let (reader, mut writer) = client.into_split();
     let handshake = DaemonHandshake {
@@ -751,7 +751,7 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     std::fs::create_dir_all(&unregistered_project).expect("unregistered project directory");
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
 
     let (reader, mut writer) = client.into_split();
     let handshake = DaemonHandshake {
@@ -825,7 +825,7 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
         "closed-invocation-socket-test",
     );
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
 
     let (reader, mut writer) = client.into_split();
     let handshake = DaemonHandshake {
@@ -959,7 +959,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let engine_for_test = engine.clone();
-    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
     let (reader, mut writer) = client.into_split();
     writer
         .write_all(handshake.to_line().expect("handshake").as_bytes())
@@ -1226,7 +1226,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
         let lifecycle = DaemonLifecycle::default();
-        super::super::serve_windows_broker_client(
+        Box::pin(super::super::serve_windows_broker_client(
             stream,
             TOKEN,
             &lifecycle,
@@ -1235,7 +1235,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
                 super::super::ProjectOpenGates::default(),
             )),
             None,
-        )
+        ))
         .await
     });
 
