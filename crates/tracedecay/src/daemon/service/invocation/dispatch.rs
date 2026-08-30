@@ -274,6 +274,17 @@ impl DaemonInvocationService {
             return *response;
         }
         if request.requires_project() && !project_runtime_admitted {
+            // The wire problem stays deliberately non-diagnostic; the cause
+            // must still land in the operator journal, because from the
+            // client this refusal is indistinguishable from every other
+            // `Unavailable`.
+            tracing::warn!(
+                operation = ?operation,
+                project_root = ?project_root,
+                "invocation refused at the front door: the project runtime is \
+                 not admitted (project graph runtime unavailable or its \
+                 activation is pending)"
+            );
             observe_front_door_denial(DaemonInvocationProblem::Unavailable);
             return DaemonInvocationResponse::problem(
                 request_id,
