@@ -4670,26 +4670,20 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<ResidentMemoryReservationV1, CodeIndexSchedulerErrorV1> {
         self.ensure_worker_plan()?;
         let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
-        let planned_bytes =
-            tracedecay_code_index::parallelism::worker_reservation_bytes(planned_workers);
         let snapshot = self.resident_memory.snapshot();
         let remaining = snapshot.limit_bytes.saturating_sub(snapshot.used_bytes);
         // The process-global worker plan may have been installed against a
-        // larger authority (standalone seed, or a host-RAM plan). This
-        // scheduler's resident authority can already hold the seated text
-        // owner. Asking for the full planned slab then refuses a graph-off
-        // rebuild that still has gigabytes free. Cap to whole workers that
-        // fit; a remainder smaller than one worker still requests one so
+        // larger authority (standalone seed using detected host RAM). This
+        // scheduler's remaining bytes are a different authority: the 6 GiB
+        // default still has to leave the typed non-worker headroom that
+        // `memory_safe_worker_count` already models. Capping to
+        // `remaining / 128MiB` spends that headroom as extra workers, so a
+        // later 31-byte snapshot charge sees used==limit. A remainder that
+        // cannot admit one memory-safe worker still requests one so
         // admission produces the canonical denial.
-        let affordable_workers = usize::try_from(
-            remaining / tracedecay_code_index::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-        )
-        .unwrap_or(0);
-        let workers = if planned_bytes <= remaining {
-            planned_workers
-        } else {
-            affordable_workers
-        };
+        let affordable_workers =
+            tracedecay_code_index::parallelism::memory_safe_worker_count(remaining);
+        let workers = planned_workers.min(affordable_workers);
         let requested_bytes = NonZeroU64::new(
             tracedecay_code_index::parallelism::worker_reservation_bytes(workers.max(1)),
         )
