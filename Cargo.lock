@@ -6021,11 +6021,14 @@ dependencies = [
 name = "tracedecay-application"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "gix",
+ "hex",
  "hotpath",
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.19",
  "tokio",
  "tracedecay-domain",
@@ -6277,7 +6280,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-domain",
@@ -6286,7 +6288,6 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-sessions",
  "tracedecay-tool-catalog",
- "tracedecay-usecases",
 ]
 
 [[package]]

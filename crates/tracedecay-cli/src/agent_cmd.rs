@@ -307,8 +307,8 @@ fn apply_host_bundle_artifact_action_at(
             message: "artifact backup/restore requires exactly one canonical component".to_string(),
         });
     };
-    let operation_id = tracedecay_usecases::request_identity::mint_global_operation_id(
-        tracedecay_usecases::request_identity::GlobalOperationIdentityKind::HostArtifact,
+    let operation_id = tracedecay_application::request_identity::mint_global_operation_id(
+        tracedecay_application::request_identity::GlobalOperationIdentityKind::HostArtifact,
     )
     .map_err(
         |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -411,8 +411,8 @@ fn component_set_request(
 ) -> tracedecay_runtime_core::errors::Result<
     tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
 > {
-    let operation_id = tracedecay_usecases::request_identity::mint_global_operation_id(
-        tracedecay_usecases::request_identity::GlobalOperationIdentityKind::HostComponentSet,
+    let operation_id = tracedecay_application::request_identity::mint_global_operation_id(
+        tracedecay_application::request_identity::GlobalOperationIdentityKind::HostComponentSet,
     )
     .map_err(
         |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -1160,8 +1160,8 @@ fn feedback_request(
 ) -> tracedecay_runtime_core::errors::Result<
     tracedecay::agents::host_bundle_v2::HostBundleExecutionRequestV1,
 > {
-    let operation_id = tracedecay_usecases::request_identity::mint_global_operation_id(
-        tracedecay_usecases::request_identity::GlobalOperationIdentityKind::HostFeedbackRollback,
+    let operation_id = tracedecay_application::request_identity::mint_global_operation_id(
+        tracedecay_application::request_identity::GlobalOperationIdentityKind::HostFeedbackRollback,
     )
     .map_err(
         |error| tracedecay_runtime_core::errors::TraceDecayError::Config {

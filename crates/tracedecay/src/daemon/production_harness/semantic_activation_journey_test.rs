@@ -237,8 +237,8 @@ pub(super) async fn evaluate_native_profile(
     // vector generation is a `sha256:<hex>` digest, which cannot be embedded
     // in a daemon request token; doing so truthfully fails at request
     // validation before the evaluator is reached.
-    let request_id = tracedecay_usecases::request_identity::mint_global_request_id(
-        tracedecay_usecases::request_identity::GlobalRequestSurface::SemanticEvaluation,
+    let request_id = tracedecay_application::request_identity::mint_global_request_id(
+        tracedecay_application::request_identity::GlobalRequestSurface::SemanticEvaluation,
     )
     .expect("mint a production semantic-evaluation request id");
     let response = resources

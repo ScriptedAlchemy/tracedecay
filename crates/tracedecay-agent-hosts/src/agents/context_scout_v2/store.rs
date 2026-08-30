@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
 use super::{
-    ContextScoutAddressV1, ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimOutcomeV1,
-    ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
+    ContextScoutAddressExt, ContextScoutAddressV1, ContextScoutDeliveryReceiptV1,
+    ContextScoutDurableClaimOutcomeV1, ContextScoutDurableClaimV1,
+    ContextScoutDurableQueueEntryExt, ContextScoutDurableQueueEntryV1,
     ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1,
-    ContextScoutDurableStoreV1, ContextScoutFeedbackV1, ContextScoutLeaseV1,
+    ContextScoutDurableStoreV1, ContextScoutFeedbackV1, ContextScoutLeaseExt, ContextScoutLeaseV1,
     ContextScoutRecentDeliveryV1, ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1,
     ContextScoutStoreFuture, ContextScoutWorkV1, MAX_SCOUT_ACTIVE_ADDRESSES,
     MAX_SCOUT_RECENT_DELIVERIES, validate_context_scout_delivery_receipt,

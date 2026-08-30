@@ -61,7 +61,7 @@ use crate::advisory::{
 };
 use crate::config::analyzer::{configured_language_selection, resolved_analyzer_settings};
 use crate::configuration::ConfigurationCurrentStateV1;
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
