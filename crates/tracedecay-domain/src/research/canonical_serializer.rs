@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::ops::Range;
 
 use serde::Serialize;
@@ -8,15 +9,76 @@ use super::canonical_sink::{CanonicalSink, write_f64, write_i64, write_json_stri
 use super::canonical_value::write_canonical;
 use super::error::DomainError;
 
+type ObjectEntries = Vec<(Cow<'static, str>, Range<usize>)>;
+
+/// One object's entry buffer may keep this much rendered-value capacity when
+/// it returns to the pool. Canonical chunk/manifest objects render well below
+/// this; a corpus-scale object (a legacy whole-generation digest renders the
+/// entire document into its top-level buffer) is dropped instead of pinning
+/// gigabytes to the thread.
+const POOLED_VALUES_CAPACITY_LIMIT: usize = 1024 * 1024;
+
+/// Entry-vector capacity kept by the pool. Struct objects have a handful of
+/// fields; only corpus-scale maps exceed this, and those are dropped.
+const POOLED_ENTRIES_CAPACITY_LIMIT: usize = 4 * 1024;
+
+/// Buffers retained per thread: canonical documents nest a few objects deep,
+/// so a small stack already makes sibling and per-call reuse hit every time.
+const POOLED_BUFFER_LIMIT: usize = 8;
+
+/// Reusable `ObjectWriter` buffers for one serialization thread.
+///
+/// Every canonical JSON object buffers its rendered entries so keys can be
+/// emitted in lexicographic order. Corpus-scale digest sweeps serialize
+/// hundreds of thousands of small objects per generation; allocating those
+/// buffers per object dominated decode allocation traffic (measured ~9 KB per
+/// chunk digest), so objects check buffers out of this pool and return them
+/// cleared, exactly like the buffered digest sink one layer down.
+#[derive(Default)]
+pub(super) struct ObjectBufferPool {
+    buffers: Vec<(String, ObjectEntries)>,
+}
+
+impl ObjectBufferPool {
+    fn acquire(&mut self) -> (String, ObjectEntries) {
+        self.buffers.pop().unwrap_or_default()
+    }
+
+    fn release(&mut self, mut values: String, mut entries: ObjectEntries) {
+        if self.buffers.len() >= POOLED_BUFFER_LIMIT
+            || values.capacity() > POOLED_VALUES_CAPACITY_LIMIT
+            || entries.capacity() > POOLED_ENTRIES_CAPACITY_LIMIT
+        {
+            return;
+        }
+        values.clear();
+        entries.clear();
+        self.buffers.push((values, entries));
+    }
+}
+
+thread_local! {
+    /// `Cell::take` keeps the pool owned across a panic or a re-entrant
+    /// `serialize_canonical` (a `Serialize` impl may itself digest): the inner
+    /// call simply sees an empty pool and the outer restores its own on exit.
+    static OBJECT_BUFFER_POOL: Cell<ObjectBufferPool> = Cell::new(ObjectBufferPool::default());
+}
+
 /// Stream `value` into `sink` in canonical JSON form.
 pub(super) fn serialize_canonical<T, S>(value: &T, sink: &mut S) -> Result<(), DomainError>
 where
     T: Serialize + ?Sized,
     S: CanonicalSink,
 {
-    value
-        .serialize(CanonicalSerializer { sink })
-        .map_err(|error| DomainError::CanonicalSerialization(error.to_string()))
+    OBJECT_BUFFER_POOL.with(|cell| {
+        let mut pool = cell.take();
+        let serialized = value.serialize(CanonicalSerializer {
+            sink,
+            pool: &mut pool,
+        });
+        cell.set(pool);
+        serialized.map_err(|error| DomainError::CanonicalSerialization(error.to_string()))
+    })
 }
 
 /// `serde_json`'s private struct tokens (`RawValue`, and the
@@ -41,6 +103,7 @@ fn number_out_of_range() -> CanonicalError {
 /// can be emitted in lexicographic order.
 struct CanonicalSerializer<'sink, S: CanonicalSink> {
     sink: &'sink mut S,
+    pool: &'sink mut ObjectBufferPool,
 }
 
 impl<'sink, S: CanonicalSink> serde::Serializer for CanonicalSerializer<'sink, S> {
@@ -202,7 +265,10 @@ impl<'sink, S: CanonicalSink> serde::Serializer for CanonicalSerializer<'sink, S
         self.sink.write("{");
         write_json_string(variant, self.sink);
         self.sink.write(":");
-        value.serialize(CanonicalSerializer { sink: self.sink })?;
+        value.serialize(CanonicalSerializer {
+            sink: self.sink,
+            pool: self.pool,
+        })?;
         self.sink.write("}");
         Ok(())
     }
@@ -211,6 +277,7 @@ impl<'sink, S: CanonicalSink> serde::Serializer for CanonicalSerializer<'sink, S
         self.sink.write("[");
         Ok(SeqWriter {
             sink: self.sink,
+            pool: self.pool,
             first: true,
             close: "]",
         })
@@ -240,13 +307,20 @@ impl<'sink, S: CanonicalSink> serde::Serializer for CanonicalSerializer<'sink, S
         self.sink.write(":[");
         Ok(SeqWriter {
             sink: self.sink,
+            pool: self.pool,
             first: true,
             close: "]}",
         })
     }
 
     fn serialize_map(self, len: Option<usize>) -> CanonicalResult<Self::SerializeMap> {
-        Ok(ObjectWriter::new(self.sink, len.unwrap_or(0), "{", "}"))
+        Ok(ObjectWriter::new(
+            self.sink,
+            self.pool,
+            len.unwrap_or(0),
+            "{",
+            "}",
+        ))
     }
 
     fn serialize_struct(
@@ -265,7 +339,7 @@ impl<'sink, S: CanonicalSink> serde::Serializer for CanonicalSerializer<'sink, S
             });
         }
         Ok(StructWriter::Object(ObjectWriter::new(
-            self.sink, len, "{", "}",
+            self.sink, self.pool, len, "{", "}",
         )))
     }
 
@@ -276,12 +350,10 @@ impl<'sink, S: CanonicalSink> serde::Serializer for CanonicalSerializer<'sink, S
         variant: &'static str,
         len: usize,
     ) -> CanonicalResult<Self::SerializeStructVariant> {
-        let mut prefix = String::with_capacity(variant.len() + 4);
-        prefix.push('{');
-        write_json_string(variant, &mut prefix);
-        prefix.push_str(":{");
-        self.sink.write(&prefix);
-        Ok(ObjectWriter::new(self.sink, len, "", "}}"))
+        self.sink.write("{");
+        write_json_string(variant, self.sink);
+        self.sink.write(":{");
+        Ok(ObjectWriter::new(self.sink, self.pool, len, "", "}}"))
     }
 
     fn collect_str<T>(self, value: &T) -> CanonicalResult
@@ -296,6 +368,7 @@ impl<'sink, S: CanonicalSink> serde::Serializer for CanonicalSerializer<'sink, S
 /// Streams array elements straight through; arrays never reorder.
 struct SeqWriter<'sink, S: CanonicalSink> {
     sink: &'sink mut S,
+    pool: &'sink mut ObjectBufferPool,
     first: bool,
     close: &'static str,
 }
@@ -310,7 +383,10 @@ impl<S: CanonicalSink> SeqWriter<'_, S> {
         } else {
             self.sink.write(",");
         }
-        value.serialize(CanonicalSerializer { sink: self.sink })
+        value.serialize(CanonicalSerializer {
+            sink: &mut *self.sink,
+            pool: &mut *self.pool,
+        })
     }
 
     fn finish(self) -> CanonicalResult {
@@ -388,13 +464,15 @@ impl<S: CanonicalSink> serde::ser::SerializeTupleVariant for SeqWriter<'_, S> {
 ///
 /// Only the entries of the object currently being written are held; nested
 /// values stream into their own entry buffer, so the cost is the size of one
-/// object rather than of the whole document.
+/// object rather than of the whole document. The buffers themselves check out
+/// of the thread's [`ObjectBufferPool`] and return on finish.
 struct ObjectWriter<'sink, S: CanonicalSink> {
     sink: &'sink mut S,
+    pool: &'sink mut ObjectBufferPool,
     /// Rendered entry values laid end to end; entries index into this one
     /// buffer so a field costs no owned `String` of its own.
     values: String,
-    entries: Vec<(Cow<'static, str>, Range<usize>)>,
+    entries: ObjectEntries,
     pending_key: Option<String>,
     /// Written before the first entry (empty when the caller already opened
     /// the brace, as struct variants do).
@@ -403,11 +481,25 @@ struct ObjectWriter<'sink, S: CanonicalSink> {
 }
 
 impl<'sink, S: CanonicalSink> ObjectWriter<'sink, S> {
-    fn new(sink: &'sink mut S, len: usize, open: &'static str, close: &'static str) -> Self {
+    fn new(
+        sink: &'sink mut S,
+        pool: &'sink mut ObjectBufferPool,
+        len: usize,
+        open: &'static str,
+        close: &'static str,
+    ) -> Self {
+        let (mut values, mut entries) = pool.acquire();
+        if values.capacity() == 0 {
+            values.reserve(len.saturating_mul(32));
+        }
+        if entries.capacity() < len {
+            entries.reserve(len);
+        }
         Self {
             sink,
-            values: String::with_capacity(len.saturating_mul(32)),
-            entries: Vec::with_capacity(len),
+            pool,
+            values,
+            entries,
             pending_key: None,
             open,
             close,
@@ -421,6 +513,7 @@ impl<'sink, S: CanonicalSink> ObjectWriter<'sink, S> {
         let start = self.values.len();
         value.serialize(CanonicalSerializer {
             sink: &mut self.values,
+            pool: &mut *self.pool,
         })?;
         self.entries.push((key, start..self.values.len()));
         Ok(())
@@ -455,6 +548,8 @@ impl<'sink, S: CanonicalSink> ObjectWriter<'sink, S> {
             self.sink.write(&self.values[range.clone()]);
         }
         self.sink.write(self.close);
+        self.pool
+            .release(std::mem::take(&mut self.values), std::mem::take(&mut self.entries));
         Ok(())
     }
 }
