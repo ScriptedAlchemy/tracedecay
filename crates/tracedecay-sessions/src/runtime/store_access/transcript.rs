@@ -35,7 +35,7 @@ pub async fn get_parse_offset(
             Ok(Some(ParseOffset {
                 byte_offset: decode_u64(&row, 0, "decode transcript byte offset")?,
                 mtime: decode_u64(&row, 1, "decode transcript mtime")?,
-                file_id: decode_u64(&row, 2, "decode transcript file id")?,
+                file_id: decode_file_id(&row, 2, "decode transcript file id")?,
             }))
         }
         Err(error) if sqlite_missing_column(&error, "file_id") => {
@@ -91,6 +91,25 @@ fn encode_i64(value: u64, operation: &'static str) -> Result<i64, TranscriptPers
     i64::try_from(value).map_err(|error| TranscriptPersistenceError::storage(operation, error))
 }
 
+fn decode_file_id(
+    row: &Row,
+    index: i32,
+    operation: &'static str,
+) -> Result<u64, TranscriptPersistenceError> {
+    let value = row
+        .get::<i64>(index)
+        .map_err(|error| TranscriptPersistenceError::storage(operation, error))?;
+    Ok(decode_file_id_value(value))
+}
+
+fn encode_file_id(value: u64) -> i64 {
+    i64::from_le_bytes(value.to_le_bytes())
+}
+
+fn decode_file_id_value(value: i64) -> u64 {
+    u64::from_le_bytes(value.to_le_bytes())
+}
+
 pub async fn require_expected_offset(
     conn: &impl QueryExecutor,
     path: &str,
@@ -120,7 +139,7 @@ pub async fn set_parse_offset(
             path,
             encode_i64(offset.byte_offset, "encode transcript byte offset")?,
             encode_i64(offset.mtime, "encode transcript mtime")?,
-            encode_i64(offset.file_id, "encode transcript file id")?
+            encode_file_id(offset.file_id)
         ],
     )
     .await
@@ -630,13 +649,24 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                     .map_err(|error| format!("encode transcript byte offset: {error}"))?,
                 i64::try_from(offset.mtime)
                     .map_err(|error| format!("encode transcript mtime: {error}"))?,
-                i64::try_from(offset.file_id)
-                    .map_err(|error| format!("encode transcript file id: {error}"))?
+                encode_file_id(offset.file_id)
             ],
         )
         .await
         .map(|_| ())
         .map_err(|error| format!("failed to advance transcript parse offset: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_file_id_value, encode_file_id};
+
+    #[test]
+    fn transcript_file_id_encoding_round_trips_the_full_u64_domain() {
+        for file_id in [0, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
+            assert_eq!(decode_file_id_value(encode_file_id(file_id)), file_id);
+        }
     }
 }
 

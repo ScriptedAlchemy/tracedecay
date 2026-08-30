@@ -344,10 +344,13 @@ fn search_session_messages(
             w.ordering_domain, w.content_json, w.content_text
          FROM observation_workflow_facts w
          JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
-         WHERE w.projector_version = 'claude-session-message-v4'
-           AND w.provider = ?1"
+         WHERE w.projector_version = ?1
+           AND w.provider = ?2"
         .to_owned();
-    let mut values = vec![rusqlite::types::Value::Text(provider.to_owned())];
+    let mut values = vec![
+        rusqlite::types::Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
+        rusqlite::types::Value::Text(provider.to_owned()),
+    ];
     if let Some(project_key) = project_key {
         values.push(rusqlite::types::Value::Text(project_key.to_owned()));
         workflow_sql.push_str(&format!(
@@ -458,7 +461,7 @@ fn recent_session_goals_filtered(
                             ORDER BY w.observation_sequence DESC, w.fact_ordinal DESC
                         ) AS goal_rank
                  FROM observation_workflow_facts w
-                 WHERE w.projector_version = 'claude-session-message-v4'
+                 WHERE w.projector_version = ?1
                    AND w.semantic_kind = 'goal'
              )
              SELECT
@@ -470,18 +473,19 @@ fn recent_session_goals_filtered(
              FROM ranked_goals w
              JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
              WHERE w.goal_rank = 1
-               AND (?1 IS NULL OR w.provider = ?1)
-               AND (?2 IS NULL OR s.project_key = ?2 OR s.project_path = ?2)
-               AND (?3 IS NULL OR w.session_id = ?3)
-               AND (?4 IS NULL OR w.status = ?4)
+               AND (?2 IS NULL OR w.provider = ?2)
+               AND (?3 IS NULL OR s.project_key = ?3 OR s.project_path = ?3)
+               AND (?4 IS NULL OR w.session_id = ?4)
+               AND (?5 IS NULL OR w.status = ?5)
              ORDER BY COALESCE(w.native_timestamp, 0) DESC,
                       w.observation_sequence DESC, w.fact_ordinal DESC
-             LIMIT ?5",
+             LIMIT ?6",
         )
         .unwrap();
     statement
         .query_map(
             rusqlite::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 provider,
                 project_key,
                 session_id,
@@ -718,6 +722,19 @@ async fn latest_goal_state_filters_provider_session_and_status() {
     );
     persist_and_project(&store, completed, Some(cursor)).await;
 
+    let production_goals = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .recent_session_goals(Some("user"), 10)
+        .await
+        .expect("read current-projector workflow goals");
+    assert_eq!(
+        production_goals.len(),
+        1,
+        "the production read path must select facts from the current projector"
+    );
+    assert_eq!(production_goals[0].message.text, "ship the release");
+
     let goals = recent_session_goals_filtered(
         &database_path,
         Some(FIXTURE_PROVIDER),
@@ -797,6 +814,14 @@ async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields
         ],
     );
     persist_and_project(&store, candidate, None).await;
+
+    let production_results = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release-item", 10)
+        .await
+        .expect("search current-projector workflow facts");
+    assert_eq!(production_results.len(), 2);
 
     let results = search_session_messages(
         &database_path,
