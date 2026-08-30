@@ -72,7 +72,7 @@ fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
     }
     let prefix = utf8_prefix_at_or_before(lane, budget);
     preview.push_str(prefix);
-    if crate::mcp::tools::render::has_open_markdown_fence(prefix) {
+    if tracedecay_mcp::tools::render::has_open_markdown_fence(prefix) {
         preview.push_str("\n```\n");
     }
     preview.push_str(CONTEXT_LANE_TRUNCATED_NOTE);
@@ -309,7 +309,7 @@ async fn context_memory_matches(
         .search_project_memory_facts(query, read_control)
         .await
         .map_err(memory_application_error)?;
-    let public = crate::daemon::retained_owner::public_search_page(&page).map_err(|error| {
+    let mapped = crate::daemon::retained_owner::search_page(&page).map_err(|error| {
         let problem = retained_surface_execution_problem(error);
         TraceDecayError::Database {
             operation: "project canonical context memory".to_string(),
@@ -317,7 +317,7 @@ async fn context_memory_matches(
         }
     })?;
     Ok(ContextMemoryMatches {
-        hits: public.hits,
-        graph_coverage: public.graph_coverage,
+        hits: mapped.hits,
+        graph_coverage: mapped.graph_coverage,
     })
 }

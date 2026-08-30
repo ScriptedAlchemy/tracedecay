@@ -17,7 +17,8 @@ use tracedecay_domain::{
     ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1, ProjectionReplayReasonV1,
     QueryFallbackSubpayload, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
     RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
-    SemanticSearchIndexProfileV1, SourceOccurrenceId, VectorGenerationIdV1, WorktreeId,
+    SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1, SourceOccurrenceId,
+    VectorGenerationIdV1, WorktreeId,
     canonical_sha256,
 };
 use tracedecay_policy::retrieval_selection::{
@@ -27,8 +28,9 @@ use tracedecay_policy::retrieval_selection::{
 use crate::config::SemanticResourceCeilings;
 use crate::store::vector_generations::{
     GraphVectorGenerationStoreV1, IsolatedSemanticEvaluationGraphV1, PublishedVectorGenerationV1,
-    SemanticVectorStageDescriptorV1, VectorGenerationBeginOutcomeV1, VectorGenerationPlanV1,
-    generation_identity_digest, isolated_semantic_evaluation_graph,
+    SemanticAnnServingIndexV1, SemanticVectorStageDescriptorV1, VectorGenerationBeginOutcomeV1,
+    VectorGenerationPlanV1, VectorGenerationStoreErrorV1, generation_identity_digest,
+    isolated_semantic_evaluation_graph,
 };
 
 mod application_status;
@@ -51,12 +53,12 @@ use tracedecay_query::retrieval::ports::{
 use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
-    SemanticAbstentionDispositionV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
-    SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
-    SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
-    SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
-    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
-    SemanticVectorScanSummaryV1,
+    SemanticAbstentionDispositionV1, SemanticAnnCandidatesV1, SemanticAnnIndexStateV1,
+    SemanticCalibrationProfileV1, SemanticCodeRetriever, SemanticExecutionControl,
+    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever, SemanticQueryDecisionV1,
+    SemanticQueryModeV1, SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
+    SemanticRetrievalRequestV1, SemanticSearchKindV1, SemanticVectorReadPort,
+    SemanticVectorReadRequestV1, SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_search_eval::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
@@ -492,8 +494,15 @@ impl ProductionSemanticRuntimeV1 {
         let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
             .and_then(|profile| profile.index_key())
             .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+        let ann = semantic_ann_serving_index(
+            &store,
+            &active,
+            &search_index_key,
+            Arc::clone(&cancellation),
+        )
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         let port = Arc::new(
-            PublishedSemanticVectorReadPortV1::new(active, search_index_key.clone(), generation)
+            PublishedSemanticVectorReadPortV1::new(active, search_index_key.clone(), generation, ann)
                 .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
         );
         let vectors = CachedPublishedVectorsV1 {
@@ -1951,11 +1960,19 @@ impl ProductionSemanticRuntimeV1 {
                         .await
                         .map_err(|error| publish_failure.publish_generation(&error))?
                         .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
+                    let ann = semantic_ann_serving_index(
+                        &store,
+                        &active,
+                        &search_index_key,
+                        Arc::clone(&cancellation),
+                    )
+                    .map_err(|error| publish_failure.publish_generation(&error))?;
                     let port = Arc::new(
                         PublishedSemanticVectorReadPortV1::new(
                             active,
                             search_index_key.clone(),
                             stage_handles.generation.as_ref(),
+                            ann,
                         )
                         .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
                     );
@@ -2033,6 +2050,7 @@ impl ProductionSemanticRuntimeV1 {
         active: PublishedVectorGenerationV1,
         search_index_key: SemanticSearchIndexKeyV1,
         code_generation: &CodeIndexPublishedGenerationV1,
+        ann: Option<SemanticAnnServingIndexV1>,
     ) -> Result<Arc<PublishedSemanticVectorReadPortV1>, SemanticQueryServiceError> {
         if let Some(cached) = retained_vector_read_port(
             &self.vector_read_cache,
@@ -2049,6 +2067,7 @@ impl ProductionSemanticRuntimeV1 {
                 active,
                 search_index_key.clone(),
                 code_generation,
+                ann,
             )
             .map_err(|_| SemanticQueryServiceError::InvalidFallback)?,
         );
@@ -2180,10 +2199,27 @@ impl ProductionSemanticRuntimeV1 {
             code_generation.capability().manifest_digest.clone(),
         )
         .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+        let ann = match semantic_ann_serving_index(
+            &store,
+            &active,
+            request.search_index_key,
+            Arc::clone(&cancellation),
+        ) {
+            Ok(ann) => ann,
+            Err(_) => {
+                return execute_calibrated_semantic_query(
+                    &NeverCalledSemanticLane,
+                    SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Failed),
+                    mode,
+                    fallback,
+                );
+            }
+        };
         let vectors = self.cached_vector_read_port(
             active,
             request.search_index_key.clone(),
             code_generation,
+            ann,
         )?;
         compose_application_semantic_search(ApplicationSemanticSearchParametersV1 {
             handle: &self.handle,
@@ -2623,10 +2659,23 @@ fn canonical_exact_flat_search_index_key()
         .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)
 }
 
+fn canonical_ann_hnsw_search_index_key()
+-> Result<SemanticSearchIndexKeyV1, SemanticRuntimeBackendErrorV1> {
+    SemanticSearchIndexProfileV1::ann_hnsw_exact_rescore_v1()
+        .and_then(|profile| profile.index_key())
+        .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)
+}
+
+/// A pinned key qualifies only when it is one of the canonical profiles this
+/// runtime can actually serve: the exact-flat scan, or HNSW candidate
+/// generation with exact rescoring (which falls back to the flat scan on a
+/// missing or incomplete index).
 fn validate_evaluation_target_search_index(
     search_index_key: &SemanticSearchIndexKeyV1,
 ) -> Result<(), SemanticRuntimeBackendErrorV1> {
-    if *search_index_key == canonical_exact_flat_search_index_key()? {
+    if *search_index_key == canonical_exact_flat_search_index_key()?
+        || *search_index_key == canonical_ann_hnsw_search_index_key()?
+    {
         Ok(())
     } else {
         Err(SemanticRuntimeBackendErrorV1::Rejected)
@@ -2819,6 +2868,69 @@ struct PublishedSemanticVectorReadPortV1 {
     source_generation: CodeGenerationId,
     capability_manifest_digest: ManifestDigest,
     rows: Vec<SemanticVectorRecordV1>,
+    ann: PublishedSemanticAnnBindingV1,
+}
+
+/// The port's generation-bound ANN candidate authority, decided once at
+/// construction against the complete resident row set.
+enum PublishedSemanticAnnBindingV1 {
+    /// The typed reason ANN candidates cannot serve; the lane observes it
+    /// and falls back to the exact-flat scan.
+    Unavailable(SemanticAnnIndexStateV1),
+    /// A persisted index whose census equals the resident row count, so
+    /// every index hit maps to exactly one resident row.
+    Serving {
+        index: SemanticAnnServingIndexV1,
+        rows_by_chunk: BTreeMap<tracedecay_domain::CodeSearchChunkId, usize>,
+    },
+}
+
+impl PublishedSemanticAnnBindingV1 {
+    /// Binds an acquired index to the resident rows, or records the typed
+    /// reason none serves. `index` must be `None` exactly when the store was
+    /// consulted and held no populated index for the generation.
+    fn bind(
+        search_index_key: &SemanticSearchIndexKeyV1,
+        index: Option<SemanticAnnServingIndexV1>,
+        rows: &[SemanticVectorRecordV1],
+    ) -> Result<Self, RetrievalPortError> {
+        match (search_index_key.kind, index) {
+            (SemanticSearchIndexKindV1::ExactFlat, None) => {
+                Ok(Self::Unavailable(SemanticAnnIndexStateV1::Unsupported))
+            }
+            (SemanticSearchIndexKindV1::ExactFlat, Some(_)) => Err(RetrievalPortError::Contract(
+                "an exact-flat semantic port must not bind an ANN index".to_owned(),
+            )),
+            (SemanticSearchIndexKindV1::AnnHnswExactRescore, None) => {
+                Ok(Self::Unavailable(SemanticAnnIndexStateV1::Missing))
+            }
+            (SemanticSearchIndexKindV1::AnnHnswExactRescore, Some(index)) => {
+                let resident = rows.len() as u64;
+                if index.indexed() == resident {
+                    let rows_by_chunk = rows
+                        .iter()
+                        .enumerate()
+                        .map(|(ordinal, row)| (row.chunk_id.clone(), ordinal))
+                        .collect();
+                    Ok(Self::Serving {
+                        index,
+                        rows_by_chunk,
+                    })
+                } else {
+                    // The index covers only this generation's own staged
+                    // vectors; rows hydrated from base-generation reuse are
+                    // resident but not indexed, so candidate generation
+                    // would silently drop them.
+                    Ok(Self::Unavailable(
+                        SemanticAnnIndexStateV1::IncompleteCoverage {
+                            indexed: index.indexed(),
+                            resident,
+                        },
+                    ))
+                }
+            }
+        }
+    }
 }
 
 fn semantic_candidate_identity(
@@ -2958,6 +3070,10 @@ impl PublishedSemanticVectorReadPortV1 {
             source_generation: prepared.request.changes.to_generation.clone(),
             capability_manifest_digest: code.capability().manifest_digest.clone(),
             rows,
+            // Evaluation ports read a prepared in-memory projection that was
+            // never staged into the graph store, so no persisted index can
+            // exist for it.
+            ann: PublishedSemanticAnnBindingV1::Unavailable(SemanticAnnIndexStateV1::Unsupported),
         })
     }
 
@@ -2965,6 +3081,7 @@ impl PublishedSemanticVectorReadPortV1 {
         vectors: PublishedVectorGenerationV1,
         search_index_key: SemanticSearchIndexKeyV1,
         code: &CodeIndexPublishedGenerationV1,
+        ann: Option<SemanticAnnServingIndexV1>,
     ) -> Result<Self, RetrievalPortError> {
         if vectors.source_generation() != &code.manifest().generation_id {
             return Err(RetrievalPortError::GenerationMismatch);
@@ -3033,6 +3150,7 @@ impl PublishedSemanticVectorReadPortV1 {
                 values: vector.values.clone(),
             });
         }
+        let ann = PublishedSemanticAnnBindingV1::bind(&search_index_key, ann, &rows)?;
         Ok(Self {
             generation: vectors.generation_id().clone(),
             projection_key: vectors.projection_key().clone(),
@@ -3040,6 +3158,7 @@ impl PublishedSemanticVectorReadPortV1 {
             source_generation: vectors.source_generation().clone(),
             capability_manifest_digest: code.capability().manifest_digest.clone(),
             rows,
+            ann,
         })
     }
 }
@@ -3076,6 +3195,82 @@ impl SemanticVectorReadPort for PublishedSemanticVectorReadPortV1 {
             excluded: 0,
             unknown: 0,
         })
+    }
+
+    fn ann_candidates(
+        &self,
+        request: SemanticVectorReadRequestV1<'_>,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<SemanticAnnCandidatesV1<'_>, RetrievalPortError> {
+        if request.search_kind != SemanticSearchKindV1::AnnHnswExactRescore
+            || request.vector_generation != &self.generation
+            || request.projection_key != &self.projection_key
+            || request.search_index_key != &self.search_index_key
+            || request.source_generation != &self.source_generation
+            || request.capability_manifest_digest != &self.capability_manifest_digest
+        {
+            return Err(RetrievalPortError::IncompatibleProjection);
+        }
+        let (index, rows_by_chunk) = match &self.ann {
+            PublishedSemanticAnnBindingV1::Unavailable(state) => {
+                return Ok(SemanticAnnCandidatesV1::Unavailable(*state));
+            }
+            PublishedSemanticAnnBindingV1::Serving {
+                index,
+                rows_by_chunk,
+            } => (index, rows_by_chunk),
+        };
+        let chunks = hotpath::measure_block!(
+            "semantic.vector.ann_candidates",
+            index.search(query, limit).map_err(ann_search_port_error)
+        )?;
+        hotpath::gauge!("semantic_ann_candidates").set(chunks.len());
+        chunks
+            .into_iter()
+            .map(|chunk_id| {
+                rows_by_chunk
+                    .get(&chunk_id)
+                    .map(|ordinal| &self.rows[*ordinal])
+                    .ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "semantic ANN index answered with a non-resident row".to_owned(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(SemanticAnnCandidatesV1::Candidates)
+    }
+}
+
+/// Consults the store for the generation's persisted ANN index exactly when
+/// the pinned search profile is ANN-kinded. Exact-flat profiles never bind
+/// one, and `Ok(None)` under an ANN profile is the typed "no populated
+/// index" state the port reports as `Missing`.
+fn semantic_ann_serving_index(
+    store: &GraphVectorGenerationStoreV1,
+    active: &PublishedVectorGenerationV1,
+    search_index_key: &SemanticSearchIndexKeyV1,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<Option<SemanticAnnServingIndexV1>, VectorGenerationStoreErrorV1> {
+    match search_index_key.kind {
+        SemanticSearchIndexKindV1::ExactFlat => Ok(None),
+        SemanticSearchIndexKindV1::AnnHnswExactRescore => store.ann_serving_index(
+            active.generation_id(),
+            active.embedding_key(),
+            active.vectors().keys(),
+            cancellation,
+        ),
+    }
+}
+
+/// The ANN index search runs under the same request control as the scan, so
+/// its store failures map onto the lane's typed port errors.
+fn ann_search_port_error(error: VectorGenerationStoreErrorV1) -> RetrievalPortError {
+    match error {
+        VectorGenerationStoreErrorV1::Cancelled => RetrievalPortError::Cancelled,
+        VectorGenerationStoreErrorV1::DeadlineExceeded => RetrievalPortError::BudgetExceeded,
+        other => RetrievalPortError::AuthorityUnavailable(other.to_string()),
     }
 }
 
@@ -3975,11 +4170,38 @@ mod tests {
     }
 
     #[test]
-    fn preacceptance_target_requires_the_canonical_exact_flat_index() {
-        let canonical = search_index_key().clone();
-        assert_eq!(validate_evaluation_target_search_index(&canonical), Ok(()));
+    fn ann_binding_is_unsupported_for_exact_flat_and_missing_for_unbound_ann() {
+        let exact_flat = search_index_key();
+        assert!(matches!(
+            PublishedSemanticAnnBindingV1::bind(exact_flat, None, &[])
+                .expect("exact-flat ports bind without an index"),
+            PublishedSemanticAnnBindingV1::Unavailable(SemanticAnnIndexStateV1::Unsupported)
+        ));
 
-        let mut wrong = canonical;
+        let ann = SemanticSearchIndexProfileV1::ann_hnsw_exact_rescore_v1()
+            .and_then(|profile| profile.index_key())
+            .expect("ann search index key");
+        assert!(matches!(
+            PublishedSemanticAnnBindingV1::bind(&ann, None, &[])
+                .expect("a consulted store without an index binds as missing"),
+            PublishedSemanticAnnBindingV1::Unavailable(SemanticAnnIndexStateV1::Missing)
+        ));
+    }
+
+    #[test]
+    fn preacceptance_target_requires_a_canonical_search_index() {
+        let exact_flat = search_index_key().clone();
+        assert_eq!(
+            validate_evaluation_target_search_index(&exact_flat),
+            Ok(())
+        );
+
+        let ann = SemanticSearchIndexProfileV1::ann_hnsw_exact_rescore_v1()
+            .and_then(|profile| profile.index_key())
+            .expect("ann search index key");
+        assert_eq!(validate_evaluation_target_search_index(&ann), Ok(()));
+
+        let mut wrong = exact_flat;
         wrong.schema_revision = "semantic-search-index.v0".to_owned();
         assert_eq!(
             validate_evaluation_target_search_index(&wrong),
@@ -4279,6 +4501,7 @@ mod tests {
             source_generation: source.clone(),
             capability_manifest_digest: capability.clone(),
             rows: Vec::new(),
+            ann: PublishedSemanticAnnBindingV1::Unavailable(SemanticAnnIndexStateV1::Unsupported),
         });
         let cached = CachedPublishedVectorsV1 {
             generation: vector.clone(),
@@ -4329,6 +4552,7 @@ mod tests {
             source_generation: source.clone(),
             capability_manifest_digest: capability.clone(),
             rows: Vec::new(),
+            ann: PublishedSemanticAnnBindingV1::Unavailable(SemanticAnnIndexStateV1::Unsupported),
         });
         let cache = Mutex::new(Some(CachedPublishedVectorsV1 {
             generation: vector.clone(),

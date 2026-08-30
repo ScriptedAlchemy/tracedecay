@@ -12,7 +12,6 @@ use tracedecay::application_surface::{
     resolve_http_application_surface_dispatch,
 };
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
-use tracedecay::mcp::tools::get_tool_definitions;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
     HttpApplicationRequest, HttpSseEvent, application_router,
@@ -31,6 +30,7 @@ use tracedecay_domain::{
     RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
+use tracedecay_mcp::get_tool_definitions;
 use tracedecay_tool_catalog::{BindingSurface, ProfileId, SchemaId, SurfaceOperationName};
 
 const PARITY_FIXTURE: &str = include_str!(

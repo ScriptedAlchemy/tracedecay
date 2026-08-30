@@ -1,11 +1,8 @@
-use std::collections::BTreeSet;
-use std::fmt::Write as _;
-
-use serde_json::Value as JsonValue;
-
-use tracedecay_runtime_core::db::engine::Value;
-use tracedecay_sessions::retrieval_content::{
-    RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
+use tracedecay_runtime_core::errors::TraceDecayError;
+#[cfg(test)]
+pub(crate) use tracedecay_sessions::runtime::SessionRecord;
+use tracedecay_sessions::runtime::{
+    SessionMessageRecord, SessionMessageSearchResult, SessionStoreAccess,
 };
 
 use super::{
@@ -16,297 +13,48 @@ use super::{
     interleave_workflow_search_results, session_fts_query,
 };
 
-const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
-const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, tool_names, metadata_json \
-                 FROM session_messages \
-                 WHERE provider = ?1 AND session_id = ?2 \
-                   AND timestamp IS NOT NULL AND timestamp >= ?3 \
-                 ORDER BY timestamp, ordinal, message_id \
-                 LIMIT ?4";
+#[cfg(test)]
+pub(crate) use tracedecay_sessions::runtime::store_access::SESSION_MESSAGES_AFTER_SQL;
 
 impl RegisteredGlobalDb {
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
-        self.session_ingest_health_for_provider(Some("cursor"))
+        SessionStoreAccess::new(self)
+            .cursor_session_ingest_health()
             .await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.ingest_health")]
     pub async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
     ) -> Result<SessionIngestHealth, String> {
-        let mut health = SessionIngestHealth::default();
-        // Store-scale scan interleaved with per-row filesystem metadata reads.
-        // Holding one pinned snapshot across the whole walk parks a general
-        // reader worker for the entire scan; page with short-held query leases
-        // instead. The filesystem side of this health estimate is already read
-        // live, so a per-page read boundary matches what the result means.
-        //
-        // Every page is also declared background: this walks the whole store
-        // and runs off maintenance, so it admits against the unreserved slice
-        // of the reader lane rather than competing with interactive queries.
-        let reader = self.read_connection().background();
-        let mut observed_providers = BTreeSet::new();
-        let mut provider_rows = reader
-            .query(
-                "SELECT DISTINCT provider
-                 FROM sessions
-                 WHERE provider IS NOT NULL AND provider != ''
-                   AND (?1 IS NULL OR provider = ?1)
-                 ORDER BY provider",
-                tracedecay_runtime_core::db::engine::params![provider],
-            )
+        SessionStoreAccess::new(self)
+            .session_ingest_health_for_provider(provider)
             .await
-            .map_err(|error| format!("failed to query session ingest providers: {error}"))?;
-        while let Some(row) = provider_rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read session ingest provider: {error}"))?
-        {
-            observed_providers.insert(
-                row.get::<String>(0)
-                    .map_err(|error| format!("failed to decode session provider: {error}"))?,
-            );
-        }
-        drop(provider_rows);
-        let mut frontier_rows = reader
-            .query(
-                "SELECT file_path
-                 FROM parse_offsets
-                 WHERE file_path LIKE 'host-frontier://%/%'
-                 ORDER BY file_path",
-                (),
-            )
-            .await
-            .map_err(|error| format!("failed to query host ingest frontiers: {error}"))?;
-        while let Some(row) = frontier_rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read host ingest frontier: {error}"))?
-        {
-            let key = row
-                .get::<String>(0)
-                .map_err(|error| format!("failed to decode host ingest frontier: {error}"))?;
-            if let Some(provider_name) = key
-                .strip_prefix("host-frontier://")
-                .and_then(|suffix| suffix.split('/').next())
-                .filter(|provider_name| !provider_name.is_empty())
-                && provider.is_none_or(|selected| selected == provider_name)
-            {
-                observed_providers.insert(provider_name.to_owned());
-            }
-        }
-        drop(frontier_rows);
-        health.observed_providers = observed_providers.into_iter().collect();
-        let mut coverage_rows = reader
-            .query(
-                "SELECT file_path, byte_offset, file_id
-                 FROM parse_offsets
-                 WHERE file_path LIKE 'host-coverage://%/v1'
-                 ORDER BY file_path",
-                (),
-            )
-            .await
-            .map_err(|error| format!("failed to query host ingest coverage: {error}"))?;
-        while let Some(row) = coverage_rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read host ingest coverage: {error}"))?
-        {
-            let key = row
-                .get::<String>(0)
-                .map_err(|error| format!("failed to decode host ingest coverage key: {error}"))?;
-            let Some(provider_name) = key
-                .strip_prefix("host-coverage://")
-                .and_then(|suffix| suffix.strip_suffix("/v1"))
-                .filter(|provider_name| !provider_name.is_empty())
-            else {
-                continue;
-            };
-            if provider.is_some_and(|selected| selected != provider_name) {
-                continue;
-            }
-            let deferred = row.get::<i64>(1).map_err(|error| {
-                format!("failed to decode host ingest coverage deferred units: {error}")
-            })?;
-            let deferred_units = u64::try_from(deferred)
-                .map_err(|_| format!("negative deferred units for provider {provider_name}"))?;
-            let state = match row
-                .get::<i64>(2)
-                .map_err(|error| format!("failed to decode host ingest coverage state: {error}"))?
-            {
-                1 => SessionProviderCoverageState::Complete,
-                2 => SessionProviderCoverageState::Partial,
-                3 => SessionProviderCoverageState::Unavailable,
-                _ => continue,
-            };
-            health.provider_coverage.push(SessionProviderCoverage {
-                provider: provider_name.to_owned(),
-                state,
-                deferred_units,
-            });
-        }
-        drop(coverage_rows);
-        let mut after_path = String::new();
-        loop {
-            let mut rows = reader
-                .query(
-                    "SELECT paths.transcript_path,
-                            COALESCE(offsets.byte_offset, 0),
-                            COALESCE(offsets.mtime, 0)
-                     FROM (
-                         SELECT DISTINCT transcript_path
-                         FROM sessions
-                         WHERE (?1 IS NULL OR provider = ?1)
-                           AND transcript_path IS NOT NULL
-                           AND transcript_path != ''
-                           AND transcript_path > ?2
-                         ORDER BY transcript_path
-                         LIMIT ?3
-                     ) AS paths
-                     LEFT JOIN parse_offsets AS offsets
-                       ON offsets.file_path = paths.transcript_path
-                     ORDER BY paths.transcript_path",
-                    tracedecay_runtime_core::db::engine::params![
-                        provider,
-                        after_path.as_str(),
-                        SESSION_INGEST_HEALTH_PAGE_SIZE
-                    ],
-                )
-                .await
-                .map_err(|error| format!("failed to query session ingest health: {error}"))?;
-            let mut page = Vec::with_capacity(SESSION_INGEST_HEALTH_PAGE_SIZE as usize);
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| format!("failed to read session ingest health: {error}"))?
-            {
-                let path = row
-                    .get::<String>(0)
-                    .map_err(|error| format!("failed to decode transcript path: {error}"))?;
-                let byte_offset = u64::try_from(
-                    row.get::<i64>(1)
-                        .map_err(|error| format!("failed to decode transcript offset: {error}"))?,
-                )
-                .map_err(|error| format!("invalid transcript offset: {error}"))?;
-                let mtime = u64::try_from(
-                    row.get::<i64>(2)
-                        .map_err(|error| format!("failed to decode transcript mtime: {error}"))?,
-                )
-                .map_err(|error| format!("invalid transcript mtime: {error}"))?;
-                page.push((path, byte_offset, mtime));
-            }
-            drop(rows);
-            if page.is_empty() {
-                break;
-            }
-            for (path, byte_offset, mtime) in &page {
-                let Ok(metadata) = hotpath::measure_block!(
-                    "global_db.registered_sessions.ingest_stat",
-                    std::fs::metadata(path)
-                ) else {
-                    continue;
-                };
-                health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
-                if *mtime > 0 {
-                    let mtime = i64::try_from(*mtime).unwrap_or(i64::MAX);
-                    health.last_ingest_unix = Some(
-                        health
-                            .last_ingest_unix
-                            .map_or(mtime, |previous| previous.max(mtime)),
-                    );
-                }
-                let pending = metadata.len().saturating_sub(*byte_offset);
-                if pending > 0 {
-                    health.pending_transcripts = health.pending_transcripts.saturating_add(1);
-                    health.pending_bytes = health.pending_bytes.saturating_add(pending);
-                    health.max_transcript_pending_bytes =
-                        health.max_transcript_pending_bytes.max(pending);
-                }
-            }
-            after_path = page
-                .last()
-                .map(|(path, _, _)| path.clone())
-                .ok_or_else(|| "session ingest health page unexpectedly empty".to_owned())?;
-            if page.len() < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
-                break;
-            }
-        }
-        Ok(health)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.exists")]
     pub async fn has_session_message(
         &self,
         provider: &str,
         message_id: &str,
     ) -> Result<bool, String> {
-        // Single-statement point lookup: a pinned read snapshot would hold a
-        // general reader lease across BEGIN/pin/query/ROLLBACK, and this runs
-        // once per ingested message. Use one short-held query lease instead.
-        let mut rows = self
-            .read_connection()
-            .query(
-                "SELECT EXISTS(
-                    SELECT 1 FROM session_messages
-                    WHERE provider = ?1 AND message_id = ?2
-                 )",
-                tracedecay_runtime_core::db::engine::params![provider, message_id],
-            )
+        SessionStoreAccess::new(self)
+            .has_session_message(provider, message_id)
             .await
-            .map_err(|error| format!("failed to query session message existence: {error}"))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read session message existence: {error}"))?
-            .ok_or_else(|| "session message existence returned no row".to_string())?;
-        row.get::<i64>(0)
-            .map(|exists| exists != 0)
-            .map_err(|error| format!("failed to decode session message existence: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.count")]
     pub async fn session_message_count(&self) -> Result<i64, String> {
-        let mut rows = self
-            .read_connection()
-            .query("SELECT COUNT(*) FROM session_messages", ())
-            .await
-            .map_err(|error| format!("failed to count session messages: {error}"))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read session message count: {error}"))?
-            .ok_or_else(|| "session message count returned no row".to_string())?;
-        row.get::<i64>(0)
-            .map_err(|error| format!("failed to decode session message count: {error}"))
+        SessionStoreAccess::new(self).session_message_count().await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.count_project")]
     pub async fn session_message_count_for_project(
         &self,
         project_key: &str,
     ) -> Result<i64, String> {
-        let mut rows = self
-            .read_connection()
-            .query(
-                "SELECT COUNT(*)
-                 FROM session_messages m
-                 JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-                 WHERE s.project_key = ?1",
-                tracedecay_runtime_core::db::engine::params![project_key],
-            )
+        SessionStoreAccess::new(self)
+            .session_message_count_for_project(project_key)
             .await
-            .map_err(|error| format!("failed to count project session messages: {error}"))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read project session message count: {error}"))?
-            .ok_or_else(|| "project session message count returned no row".to_string())?;
-        row.get::<i64>(0)
-            .map_err(|error| format!("failed to decode project session message count: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.after")]
     pub async fn session_messages_after(
         &self,
         provider: &str,
@@ -314,53 +62,9 @@ impl RegisteredGlobalDb {
         since_ts: i64,
         limit: usize,
     ) -> Result<Vec<SessionActivityRow>, String> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut rows = self
-            .read_connection()
-            .query(
-                SESSION_MESSAGES_AFTER_SQL,
-                tracedecay_runtime_core::db::engine::params![
-                    provider,
-                    session_id,
-                    since_ts,
-                    i64::try_from(limit).unwrap_or(i64::MAX)
-                ],
-            )
+        SessionStoreAccess::new(self)
+            .session_messages_after(provider, session_id, since_ts, limit)
             .await
-            .map_err(|error| format!("failed to query session messages after hint: {error}"))?;
-        let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read session messages after hint: {error}"))?
-        {
-            // Every column is propagated as a typed read failure rather than
-            // masked: `.ok().flatten()` conflates "column is SQL NULL" with
-            // "the column could not be read", and `unwrap_or_default()` on the
-            // ordinal reports position 0 for a row whose position is unknown,
-            // which callers read as the first message of the session.
-            let column = |index: i32, error: &dyn std::fmt::Display| {
-                format!("failed to read session activity column {index}: {error}")
-            };
-            out.push(SessionActivityRow {
-                timestamp: row
-                    .get::<Option<i64>>(0)
-                    .map_err(|error| column(0, &error))?,
-                ordinal: row.get::<i64>(1).map_err(|error| column(1, &error))?,
-                kind: row
-                    .get::<Option<String>>(2)
-                    .map_err(|error| column(2, &error))?,
-                tool_names: row
-                    .get::<Option<String>>(3)
-                    .map_err(|error| column(3, &error))?,
-                metadata_json: row
-                    .get::<Option<String>>(4)
-                    .map_err(|error| column(4, &error))?,
-            });
-        }
-        Ok(out)
     }
 
     /// Unix seconds of the most recent session activity.
@@ -696,61 +400,10 @@ impl RegisteredGlobalDb {
         Ok(results)
     }
 
-    /// Reads the canonical workflow fact columns used by projection acceptance.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_facts")]
     pub async fn workflow_fact_rows(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<(String, Option<String>, Option<String>)>>
-    {
-        let snapshot = self.read_snapshot().await.map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "begin registered workflow fact snapshot".to_owned(),
-                message: error.to_string(),
-            }
-        })?;
-        let mut rows = snapshot
-            .query(
-                "SELECT semantic_kind, status, state
-                 FROM observation_workflow_facts
-                 ORDER BY observation_sequence, fact_ordinal",
-                (),
-            )
-            .await
-            .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "query registered workflow facts".to_owned(),
-                    message: error.to_string(),
-                },
-            )?;
-        let mut values = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered workflow fact row".to_owned(),
-                message: error.to_string(),
-            }
-        })? {
-            values.push((
-                row.get(0).map_err(|error| {
-                    tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "decode registered workflow fact kind".to_owned(),
-                        message: error.to_string(),
-                    }
-                })?,
-                row.get(1).map_err(|error| {
-                    tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "decode registered workflow fact status".to_owned(),
-                        message: error.to_string(),
-                    }
-                })?,
-                row.get(2).map_err(|error| {
-                    tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "decode registered workflow fact state".to_owned(),
-                        message: error.to_string(),
-                    }
-                })?,
-            ));
-        }
-        Ok(values)
+    ) -> Result<Vec<(String, Option<String>, Option<String>)>, TraceDecayError> {
+        SessionStoreAccess::new(self).workflow_fact_rows().await
     }
 }
 

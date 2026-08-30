@@ -24,7 +24,7 @@ fn advertised_mcp_tools() -> Vec<tracedecay_agent_hosts::ports::mcp_tools::Adver
 }
 
 fn build_advertised_mcp_tools(
-    definitions: Vec<crate::mcp::tools::ToolDefinition>,
+    definitions: Vec<tracedecay_mcp::ToolDefinition>,
 ) -> Vec<tracedecay_agent_hosts::ports::mcp_tools::AdvertisedToolV1> {
     definitions
         .into_iter()
@@ -47,7 +47,7 @@ fn build_advertised_mcp_tools(
 
 /// Wires the root MCP catalog into extracted agent-host installers.
 pub fn register_mcp_tool_catalog_ports() -> Result<()> {
-    let definitions = crate::mcp::tools::get_tool_definitions().map_err(|error| {
+    let definitions = tracedecay_mcp::get_tool_definitions().map_err(|error| {
         TraceDecayError::project_route(
             "mcp.catalog_discovery_unavailable",
             false,
@@ -57,7 +57,7 @@ pub fn register_mcp_tool_catalog_ports() -> Result<()> {
     let _ = ADVERTISED_MCP_TOOLS.set(build_advertised_mcp_tools(definitions));
     tracedecay_agent_hosts::ports::mcp_tools::register(advertised_mcp_tools);
     tracedecay_agent_hosts::ports::mcp_tools::register_format_capable_names(
-        crate::mcp::tools::format_capable_tool_names,
+        tracedecay_mcp::format_capable_tool_names,
     );
     Ok(())
 }

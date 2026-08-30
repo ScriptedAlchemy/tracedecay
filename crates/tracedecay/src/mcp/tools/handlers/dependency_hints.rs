@@ -8,8 +8,8 @@ use tracedecay_usecases::code_index::{
     CodeIndexIgnoredDependencyAdmissionRequestV1,
 };
 
-use crate::mcp::tools::render::{self, Md};
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
+use tracedecay_mcp::tools::render::{self, Md};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub(super) fn should_check_external_import_hint(result_count: usize, limit: usize) -> bool {

@@ -11,11 +11,11 @@ use tempfile::TempDir;
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::config::{discover_project_root, get_config_path, load_config};
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::mcp::response_handles::{
-    ResponseHandleLookup, retrieve_response_handle, store_response_handle,
-};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_global_db::{ProjectObservationStoreError, StoreInstanceUpsert};
+use tracedecay_mcp::response_handles::{
+    ResponseHandleLookup, retrieve_response_handle, store_response_handle,
+};
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use tracedecay_runtime_core::storage::{
     ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,

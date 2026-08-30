@@ -16,8 +16,8 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
 use super::json_result;
+use tracedecay_mcp::ToolResult;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]

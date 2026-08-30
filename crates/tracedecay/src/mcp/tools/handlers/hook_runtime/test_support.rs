@@ -253,7 +253,7 @@ pub(super) fn hermes_turn_completed_event(session_id: &str, watermark: &str) -> 
 }
 
 pub(super) fn valid_hermes_terminal_receipt_payload(session_id: &str, watermark: &str) -> Vec<u8> {
-    let plan = crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt {
+    let plan = tracedecay_mcp::hook_events::HookEventPlan::RecordTerminalReceipt {
         route: Some(tracedecay_hooks::core_events::HookRouteMetadata {
             session_id: Some(session_id.to_string()),
             thread_id: None,
@@ -269,5 +269,5 @@ pub(super) fn valid_hermes_terminal_receipt_payload(session_id: &str, watermark:
             transcript_watermark: Some(watermark.to_string()),
         },
     };
-    crate::mcp::hook_events::encode_durable_hook_event_plan(&plan).unwrap()
+    tracedecay_mcp::hook_events::encode_durable_hook_event_plan(&plan).unwrap()
 }

@@ -1,8 +1,14 @@
-//! Exact-flat semantic retrieval lane.
+//! Semantic retrieval lane: exact-flat scan and ANN candidates with exact
+//! rescoring.
 //!
 //! The lane consumes only an admitted embedding projection, a request-local
-//! query-embedding port, and an immutable vector-generation read port. It
-//! performs no artifact admission, vector mutation, ANN lookup, fusion,
+//! query-embedding port, and an immutable vector-generation read port. The
+//! request's search-index key selects the path: `exact_flat` scans and
+//! exactly scores every published row, while `ann_hnsw_exact_rescore` asks
+//! the read port for index-bounded candidates and exactly rescores them with
+//! the same canonical distance, falling back to the exact-flat scan (typed,
+//! never silent) when the port reports its index missing or incomplete.
+//! The lane performs no artifact admission, vector mutation, fusion,
 //! reranking, hydration, activation, or calls into another retrieval lane.
 
 #[cfg(test)]
@@ -18,7 +24,7 @@ use tracedecay_domain::{
     ProjectionKeyV1, QueryDigest, RetrievalBudget, RetrievalBudgetUsage, RetrievalError,
     RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch, RetrieverContinuation,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, SemanticSearchIndexKeyV1,
-    VectorGenerationIdV1,
+    SemanticSearchIndexKindV1, VectorGenerationIdV1,
 };
 
 use super::ports::{
@@ -48,12 +54,22 @@ pub use service::{
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
 const SEMANTIC_CHECKPOINT_DOMAIN: &str = "tracedecay.semantic-flat-checkpoint.v1";
 
-/// The only search implementation admitted by this quarantined lane.
+/// The search implementation that actually executed for one request.
+/// Evidence records the executed path, so an ANN-profiled request that fell
+/// back to the exact-flat scan is visibly `ExactFlat` in its evidence.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SemanticSearchKindV1 {
     #[serde(rename = "exact_flat")]
     ExactFlat,
+    #[serde(rename = "ann_hnsw_exact_rescore")]
+    AnnHnswExactRescore,
 }
+
+/// How many index candidates the ANN path requests per retained result. The
+/// oversample absorbs candidates the exact rescore reorders near the cap
+/// boundary; it is committed in the ANN search-index profile's parameters
+/// digest, so changing it mints a new index identity.
+pub const SEMANTIC_ANN_CANDIDATE_OVERSAMPLE_V1: usize = 4;
 
 /// Canonical fixed-point semantic distance. Smaller values rank first.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -213,6 +229,31 @@ pub struct SemanticVectorScanSummaryV1 {
     pub unknown: u64,
 }
 
+/// Typed reason one generation-bound ANN candidate index cannot serve.
+/// A servable index is expressed by returning candidates, so no
+/// contradictory "unavailable but ready" state is representable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticAnnIndexStateV1 {
+    /// No persisted index exists for the serving generation.
+    Missing,
+    /// The index exists but does not cover the complete serving row set —
+    /// for example rows reused from base-generation lineage are hydrated in
+    /// memory but were never native entities of this generation's namespace.
+    IncompleteCoverage { indexed: u64, resident: u64 },
+    /// The port does not implement ANN candidate generation.
+    Unsupported,
+}
+
+/// Outcome of one bounded ANN candidate request.
+pub enum SemanticAnnCandidatesV1<'a> {
+    /// Index-nearest rows in ascending index-distance order, at most the
+    /// requested limit, each a serving row of the requested generation.
+    Candidates(Vec<&'a SemanticVectorRecordV1>),
+    /// The typed reason the index cannot serve this request; the lane falls
+    /// back to the exact-flat scan and records the fallback.
+    Unavailable(SemanticAnnIndexStateV1),
+}
+
 /// Read-only port over one immutable, fully published vector generation.
 /// The callback shape lets the lane scan without retaining or copying the
 /// complete vector set. Implementations must invoke `examine` before every
@@ -224,6 +265,25 @@ pub trait SemanticVectorReadPort {
         examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
         visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
     ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError>;
+
+    /// Index-bounded nearest candidates for one request-local query vector.
+    ///
+    /// `query` is the ephemeral query embedding: implementations may use it
+    /// for the one transient index search and must not retain, copy beyond
+    /// the search, or serialize it. Ports without a generation-bound ANN
+    /// index report `Unavailable` with a typed state; they must never
+    /// approximate this surface with a partial scan.
+    fn ann_candidates(
+        &self,
+        request: SemanticVectorReadRequestV1<'_>,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<SemanticAnnCandidatesV1<'_>, RetrievalPortError> {
+        let _ = (request, query, limit);
+        Ok(SemanticAnnCandidatesV1::Unavailable(
+            SemanticAnnIndexStateV1::Unsupported,
+        ))
+    }
 }
 
 /// Request-scoped cancellation and monotonic deadline authority.
@@ -340,6 +400,7 @@ where
         request: &SemanticRetrievalRequestV1<'_>,
         record: &SemanticVectorRecordV1,
         distance: CanonicalSemanticDistanceV1,
+        search_kind: SemanticSearchKindV1,
     ) -> SemanticRankedEntryV1 {
         #[cfg(test)]
         SEMANTIC_RETAINED_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
@@ -353,7 +414,7 @@ where
                 vector_generation: request.vector_generation.clone(),
                 chunk_id: record.chunk_id.clone(),
                 distance,
-                search_kind: SemanticSearchKindV1::ExactFlat,
+                search_kind,
             },
         }
     }
@@ -362,6 +423,7 @@ where
         request: &SemanticRetrievalRequestV1<'_>,
         record: &SemanticVectorRecordV1,
         distance: CanonicalSemanticDistanceV1,
+        search_kind: SemanticSearchKindV1,
         cap: usize,
         ranked: &mut BinaryHeap<SemanticRankedEntryV1>,
     ) {
@@ -391,7 +453,7 @@ where
         if !retain {
             return;
         }
-        let entry = Self::materialize_record(request, record, distance);
+        let entry = Self::materialize_record(request, record, distance, search_kind);
         if ranked.len() == cap {
             ranked.pop();
         }
@@ -407,7 +469,113 @@ where
             observe_semantic_lane_failure("query_embedding_identity", "incompatible_projection");
             return Err(RetrievalPortError::IncompatibleProjection);
         }
+        match request.search_index_key.kind {
+            SemanticSearchIndexKindV1::ExactFlat => self.retrieve_exact_flat(request, query),
+            SemanticSearchIndexKindV1::AnnHnswExactRescore => {
+                self.retrieve_ann_exact_rescore(request, query)
+            }
+        }
+    }
 
+    /// ANN candidate generation with exact rescoring. Candidates come from
+    /// the port's generation-bound index; each is rescored with the same
+    /// canonical distance the exact-flat scan uses, so published distances
+    /// are bit-identical to a flat scan's for every returned row. Coverage is
+    /// candidate-bounded and the continuation never claims exhaustion: an
+    /// index-bounded candidate set cannot prove no better row exists.
+    fn retrieve_ann_exact_rescore(
+        &self,
+        request: &SemanticRetrievalRequestV1<'_>,
+        query: &EphemeralQueryEmbeddingV1,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
+        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
+        let limit = cap
+            .saturating_mul(SEMANTIC_ANN_CANDIDATE_OVERSAMPLE_V1)
+            .max(1);
+        let read_request = SemanticVectorReadRequestV1 {
+            vector_generation: &request.vector_generation,
+            projection_key: request.projection.projection_key(),
+            search_index_key: request.search_index_key,
+            source_generation: &request.code_generation,
+            capability_manifest_digest: &request.capability_manifest_digest,
+            search_kind: SemanticSearchKindV1::AnnHnswExactRescore,
+        };
+        let candidates = match self
+            .vectors
+            .ann_candidates(read_request, &query.values, limit)
+        {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                observe_semantic_lane_failure("ann_candidates", port_error_class(&error));
+                return port_error_outcome(error, budget_usage(request, 0, 0, self.control));
+            }
+        };
+        let records = match candidates {
+            SemanticAnnCandidatesV1::Candidates(records) => records,
+            SemanticAnnCandidatesV1::Unavailable(state) => {
+                observe_semantic_ann_fallback(state);
+                return self.retrieve_exact_flat(request, query);
+            }
+        };
+        if records.len() > limit {
+            observe_semantic_lane_failure("ann_candidate_limit", "contract");
+            return Err(RetrievalPortError::Contract(
+                "semantic ANN port returned more candidates than requested".to_owned(),
+            ));
+        }
+        hotpath::gauge!("query.lane.semantic.ann.candidates").set(records.len());
+
+        let mut ranked: BinaryHeap<SemanticRankedEntryV1> = BinaryHeap::new();
+        let mut eligible_count: usize = 0;
+        let mut seen_occurrences = BTreeSet::new();
+        for record in records {
+            if self.control.is_cancelled() {
+                hotpath::gauge!("query.cancel.count").inc(1u32);
+                return Ok(RetrieverOutcome::Cancelled);
+            }
+            if deadline_exhausted(request, self.control) {
+                return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
+                    request,
+                    eligible_count as u64,
+                    0,
+                    self.control,
+                )));
+            }
+            let distance = Self::score_record(request, record, query)?;
+            if !seen_occurrences.insert(record.candidate.source_occurrence_id.clone()) {
+                observe_semantic_lane_failure("ann_duplicate_occurrence", "contract");
+                return Err(RetrievalPortError::Contract(
+                    "semantic ANN candidates contain duplicate source occurrences".to_owned(),
+                ));
+            }
+            eligible_count += 1;
+            Self::retain_scored_record(
+                request,
+                record,
+                distance,
+                SemanticSearchKindV1::AnnHnswExactRescore,
+                cap,
+                &mut ranked,
+            );
+        }
+        let coverage = RetrieverCoverage {
+            examined: eligible_count as u64,
+            eligible: eligible_count as u64,
+            excluded: 0,
+            capped: eligible_count.saturating_sub(ranked.len()) as u64,
+            unknown: 0,
+        };
+        hotpath::gauge!("query.lane.semantic.examined").set(coverage.examined);
+        hotpath::gauge!("query.lane.semantic.candidates").set(eligible_count);
+        self.assemble_ranked_batch(request, ranked, coverage, false)
+    }
+
+    /// Exact-flat scan: visit and exactly score every published row.
+    fn retrieve_exact_flat(
+        &self,
+        request: &SemanticRetrievalRequestV1<'_>,
+        query: &EphemeralQueryEmbeddingV1,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
         // Bound retention to the lane cap during the scan with a max-heap
         // keyed by the final ranking order, instead of collecting every
         // eligible row into an unbounded vec and sorting the whole set. The cap
@@ -451,7 +619,14 @@ where
                     ));
                 }
                 eligible_count += 1;
-                Self::retain_scored_record(request, record, distance, cap, &mut ranked);
+                Self::retain_scored_record(
+                    request,
+                    record,
+                    distance,
+                    SemanticSearchKindV1::ExactFlat,
+                    cap,
+                    &mut ranked,
+                );
                 Ok(())
             });
         let summary = match scan {
@@ -506,12 +681,29 @@ where
             ));
         }
 
-        // The heap already retained only the cap smallest rows; drain it in
-        // ascending ranking order (identical to sorting the full set and
-        // truncating to `cap`).
-        let ranked = ranked.into_sorted_vec();
         let truncated = eligible_count.saturating_sub(cap);
+        let coverage = RetrieverCoverage {
+            examined: summary.examined,
+            eligible: summary.eligible,
+            excluded: summary.excluded,
+            capped: truncated as u64,
+            unknown: summary.unknown,
+        };
+        self.assemble_ranked_batch(request, ranked, coverage, truncated == 0)
+    }
 
+    /// Drain the retained heap in ascending ranking order (identical to a
+    /// full sort followed by truncation), bind evidence, and validate the
+    /// batch. Shared by the exact-flat and ANN-rescore paths; only their
+    /// coverage accounting and exhaustion claims differ.
+    fn assemble_ranked_batch(
+        &self,
+        request: &SemanticRetrievalRequestV1<'_>,
+        ranked: BinaryHeap<SemanticRankedEntryV1>,
+        coverage: RetrieverCoverage,
+        exhausted: bool,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
+        let ranked = ranked.into_sorted_vec();
         let mut candidates = Vec::with_capacity(ranked.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, entry) in ranked.into_iter().enumerate() {
@@ -530,17 +722,11 @@ where
         let batch = RetrieverBatch {
             candidates,
             evidence_by_occurrence,
-            coverage: RetrieverCoverage {
-                examined: summary.examined,
-                eligible: summary.eligible,
-                excluded: summary.excluded,
-                capped: truncated as u64,
-                unknown: summary.unknown,
-            },
+            coverage,
             continuation: Some(RetrieverContinuation {
                 lane: RetrieverKind::Semantic,
                 checkpoint_digest,
-                exhausted: truncated == 0,
+                exhausted,
             }),
         };
         batch
@@ -555,7 +741,7 @@ where
         if deadline_exhausted(request, self.control) {
             return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
                 request,
-                summary.examined,
+                coverage.examined,
                 batch.candidates.len() as u64,
                 self.control,
             )));
@@ -638,6 +824,23 @@ pub(super) fn port_error_class(error: &RetrievalPortError) -> &'static str {
     }
 }
 
+/// An ANN-profiled request fell back to the exact-flat scan. Fallbacks are
+/// typed and observable, never silent: the evidence records the executed
+/// `ExactFlat` path and these gauges record why the index could not serve.
+fn observe_semantic_ann_fallback(state: SemanticAnnIndexStateV1) {
+    match state {
+        SemanticAnnIndexStateV1::Missing => {
+            hotpath::gauge!("query.lane.semantic.ann.fallback.missing").inc(1_u64);
+        }
+        SemanticAnnIndexStateV1::IncompleteCoverage { .. } => {
+            hotpath::gauge!("query.lane.semantic.ann.fallback.incomplete_coverage").inc(1_u64);
+        }
+        SemanticAnnIndexStateV1::Unsupported => {
+            hotpath::gauge!("query.lane.semantic.ann.fallback.unsupported").inc(1_u64);
+        }
+    }
+}
+
 pub(super) fn observe_semantic_lane_failure(stage: &'static str, error_class: &'static str) {
     match stage {
         "request_validation" => {
@@ -672,6 +875,15 @@ pub(super) fn observe_semantic_lane_failure(stage: &'static str, error_class: &'
         }
         "scan_duplicate_occurrence" => {
             hotpath::gauge!("query.lane.semantic.failure.scan_duplicate_occurrence").inc(1_u64);
+        }
+        "ann_candidates" => {
+            hotpath::gauge!("query.lane.semantic.failure.ann_candidates").inc(1_u64);
+        }
+        "ann_duplicate_occurrence" => {
+            hotpath::gauge!("query.lane.semantic.failure.ann_duplicate_occurrence").inc(1_u64);
+        }
+        "ann_candidate_limit" => {
+            hotpath::gauge!("query.lane.semantic.failure.ann_candidate_limit").inc(1_u64);
         }
         "scan_eligible_coverage" => {
             hotpath::gauge!("query.lane.semantic.failure.scan_eligible_coverage").inc(1_u64);

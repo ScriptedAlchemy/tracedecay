@@ -23,7 +23,6 @@ use tracedecay::application_surface::{
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, parse_application_surface_request,
     resolve_application_surface_dispatch, resolve_catalog_tool_binding,
 };
-use tracedecay::mcp::tools::get_tool_definitions;
 use tracedecay_application::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
 };
@@ -32,6 +31,7 @@ use tracedecay_application::{
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
 use tracedecay_daemon_protocol::RequestedOutputFormat;
+use tracedecay_mcp::get_tool_definitions;
 use tracedecay_tool_catalog::{BindingSurface, CatalogContributionV1};
 
 /// The transaction journey, restated here as the reverse authority. Deriving

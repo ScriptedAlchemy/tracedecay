@@ -114,7 +114,7 @@ mod tests {
                 "session temporal refresh did not publish before hook completion",
             ))
         );
-        let data = crate::mcp::tools::structured_hook_error_data(&error)
+        let data = tracedecay_mcp::structured_hook_error_data(&error)
             .expect("hook error must retain structured context");
         assert_eq!(data["status"], "unavailable");
     }

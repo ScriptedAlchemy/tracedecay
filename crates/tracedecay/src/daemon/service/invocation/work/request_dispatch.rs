@@ -70,7 +70,9 @@ pub(super) async fn dispatch_work_application(
             );
         }
     };
-    let services = match registered.database.work_application_services() {
+    let services = match tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+        &registered.database,
+    ) {
         Ok(services) => services,
         Err(_) => {
             return DaemonInvocationResponse::problem(
@@ -122,9 +124,10 @@ pub(super) async fn dispatch_work_application(
                     capability_id,
                     use_case.clone(),
                 );
-                let created = registered
-                .database
-                .work_product_services(binding.clone())
+                let created = tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+                    &registered.database,
+                    binding.clone(),
+                )
                 .map_err(|_| {
                     tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable
                 })
@@ -257,9 +260,10 @@ pub(super) async fn dispatch_work_application(
                         capability,
                         use_case.clone(),
                     );
-                    registered
-                        .database
-                        .work_product_services(binding.clone())
+                    tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+                        &registered.database,
+                        binding.clone(),
+                    )
                         .map_err(|_| {
                             work_product_problem(
                                 tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
@@ -709,15 +713,19 @@ pub(super) async fn dispatch_work_application(
                 };
                 let binding =
                     tracedecay_application::WorkProductBindingV1::new(capability, use_case.clone());
-                let product_services = match registered.database.work_product_services(binding) {
-                    Ok(services) => services,
-                    Err(_) => {
-                        return DaemonInvocationResponse::problem(
-                            request_id,
-                            DaemonInvocationProblem::Unavailable,
-                        );
-                    }
-                };
+                let product_services =
+                    match tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+                        &registered.database,
+                        binding,
+                    ) {
+                        Ok(services) => services,
+                        Err(_) => {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                DaemonInvocationProblem::Unavailable,
+                            );
+                        }
+                    };
                 complete_work_read(
                     &registered,
                     request_id,
@@ -802,7 +810,10 @@ pub(super) async fn dispatch_work_application(
                 let binding =
                     tracedecay_application::WorkProductBindingV1::new(capability, use_case.clone());
                 let product_services =
-                    match registered.database.work_product_services(binding.clone()) {
+                    match tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+                        &registered.database,
+                        binding.clone(),
+                    ) {
                         Ok(services) => services,
                         Err(_) => {
                             return DaemonInvocationResponse::problem(
