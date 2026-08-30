@@ -135,7 +135,9 @@ async fn drive_messages(
         if shutdown_on_exit {
             Box::pin(server.run(&mut transport)).await.unwrap();
         } else {
-            Box::pin(server.run_connection(&mut transport)).await.unwrap();
+            Box::pin(server.run_connection(&mut transport))
+                .await
+                .unwrap();
         }
     });
 

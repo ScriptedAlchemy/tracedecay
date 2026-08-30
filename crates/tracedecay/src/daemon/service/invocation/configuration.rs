@@ -481,34 +481,33 @@ pub(super) async fn apply_configuration_or_semantic_transition(
             requested.is_some(),
         )
     });
-    let receipt = if current.revision_id != expected_revision {
-        Box::pin(
-            registered
-                .runtime
-                .client()
-                .mutate_direct(authority, mutation, expected_revision),
-        )
-        .await?
-    } else if let Some(semantic_profile) = semantic_profile {
-        let operation = registered
-            .semantic_operation
-            .get()
-            .cloned()
-            .ok_or(ConfigurationError::Unavailable)?;
-        match semantic_profile {
-            Some(selected_profile) => {
-                Box::pin(operation.activate(SemanticProtectedActivationOperationV1 {
-                    authority,
-                    selected_profile,
-                    central_mutation: mutation,
-                    now,
-                }))
-                .await
-                .map(|applied| applied.configuration_receipt)
-                .map_err(map_semantic_configuration_error)?
-            }
-            None => {
-                Box::pin(operation.rollback(SemanticProtectedRollbackOperationV1 {
+    let receipt =
+        if current.revision_id != expected_revision {
+            Box::pin(registered.runtime.client().mutate_direct(
+                authority,
+                mutation,
+                expected_revision,
+            ))
+            .await?
+        } else if let Some(semantic_profile) = semantic_profile {
+            let operation = registered
+                .semantic_operation
+                .get()
+                .cloned()
+                .ok_or(ConfigurationError::Unavailable)?;
+            match semantic_profile {
+                Some(selected_profile) => {
+                    Box::pin(operation.activate(SemanticProtectedActivationOperationV1 {
+                        authority,
+                        selected_profile,
+                        central_mutation: mutation,
+                        now,
+                    }))
+                    .await
+                    .map(|applied| applied.configuration_receipt)
+                    .map_err(map_semantic_configuration_error)?
+                }
+                None => Box::pin(operation.rollback(SemanticProtectedRollbackOperationV1 {
                     authority,
                     central_mutation: mutation,
                     trigger: "configuration_semantic_profile_disabled".to_owned(),
@@ -516,18 +515,16 @@ pub(super) async fn apply_configuration_or_semantic_transition(
                 }))
                 .await
                 .map(|applied| applied.configuration_receipt)
-                .map_err(map_semantic_configuration_error)?
+                .map_err(map_semantic_configuration_error)?,
             }
-        }
-    } else {
-        Box::pin(
-            registered
-                .runtime
-                .client()
-                .mutate_direct(authority, mutation, expected_revision),
-        )
-        .await?
-    };
+        } else {
+            Box::pin(registered.runtime.client().mutate_direct(
+                authority,
+                mutation,
+                expected_revision,
+            ))
+            .await?
+        };
     Box::pin(reconcile_configuration_runtime(registered, &receipt, now)).await;
     Ok(receipt)
 }

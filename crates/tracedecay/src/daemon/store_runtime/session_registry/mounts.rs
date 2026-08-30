@@ -372,8 +372,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             label = "daemon.store.profile_authority.open"
         )
         .await?;
-        let database = Box::pin(self.attach_registered(runtime, "attach profile authority store"))
-            .await?;
+        let database =
+            Box::pin(self.attach_registered(runtime, "attach profile authority store")).await?;
         let lease = database.issue_lease().map_err(|error| {
             session_registry_error(
                 "issue profile authority database client",
@@ -444,8 +444,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             label = "daemon.store.profile_sessions.open"
         )
         .await?;
-        let database = Box::pin(self.attach_registered(runtime, "mount profile session store"))
-            .await?;
+        let database =
+            Box::pin(self.attach_registered(runtime, "mount profile session store")).await?;
         let (database, lease) = self.publish_session_owner(
             database,
             shard_id,

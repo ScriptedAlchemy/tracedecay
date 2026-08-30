@@ -291,14 +291,16 @@ async fn initialize_test_project(
     // Heap-allocate the graph-init composition so every test awaiting this
     // fixture keeps a bounded resident frame (perf-profile layouts overflow
     // the test stack when the mega-future is inlined).
-    let project = Box::pin(crate::tracedecay::TraceDecay::init_with_exclusive_maintenance(
-        project_root,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-        &lifecycle,
-    ))
+    let project = Box::pin(
+        crate::tracedecay::TraceDecay::init_with_exclusive_maintenance(
+            project_root,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(client_identity.profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+            &lifecycle,
+        ),
+    )
     .await
     .expect("initialize project");
     let store_layout = project.store_layout().clone();

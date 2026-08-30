@@ -80,14 +80,16 @@ pub(super) async fn open_project_for_handshake(
     // admission path. Opening establishes the exact registered configuration
     // and durable store authority; project composition schedules the maintained
     // bounded code-index owner after publication.
-    let open_result = Box::pin(crate::tracedecay::TraceDecay::open_with_registered_configuration(
-        project_path,
-        open_options.clone(),
-        store_layout.clone(),
-        configuration_database.clone(),
-        registry_database.clone(),
-        Arc::clone(&runtime_registry),
-    ))
+    let open_result = Box::pin(
+        crate::tracedecay::TraceDecay::open_with_registered_configuration(
+            project_path,
+            open_options.clone(),
+            store_layout.clone(),
+            configuration_database.clone(),
+            registry_database.clone(),
+            Arc::clone(&runtime_registry),
+        ),
+    )
     .await;
     match open_result {
         Ok(cg) => Ok(cg),
@@ -116,14 +118,16 @@ pub(super) async fn open_project_for_handshake(
             // exact configuration authority only. The bounded code-index
             // activation owner performs indexing after admission, so opening a
             // project never waits for a repository scan or rebuild.
-            Box::pin(crate::tracedecay::TraceDecay::init_with_registered_configuration(
-                project_path,
-                open_options,
-                store_layout,
-                configuration_database,
-                registry_database,
-                runtime_registry,
-            ))
+            Box::pin(
+                crate::tracedecay::TraceDecay::init_with_registered_configuration(
+                    project_path,
+                    open_options,
+                    store_layout,
+                    configuration_database,
+                    registry_database,
+                    runtime_registry,
+                ),
+            )
             .await
         }
         Err(open_err) => Err(open_err),
