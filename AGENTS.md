@@ -67,8 +67,12 @@ compiles.
 - `dashboard/app-dist/` is gitignored build output but required by `build.rs`;
   a fresh checkout/worktree must build the dashboard (or seed the directory)
   before Rust compiles. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` only skips a
-  stale rebuild. Create linked worktrees with `scripts/agent-worktree.sh` so
-  `app-dist` and `node_modules` are seeded from the primary checkout.
+  stale rebuild. Create linked worktrees with `scripts/agent-worktree.sh`
+  (it locks the lane). Clean up only via `scripts/worktree-gc.sh` or by the
+  owning lane unlocking and removing its own exact absolute path; never
+  `git worktree remove` / `git branch -D` another lane's tree or any path
+  you did not create, and never use name prefixes. A clean tree at the
+  integration tip may be a FRESH lane, not garbage.
 - This machine shares one compile cache (kache, keyed on
   profile × features × RUSTFLAGS × source); the `kache cargo -- <args>`
   front-end above keeps that key stable, which is why bare `cargo` is
