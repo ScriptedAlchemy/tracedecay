@@ -759,8 +759,12 @@ fn dispatch_git_tools_inner<'a>(
                     git::handle_diff_context(cg, &graph, args).await
                 }
                 "tracedecay_changelog" => {
-                    let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
-                    git::handle_changelog(cg, &graph, args).await
+                    git::handle_changelog(
+                        cg,
+                        admitted_graph_query(cg, &options, "file_dependents"),
+                        args,
+                    )
+                    .await
                 }
                 "tracedecay_commit_context" => {
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
@@ -1131,10 +1135,9 @@ fn dispatch_session_workflow_tools_inner<'a>(
                 .await
             }
             "tracedecay_run_affected_tests" => {
-                let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
                 workflow::handle_run_affected_tests(
                     cg,
-                    &graph,
+                    admitted_graph_query(cg, &options, "file_dependents"),
                     args,
                     options.application_cancellation.clone(),
                     options.code_index_publication_identity.as_deref(),

@@ -183,9 +183,15 @@ pub(super) async fn handle_diagnose(
     let mut near_duplicates_by_node: Option<HashMap<String, Vec<Value>>> = None;
 
     for d in &diagnostics {
-        touched.insert(d.file.clone());
+        // Compilers report paths in whatever shape the build invoked them
+        // with — absolute, project-relative, or backslash-separated. The
+        // graph's logical paths are project-relative with forward slashes,
+        // so normalize before lookup; the diagnostic itself keeps the
+        // compiler's own spelling.
+        let lookup_path = normalized_diagnostic_path(cg.project_root(), &d.file);
+        touched.insert(lookup_path.clone());
 
-        let node = diagnostic_symbol_at_location(graph, &d.file, d.line)?;
+        let node = diagnostic_symbol_at_location(graph, &lookup_path, d.line)?;
         let near_duplicates = match &node {
             Some(n) => {
                 if near_duplicates_by_node.is_none() {
@@ -272,6 +278,19 @@ pub(super) async fn handle_diagnose(
         touched.into_iter().collect(),
         || render::diagnostics_md(&body),
     ))
+}
+
+/// The graph-lookup form of one compiler-reported path: forward slashes,
+/// relative to the project root when the compiler reported it absolute.
+fn normalized_diagnostic_path(project_root: &Path, file: &str) -> String {
+    let forward = file.replace('\\', "/");
+    let path = Path::new(&forward);
+    if path.is_absolute()
+        && let Ok(relative) = path.strip_prefix(project_root)
+    {
+        return relative.to_string_lossy().into_owned();
+    }
+    forward
 }
 
 fn diagnostic_symbol_at_location(
@@ -515,13 +534,16 @@ fn severity_string(s: Severity) -> &'static str {
 }
 
 /// Handles `tracedecay_run_affected_tests`.
-pub(super) async fn handle_run_affected_tests(
+pub(super) async fn handle_run_affected_tests<F>(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: F,
     args: Value,
     cancellation: Option<CancellationSignal>,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
-) -> Result<ToolResult> {
+) -> Result<ToolResult>
+where
+    F: Future<Output = Result<crate::tracedecay::queries::graph::VerifiedGraphQuery>>,
+{
     handle_run_affected_tests_with_runner(
         cg,
         graph,
@@ -534,15 +556,16 @@ pub(super) async fn handle_run_affected_tests(
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.total")]
-async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
+async fn handle_run_affected_tests_with_runner<F, Runner, RunFuture>(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: F,
     args: Value,
     cancellation: Option<CancellationSignal>,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
     runner: Runner,
 ) -> Result<ToolResult>
 where
+    F: Future<Output = Result<crate::tracedecay::queries::graph::VerifiedGraphQuery>>,
     Runner: FnOnce(PathBuf, TestProfile, Vec<String>, Duration, TestRunControl) -> RunFuture,
     RunFuture: Future<Output = std::result::Result<TestRunOutput, TestRunFailure>>,
 {
@@ -553,6 +576,9 @@ where
     let project_root = cg.project_root().to_path_buf();
 
     // The caller's manifest is the authority for the affected-test scope.
+    // Graph admission stays unawaited until that scope is validated: a request
+    // without manifest-scoped changed paths is an invalid request regardless
+    // of whether the graph projection is mounted.
     let changed_paths = match resolve_changed_paths(&args, run_args.explicit_paths) {
         Ok(paths) => paths,
         Err(result) => return Ok(result),
@@ -561,6 +587,8 @@ where
         return Ok(empty_result(&args, "no changed files detected"));
     }
 
+    let graph = &hotpath::future!(graph, label = "mcp.workflow.affected_tests.graph_admission")
+        .await?;
     let test_targets = hotpath::measure_block!(
         "mcp.workflow.affected_tests.graph",
         collect_affected_test_targets(graph, &changed_paths)
