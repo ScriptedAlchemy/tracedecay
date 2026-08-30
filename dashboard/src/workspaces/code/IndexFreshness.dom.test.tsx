@@ -482,6 +482,7 @@ function worktree() {
     hook_hint_count: 0,
     coverage: 'complete',
     progress: null,
+    parked: null,
   };
 }
 

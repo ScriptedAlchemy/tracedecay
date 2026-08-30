@@ -100,8 +100,12 @@ impl StoreAdministration {
         };
         let registry = registry
             .get_or_try_init(|| async move {
-                crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                    identity,
+                // Boxed: the registry-open composition is a mega future whose
+                // inline layout overflows 2MB runtime stacks.
+                Box::pin(
+                    crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                        identity,
+                    ),
                 )
                 .await
                 .map(Arc::new)
@@ -119,8 +123,8 @@ impl StoreAdministration {
         &self,
     ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
     {
-        self.ensure_account_active().await?;
-        self.session_runtime_registry().await
+        Box::pin(self.ensure_account_active()).await?;
+        Box::pin(self.session_runtime_registry()).await
     }
 
     /// Shutdown-only: drains the retained graph owners out of every session

@@ -34,7 +34,8 @@ use tracedecay_domain::{
     WorktreeId, canonical_sha256,
 };
 use tracedecay_private_fs::{
-    framed_log::DirectorySyncPolicy, open_private_file, validate_private_directory,
+    framed_log::DirectorySyncPolicy, make_private_directory, open_private_file,
+    validate_private_directory,
 };
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
@@ -4981,14 +4982,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
-    #[cfg(test)]
-    fn reconcile_retained_text_generation(
-        &mut self,
-        metadata: &VerifiedSealedTextGenerationMetadataV1,
-    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        self.reconcile_retained_text_generation_with(metadata, true)
-    }
-
     fn reconcile_retained_text_generation_with(
         &mut self,
         metadata: &VerifiedSealedTextGenerationMetadataV1,
@@ -6602,14 +6595,56 @@ fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortEr
     match tracedecay_private_fs::create_private_directory(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            validate_private_directory(path).map_err(|error| {
-                RetrievalPortError::Contract(format!(
-                    "code text artifacts root is not owner-private: {error}"
-                ))
-            })
+            let validation_error = match validate_private_directory(path) {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            // A pre-existing root that fails owner-privacy validation is most
+            // often a legacy directory an older binary created under a
+            // permissive umask. Ownership is the proof this process may
+            // tighten it in place; a root it does not own — or that is not a
+            // directory at all — stays a typed deterministic contract
+            // violation for the operator instead of an endless silent retry.
+            match make_private_directory(path) {
+                Ok(receipt) => {
+                    let previous_mode = receipt
+                        .previous_unix_mode
+                        .map(|mode| format!("{mode:o}"))
+                        .unwrap_or_else(|| "platform-acl".to_owned());
+                    tracing::info!(
+                        event = "code_index_text_artifacts_root_privacy_healed",
+                        previous_mode = %previous_mode,
+                        "legacy code text artifacts root was re-permissioned to owner-private"
+                    );
+                    Ok(())
+                }
+                Err(heal_error) => Err(RetrievalPortError::Contract(format!(
+                    "code text artifacts root '{}' is not owner-private{}: {validation_error}; \
+                     self-heal refused: {heal_error}; restore owner-only access (chmod 700 and \
+                     chown to the daemon user) or re-enroll the store",
+                    path.display(),
+                    observed_unix_mode(path)
+                        .map(|mode| format!(" (mode {mode:o}, need 700)"))
+                        .unwrap_or_default(),
+                ))),
+            }
         }
         Err(error) => Err(text_artifact_unavailable(error)),
     }
+}
+
+/// Unix permission bits currently on `path`, for typed contract messages.
+#[cfg(unix)]
+fn observed_unix_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    path.symlink_metadata()
+        .ok()
+        .map(|metadata| metadata.permissions().mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn observed_unix_mode(_path: &Path) -> Option<u32> {
+    None
 }
 
 fn checkpoint_text_artifact_control(

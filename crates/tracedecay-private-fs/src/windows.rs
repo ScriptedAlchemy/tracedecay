@@ -221,9 +221,33 @@ pub fn make_private_file(path: &Path) -> io::Result<File> {
         SHARE_READ_WRITE_DELETE,
     )?;
     validate_file_kind(&file, path, PathKind::File)?;
-    protect_existing_file(&file, path)?;
+    protect_existing(&file, path, PathKind::File)?;
     validate_private_handle(&file, path, PathKind::File)?;
     Ok(file)
+}
+
+/// Protect an existing directory through its exact opened handle, when the
+/// current user may rewrite its owner and DACL.
+///
+/// The directory analogue of [`make_private_file`]: it converges a legacy
+/// directory an older binary created without the protected private ACL. The
+/// `WRITE_DAC | WRITE_OWNER` open is the authorization proof — a caller that
+/// cannot take ownership of the object is refused by the open itself.
+#[hotpath::measure(label = "private_fs.make_private_directory")]
+pub fn make_private_directory(path: &Path) -> io::Result<crate::MadePrivateDirectory> {
+    let file = open_handle_with_share(
+        path,
+        OPEN_EXISTING,
+        SECURITY_ACCESS | WRITE_DAC | WRITE_OWNER,
+        null(),
+        SHARE_READ_WRITE,
+    )?;
+    validate_file_kind(&file, path, PathKind::Directory)?;
+    protect_existing(&file, path, PathKind::Directory)?;
+    validate_private_handle(&file, path, PathKind::Directory)?;
+    Ok(crate::MadePrivateDirectory {
+        previous_unix_mode: None,
+    })
 }
 
 /// Open or create a private lock file with concurrent read-write sharing.
@@ -311,11 +335,11 @@ fn open_with_private_creation_acl(
     })
 }
 
-fn protect_existing_file(file: &File, path: &Path) -> io::Result<()> {
+fn protect_existing(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
     let current_user = current_user_sid()
         .map_err(|error| wrap_error("resolve current Windows user SID", path, error))?;
-    let acl = private_acl(&current_user, PathKind::File.inheritance())
-        .map_err(|error| wrap_error("build private Windows file DACL", path, error))?;
+    let acl = private_acl(&current_user, kind.inheritance())
+        .map_err(|error| wrap_error("build private Windows DACL", path, error))?;
     // SAFETY: the file handle, SID, and ACL are valid and remain live for the call.
     let status = unsafe {
         SetSecurityInfo(
@@ -332,7 +356,10 @@ fn protect_existing_file(file: &File, path: &Path) -> io::Result<()> {
     };
     if status != ERROR_SUCCESS {
         return Err(wrap_error(
-            "protect existing Windows file",
+            match kind {
+                PathKind::Directory => "protect existing Windows directory",
+                PathKind::File => "protect existing Windows file",
+            },
             path,
             io::Error::from_raw_os_error(status as i32),
         ));
@@ -944,6 +971,30 @@ mod tests {
         assert_eq!(snapshot.ace_mask, FILE_ALL_ACCESS);
         assert_eq!(snapshot.ace_inheritance, NO_INHERITANCE as u8);
         assert!(snapshot.trustee_is_current_user);
+    }
+
+    #[test]
+    fn ordinary_directory_is_hardened_through_its_opened_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("legacy-directory");
+        std::fs::create_dir(&path).unwrap();
+        assert!(open_private_directory(&path).is_err());
+
+        let receipt = make_private_directory(&path).unwrap();
+
+        assert_eq!(receipt.previous_unix_mode, None);
+        let snapshot = snapshot(&path, PathKind::Directory);
+        assert!(snapshot.owner_is_current_user);
+        assert!(snapshot.dacl_is_protected);
+        assert_eq!(snapshot.ace_count, 1);
+        assert!(snapshot.ace_is_allowed);
+        assert_eq!(snapshot.ace_mask, FILE_ALL_ACCESS);
+        assert_eq!(
+            snapshot.ace_inheritance,
+            SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8
+        );
+        assert!(snapshot.trustee_is_current_user);
+        drop(open_private_directory(&path).unwrap());
     }
 
     #[test]

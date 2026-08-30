@@ -678,6 +678,22 @@ export const CodeIndexBuildProgressV1Schema = z.object({
 });
 export type CodeIndexBuildProgressV1 = z.infer<typeof CodeIndexBuildProgressV1Schema>;
 
+/** A deterministic contract violation that parked background convergence.
+
+Parked is not dead: the worker keeps re-observing the violation on its
+ordinary wake cadence, so an operator fix (for example restoring an
+owner-private mode) is picked up on the next wake without a restart. The
+state exists so `status`, doctor, and the dashboard report the violation
+typed instead of an indefinite "warming". */
+export const CodeIndexConvergenceParkedV1Schema = z.object({
+  observed_passes: z.number().int().safe().min(0),
+  parked_at_micros: z.number().int().safe(),
+  reason: z.string(),
+  remediation: z.string(),
+  retries_on_wake: z.boolean(),
+});
+export type CodeIndexConvergenceParkedV1 = z.infer<typeof CodeIndexConvergenceParkedV1Schema>;
+
 export const CodeIndexFreshnessPayloadV1Schema = z.object({
   note: z.string(),
   worktrees: z.array(z.lazy(() => CodeIndexWorktreeFreshnessV1Schema)),
@@ -727,6 +743,7 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   hook_hint_count: z.number().int().safe().min(0).nullable(),
   last_reconcile_micros: z.number().int().safe().nullable(),
   latest_generation_id: z.string().nullable(),
+  parked: z.union([z.lazy(() => CodeIndexConvergenceParkedV1Schema), z.null()]),
   progress: z.union([z.lazy(() => CodeIndexBuildProgressV1Schema), z.null()]),
   repository_id: z.string().nullable(),
   sealed_at_micros: z.number().int().safe().nullable(),

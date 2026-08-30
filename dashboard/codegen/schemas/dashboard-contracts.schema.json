@@ -2367,6 +2367,42 @@
       ],
       "type": "object"
     },
+    "CodeIndexConvergenceParkedV1": {
+      "description": "A deterministic contract violation that parked background convergence.\n\nParked is not dead: the worker keeps re-observing the violation on its\nordinary wake cadence, so an operator fix (for example restoring an\nowner-private mode) is picked up on the next wake without a restart. The\nstate exists so `status`, doctor, and the dashboard report the violation\ntyped instead of an indefinite \"warming\".",
+      "properties": {
+        "observed_passes": {
+          "description": "Background passes that re-observed the violation since parking.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parked_at_micros": {
+          "description": "When the violation was first observed (microseconds since the Unix epoch).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Exact typed failure that parked convergence.",
+          "type": "string"
+        },
+        "remediation": {
+          "description": "Operator action that clears the violation.",
+          "type": "string"
+        },
+        "retries_on_wake": {
+          "description": "Whether the worker re-checks this violation on every ordinary wake.\nTrue for filesystem/contract violations an operator fix clears in\nplace; false for an abnormal task failure that only changed input (a\nnew sealed generation) retries.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reason",
+        "remediation",
+        "parked_at_micros",
+        "observed_passes",
+        "retries_on_wake"
+      ],
+      "type": "object"
+    },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
         "note": {
@@ -2532,6 +2568,17 @@
             "null"
           ]
         },
+        "parked": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexConvergenceParkedV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Deterministic contract violation currently parking background\nconvergence, when one is observed. `staleness_state` reads `parked`\nwhile this is set and no generation serves."
+        },
         "progress": {
           "anyOf": [
             {
@@ -2611,7 +2658,8 @@
         "staleness_state",
         "hook_hint_count",
         "coverage",
-        "progress"
+        "progress",
+        "parked"
       ],
       "type": "object"
     },
