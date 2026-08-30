@@ -26,11 +26,11 @@ use tracedecay_application::doctor::{
     RemoteOperationalReadV1, advisory_feedback_read_from_publication, compose_doctor_report,
     merge_storage_reads, runtime_health_read, storage_family_read,
 };
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::maintenance::GuardedStoreTelemetryPort;
 

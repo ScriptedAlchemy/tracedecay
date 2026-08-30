@@ -67,9 +67,11 @@ use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
 use crate::surface::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
 use tracedecay_application::ConfigurationWireRequestV1;
+use tracedecay_application::feedback::observations::{
+    FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
+};
 use tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
 use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay_application::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 use tracedecay_application::retrieval::PrimitiveRequest;
 
 /// Request-field character rules. The contract accepts opaque handles and ids
@@ -1719,11 +1721,13 @@ impl DaemonInvocationRequest {
         }
     }
 
+    #[must_use]
     pub fn with_delivery_route(mut self, route: FeedbackDeliveryRouteV1) -> Self {
         self.delivery_route = Some(route);
         self
     }
 
+    #[must_use]
     pub fn with_resolved_scope(mut self, scope: Option<ResolvedScope>) -> Self {
         match &mut self.payload {
             DaemonInvocationPayload::FeedbackGet { resolved_scope, .. }

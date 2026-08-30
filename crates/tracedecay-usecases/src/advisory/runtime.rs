@@ -31,12 +31,12 @@ use crate::context::MonotonicDeadline;
 use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::cycle_runtime::{CanonicalFeedbackResultV1, FeedbackCycleRuntime};
 use crate::feedback::observations::FeedbackObservationEmitterV1;
+use crate::operation_stream::OperationEmitter;
 use tracedecay_application::feedback::observations::{
     FeedbackAdvisoryProviderV1, FeedbackCiProviderV1, FeedbackCoverageV1,
-    FeedbackGitHubLifecycleV1, FeedbackOperationV1, FeedbackOutcomeV1,
-    FeedbackProximityRiskV1, FeedbackProximityTransitionV1, FeedbackSourceEventV1,
+    FeedbackGitHubLifecycleV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackProximityRiskV1,
+    FeedbackProximityTransitionV1, FeedbackSourceEventV1,
 };
-use crate::operation_stream::OperationEmitter;
 use tracedecay_runtime_core::db::Database;
 
 use super::ci_runtime::{

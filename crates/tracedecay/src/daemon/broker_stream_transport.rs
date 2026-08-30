@@ -64,9 +64,7 @@ impl BrokerStreamTransport {
     pub(super) fn new(stream: BrokerStream) -> Self {
         let (reader, writer) = stream.into_owned_split();
         Self {
-            reader: BoundedLineReader::new(
-                tokio::io::BufReader::new(reader),
-            ),
+            reader: BoundedLineReader::new(tokio::io::BufReader::new(reader)),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
             active_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
             replay: VecDeque::new(),
@@ -420,9 +418,7 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     self.peer_fully_closed_after_eof().await;
                     return None;
                 }
-                Err(error)
-                    if is_wire_oversized_io_error(&error) =>
-                {
+                Err(error) if is_wire_oversized_io_error(&error) => {
                     let _ = tracedecay_mcp::transport::write_wire_oversized_rejection(self, &error)
                         .await;
                     return None;

@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::ResolvedScope;
+#[cfg(test)]
+use tracedecay_application::context_scout::ContextScoutFeedbackV1;
 use tracedecay_application::context_scout::{
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
-#[cfg(test)]
-use tracedecay_application::context_scout::ContextScoutFeedbackV1;
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
 use tracedecay_hooks::{
     AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
@@ -23,11 +23,11 @@ use tracedecay_hooks::{
 #[cfg(test)]
 use tracedecay_hooks::{HookImmediateAdmissionStateV1, HookScopedFeedbackV1};
 
+#[cfg(test)]
+use crate::agents::context_scout_v2::context_scout_delivery_receipt_matches_envelope;
 use crate::agents::context_scout_v2::{
     ContextScoutDeliveryReceiptHookV1, context_scout_delivery_receipt_id,
 };
-#[cfg(test)]
-use crate::agents::context_scout_v2::context_scout_delivery_receipt_matches_envelope;
 
 use super::analytics::{HookTimingSpan, elapsed_us};
 #[cfg(test)]
@@ -700,19 +700,17 @@ async fn dispatch_decoded(
             };
             let deadline = HookSynchronousDeadlineV1::after_elapsed(elapsed_us(started));
             let scout_receipt = match (result.rendered_guidance.as_ref(), guidance_envelope_id) {
-                (Some(_), Some(envelope_id)) => Some(
-                    ContextScoutDeliveryReceiptHookV1 {
-                        receipt: ContextScoutDeliveryReceiptV1 {
-                            receipt_id: context_scout_delivery_receipt_id(
-                                envelope.event_id,
-                                envelope_id,
-                            ),
+                (Some(_), Some(envelope_id)) => Some(ContextScoutDeliveryReceiptHookV1 {
+                    receipt: ContextScoutDeliveryReceiptV1 {
+                        receipt_id: context_scout_delivery_receipt_id(
+                            envelope.event_id,
                             envelope_id,
-                            delivered_at: now_utc(),
-                            outcome: ContextScoutDeliveryOutcomeV1::Attempted,
-                        },
+                        ),
+                        envelope_id,
+                        delivered_at: now_utc(),
+                        outcome: ContextScoutDeliveryOutcomeV1::Attempted,
                     },
-                ),
+                }),
                 _ => None,
             };
             let receipts = DaemonDeliveryReceiptPort::new(project_root);

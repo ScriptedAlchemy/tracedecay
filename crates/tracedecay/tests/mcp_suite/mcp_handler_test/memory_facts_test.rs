@@ -915,7 +915,9 @@ async fn fact_store_add_rejection_names_the_admitted_categories() {
         }),
     )
     .await;
-    let message = result.expect_err("an unknown category must be rejected").to_string();
+    let message = result
+        .expect_err("an unknown category must be rejected")
+        .to_string();
     assert!(
         message.contains("pitfall"),
         "the rejection must echo the offending category: {message}"

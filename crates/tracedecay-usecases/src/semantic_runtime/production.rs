@@ -18,8 +18,7 @@ use tracedecay_domain::{
     QueryFallbackSubpayload, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
     RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
     SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1, SourceOccurrenceId,
-    VectorGenerationIdV1, WorktreeId,
-    canonical_sha256,
+    VectorGenerationIdV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_policy::retrieval_selection::{
     RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
@@ -502,8 +501,13 @@ impl ProductionSemanticRuntimeV1 {
         )
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         let port = Arc::new(
-            PublishedSemanticVectorReadPortV1::new(active, search_index_key.clone(), generation, ann)
-                .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
+            PublishedSemanticVectorReadPortV1::new(
+                active,
+                search_index_key.clone(),
+                generation,
+                ann,
+            )
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
         );
         let vectors = CachedPublishedVectorsV1 {
             generation: port.generation.clone(),
@@ -4191,10 +4195,7 @@ mod tests {
     #[test]
     fn preacceptance_target_requires_a_canonical_search_index() {
         let exact_flat = search_index_key().clone();
-        assert_eq!(
-            validate_evaluation_target_search_index(&exact_flat),
-            Ok(())
-        );
+        assert_eq!(validate_evaluation_target_search_index(&exact_flat), Ok(()));
 
         let ann = SemanticSearchIndexProfileV1::ann_hnsw_exact_rescore_v1()
             .and_then(|profile| profile.index_key())
