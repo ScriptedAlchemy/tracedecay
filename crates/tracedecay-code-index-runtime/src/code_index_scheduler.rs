@@ -3027,7 +3027,7 @@ impl LatestCompleteCodeIndexV1 {
     }
 
     #[cfg(test)]
-    pub fn lexical(&self) -> &[tracedecay_domain::CodeSearchChunkV1] {
+    pub fn lexical(&self) -> &[Arc<tracedecay_domain::CodeSearchChunkV1>] {
         self.generation.chunks().chunks()
     }
 
