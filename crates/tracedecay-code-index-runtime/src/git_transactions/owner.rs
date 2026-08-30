@@ -404,7 +404,7 @@ impl DaemonGitInvocationOwner {
 
     pub fn current_read_authority(
         &self,
-        request: &tracedecay_usecases::git_reads::GitReadRequestV1,
+        request: &tracedecay_application::git::GitReadRequestV1,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         let capability = CapabilityId::new(request.capability_id().to_owned())
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;

@@ -5,6 +5,12 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, RwLock};
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
+    ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1, ContextScoutFeedbackV1,
+    ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1, ContextScoutWorkV1,
+};
+use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookLifecyclePhaseV1, HookReadyGuidanceV1,
@@ -14,20 +20,16 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 use super::context_scout_model::context_scout_model_assistant_from_project_config;
 use super::context_scout_ports::ContextScoutConfigurationPinV1;
 use super::context_scout_v2::{
-    ContextScoutAddressV1, ContextScoutBudgetStateV1, ContextScoutCapabilityStateV1,
-    ContextScoutControlV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
-    ContextScoutDurableClaimOutcomeV1, ContextScoutDurableClaimV1, ContextScoutDurableRuntimeV1,
+    ContextScoutBudgetStateV1, ContextScoutCapabilityStateV1, ContextScoutControlV1,
+    ContextScoutDurableClaimOutcomeV1, ContextScoutDurableRuntimeV1,
     ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1,
     ContextScoutDurableStoreV1, ContextScoutErrorV1, ContextScoutExplanationV1,
-    ContextScoutFeedbackV1, ContextScoutLeaseV1, ContextScoutModelAssistantV1,
-    ContextScoutModelBackendV1, ContextScoutModelErrorV1, ContextScoutModelExecutionV1,
-    ContextScoutModelFuture, ContextScoutModelRequestV1, ContextScoutModelRunOutcomeV1,
-    ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1,
-    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
-    ContextScoutWorkV1, ProjectContextScoutDurableStoreV1,
+    ContextScoutModelAssistantV1, ContextScoutModelErrorV1, ContextScoutModelExecutionV1,
+    ContextScoutModelFuture, ContextScoutModelRequestV1, ContextScoutRecentReadOutcomeV1,
+    ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1,
+    ContextScoutServiceStateV1, ContextScoutStatusV1, ProjectContextScoutDurableStoreV1,
 };
 use crate::db::Database;
-use tracedecay_automation_runtime::automation::config::AutomationConfig;
 
 const STARTUP_RECOVERY_LIMIT: usize = 32;
 const DELIVERY_LEASE_MICROS: i64 = 30 * 1_000_000;
@@ -196,7 +198,7 @@ impl ProjectContextScoutOwnerV1 {
         hook: &HookEventEnvelopeV2,
         configuration_revision: u64,
         now: UtcMicros,
-        entry: crate::agents::context_scout_v2::ContextScoutDurableQueueEntryV1,
+        entry: ContextScoutDurableQueueEntryV1,
     ) -> Option<(HookReadyGuidanceV1, ContextScoutDurableClaimV1)> {
         if !delivery_window_admitted_at_hook(entry.envelope.delivery_window, &hook.event) {
             return None;
@@ -520,8 +522,8 @@ impl ProjectContextScoutOwnerV1 {
             && !matches!(
                 status.last_model_outcome,
                 None | Some(
-                    ContextScoutModelRunOutcomeV1::Disabled
-                        | ContextScoutModelRunOutcomeV1::Unavailable
+                    ContextScoutModelOutcomeV1::Disabled
+                        | ContextScoutModelOutcomeV1::Unavailable
                 )
             );
         Ok(ContextScoutCapabilityStateV1 {
@@ -543,7 +545,7 @@ impl ProjectContextScoutOwnerV1 {
             limits: status.limits,
             last_model_outcome: status.last_model_outcome,
             exhausted: status.last_model_outcome
-                == Some(ContextScoutModelRunOutcomeV1::TokenBudgetExceeded),
+                == Some(ContextScoutModelOutcomeV1::TokenBudgetExceeded),
             last_input_tokens: status
                 .last_model_receipt
                 .as_ref()

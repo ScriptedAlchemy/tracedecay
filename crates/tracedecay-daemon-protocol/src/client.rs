@@ -25,10 +25,9 @@ use tracedecay_tool_catalog::{
     SurfaceOperationName,
 };
 
-use tracedecay_usecases::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
-use tracedecay_usecases::request_identity::{
-    ConnectionLocalRequestSequence, GlobalRequestSurface, mint_global_request_id,
-};
+use tracedecay_application::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_lsp::ConnectionLocalRequestSequence;
 
 pub type ScopeSelector = InvocationTarget;
 

@@ -35,7 +35,7 @@ use super::{
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
     DaemonInvocationState,
 };
-use tracedecay_usecases::request_identity::{PreviewIdentityDomain, derive_preview_identity};
+use tracedecay_application::request_identity::{PreviewIdentityDomain, derive_preview_identity};
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
 use crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar;
