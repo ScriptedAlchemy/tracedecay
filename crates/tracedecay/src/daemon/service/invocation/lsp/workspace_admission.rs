@@ -4,8 +4,9 @@ use tracedecay_application::{
     AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, Deadline,
     RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
 };
+use tracedecay_daemon_protocol::MAX_LSP_WORKSPACE_ROOTS;
 use tracedecay_domain::{ScopeSetId, ScopeSetRevision, UtcMicros, canonical_sha256};
-use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace, MAX_LSP_WORKSPACE_ROOTS};
+use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
