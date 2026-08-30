@@ -37,7 +37,7 @@ use tracedecay_application::{
     OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_daemon_protocol::{
-    DaemonInvocationClient, DaemonLspSessionClient, RequestedOutputFormat,
+    DaemonInvocationClient, DaemonLspSessionClient, FramePoll, FrameSend, RequestedOutputFormat,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
@@ -52,7 +52,7 @@ use tracedecay_domain::{
     GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionOperationV1,
     GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
 };
-use tracedecay_lsp::{FramePoll, FrameSend, TRACEDECAY_CONTEXT_REVISION};
+use tracedecay_lsp::TRACEDECAY_CONTEXT_REVISION;
 use tracedecay_mcp::application_output::json::json_line as canonical_json_line;
 use tracedecay_mcp::application_output::markdown::render as render_markdown;
 use tracedecay_mcp::application_output::view::CanonicalHumanView;

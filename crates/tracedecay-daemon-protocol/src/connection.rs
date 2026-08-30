@@ -183,8 +183,7 @@ where
                     Err(error) if is_wire_oversized_io_error(&error) => {
                         Err(TraceDecayError::Config {
                             message: format!(
-                                "daemon {request_label} response exceeded wire message bound ({})",
-                                WIRE_RECORD_TOO_LARGE
+                                "daemon {request_label} response exceeded wire message bound ({WIRE_RECORD_TOO_LARGE})"
                             ),
                         })
                     }

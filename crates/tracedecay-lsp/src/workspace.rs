@@ -3,11 +3,12 @@
 use std::collections::BTreeSet;
 
 use serde_json::Value;
+use tracedecay_daemon_protocol::MAX_LSP_WORKSPACE_ROOTS;
 use tracedecay_domain::ManifestDigest;
 
 use crate::gateway::AdmittedRoot;
 use crate::rpc::RpcFailure;
-use crate::session::{AuthorizedLspWorkspace, MAX_LSP_WORKSPACE_ROOTS};
+use crate::session::AuthorizedLspWorkspace;
 
 /// One validated `workspace/didChangeWorkspaceFolders` intent. The actor does
 /// not apply it locally; its daemon owner resolves and authorizes every URI.

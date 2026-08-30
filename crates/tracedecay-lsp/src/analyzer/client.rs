@@ -28,15 +28,17 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
+use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
 
 use super::broker::{CodeDiagnostic, DiagnosticSeverity};
 use super::error::{
     AnalyzerCancellation as CancellationToken, AnalyzerResult as Result,
     AnalyzerRuntimeError as TraceDecayError,
 };
+
 use crate::{
-    AnalyzerEvent, AsyncContentLengthError, ConnectionLocalRequestSequence, ContentLengthCodec,
-    FramePoll, UpstreamCapabilities, read_content_length_frame_until,
+    AnalyzerEvent, AsyncContentLengthError, ContentLengthCodec, UpstreamCapabilities,
+    read_content_length_frame_until,
 };
 
 const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
