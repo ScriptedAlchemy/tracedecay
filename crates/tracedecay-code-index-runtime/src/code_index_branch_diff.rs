@@ -308,8 +308,8 @@ where
                 let scope = match scope_resolver
                     .resolved_scope_for_project(&request.project_root, &project_id)
                 {
-                    Ok(scope) => scope,
-                    Err(_) => {
+                    Some(scope) => scope,
+                    None => {
                         return unavailable(
                             None,
                             None,
@@ -586,7 +586,7 @@ where
                 let terminal_scope = match scope_resolver
                     .resolved_scope_for_project(&request.project_root, &project_id)
                 {
-                    Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
+                    Some(terminal_scope) if terminal_scope == scope => terminal_scope,
                     _ => {
                         return unavailable(
                             Some(base_id),

@@ -530,8 +530,8 @@ where
                 let scope = match scope_resolver
                     .resolved_scope_for_project(&request.project_root, &project_id)
                 {
-                    Ok(scope) => scope,
-                    Err(_) => return code_index_scope_unavailable(),
+                    Some(scope) => scope,
+                    None => return code_index_scope_unavailable(),
                 };
                 let admission = match admission_provider.admit_current(&scope) {
                     Ok(admission) => admission,
@@ -888,7 +888,7 @@ where
                 }
                 let terminal_scope =
                     match scope_resolver.resolved_scope_for_project(&project_root, &project_id) {
-                        Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
+                        Some(terminal_scope) if terminal_scope == scope => terminal_scope,
                         _ => {
                             return code_index_search_unavailable_for_generation(
                             Some(executed.query.generation.as_str().to_owned()),
@@ -987,7 +987,7 @@ where
                      _candidate: &tracedecay_domain::RankedCandidate| {
                         use tracedecay_query::retrieval::hydrate::HydrationAuthorizationV1;
 
-                        let Ok(current_scope) =
+                        let Some(current_scope) =
                             scope_resolver.resolved_scope_for_project(&project_root, &project_id)
                         else {
                             return HydrationAuthorizationV1::Denied;
@@ -1175,7 +1175,7 @@ where
                 }
                 let publication_scope =
                     match scope_resolver.resolved_scope_for_project(&project_root, &project_id) {
-                        Ok(publication_scope) if publication_scope == terminal_scope => {
+                        Some(publication_scope) if publication_scope == terminal_scope => {
                             publication_scope
                         }
                         _ => {

@@ -11,11 +11,13 @@ use tracedecay_query::code_search;
 
 /// Scope resolver the search/diff executors call for each request root.
 pub trait CodeIndexScopeResolverV1: Clone + Send + Sync + 'static {
+    /// Returns `None` when no scope authority resolves for the request root;
+    /// executors map that to their unavailable outcome.
     fn resolved_scope_for_project(
         &self,
         project_root: &Path,
         project_id: &ProjectId,
-    ) -> Result<ResolvedScope, ()>;
+    ) -> Option<ResolvedScope>;
 }
 
 /// Closed admission refusal vocabulary the executors map onto search outcomes.

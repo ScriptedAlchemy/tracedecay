@@ -115,6 +115,7 @@ pub fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: b
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
 fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
     injected_resident_memory_refusals()
         .lock()
@@ -123,6 +124,7 @@ fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
 fn take_injected_activation_failure(worktree_id: &WorktreeId) -> bool {
     let mut injected = injected_activation_failures()
         .lock()
@@ -137,6 +139,7 @@ fn take_injected_activation_failure(worktree_id: &WorktreeId) -> bool {
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
 fn take_injected_activation_gate(
     worktree_id: &WorktreeId,
 ) -> Option<Arc<InjectedActivationGateStateV1>> {
