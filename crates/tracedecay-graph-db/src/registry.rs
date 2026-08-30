@@ -640,10 +640,7 @@ impl GraphDbRegistry {
             GraphDbError::unavailable("direct-sealed reader table lock is poisoned")
         })?;
         readers.retain(|(_, weak)| weak.strong_count() > 0);
-        Ok(readers
-            .iter()
-            .map(|(locator, _)| locator.clone())
-            .collect())
+        Ok(readers.iter().map(|(locator, _)| locator.clone()).collect())
     }
 
     #[cfg(test)]

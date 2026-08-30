@@ -595,9 +595,10 @@ fn retirement_waits_for_a_live_direct_sealed_reader() {
     authority
         .records
         .insert(g1_record.publication.key.clone(), rewritten);
-    authority
-        .heads
-        .insert(g1_record.publication.key.projection.clone(), rewritten_head.clone());
+    authority.heads.insert(
+        g1_record.publication.key.projection.clone(),
+        rewritten_head.clone(),
+    );
 
     // Direct-sealed recovery serves cold starts: the staging shard is closed,
     // so the sealed artifact is the only open handle on this generation.
