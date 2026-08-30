@@ -22,7 +22,7 @@ use tracedecay_store::cursor_dispatch::CURSOR_MODEL_KEYS;
 use crate::runtime::lcm::LcmSummaryRequest;
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader};
 use tracedecay_daemon_protocol::wire::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub const CODEX_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CODEX_SUMMARY_CHILD";
 const CODEX_APP_SERVER_SPAWN_RETRY_WINDOW: Duration = Duration::from_millis(250);

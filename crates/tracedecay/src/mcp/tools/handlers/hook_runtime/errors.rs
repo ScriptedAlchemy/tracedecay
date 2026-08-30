@@ -1,4 +1,4 @@
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestError;
 

@@ -195,7 +195,7 @@ pub struct RegisteredGlobalDbTestRuntime {
 impl RegisteredGlobalDbTestRuntime {
     pub async fn profile(
         profile_root: impl AsRef<std::path::Path>,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         Self::open(profile_root.as_ref(), None, None).await
     }
 
@@ -203,7 +203,7 @@ impl RegisteredGlobalDbTestRuntime {
         profile_root: impl AsRef<std::path::Path>,
         project_root: impl AsRef<std::path::Path>,
         project_id: tracedecay_domain::ProjectId,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let project_root = project_root.as_ref();
         std::fs::create_dir_all(project_root)?;
         Self::open(
@@ -222,7 +222,7 @@ impl RegisteredGlobalDbTestRuntime {
         project_root: impl AsRef<std::path::Path>,
         project_id: tracedecay_domain::ProjectId,
         profile_identity: tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let project_root = project_root.as_ref();
         std::fs::create_dir_all(project_root)?;
         Self::open(
@@ -237,7 +237,7 @@ impl RegisteredGlobalDbTestRuntime {
         profile_root: &std::path::Path,
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
         profile_identity: Option<tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1>,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         crate::register_test_schema_installer();
         // A profile root is a profile-identity root in production and must be
         // mode 0700; creating it with the ambient umask (0775 under umask 0002)
@@ -255,7 +255,7 @@ impl RegisteredGlobalDbTestRuntime {
                 max_open: 2,
             })
             .map_err(|error| {
-                tracedecay_runtime_core::errors::TraceDecayError::Database {
+                tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "create registered global-db test graph registry".to_owned(),
                     message: error.to_string(),
                 }
@@ -313,7 +313,7 @@ impl RegisteredGlobalDbTestRuntime {
 
     pub async fn remount_profile_database_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
+    ) -> tracedecay_domain::errors::Result<RegisteredGlobalDbLeaseV1> {
         open_registered_test_database(
             self.profile_registered.db_path(),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
@@ -323,7 +323,7 @@ impl RegisteredGlobalDbTestRuntime {
 
     pub async fn reopen_profile_database_for_test(
         self,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let Self {
             profile_registered,
             _profile_owner,
@@ -333,7 +333,7 @@ impl RegisteredGlobalDbTestRuntime {
             _scope,
         } = self;
         if project_registered.is_some() {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
+            return Err(tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "reopen registered profile test database".to_owned(),
                 message: "profile reopen fixture cannot retain a project sessions shard".to_owned(),
             });
@@ -350,7 +350,7 @@ impl RegisteredGlobalDbTestRuntime {
         graph_registry
             .close_retained(&graph_binding, &graph_locator)
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "close registered global-db test graph before reopen".to_owned(),
                     message: error.to_string(),
                 },
@@ -368,7 +368,7 @@ impl RegisteredGlobalDbTestRuntime {
                 max_open: 1,
             })
             .map_err(|error| {
-                tracedecay_runtime_core::errors::TraceDecayError::Database {
+                tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "recreate registered global-db test graph registry".to_owned(),
                     message: error.to_string(),
                 }
@@ -384,9 +384,9 @@ impl RegisteredGlobalDbTestRuntime {
         })
     }
 
-    pub fn project_database(&self) -> tracedecay_runtime_core::errors::Result<&RegisteredGlobalDb> {
+    pub fn project_database(&self) -> tracedecay_domain::errors::Result<&RegisteredGlobalDb> {
         self.project_registered.as_deref().ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "bind registered project test database".to_owned(),
                 message: "registered project database is unavailable".to_owned(),
             }
@@ -395,9 +395,9 @@ impl RegisteredGlobalDbTestRuntime {
 
     pub fn project_database_arc(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
+    ) -> tracedecay_domain::errors::Result<RegisteredGlobalDbLeaseV1> {
         self.project_registered.clone().ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "bind registered project test database".to_owned(),
                 message: "registered project database is unavailable".to_owned(),
             }
@@ -408,15 +408,15 @@ impl RegisteredGlobalDbTestRuntime {
     /// receive while the retained project owner remains ready.
     pub fn issue_project_database_lease_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
+    ) -> tracedecay_domain::errors::Result<RegisteredGlobalDbLeaseV1> {
         let owner = self._project_owner.as_ref().ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "issue registered project test database client".to_owned(),
                 message: "registered project database owner is unavailable".to_owned(),
             }
         })?;
         owner.issue_lease().map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "issue registered project test database client".to_owned(),
                 message: format!("{error:?}"),
             }
@@ -474,7 +474,7 @@ impl RegisteredGlobalDbHarness {
     #[cfg(test)]
     pub(super) async fn remount_profile_database_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
+    ) -> tracedecay_domain::errors::Result<RegisteredGlobalDbLeaseV1> {
         Ok(open_registered_test_database_with(
             self.registered.db_path(),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
@@ -563,7 +563,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[cfg(test)]
     pub(crate) async fn profile_with_session_capture_resources(
         profile_root: impl AsRef<std::path::Path>,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         use std::num::NonZeroUsize;
         use tracedecay_private_fs::background_cpu::{
             install_process_background_cpu, process_background_cpu,
@@ -586,7 +586,7 @@ impl HostAdmissionTestRuntimeV1 {
                 // at a different canonical width. Reuse that authority instead
                 // of making test success depend on execution order.
                 Err(error) => process_background_cpu().ok_or_else(|| {
-                    tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    tracedecay_domain::errors::TraceDecayError::Database {
                         operation: "mount host-admission test background CPU authority".to_owned(),
                         message: error.to_string(),
                     }
@@ -596,7 +596,7 @@ impl HostAdmissionTestRuntimeV1 {
         tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default()
             .configure_preparation_resources(memory)
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "mount host-admission test resident-memory authority".to_owned(),
                     message: error.to_string(),
                 },
@@ -658,7 +658,7 @@ impl HostAdmissionTestRuntimeV1 {
 impl HostAdmissionTestRuntimeV1 {
     pub async fn profile(
         profile_root: impl AsRef<std::path::Path>,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         Self::open(profile_root.as_ref(), None).await
     }
 
@@ -666,7 +666,7 @@ impl HostAdmissionTestRuntimeV1 {
         profile_root: impl AsRef<std::path::Path>,
         project_root: impl AsRef<std::path::Path>,
         project_id: tracedecay_domain::ProjectId,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         Self::open(
             profile_root.as_ref(),
             Some((project_root.as_ref(), project_id)),
@@ -677,7 +677,7 @@ impl HostAdmissionTestRuntimeV1 {
     async fn open(
         profile_root: &std::path::Path,
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         crate::register_test_schema_installer();
         // See the note in `RegisteredGlobalDbTestRuntimeV1::open`: profile
         // identity roots must be 0700 regardless of the ambient umask.
@@ -742,9 +742,9 @@ impl HostAdmissionTestRuntimeV1 {
     fn session_database_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<&RegisteredGlobalDb> {
+    ) -> tracedecay_domain::errors::Result<&RegisteredGlobalDb> {
         self.registered_database(scope).ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "bind registered global-db test runtime".to_owned(),
                 message: "requested registered database scope is unavailable".to_owned(),
             }
@@ -755,7 +755,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn observation_store(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<crate::GlobalDbObservationStore> {
+    ) -> tracedecay_domain::errors::Result<crate::GlobalDbObservationStore> {
         let database = self.session_database_for_test(scope)?;
         Ok(database.observation_store())
     }
@@ -764,7 +764,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         session: &tracedecay_sessions::runtime::SessionRecord,
-    ) -> tracedecay_runtime_core::errors::Result<bool> {
+    ) -> tracedecay_domain::errors::Result<bool> {
         Ok(self
             .session_database_for_test(scope)?
             .upsert_session(session)
@@ -775,13 +775,13 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         message: &tracedecay_sessions::runtime::SessionMessageRecord,
-    ) -> tracedecay_runtime_core::errors::Result<bool> {
+    ) -> tracedecay_domain::errors::Result<bool> {
         let database = self.session_database_for_test(scope)?;
         let session = database
             .get_session(&message.provider, &message.session_id)
             .await
             .ok_or_else(
-                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                || tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "seed registered session message fixture".to_owned(),
                     message: format!(
                         "session {}/{} is unavailable",
@@ -807,7 +807,7 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         provider: &str,
         session_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
+    ) -> tracedecay_domain::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
     {
         Ok(self
             .session_database_for_test(scope)?
@@ -821,7 +821,7 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         session_id: &str,
         transcript_path: &std::path::Path,
-    ) -> tracedecay_runtime_core::errors::Result<(i64, i64, i64, i64, i64, i64, i64)> {
+    ) -> tracedecay_domain::errors::Result<(i64, i64, i64, i64, i64, i64, i64)> {
         let snapshot = self
             .session_database_for_test(scope)?
             .read_snapshot()
@@ -852,7 +852,7 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await?;
         let row = rows.next().await?.ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "read registered transcript store counts".to_owned(),
                 message: "count query returned no row".to_owned(),
             }
@@ -873,7 +873,7 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<u64> {
+    ) -> tracedecay_domain::errors::Result<u64> {
         let transaction = self
             .session_database_for_test(scope)?
             .begin_write_transaction()
@@ -890,12 +890,12 @@ impl HostAdmissionTestRuntimeV1 {
 
     pub async fn project_session_message_count_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<i64> {
+    ) -> tracedecay_domain::errors::Result<i64> {
         self.session_database_for_test(HostAdmissionScope::Project)?
             .session_message_count()
             .await
             .map_err(
-                |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |message| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "count registered project session messages".to_owned(),
                     message,
                 },
@@ -906,7 +906,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn session_temporal_store_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
             '_,
             crate::RegisteredGlobalDb,
@@ -922,11 +922,11 @@ impl HostAdmissionTestRuntimeV1 {
     #[cfg(test)]
     pub(crate) fn project_configuration_control_store_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         crate::configuration::OwnedGlobalDbConfigurationControlStore,
     > {
         let database = self.project_registered.clone().ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "bind configuration control test project sessions".to_owned(),
                 message: "registered project database is unavailable".to_owned(),
             }
@@ -943,7 +943,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         kind: SessionTemporalFixtureCountV1,
-    ) -> tracedecay_runtime_core::errors::Result<i64> {
+    ) -> tracedecay_domain::errors::Result<i64> {
         let table = match kind {
             SessionTemporalFixtureCountV1::ProjectionReceipts => {
                 "session_temporal_projection_receipts"
@@ -961,7 +961,7 @@ impl HostAdmissionTestRuntimeV1 {
             .query(&format!("SELECT COUNT(*) FROM {table}"), ())
             .await?;
         let row = rows.next().await?.ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "read session-temporal fixture count".to_owned(),
                 message: "count query returned no row".to_owned(),
             }
@@ -995,7 +995,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn seed_lcm_render_fixture_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let database = self.session_database_for_test(scope)?;
         let session = tracedecay_sessions::runtime::SessionRecord {
             provider: "codex".to_owned(),
@@ -1013,7 +1013,7 @@ impl HostAdmissionTestRuntimeV1 {
             parent_tool_use_id: None,
         };
         if !database.upsert_session(&session).await {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
+            return Err(tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "seed canonical lcm render session".to_owned(),
                 message: "session upsert failed".to_owned(),
             });
@@ -1032,7 +1032,7 @@ impl HostAdmissionTestRuntimeV1 {
             .db_path()
             .parent()
             .ok_or_else(
-                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                || tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "seed canonical lcm render payload".to_owned(),
                     message: "registered session database has no storage root".to_owned(),
                 },
@@ -1117,16 +1117,16 @@ impl HostAdmissionTestRuntimeV1 {
 #[cfg(any(test, feature = "test-helpers"))]
 fn lcm_render_fixture_sanitization_metadata(
     content: &str,
-) -> tracedecay_runtime_core::errors::Result<String> {
+) -> tracedecay_domain::errors::Result<String> {
     let sanitization = tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(content)
         .map_err(
-            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            |error| tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "seed canonical lcm render sanitization receipt".to_owned(),
                 message: format!("payload sanitizer rejected fixture content: {error:?}"),
             },
         )?;
     let receipt = serde_json::to_value(sanitization.receipt()).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Database {
+        tracedecay_domain::errors::TraceDecayError::Database {
             operation: "seed canonical lcm render sanitization receipt".to_owned(),
             message: format!("sanitization receipt encoding failed: {error}"),
         }
@@ -1144,12 +1144,12 @@ pub async fn publish_test_session_relation_projection(
     database: &RegisteredGlobalDb,
     session_id: &str,
     generation: u64,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     use tracedecay_domain::SessionId;
     use tracedecay_graph_db::NeverCancelled;
 
     let session_id = SessionId::new(session_id).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Database {
+        tracedecay_domain::errors::TraceDecayError::Database {
             operation: "publish test session relation projection".to_owned(),
             message: error.to_string(),
         }
@@ -1163,14 +1163,14 @@ pub async fn publish_test_session_relation_projection(
     )
     .await
     .map_err(
-        |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        |error| tracedecay_domain::errors::TraceDecayError::Database {
             operation: "reconstruct test session relation projection".to_owned(),
             message: format!("{error:?}"),
         },
     )?;
     drop(snapshot);
     if projection.generation != generation {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
+        return Err(tracedecay_domain::errors::TraceDecayError::Database {
             operation: "reconstruct test session relation projection".to_owned(),
             message: format!(
                 "fixture generation {generation} resolved projection generation {}",
@@ -1182,7 +1182,7 @@ pub async fn publish_test_session_relation_projection(
     tracedecay_session_temporal_store::record_relation_receipt(&transaction, &projection, 1)
         .await
         .map_err(
-            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            |error| tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "record test session relation receipt".to_owned(),
                 message: format!("{error:?}"),
             },
@@ -1196,7 +1196,7 @@ pub async fn publish_test_session_relation_projection(
     .await
     .map(|_| ())
     .map_err(
-        |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        |error| tracedecay_domain::errors::TraceDecayError::Database {
             operation: "apply test session relation projection".to_owned(),
             message: format!("{error:?}"),
         },
@@ -1206,13 +1206,13 @@ pub async fn publish_test_session_relation_projection(
 #[cfg(any(test, feature = "test-helpers"))]
 fn bind_test_session_relation_graph(
     database: &RegisteredGlobalDb,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let registry =
         tracedecay_graph_db::GraphDbRegistry::new(tracedecay_graph_db::GraphDbRegistryConfig {
             max_open: 1,
         })
         .map_err(
-            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            |error| tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "create test session relation graph registry".to_owned(),
                 message: error.to_string(),
             },
@@ -1224,7 +1224,7 @@ fn bind_test_session_relation_graph(
 fn bind_test_session_relation_graph_with_registry(
     database: &RegisteredGlobalDb,
     registry: &tracedecay_graph_db::GraphDbRegistry,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -1287,21 +1287,21 @@ fn bind_test_session_relation_graph_with_registry(
             SessionRelationScope::profile_sessions(binding.shard_id.profile_id.clone())
         }
         _ => {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
+            return Err(tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "bind test session relation graph".to_owned(),
                 message: "registered test database is not a session shard".to_owned(),
             });
         }
     };
     let store_root = database.db_path().parent().ok_or_else(|| {
-        tracedecay_runtime_core::errors::TraceDecayError::Database {
+        tracedecay_domain::errors::TraceDecayError::Database {
             operation: "bind test session relation graph".to_owned(),
             message: "registered session database has no storage root".to_owned(),
         }
     })?;
     let canonical_path =
         graph_store_locator_path(store_root, database.db_path()).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "derive test session relation graph path".to_owned(),
                 message: format!("{error:?}"),
             }
@@ -1310,7 +1310,7 @@ fn bind_test_session_relation_graph_with_registry(
         binding.shard_id.clone(),
         binding.incarnation,
         canonical_store_locator_digest(&canonical_path).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "digest test session relation graph path".to_owned(),
                 message: format!("{error:?}"),
             }
@@ -1339,13 +1339,13 @@ fn bind_test_session_relation_graph_with_registry(
             authority_attachment: Box::new(lease),
         })
         .map_err(
-            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            |error| tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "mount test session relation graph owner".to_owned(),
                 message: error.to_string(),
             },
         )?;
     let graph = registry.resolve(operation).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Database {
+        tracedecay_domain::errors::TraceDecayError::Database {
             operation: "resolve test session relation graph".to_owned(),
             message: error.to_string(),
         }
@@ -1358,7 +1358,7 @@ fn bind_test_session_relation_graph_with_registry(
 async fn open_registered_test_database(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
-) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
+) -> tracedecay_domain::errors::Result<RegisteredGlobalDbLeaseV1> {
     Ok(
         open_registered_test_database_with(path, scope, RegisteredTestWriteAuthority::Fixture)
             .await?
@@ -1371,7 +1371,7 @@ async fn open_registered_test_database_with(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
     write_authority: RegisteredTestWriteAuthority,
-) -> tracedecay_runtime_core::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
+) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
 {
     open_registered_test_database_with_identity(path, scope, write_authority, None).await
 }
@@ -1382,7 +1382,7 @@ async fn open_registered_test_database_with_identity(
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
     write_authority: RegisteredTestWriteAuthority,
     profile_identity: Option<tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1>,
-) -> tracedecay_runtime_core::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
+) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
 {
     crate::register_test_schema_installer();
     if let Some(parent) = path.parent() {
@@ -1453,7 +1453,7 @@ async fn open_registered_test_database_with_identity(
     // Issuance preserves that capability; neither branch manufactures a
     // second raw authority after publication.
     let registered = database.issue_lease().map_err(|failure| {
-        tracedecay_runtime_core::errors::TraceDecayError::Database {
+        tracedecay_domain::errors::TraceDecayError::Database {
             operation: "issue registered global-db test database lease".to_owned(),
             message: format!("{failure:?}"),
         }
@@ -1469,7 +1469,7 @@ async fn open_registered_test_database_with_identity(
 pub async fn open_registered_test_database_fixture(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
-) -> tracedecay_runtime_core::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
+) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
 {
     open_registered_test_database_with(path, scope, RegisteredTestWriteAuthority::Fixture).await
 }
@@ -1538,7 +1538,7 @@ impl Executor for RegisteredGlobalDbTestFixture {
 pub(crate) async fn open_registered_test_fixture(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
-) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbTestFixture> {
+) -> tracedecay_domain::errors::Result<RegisteredGlobalDbTestFixture> {
     let (database, owner) = open_registered_test_database_fixture(path, scope).await?;
     Ok(RegisteredGlobalDbTestFixture {
         database,

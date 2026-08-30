@@ -8,7 +8,7 @@ use tokio::time::{Duration, timeout};
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 #[path = "core_doctor_schema.rs"]

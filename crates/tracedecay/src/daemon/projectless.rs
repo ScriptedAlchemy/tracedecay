@@ -8,7 +8,7 @@ use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, tool_error_response,
     tool_result_has_semantic_error,
 };
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::*;
 

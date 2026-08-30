@@ -7,7 +7,7 @@ use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{SharedHostAdmissionBroker, TerminalReason};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 
 use super::errors::map_host_admission_outcome;
@@ -237,7 +237,7 @@ async fn continue_projectless_hermes_review(
         .lcm_raw_message_store_id("hermes", &ready.transcript_watermark)
         .await
         .map_err(
-            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            |error| tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "read Hermes transcript watermark".to_owned(),
                 message: error.to_string(),
             },

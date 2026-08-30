@@ -18,7 +18,7 @@ use crate::mcp::tools::{
 };
 use tracedecay_dashboard_api::project_registry::{PublicCodeProject, build_project_registry_view};
 use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 #[derive(Clone)]
 pub(crate) struct DaemonProjectRegistryReadService {

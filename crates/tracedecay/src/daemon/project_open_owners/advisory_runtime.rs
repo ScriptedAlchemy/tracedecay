@@ -98,7 +98,7 @@ use crate::daemon::service::invocation::{
 use crate::daemon::service::project_runtime::RegisteredDeliveryReadAuthorityV1;
 use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod deferred;
 mod model;

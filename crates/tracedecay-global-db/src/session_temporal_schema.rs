@@ -576,7 +576,7 @@ pub(crate) use tracedecay_session_temporal_store::TEMPORAL_TABLE_COLUMNS;
 #[hotpath::measure(future = true, label = "session_temporal.schema.migrate")]
 pub(crate) async fn migrate_released_v3_session_temporal_schema(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     admission::validate_released_v3_session_temporal_schema(conn).await?;
     conn.execute_batch(
         "DROP TRIGGER session_temporal_projection_receipts_immutable_update_v1;
@@ -761,7 +761,7 @@ pub(crate) async fn migrate_released_v3_session_temporal_schema(
 #[hotpath::measure(future = true, label = "session_temporal.schema.install")]
 pub(crate) async fn install_session_temporal_schema(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -784,7 +784,7 @@ pub(crate) async fn install_session_temporal_schema(
 
 async fn validate_temporal_table_shapes(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     for &(table, expected_columns) in TEMPORAL_TABLE_COLUMNS {
         let mut rows = conn
             .query(

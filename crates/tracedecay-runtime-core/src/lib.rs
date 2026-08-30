@@ -1,8 +1,8 @@
 //! `TraceDecay` runtime kernel.
 //!
 //! This crate owns the load-bearing runtime substrate that every other
-//! `TraceDecay` subsystem sits on: the canonical error type, shared value
-//! types, the storage layout resolver, the `SQLite` database facade and its
+//! `TraceDecay` subsystem sits on: shared value types, the storage layout
+//! resolver, the `SQLite` database facade and its
 //! migrations, the observation/memory/session stores, git and worktree
 //! topology reads, process-level leases, and the privacy detectors.
 //!
@@ -81,7 +81,6 @@ pub mod branch_meta;
 pub mod cancellation;
 pub mod config;
 pub mod db;
-pub mod errors;
 pub mod git;
 pub mod git_discovery;
 pub mod git_repository;

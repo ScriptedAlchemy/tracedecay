@@ -138,7 +138,7 @@ async fn publish_fixture_owner_runtime(
     authority: &DatabaseAuthority,
     mode: TestDatabaseRuntimeMode,
     shard_family: TestRuntimeShardFamilyV1,
-) -> crate::errors::Result<DatabaseOwnerV1> {
+) -> tracedecay_domain::errors::Result<DatabaseOwnerV1> {
     Ok(
         Database::publish_fixture_runtime_publication(db_path, authority, mode, shard_family, None)
             .await?

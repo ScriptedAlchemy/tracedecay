@@ -46,8 +46,8 @@ fn prepare_remove(project_root: &Path, tracedecay_dir: &Path) -> PreparedBranchA
     .unwrap()
 }
 
-fn failpoint(message: &str) -> crate::errors::Result<()> {
-    Err(crate::errors::TraceDecayError::Config {
+fn failpoint(message: &str) -> tracedecay_domain::errors::Result<()> {
+    Err(tracedecay_domain::errors::TraceDecayError::Config {
         message: message.to_string(),
     })
 }

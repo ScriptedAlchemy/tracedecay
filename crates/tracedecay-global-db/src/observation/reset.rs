@@ -22,7 +22,7 @@
 
 use std::collections::BTreeSet;
 
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 use super::schema::{
     OBSERVATION_AUTHORITY, OBSERVATION_AUTHORITY_SCHEMA_SQL, OBSERVATION_CANONICAL_COLUMNS,

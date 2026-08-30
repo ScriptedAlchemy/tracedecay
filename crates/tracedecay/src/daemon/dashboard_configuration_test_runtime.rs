@@ -31,7 +31,7 @@ use tracedecay_dashboard_api::{
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const CONFIGURATION_REQUEST_DEADLINE_MICROS: i64 = 15_000_000;
 const CONFIGURATION_AUTHORITY_LIFETIME_MICROS: i64 = 3_600_000_000;

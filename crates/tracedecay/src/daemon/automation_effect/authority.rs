@@ -6,7 +6,7 @@ use tracedecay_automation_runtime::automation::effect_runtime::journal::DurableA
 use tracedecay_automation_runtime::automation::effect_runtime::{contract_error, retirement};
 
 use super::recovery_index;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 #[hotpath::measure(label = "daemon.automation.effect.housekeeping", future = true)]
 pub(super) async fn finalize_terminal_housekeeping(

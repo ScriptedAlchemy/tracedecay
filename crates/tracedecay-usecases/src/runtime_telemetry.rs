@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod store_runtime;
 

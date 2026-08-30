@@ -14,7 +14,7 @@ use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::service::invocation::{DaemonAdvisoryRuntimeRegistrar, DaemonRetainedRuntimeRegistrar};
 use super::*;

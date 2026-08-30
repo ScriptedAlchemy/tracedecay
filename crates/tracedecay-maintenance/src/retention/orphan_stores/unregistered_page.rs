@@ -102,7 +102,7 @@ pub async fn sweep_unregistered_store_page(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     request: UnregisteredStoreSweepRequestV1<'_>,
-) -> tracedecay_runtime_core::errors::Result<UnregisteredStoreSweepReport> {
+) -> tracedecay_domain::errors::Result<UnregisteredStoreSweepReport> {
     let limit = request.limit.clamp(1, MAX_UNREGISTERED_STORE_PAGE_LIMIT);
     if let Some(completion) =
         UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
@@ -235,7 +235,7 @@ async fn census_unregistered_project_dirs_page(
     cancellation: &CancellationToken,
     deadline: MonotonicDeadline,
     recovery_outcome: &mut CollectionOutcome,
-) -> tracedecay_runtime_core::errors::Result<Option<(Vec<UnregisteredStoreFinding>, Option<String>)>>
+) -> tracedecay_domain::errors::Result<Option<(Vec<UnregisteredStoreFinding>, Option<String>)>>
 {
     let projects_dir = profile_root.join("projects");
     let page = read_project_directory_page(profile_root, cursor, limit, cancellation, deadline)?;
@@ -382,7 +382,7 @@ pub(super) fn read_project_directory_page(
     limit: usize,
     cancellation: &CancellationToken,
     deadline: MonotonicDeadline,
-) -> tracedecay_runtime_core::errors::Result<Option<(Vec<ProjectDirectoryWorkV1>, Option<String>)>>
+) -> tracedecay_domain::errors::Result<Option<(Vec<ProjectDirectoryWorkV1>, Option<String>)>>
 {
     let projects_dir = profile_root.join("projects");
     let root = match open_store_directory_nofollow(profile_root, &projects_dir) {
@@ -391,13 +391,13 @@ pub(super) fn read_project_directory_page(
             return Ok(Some((Vec::new(), None)));
         }
         Err(kind) => {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("open unregistered project-directory page: {kind:?}"),
             });
         }
     };
     let identity = directory_cursor_identity(&root).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("inspect unregistered project-directory cursor: {error}"),
         }
     })?;
@@ -406,7 +406,7 @@ pub(super) fn read_project_directory_page(
         .filter(|saved| saved.identity == identity && saved.offset >= 0)
         .map_or(0, |saved| saved.offset);
     let stream = DirectoryStream::open(root.as_raw_fd()).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("open unregistered project-directory stream: {error}"),
         }
     })?;
@@ -427,7 +427,7 @@ pub(super) fn read_project_directory_page(
             return Ok(None);
         }
         let Some(name) = stream.next_name().map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("read unregistered project-directory stream: {error}"),
             }
         })?
@@ -438,7 +438,7 @@ pub(super) fn read_project_directory_page(
             continue;
         }
         let position = stream.position().map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("checkpoint unregistered project-directory stream: {error}"),
             }
         })?;
@@ -616,7 +616,7 @@ pub(super) fn read_project_directory_page(
     limit: usize,
     cancellation: &CancellationToken,
     deadline: MonotonicDeadline,
-) -> tracedecay_runtime_core::errors::Result<Option<(Vec<ProjectDirectoryWorkV1>, Option<String>)>>
+) -> tracedecay_domain::errors::Result<Option<(Vec<ProjectDirectoryWorkV1>, Option<String>)>>
 {
     let projects_dir = profile_root.join("projects");
     let saved = cursor.and_then(parse_portable_directory_cursor);
@@ -635,7 +635,7 @@ pub(super) fn read_project_directory_page(
                     return Ok(Some((Vec::new(), None)));
                 }
                 Err(error) => {
-                    return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
                         message: format!("inspect unregistered project-directory page: {error}"),
                     });
                 }
@@ -650,7 +650,7 @@ pub(super) fn read_project_directory_page(
                 return Ok(Some((Vec::new(), None)));
             }
             Err(error) => {
-                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!("inspect unregistered project-directory page: {error}"),
                 });
             }
@@ -685,7 +685,7 @@ pub(super) fn read_project_directory_page(
             return Ok(Some((Vec::new(), None)));
         }
         Err(error) => {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("open unregistered project-directory page: {error}"),
             });
         }
@@ -695,13 +695,13 @@ pub(super) fn read_project_directory_page(
     if start == 0 {
         let mut header = String::new();
         reader.read_line(&mut header).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("read unregistered inventory header: {error}"),
             }
         })?;
     } else {
         reader.seek(SeekFrom::Start(start)).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("seek unregistered inventory cursor: {error}"),
             }
         })?;
@@ -715,7 +715,7 @@ pub(super) fn read_project_directory_page(
         }
         let mut name = String::new();
         let bytes = reader.read_line(&mut name).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("read unregistered inventory page: {error}"),
             }
         })?;
@@ -730,7 +730,7 @@ pub(super) fn read_project_directory_page(
         }
         let name = name.trim_end_matches(['\r', '\n']).to_owned();
         let next_offset = reader.stream_position().map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("checkpoint unregistered inventory cursor: {error}"),
             }
         })?;
@@ -843,9 +843,9 @@ fn clear_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_temporary_path(
     inventory: &Path,
-) -> tracedecay_runtime_core::errors::Result<std::path::PathBuf> {
+) -> tracedecay_domain::errors::Result<std::path::PathBuf> {
     let parent = inventory.parent().ok_or_else(|| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: "unregistered inventory has no parent".to_owned(),
         }
     })?;
@@ -853,7 +853,7 @@ fn portable_inventory_temporary_path(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(
-            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+            || tracedecay_domain::errors::TraceDecayError::Config {
                 message: "unregistered inventory has no UTF-8 file name".to_owned(),
             },
         )?;
@@ -865,14 +865,14 @@ fn portable_inventory_temporary_path(
 fn ensure_portable_inventory_header(
     inventory: &Path,
     signature: &str,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if portable_inventory_matches(inventory, signature) {
         return Ok(());
     }
     // A stale completion marker would otherwise make an atomically repaired
     // empty inventory look complete after a crash between the two operations.
     clear_portable_inventory_complete(inventory).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("clear incomplete unregistered inventory marker: {error}"),
         }
     })?;
@@ -883,7 +883,7 @@ fn ensure_portable_inventory_header(
         portable_inventory_header(signature).as_bytes(),
     )
     .map_err(
-        |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+        |error| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("atomically publish unregistered inventory header: {error}"),
         },
     )
@@ -989,16 +989,16 @@ pub(super) fn advance_portable_inventory(
     raw_entry_limit: usize,
     cancellation: &CancellationToken,
     deadline: MonotonicDeadline,
-) -> tracedecay_runtime_core::errors::Result<Option<bool>> {
+) -> tracedecay_domain::errors::Result<Option<bool>> {
     use std::io::{BufRead, Write};
 
     let parent = inventory.parent().ok_or_else(|| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: "unregistered inventory has no parent".to_owned(),
         }
     })?;
     std::fs::create_dir_all(parent).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("create unregistered inventory parent: {error}"),
         }
     })?;
@@ -1011,7 +1011,7 @@ pub(super) fn advance_portable_inventory(
     let lock_path = tracedecay_runtime_core::storage::append_lock_path(inventory);
     let _writer_lock = match tracedecay_runtime_core::storage::try_acquire_sidecar_lock(&lock_path)
         .map_err(
-            |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            |error| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("acquire unregistered inventory writer lock: {error}"),
             },
         )? {
@@ -1020,7 +1020,7 @@ pub(super) fn advance_portable_inventory(
     };
     ensure_portable_inventory_header(inventory, signature)?;
     recover_portable_inventory_tail(inventory, signature).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("recover unregistered inventory trailing record: {error}"),
         }
     })?;
@@ -1030,25 +1030,25 @@ pub(super) fn advance_portable_inventory(
     let builders = PORTABLE_INVENTORY_BUILDERS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut builders =
         builders.lock().map_err(
-            |_| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            |_| tracedecay_domain::errors::TraceDecayError::Config {
                 message: "unregistered inventory builder lock is poisoned".to_owned(),
             },
         )?;
     if !builders.contains_key(inventory) {
         let source = std::fs::read_dir(projects_dir).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("open unregistered project-directory inventory stream: {error}"),
             }
         })?;
         let file = std::fs::File::open(inventory).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("open unregistered inventory for recovery: {error}"),
             }
         })?;
         let mut hydration = std::io::BufReader::new(file);
         let mut header = String::new();
         hydration.read_line(&mut header).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("read unregistered inventory recovery header: {error}"),
             }
         })?;
@@ -1063,7 +1063,7 @@ pub(super) fn advance_portable_inventory(
         );
     }
     let Some(builder) = builders.get_mut(inventory) else {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "unregistered inventory builder was not retained".to_owned(),
         });
     };
@@ -1078,7 +1078,7 @@ pub(super) fn advance_portable_inventory(
         if let Some(hydration) = builder.hydration.as_mut() {
             let mut name = String::new();
             let bytes = hydration.read_line(&mut name).map_err(|error| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!("read unregistered inventory recovery entry: {error}"),
                 }
             })?;
@@ -1129,13 +1129,13 @@ pub(super) fn advance_portable_inventory(
     }
     if let Some(error) = append_error {
         builders.remove(inventory);
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("durably append unregistered inventory entry: {error}"),
         });
     }
     if completed {
         mark_portable_inventory_complete(inventory).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("mark unregistered inventory complete: {error}"),
             }
         })?;

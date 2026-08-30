@@ -32,7 +32,7 @@ use tracedecay_global_db::configuration::{
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};

@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::mcp::server::CodeIndexSearchDisplayV1;
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
 use tracedecay_mcp::tools::render::Md;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::dependency_hints;
 

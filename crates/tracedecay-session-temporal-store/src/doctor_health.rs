@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
 use tracedecay_runtime_core::db::engine::Error as EngineError;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 use crate::schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 

@@ -1607,7 +1607,7 @@ pub(crate) fn invariant_trigger_names_for_tables(tables: &[&str]) -> Vec<&'stati
 pub(super) async fn replace_trigger(
     conn: &impl Executor,
     trigger: &Trigger,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     conn.execute_batch(&format!(
         "DROP TRIGGER IF EXISTS \"{}\";\n{};",
         trigger.name, trigger.create_sql
@@ -1618,7 +1618,7 @@ pub(super) async fn replace_trigger(
 
 pub(super) async fn trigger_contracts_intact(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     for invariant in INVARIANTS {
         for trigger in invariant.triggers {
             if !trigger_matches(conn, trigger).await? {
@@ -1631,7 +1631,7 @@ pub(super) async fn trigger_contracts_intact(
 
 pub async fn released_v3_invariant_triggers_intact(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     const CURRENT_ACCOUNTING: &str = "AND NEW.committed_records = receipt.committed_item_count";
     const RELEASED_V3_ACCOUNTING: &str = "AND NEW.committed_records =
                                 receipt.occurrence_count
@@ -1665,7 +1665,7 @@ pub async fn released_v3_invariant_triggers_intact(
 async fn trigger_matches(
     conn: &impl QueryExecutor,
     trigger: &Trigger,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     trigger_matches_sql(conn, trigger, trigger.create_sql).await
 }
 
@@ -1673,7 +1673,7 @@ async fn trigger_matches_sql(
     conn: &impl QueryExecutor,
     trigger: &Trigger,
     expected_sql: &str,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT tbl_name, sql FROM sqlite_master
@@ -1701,7 +1701,7 @@ async fn trigger_matches_sql(
 
 pub async fn suspend_immutability_for_canonical_repair(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
         if !trigger_matches(conn, trigger).await? {
             return Err(authority_violation(format!(
@@ -1720,7 +1720,7 @@ pub async fn suspend_immutability_for_canonical_repair(
 
 pub async fn restore_immutability_after_canonical_repair(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
         replace_trigger(conn, trigger).await?;
         if !trigger_matches(conn, trigger).await? {

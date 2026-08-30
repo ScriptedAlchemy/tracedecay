@@ -17,7 +17,7 @@ use crate::connection::{DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED};
 /// request was written, a stalled response, a refused handshake — keeps the
 /// indeterminate [`DaemonInvocationError::Unavailable`].
 fn classify_invoke_transport_error(
-    error: tracedecay_runtime_core::errors::TraceDecayError,
+    error: tracedecay_domain::errors::TraceDecayError,
 ) -> DaemonInvocationError {
     match error.project_route_context() {
         Some((reason_code @ (DAEMON_CONNECT_DOWN | DAEMON_CONNECT_SATURATED), _, detail)) => {
@@ -171,7 +171,7 @@ mod tests {
     fn post_send_transport_failures_stay_indeterminate_unavailable() {
         // A closed connection after the request was written may have an
         // in-flight outcome; it must never classify as never-sent.
-        let closed = tracedecay_runtime_core::errors::TraceDecayError::Config {
+        let closed = tracedecay_domain::errors::TraceDecayError::Config {
             message: "daemon closed the invocation connection after 'status' was sent".to_owned(),
         };
         assert_eq!(

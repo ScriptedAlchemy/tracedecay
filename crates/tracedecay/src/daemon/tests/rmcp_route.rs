@@ -221,7 +221,7 @@ async fn assert_initialized_route_is_rmcp<R, W>(
     mut writer: W,
     handshake: &DaemonHandshake,
     server: &Arc<crate::mcp::McpServer>,
-    server_task: tokio::task::JoinHandle<tracedecay_runtime_core::errors::Result<()>>,
+    server_task: tokio::task::JoinHandle<tracedecay_domain::errors::Result<()>>,
 ) where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -552,7 +552,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ControlledCancella
         _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
-        tracedecay_runtime_core::errors::Result<()>,
+        tracedecay_domain::errors::Result<()>,
     > {
         Box::pin(async { panic!("controlled RMCP fixture does not observe feedback") })
     }

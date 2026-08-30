@@ -10,12 +10,41 @@ struct HookRuntimeErrorContext {
     /// `HostAdmissionStatus` wire form, when one produced this failure.
     ///
     /// The status enum is defined above this crate (`tracedecay-sessions`
-    /// depends on this kernel, not the other way round), so the value travels
+    /// depends on domain, not the other way round), so the value travels
     /// as its serde wire string and the hook boundary reconstitutes it typed
     /// with `HostAdmissionStatus::from_wire`. Carrying it verbatim is what
     /// keeps the boundary from re-deriving a status by matching reason-code
     /// strings.
     status: Option<String>,
+}
+
+/// Display-preserving automation failure payload.
+///
+/// `tracedecay-automation` cannot be named from this crate (it depends on
+/// domain). That crate implements `From<AutomationError>` into
+/// [`TraceDecayError`].
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct AutomationErrorMessage(String);
+
+impl AutomationErrorMessage {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct SqliteDriverError {
+    message: String,
+}
+
+impl SqliteDriverError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -64,22 +93,16 @@ pub enum TraceDecayError {
     Io(#[from] std::io::Error),
 
     #[error("SQLite error: {0}")]
-    Sqlite(#[from] crate::db::SqliteDriverError),
+    Sqlite(#[from] SqliteDriverError),
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
     #[error(transparent)]
-    Automation(#[from] tracedecay_automation::AutomationError),
+    Automation(#[from] AutomationErrorMessage),
 }
 
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
-
-impl From<crate::db::engine::Error> for TraceDecayError {
-    fn from(error: crate::db::engine::Error) -> Self {
-        Self::Sqlite(error.into())
-    }
-}
 
 /// Flatten an error and its [`std::error::Error::source`] chain into one
 /// message string.
@@ -253,15 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn engine_error_converts_without_exposing_the_private_engine_type() {
-        let err: TraceDecayError =
-            crate::db::engine::Error::Runtime("writer unavailable".to_string()).into();
-
-        assert!(matches!(err, TraceDecayError::Sqlite(_)));
-        assert!(err.to_string().contains("writer unavailable"));
-    }
-
-    #[test]
     fn database_operation_preserves_public_database_classification() {
         let err = TraceDecayError::database_operation(
             "SELECT observations",
@@ -407,23 +421,6 @@ mod tests {
             message: "bad value".to_string(),
         };
         assert!(err.to_string().contains("bad value"));
-    }
-
-    #[test]
-    fn automation_error_boundary_preserves_type_message_and_classification() {
-        let err = TraceDecayError::from(tracedecay_automation::AutomationError::config(
-            "timed out waiting for backend",
-        ));
-
-        assert!(matches!(&err, TraceDecayError::Automation(_)));
-        assert_eq!(
-            err.to_string(),
-            "config error: timed out waiting for backend"
-        );
-        assert_eq!(
-            tracedecay_automation::backend::classify_agent_task_error_message(&err.to_string()),
-            tracedecay_automation::backend::AgentTaskFailureClass::Timeout,
-        );
     }
 
     #[test]

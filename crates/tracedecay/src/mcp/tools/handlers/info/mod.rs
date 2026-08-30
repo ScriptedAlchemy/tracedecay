@@ -52,7 +52,7 @@ use tracedecay_dashboard_api::project_registry::{
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_mcp::path_tree::format_compact_annotated_path_list;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{ProjectPath, StorageMode, StoreKind};
 use tracedecay_usecases::context::read_modes::{LineRange, ReadMode};
 use tracedecay_usecases::context::source_read::{

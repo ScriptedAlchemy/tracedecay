@@ -27,7 +27,7 @@ const RECOVERY_PAGE_LIMIT: u32 = 32;
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 
 enum RecoveryFailureV1 {
-    Database(tracedecay_runtime_core::errors::TraceDecayError),
+    Database(tracedecay_domain::errors::TraceDecayError),
     Application(ApplicationProblem),
 }
 

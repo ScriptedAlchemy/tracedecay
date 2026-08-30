@@ -127,7 +127,7 @@ fn prepare_maintenance_profile(profile_root: &Path) {
 
 async fn init_with_maintenance(
     project_root: &Path,
-) -> tracedecay_runtime_core::errors::Result<TraceDecay> {
+) -> tracedecay_domain::errors::Result<TraceDecay> {
     let profile_root = maintenance_profile_root();
     prepare_maintenance_profile(&profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
@@ -154,7 +154,7 @@ async fn init_with_maintenance(
 
 async fn open_with_maintenance(
     project_root: &Path,
-) -> tracedecay_runtime_core::errors::Result<TraceDecay> {
+) -> tracedecay_domain::errors::Result<TraceDecay> {
     let profile_root = maintenance_profile_root();
     prepare_maintenance_profile(&profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(

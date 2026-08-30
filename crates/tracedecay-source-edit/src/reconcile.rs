@@ -8,7 +8,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;

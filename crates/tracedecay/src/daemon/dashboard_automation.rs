@@ -32,7 +32,7 @@ use tracedecay_domain::configuration::UserProfileId;
 
 use crate::mcp::server::{RetainedProjectGraphRequest, RetainedProjectServerResolver};
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod retained_curator;
 pub(crate) use retained_curator::execute_retained_memory_curator;

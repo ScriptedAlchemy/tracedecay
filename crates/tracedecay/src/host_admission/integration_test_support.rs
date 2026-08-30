@@ -18,7 +18,7 @@ use tracedecay_store::{
 use super::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus, HostAdmissionTestRuntimeV1,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]

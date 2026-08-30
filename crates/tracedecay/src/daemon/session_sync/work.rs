@@ -33,7 +33,7 @@ impl DaemonSessionSyncService {
         context: &SessionSyncProjectContext,
         alias_key: &str,
         primary_key: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<SessionSyncJournalV1>> {
+    ) -> tracedecay_domain::errors::Result<Option<SessionSyncJournalV1>> {
         let Some(encoded) = context
             .registry
             .read_session_sync_journal(primary_key)
@@ -375,7 +375,7 @@ impl SessionSyncProjectContext {
         &self,
         project_sessions: &RegisteredGlobalDbLeaseV1,
         source: &SessionSyncCommandV1,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+    ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         match source {
             SessionSyncCommandV1::ImportTranscripts(_) => {
                 self.source_frontiers(project_sessions).await
@@ -390,7 +390,7 @@ impl SessionSyncProjectContext {
     pub(super) async fn source_frontiers(
         &self,
         project_sessions: &RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+    ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let mut frontiers = Vec::new();
         for (store_scope, database) in [
             ("project", project_sessions.as_ref()),
@@ -429,7 +429,7 @@ impl SessionSyncProjectContext {
     async fn git_history_source_frontiers(
         &self,
         project_sessions: RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+    ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let store = GlobalDbGitCorrelationStore::new(project_sessions);
         let snapshot = store.read_snapshot().await.map_err(store_error)?;
         let activity_timestamp = tracedecay_sessions::runtime::git_correlation::read_meta_value(

@@ -1074,13 +1074,13 @@ async fn execute_app_server<S>(
             let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
                 provider_id,
                 tracedecay_domain::SessionId::new(summary.thread_id).map_err(|error| {
-                    tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    tracedecay_domain::errors::TraceDecayError::Config {
                         message: format!("Codex app-server returned an invalid thread id: {error}"),
                     }
                 })?,
             )
             .map_err(|error| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!("Codex app-server session identity is invalid: {error}"),
                 }
             })?;

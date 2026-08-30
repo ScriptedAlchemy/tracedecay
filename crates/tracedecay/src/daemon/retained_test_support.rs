@@ -22,7 +22,7 @@ use super::service::invocation::{DaemonInvocationService, DaemonRetainedRuntimeR
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_daemon_protocol::invocation_now_micros;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Clone)]
 struct RetainedOwnerTestExecutor {

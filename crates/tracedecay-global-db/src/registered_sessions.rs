@@ -1,4 +1,4 @@
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 #[cfg(test)]
 pub(crate) use tracedecay_sessions::runtime::SessionRecord;
 use tracedecay_sessions::runtime::{
@@ -70,7 +70,7 @@ impl RegisteredGlobalDb {
     /// masquerading as an idle store.
     pub async fn latest_session_activity_secs(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Option<i64>> {
+    ) -> tracedecay_domain::errors::Result<Option<i64>> {
         SessionStoreAccess::new(self)
             .latest_session_activity_secs()
             .await
@@ -82,7 +82,7 @@ impl RegisteredGlobalDb {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<SessionMessageRecord>> {
+    ) -> tracedecay_domain::errors::Result<Option<SessionMessageRecord>> {
         SessionStoreAccess::new(self)
             .get_session_message(provider, message_id)
             .await
@@ -98,7 +98,7 @@ impl RegisteredGlobalDb {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
+    ) -> tracedecay_domain::errors::Result<Vec<SessionMessageSearchResult>> {
         SessionStoreAccess::new(self)
             .search_session_messages(provider, project_key, query, limit)
             .await
@@ -111,7 +111,7 @@ impl RegisteredGlobalDb {
         &self,
         project_key: Option<&str>,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
+    ) -> tracedecay_domain::errors::Result<Vec<SessionMessageSearchResult>> {
         SessionStoreAccess::new(self)
             .recent_session_goals(project_key, limit)
             .await

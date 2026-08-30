@@ -22,7 +22,7 @@ use crate::semantic_runtime::{
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 use super::ports::{
