@@ -7,12 +7,11 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::Result;
 use tracedecay_usecases::operation_stream::OperationEmitter;
 
-use super::test_runner::{TestRunFailure, TestRunOutput};
 use super::{
     TestTarget, emit_observed_test_results, finish_test_run, managed_test_terminal,
     parse_libtest_output, run_affected_tests_body,
 };
-use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::{TestRunFailure, TestRunOutput, ToolResult};
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.failure")]
 pub(super) async fn terminal_failure(

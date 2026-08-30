@@ -6498,6 +6498,7 @@ name = "tracedecay-mcp"
 version = "0.1.0"
 dependencies = [
  "hotpath",
+ "libc",
  "schemars",
  "serde",
  "serde_json",
@@ -6511,6 +6512,7 @@ dependencies = [
  "tracedecay-hooks",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
+ "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
  "tracing",

@@ -35,7 +35,7 @@ use tracedecay_usecases::session::lcm::{
 };
 
 use super::super::super::SessionAuthorities;
-use super::super::errors::{map_claude_observation_ingest_error, map_transcript_ingest_error};
+use tracedecay_mcp::{map_claude_observation_ingest_error, map_transcript_ingest_error};
 use super::super::{required_str, required_user_db};
 use super::{
     admit_codex_project_rollouts, compaction_unavailable_reason,

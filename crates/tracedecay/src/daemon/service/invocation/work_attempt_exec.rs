@@ -617,17 +617,8 @@ fn select_provider(
     project_root: &std::path::Path,
     attempt: &WorkAttemptV1,
 ) -> Result<ProviderSelection, ProviderDenial> {
-    let configuration = crate::config::cached_runtime_configuration(project_root)
+    let configuration = tracedecay_usecases::config::cached_pinned_runtime_configuration(project_root)
         .map_err(|_| ProviderDenial::preferred(WorkProviderAvailabilityV1::Unavailable))?;
-    // Root `cached_runtime_configuration` still returns the composition-root
-    // pin. The resolver lives on the usecases pin; reconstruct via the same
-    // constructor the private `usecase_runtime_configuration` bridge uses.
-    let configuration = tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
-        configuration.target,
-        configuration.revision_id,
-        configuration.snapshot,
-    )
-    .map_err(|_| ProviderDenial::preferred(WorkProviderAvailabilityV1::Unavailable))?;
     let resolver = PinnedWorkExecutableBindingResolver::from_configuration(&configuration)
         .map_err(|error| ProviderDenial::preferred(availability_state(error)))?;
     select_with_resolver(&resolver, attempt)

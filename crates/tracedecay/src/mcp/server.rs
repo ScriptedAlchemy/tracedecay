@@ -30,9 +30,9 @@ use tracedecay_sessions::runtime::git_correlation::{
     SpanObservation, SpanSource,
 };
 
-use super::tools::{
-    ProjectRegistryReadPort, SessionRefreshServicePort, default_catalog_discovery_authority,
-};
+use super::tools::default_catalog_discovery_authority;
+use tracedecay_application::ProjectRegistryReadPort;
+use tracedecay_mcp::SessionRefreshServicePort;
 use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,

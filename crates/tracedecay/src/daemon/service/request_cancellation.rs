@@ -1,4 +1,7 @@
 //! Daemon-generation request cancellation shared by socket and in-process invocations.
+//!
+//! The lease table is owned by the invocation service. Root transport and
+//! executor paths call into this module; they do not keep a second table.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
@@ -18,18 +21,18 @@ struct State {
     completed: BTreeMap<String, Instant>,
 }
 
-pub(super) struct Lease {
+pub(crate) struct Lease {
     request_id: String,
     token: CancellationToken,
 }
 
 impl Lease {
-    pub(super) fn token(&self) -> CancellationToken {
+    pub(crate) fn token(&self) -> CancellationToken {
         self.token.clone()
     }
 }
 
-pub(super) fn register(request_id: &str) -> Option<Lease> {
+pub(crate) fn register(request_id: &str) -> Option<Lease> {
     let token = CancellationToken::for_application_request(request_id);
     let mut state = state()
         .lock()
@@ -53,7 +56,7 @@ pub(super) fn register(request_id: &str) -> Option<Lease> {
 }
 
 #[hotpath::measure(label = "daemon.invocation.cancel")]
-pub(super) fn cancel(request_id: &str) -> bool {
+pub(crate) fn cancel(request_id: &str) -> bool {
     let mut state = state()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

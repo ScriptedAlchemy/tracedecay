@@ -20,15 +20,20 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
     DaemonInvocationResponse,
 };
-use tracedecay_mcp::ToolResult;
+use crate::ToolResult;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::tool_call_support::json_result;
+fn json_result(value: &Value) -> ToolResult {
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
+        Vec::new(),
+    )
+}
 
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 
 #[hotpath::measure(future = true, label = "mcp.dispatch.multi_root")]
-pub(super) async fn handle_multi_root(
+pub async fn handle_multi_root(
     tool_name: &str,
     body: Value,
     executor: Option<&dyn DaemonInvocationExecutor>,
@@ -327,7 +332,7 @@ mod tests {
 
     use super::{daemon_problem, handle_multi_root};
 
-    fn problem_code(result: &tracedecay_mcp::ToolResult) -> String {
+    fn problem_code(result: &crate::ToolResult) -> String {
         let text = result.value["content"][0]["text"].as_str().unwrap();
         let payload: Value = serde_json::from_str(text).unwrap();
         payload["application"]["problem"]["code"]

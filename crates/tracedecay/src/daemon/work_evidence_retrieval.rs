@@ -5,6 +5,7 @@
 //! anchors through the active evaluated federated profile, reauthorizes Work on
 //! both sides of selection, and hydrates only the globally selected anchors.
 
+use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1;
 use tracedecay_application::{
     OpaqueCursor, RequestContext, ResolvedScope, WorkAnchorHydrationFuture,
     WorkAnchorHydrationPortV1, WorkAnchorHydrationRequestV1, WorkEvidenceCoverageStateV1,
+    WorkEvidenceRetrievalPortV1,
     WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1, WorkTaskSessionContinuationV1,
     WorkTaskSessionCoverageV1, WorkTaskSessionEvidenceV1, WorkTaskSessionFuture,
     WorkTaskSessionHydrationStateV1, WorkTaskSessionHydrationV1, WorkTaskSessionPortV1,
@@ -137,6 +139,23 @@ impl DaemonWorkEvidenceRetrievalV1 {
                 ))
                 .with_execution_limits(execution_limits)
         })
+    }
+}
+
+impl WorkEvidenceRetrievalPortV1 for DaemonWorkEvidenceRetrievalV1 {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn same_retrieval_authority(&self, other: &dyn WorkEvidenceRetrievalPortV1) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| self.same_authority(other))
+    }
+
+    fn clone_arc(&self) -> Arc<dyn WorkEvidenceRetrievalPortV1> {
+        Arc::new(self.clone())
     }
 }
 

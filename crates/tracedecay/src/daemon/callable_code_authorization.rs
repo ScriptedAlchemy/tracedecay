@@ -7,11 +7,13 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationProblem, ApplicationProblemKind, AuthorityReceipt,
     CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
-    SafeDiagnostic,
 };
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
+use tracedecay_usecases::{
+    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
+    ProjectSourceAccessSnapshot,
+};
 use tracedecay_usecases::configuration::{
     ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
 };
@@ -92,6 +94,22 @@ impl DaemonCallableCodeAuthorizationSource {
             source: self.clone(),
             admitted_access,
         }
+    }
+}
+
+impl CallableCodeAuthorizationSourcePort for DaemonCallableCodeAuthorizationSource {
+    fn current(&self, observed_at: UtcMicros) -> CurrentCallableCodeAccessFuture<'_> {
+        Box::pin(async move { self.access.current_access(observed_at).await })
+    }
+
+    fn authorize(
+        &self,
+        admitted_access: ProjectSourceAccessSnapshot,
+    ) -> Arc<dyn CallableCodeAuthorizationPort> {
+        Arc::new(DaemonCallableCodeAuthorizationSource::authorize(
+            self,
+            admitted_access,
+        ))
     }
 }
 
@@ -591,7 +609,7 @@ mod tests {
         );
 
         let routed = tracedecay_usecases::graph::map_code_graph_read_runtime_error(read_error);
-        let tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
+        let tracedecay_domain::errors::TraceDecayError::ProjectRoute {
             reason_code,
             retryable,
             ..

@@ -5,6 +5,8 @@
 //! retrieval authority, preserving its temporal, redaction, and direct-anchor
 //! semantics rather than reopening a store here.
 
+use std::sync::Arc;
+
 use tracedecay_application::{
     ApplicationProblem, RequestContext, WorkEvidenceRetrievalServiceV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1,
@@ -32,12 +34,12 @@ pub(super) async fn retrieve(
             tracedecay_application::WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable,
         )
     })?;
-    let evidence_retrieval = registered.evidence_retrieval.clone();
+    let evidence_retrieval = Arc::clone(&registered.evidence_retrieval);
     WorkEvidenceRetrievalServiceV1::new(
         storage.clone(),
         storage.clone(),
         storage,
-        evidence_retrieval.clone(),
+        Arc::clone(&evidence_retrieval),
         evidence_retrieval,
         binding,
     )

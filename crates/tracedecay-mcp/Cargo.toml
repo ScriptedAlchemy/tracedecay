@@ -58,6 +58,7 @@ test-transport = []
 
 [dependencies]
 hotpath.workspace = true
+libc = "0.2"
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -80,3 +81,4 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }

@@ -38,6 +38,7 @@ use super::{
 use tracedecay_application::request_identity::{PreviewIdentityDomain, derive_preview_identity};
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
+use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar;
 use crate::mcp::McpServer;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -78,9 +79,9 @@ const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
 const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
-pub(super) const LSP_WORKSPACE_CAPABILITY_ID_V1: &str =
-    "capability.application.lsp.workspace-folders";
-pub(super) const LSP_WORKSPACE_USE_CASE_ID_V1: &str = "use-case.application.lsp.workspace-folders";
+pub(super) use crate::daemon::service::invocation::{
+    LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1,
+};
 
 #[derive(Clone)]
 struct ProjectOpenSourceEditAuthorizationV1 {
@@ -964,7 +965,11 @@ pub(super) async fn register_project_open_production_owners(
             project_root.to_path_buf(),
             scope.clone(),
             access.clone(),
-            Arc::clone(graph.configuration_runtime()),
+            Arc::new(DaemonCallableCodeAuthorizationSource::production(
+                project_root.to_path_buf(),
+                scope.clone(),
+                Arc::clone(graph.configuration_runtime()),
+            )),
         ),
         label = "daemon.project.open.owners.feedback"
     )
@@ -1676,6 +1681,20 @@ pub(super) fn daemon_owned_project_source_access_at(
                 .saturating_add(i64::try_from(GRANT_HORIZON.as_micros()).unwrap_or(i64::MAX)),
         ),
     })
+}
+
+pub(crate) struct DaemonOwnedProjectSourceAccess;
+
+impl tracedecay_usecases::ProjectSourceAccessSnapshotPort for DaemonOwnedProjectSourceAccess {
+    fn source_access_at(
+        &self,
+        scope: &ResolvedScope,
+        project_root: &Path,
+        configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+        observed_at: UtcMicros,
+    ) -> std::result::Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
+        daemon_owned_project_source_access_at(scope, project_root, configuration, observed_at)
+    }
 }
 
 fn project_open_work_grant(

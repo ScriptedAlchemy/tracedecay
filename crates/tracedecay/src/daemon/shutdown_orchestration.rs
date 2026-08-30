@@ -16,26 +16,7 @@ use super::{
     DAEMON_PROJECT_SERVER_DRAIN_DEADLINE, DAEMON_STORE_CLOSE_RESERVE, DAEMON_TASK_ABORT_DEADLINE,
     DaemonLifecycle, core_lifecycle::DaemonShutdownClaim,
 };
-use tracedecay_code_index_runtime::SemanticEvaluationShutdownReceiptV1;
 use tracedecay_domain::errors::Result;
-
-/// Map a collected semantic-evaluation receipt onto the daemon shutdown
-/// status vocabulary. Project-runtime drain still uses `is_clean` for the
-/// same boolean it always returned.
-pub(crate) fn semantic_evaluation_shutdown_status(
-    receipt: SemanticEvaluationShutdownReceiptV1,
-) -> ShutdownStatus {
-    if receipt.remaining_workers > 0 {
-        ShutdownStatus::TimedOut
-    } else if receipt.failed_workers > 0 {
-        ShutdownStatus::Failed(format!(
-            "semantic evaluation workers failed to shut down cleanly: {}",
-            receipt.failed_workers
-        ))
-    } else {
-        ShutdownStatus::Clean
-    }
-}
 
 type ProjectServerShutdownFuture =
     Pin<Box<dyn Future<Output = ShutdownTaskReceipt> + Send + 'static>>;

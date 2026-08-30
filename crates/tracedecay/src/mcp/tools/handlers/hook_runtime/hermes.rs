@@ -10,7 +10,7 @@ use tracedecay_host_admission::{SharedHostAdmissionBroker, TerminalReason};
 use tracedecay_domain::errors::Result;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 
-use super::errors::map_host_admission_outcome;
+use tracedecay_mcp::map_host_admission_outcome;
 use super::required_str;
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.review")]

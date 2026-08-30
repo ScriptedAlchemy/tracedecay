@@ -3,9 +3,11 @@
 //! Work admits the task/version/attempt join; session retrieval retains that
 //! identity through compact ranking and selected-anchor hydration.
 
+use std::any::Any;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -424,6 +426,40 @@ impl<P> WorkAnchorHydrationPortV1 for &P
 where
     P: WorkAnchorHydrationPortV1 + ?Sized,
 {
+    fn hydrate_anchor<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: WorkAnchorHydrationRequestV1,
+    ) -> WorkAnchorHydrationFuture<'a> {
+        (**self).hydrate_anchor(context, request)
+    }
+}
+
+/// Combined Work evidence adapter retained by a registered Work runtime.
+///
+/// The two hydration ports are the consumer contract. Identity comparison is
+/// required so project-open re-registration can renew a grant without
+/// replacing an equivalent authority.
+pub trait WorkEvidenceRetrievalPortV1:
+    WorkTaskSessionPortV1 + WorkAnchorHydrationPortV1 + Send + Sync
+{
+    fn as_any(&self) -> &dyn Any;
+    fn same_retrieval_authority(&self, other: &dyn WorkEvidenceRetrievalPortV1) -> bool;
+    fn clone_arc(&self) -> Arc<dyn WorkEvidenceRetrievalPortV1>;
+}
+
+impl WorkTaskSessionPortV1 for Arc<dyn WorkEvidenceRetrievalPortV1> {
+    fn retrieve_task_session<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: WorkTaskSessionRequestV1,
+        reauthorization: &'a dyn WorkTaskSessionReauthorizationPortV1,
+    ) -> WorkTaskSessionFuture<'a> {
+        (**self).retrieve_task_session(context, request, reauthorization)
+    }
+}
+
+impl WorkAnchorHydrationPortV1 for Arc<dyn WorkEvidenceRetrievalPortV1> {
     fn hydrate_anchor<'a>(
         &'a self,
         context: &'a RequestContext,

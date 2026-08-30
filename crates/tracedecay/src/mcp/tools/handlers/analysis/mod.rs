@@ -5,7 +5,8 @@
 //! by more than one sibling, and the re-exports the handler dispatcher calls.
 //!
 //! `constructors`, `field_sites`, `imports`, `recursion`, and `unsafe_patterns`
-//! read Rust source with hand-rolled byte scanners built on [`lex`]. See the
+//! read Rust source with hand-rolled byte scanners built on
+//! [`tracedecay_mcp::is_ident_byte`]. See the
 //! notes in `docs/` before extending those scanners. `unmounted_files` is the
 //! one source-reading sibling that already parses: a mis-read `mod` line there
 //! would report a compiled file as an orphan (or, worse, hide a real one), so
@@ -19,7 +20,6 @@ mod diagnostics;
 mod field_sites;
 mod hotspots;
 mod imports;
-mod lex;
 mod metrics;
 mod recursion;
 mod unmounted_files;
@@ -40,7 +40,7 @@ pub(super) use recursion::handle_recursion;
 pub(super) use unmounted_files::handle_unmounted_files;
 pub(super) use unsafe_patterns::handle_unsafe_patterns;
 
-use lex::{is_ident_byte, line_number_at, skip_ascii_whitespace};
+use tracedecay_mcp::{is_ident_byte, line_number_at, skip_ascii_whitespace};
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

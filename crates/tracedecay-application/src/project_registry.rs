@@ -1,9 +1,9 @@
-//! Typed contract for daemon-owned project-registry reads.
+//! Portable project-registry presentation DTOs and the MCP/daemon read port.
 //!
 //! MCP owns selector parsing and rendering; the daemon owns the registry
-//! database. Handlers in this tree therefore name a
-//! [`ProjectRegistryReadPort`] instead of a `RegisteredGlobalDb`, and receive
-//! presentation views plus the typed missing-registry and unresolved states.
+//! database. Handlers therefore name a [`ProjectRegistryReadPort`] instead of a
+//! concrete registry store, and receive presentation views plus the typed
+//! missing-registry and unresolved states.
 //!
 //! Genuine read failures keep [`tracedecay_domain::errors::TraceDecayError`] so an
 //! unreadable registry stays a failure instead of collapsing into a
@@ -13,14 +13,68 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use tracedecay_dashboard_api::project_registry::{ProjectRegistryView, PublicCodeProject};
 use tracedecay_domain::errors::Result;
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectRegistrySummary {
+    pub project_count: usize,
+    pub repo_count: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectRepoGroup {
+    pub label: String,
+    pub git_common_dir: Option<String>,
+    pub project_count: usize,
+    pub branches: Vec<String>,
+    pub projects: Vec<ProjectRegistryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectRegistryEntry {
+    pub project_id: String,
+    pub label: String,
+    pub project_root: String,
+    pub canonical_root: String,
+    pub kind: String,
+    pub default_branch: Option<String>,
+    pub branches: Vec<String>,
+    pub store_count: usize,
+    pub artifact_count: usize,
+    pub alias_count: usize,
+    pub last_seen_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PublicCodeProject {
+    pub project_id: String,
+    pub label: String,
+    pub project_root: String,
+    pub display_root: String,
+    pub canonical_root: String,
+    pub git_common_dir: Option<String>,
+    pub default_branch: Option<String>,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectRegistryView {
+    pub summary: ProjectRegistrySummary,
+    pub project_tree: Vec<ProjectRepoGroup>,
+}
 
 /// Which registered project a context read names.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ProjectRegistrySelector {
+pub enum ProjectRegistrySelector {
     /// An exact registered `project_id`.
     ProjectId(String),
     /// A filesystem path. `allow_git_identity` mirrors the caller-supplied
@@ -34,7 +88,7 @@ pub(crate) enum ProjectRegistrySelector {
 
 /// Which registered projects a listing read covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ProjectRegistryListingScope {
+pub enum ProjectRegistryListingScope {
     /// Every registered project, newest registration order preserved.
     All,
     /// Registered projects matching a caller query.
@@ -47,44 +101,44 @@ pub(crate) enum ProjectRegistryListingScope {
 /// Routing stays with the caller: MCP names the served root, and the daemon
 /// resolves that root's registry identity to mark the active project.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProjectRegistryListingCommand {
-    pub(crate) active_project_root: PathBuf,
-    pub(crate) scope: ProjectRegistryListingScope,
-    pub(crate) limit: usize,
+pub struct ProjectRegistryListingCommand {
+    pub active_project_root: PathBuf,
+    pub scope: ProjectRegistryListingScope,
+    pub limit: usize,
 }
 
 /// A single-project context read, scoped the same way as a listing read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProjectRegistryContextCommand {
-    pub(crate) active_project_root: PathBuf,
-    pub(crate) selector: ProjectRegistrySelector,
+pub struct ProjectRegistryContextCommand {
+    pub active_project_root: PathBuf,
+    pub selector: ProjectRegistrySelector,
 }
 
 /// A bounded page of registered projects with its presentation view.
 #[derive(Clone, Debug)]
-pub(crate) struct ProjectRegistryListingView {
-    pub(crate) registry_path: PathBuf,
-    pub(crate) truncated: bool,
-    pub(crate) view: ProjectRegistryView,
-    pub(crate) projects: Vec<PublicCodeProject>,
+pub struct ProjectRegistryListingView {
+    pub registry_path: PathBuf,
+    pub truncated: bool,
+    pub view: ProjectRegistryView,
+    pub projects: Vec<PublicCodeProject>,
 }
 
 /// One resolved registered project with its aliases and store instances.
 #[derive(Clone, Debug)]
-pub(crate) struct ProjectRegistryContextView {
-    pub(crate) registry_path: PathBuf,
-    pub(crate) is_active: bool,
-    pub(crate) project: PublicCodeProject,
+pub struct ProjectRegistryContextView {
+    pub registry_path: PathBuf,
+    pub is_active: bool,
+    pub project: PublicCodeProject,
     /// Alias and store rows serialized by their owning authority. MCP renders
     /// them verbatim and never interprets them, so the exact registry record
     /// shape crosses the boundary unchanged.
-    pub(crate) aliases: Vec<Value>,
-    pub(crate) stores: Vec<Value>,
+    pub aliases: Vec<Value>,
+    pub stores: Vec<Value>,
 }
 
 /// Closed set of listing results.
 #[derive(Clone, Debug)]
-pub(crate) enum ProjectRegistryListingOutcome {
+pub enum ProjectRegistryListingOutcome {
     Listing(ProjectRegistryListingView),
     /// No registry authority is mounted for this profile. This is a state, not
     /// an empty listing: callers must report it as such.
@@ -93,22 +147,20 @@ pub(crate) enum ProjectRegistryListingOutcome {
 
 /// Closed set of single-project context results.
 #[derive(Clone, Debug)]
-pub(crate) enum ProjectRegistryContextOutcome {
+pub enum ProjectRegistryContextOutcome {
     Context(Box<ProjectRegistryContextView>),
     /// The registry answered, and no registered project matches the selector.
-    NotFound {
-        registry_path: PathBuf,
-    },
+    NotFound { registry_path: PathBuf },
     RegistryUnavailable,
 }
 
-pub(crate) type ProjectRegistryListingFuture<'a> =
+pub type ProjectRegistryListingFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ProjectRegistryListingOutcome>> + Send + 'a>>;
-pub(crate) type ProjectRegistryContextFuture<'a> =
+pub type ProjectRegistryContextFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ProjectRegistryContextOutcome>> + Send + 'a>>;
 
 /// The one path MCP handlers use to read the project registry.
-pub(crate) trait ProjectRegistryReadPort: Send + Sync {
+pub trait ProjectRegistryReadPort: Send + Sync {
     fn list(&self, command: ProjectRegistryListingCommand) -> ProjectRegistryListingFuture<'_>;
 
     fn context(&self, command: ProjectRegistryContextCommand) -> ProjectRegistryContextFuture<'_>;
@@ -117,7 +169,7 @@ pub(crate) trait ProjectRegistryReadPort: Send + Sync {
 /// Reads the registry through `port`, reporting the typed missing-registry
 /// state when no port is mounted.
 #[hotpath::measure(future = true, label = "mcp.project.registry.list")]
-pub(crate) async fn list_registered_projects(
+pub async fn list_registered_projects(
     port: Option<&dyn ProjectRegistryReadPort>,
     command: ProjectRegistryListingCommand,
 ) -> Result<ProjectRegistryListingOutcome> {
@@ -130,7 +182,7 @@ pub(crate) async fn list_registered_projects(
 /// Resolves one registered project through `port`, reporting the typed
 /// missing-registry state when no port is mounted.
 #[hotpath::measure(future = true, label = "mcp.project.registry.context")]
-pub(crate) async fn read_registered_project_context(
+pub async fn read_registered_project_context(
     port: Option<&dyn ProjectRegistryReadPort>,
     command: ProjectRegistryContextCommand,
 ) -> Result<ProjectRegistryContextOutcome> {

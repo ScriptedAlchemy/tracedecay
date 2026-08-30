@@ -16,7 +16,6 @@ use super::support::tool_json;
 mod admission;
 mod context_scout;
 mod envelope;
-mod errors;
 mod hermes;
 mod ingest;
 mod terminal;
@@ -37,7 +36,7 @@ use context_scout::{
     ContextScoutReadSurfaceV1, hook_v2_cancel, hook_v2_delivery_receipt, hook_v2_feedback,
     hook_v2_feedback_notice_delivery, hook_v2_scout_prepare, hook_v2_scout_read, hook_v2_status,
 };
-use errors::map_host_admission_outcome;
+use tracedecay_mcp::map_host_admission_outcome;
 use hermes::{hermes_receipt, user_review};
 use ingest::{
     accounting_receipt, claude_compact, codex_compact, cursor_compact, ingest_transcript,
