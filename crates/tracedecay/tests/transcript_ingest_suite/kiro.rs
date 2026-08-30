@@ -829,9 +829,20 @@ async fn kiro_conflicting_native_message_id_does_not_overwrite() {
             .await
             .is_empty()
     );
+    // The conflicting snapshot is scanned under its own replacement
+    // generation; its rows are refused without overwriting, and the frontier
+    // commits full coverage of the new snapshot so the stream converges
+    // instead of rescanning the rejected replacement forever.
+    let after_conflict = observation_source_cursor(&rejected, "kiro", "sess-conflict", &project)
+        .await
+        .expect("committed Kiro observation cursor");
+    assert_ne!(after_conflict.generation(), prefix_cursor.generation());
+    assert_eq!(after_conflict.position(), prefix_cursor.position());
     assert_eq!(
-        observation_source_cursor(&rejected, "kiro", "sess-conflict", &project).await,
-        Some(prefix_cursor)
+        ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Kiro))
+            .await
+            .messages_upserted,
+        0
     );
 }
 

@@ -153,6 +153,8 @@ mod overlay_admission;
 use overlay_admission::admit_overlay;
 mod diagnostic_records;
 pub use diagnostic_records::LspFeedbackDiagnosticRecordPort;
+mod semantic;
+pub use semantic::{ProductionSemanticAuthorities, production_semantic_authorities};
 #[cfg(test)]
 mod advisory_source_tests;
 

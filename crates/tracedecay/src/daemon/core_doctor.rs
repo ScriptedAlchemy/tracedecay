@@ -467,7 +467,7 @@ fn doctor_semantic_runtime_status(
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> serde_json::Value {
     serde_json::to_value(
-        crate::semantic_code::resolve_project_semantic_runtime_status(project_path, configuration),
+        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(project_path, configuration),
     )
     .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
@@ -929,14 +929,14 @@ mod doctor_runtime_route_tests {
 
     fn lifecycle_status(
         selected_model: Option<&str>,
-        state: Option<crate::semantic_code::SemanticModelLifecycleStateV1>,
-    ) -> crate::semantic_code::SemanticModelLifecycleStatusV1 {
-        crate::semantic_code::SemanticModelLifecycleStatusV1 {
+        state: Option<tracedecay_semantic::SemanticModelLifecycleStateV1>,
+    ) -> tracedecay_semantic::SemanticModelLifecycleStatusV1 {
+        tracedecay_semantic::SemanticModelLifecycleStatusV1 {
             selected_model: selected_model.map(str::to_owned),
             auto_download: false,
             catalog_model_ids: Vec::new(),
             state,
-            remediation: crate::semantic_code::SemanticModelRemediationV1 {
+            remediation: tracedecay_semantic::SemanticModelRemediationV1 {
                 retry: false,
                 remove: false,
                 rollback: false,
@@ -960,7 +960,7 @@ mod doctor_runtime_route_tests {
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
             Some(
-                crate::semantic_code::SemanticModelLifecycleStateV1::Downloading {
+                tracedecay_semantic::SemanticModelLifecycleStateV1::Downloading {
                     model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
                     revision: "rev".to_owned(),
                     artifact_digest: digest,
@@ -995,7 +995,7 @@ mod doctor_runtime_route_tests {
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
             Some(
-                crate::semantic_code::SemanticModelLifecycleStateV1::Failed {
+                tracedecay_semantic::SemanticModelLifecycleStateV1::Failed {
                     model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
                     revision: "rev".to_owned(),
                     artifact_digest: digest,
@@ -1034,7 +1034,7 @@ mod doctor_runtime_route_tests {
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
             Some(
-                crate::semantic_code::SemanticModelLifecycleStateV1::Downloading {
+                tracedecay_semantic::SemanticModelLifecycleStateV1::Downloading {
                     model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
                     revision: "rev".to_owned(),
                     artifact_digest: "d".repeat(64),

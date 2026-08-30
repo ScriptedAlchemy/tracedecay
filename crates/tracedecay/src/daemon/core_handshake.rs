@@ -5,10 +5,10 @@
 
 use std::path::PathBuf;
 
-use tracedecay_daemon_protocol::{DaemonHandshake, MovedStoreAdoption};
+use tracedecay_daemon_protocol::{
+    DaemonHandshake, MovedStoreAdoption, current_daemon_client_identity,
+};
 use tracedecay_runtime_core::errors::Result;
-
-use crate::client_identity::current_daemon_client_identity;
 
 pub use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
 

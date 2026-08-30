@@ -710,6 +710,37 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     detach_from_test_process_group(command);
 }
 
+/// Resolve a `tracedecay-search-eval` package binary that used to live under
+/// the root crate's `src/bin/`.
+///
+/// Those targets now belong to `-p tracedecay-search-eval`, so root
+/// integration tests cannot use `CARGO_BIN_EXE_*`. Prefer an explicit
+/// override, then the sibling artifact beside the current test profile.
+pub fn search_eval_bin(name: &str) -> PathBuf {
+    let override_env = match name {
+        "tracedecay-search-eval" => "TRACEDECAY_SEARCH_EVAL_TEST_BIN",
+        "tracedecay-search-eval-direct" => "TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN",
+        _ => "TRACEDECAY_SEARCH_EVAL_TEST_BIN",
+    };
+    let binary = std::env::var_os(override_env)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let test_executable =
+                std::env::current_exe().expect("test executable path should resolve");
+            let profile_dir = test_executable
+                .parent()
+                .and_then(Path::parent)
+                .expect("integration test should run from a Cargo profile directory");
+            profile_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+        });
+    assert!(
+        binary.is_file(),
+        "search-eval binary `{name}` is missing at {}; build it with `kache cargo -- build -p tracedecay-search-eval --bin {name}` or set {override_env}",
+        binary.display()
+    );
+    binary
+}
+
 pub fn tracedecay_bin() -> PathBuf {
     let binary = std::env::var_os("TRACEDECAY_TEST_BIN")
         .map(PathBuf::from)

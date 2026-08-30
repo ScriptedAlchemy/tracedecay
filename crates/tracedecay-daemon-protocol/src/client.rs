@@ -1720,11 +1720,8 @@ mod tests {
     }
 
     fn unused_test_endpoint() -> crate::transport::DaemonEndpoint {
-        crate::transport::DaemonEndpoint::loopback(std::net::SocketAddr::from((
-            [127, 0, 0, 1],
-            0,
-        )))
-        .expect("loopback endpoint")
+        crate::transport::DaemonEndpoint::loopback(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("loopback endpoint")
     }
 
     #[test]

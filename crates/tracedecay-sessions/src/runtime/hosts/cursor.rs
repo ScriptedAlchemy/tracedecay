@@ -196,6 +196,7 @@ const CURSOR_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 struct CursorJsonlAdmitState {
     generation: u64,
     namespace_replacement: bool,
+    carry: TimestampCarry,
 }
 
 // Cursor JSONL admission chokepoint: the whole per-file admission future is
@@ -231,11 +232,15 @@ fn admit_cursor_jsonl_observations<'a>(
         )
         .with_max_new_bytes(max_new_bytes)
         .with_cancellation(cancellation.clone());
+        let subagent_model = subagent.as_ref().and_then(|(_, agent_id)| {
+            parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
+        });
         let progress = admit_jsonl_observations(
             request,
             |scan| CursorJsonlAdmitState {
                 generation: scan.generation,
                 namespace_replacement: scan.replacement_rescan,
+                carry: TimestampCarry::new(i64::try_from(scan.mtime).ok()),
             },
             |state, bytes, range, source_offset, _prepared, _hints| {
                 let mut stable_record_id = None;
@@ -259,7 +264,13 @@ fn admit_cursor_jsonl_observations<'a>(
                             state.generation,
                             state.namespace_replacement,
                         )?;
-                        let native = cursor_native_with_context(native, context);
+                        let derived_timestamp = state.carry.observe(&native);
+                        let native = cursor_native_with_context(
+                            native,
+                            context,
+                            derived_timestamp,
+                            subagent_model.as_deref(),
+                        );
                         let (agent_id, parent_agent_id) = match subagent.as_ref() {
                             Some((child_id, _)) => {
                                 (Some(child_id.as_str()), Some(parent_session_id))
@@ -299,7 +310,12 @@ fn admit_cursor_jsonl_observations<'a>(
     })
 }
 
-fn cursor_native_with_context(mut native: Value, context: &CursorObservationContext) -> Value {
+fn cursor_native_with_context(
+    mut native: Value,
+    context: &CursorObservationContext,
+    derived_timestamp: Option<i64>,
+    model_fallback: Option<&str>,
+) -> Value {
     let Some(object) = native.as_object_mut() else {
         return native;
     };
@@ -319,6 +335,18 @@ fn cursor_native_with_context(mut native: Value, context: &CursorObservationCont
         "tracedecayTranscriptPath".to_string(),
         Value::String(context.transcript_path.clone()),
     );
+    if let Some(derived_timestamp) = derived_timestamp {
+        object.insert(
+            "tracedecayDerivedTimestamp".to_string(),
+            Value::from(derived_timestamp),
+        );
+    }
+    if let Some(model) = model_fallback {
+        object.insert(
+            "tracedecayModel".to_string(),
+            Value::String(model.to_owned()),
+        );
+    }
     native
 }
 
@@ -1331,6 +1359,7 @@ fn dispatch_targets_agent(item: &Value, agent_id: &str) -> bool {
 /// (assistant turns happen after the prompt that started them); lines seen
 /// before any tag fall back to the transcript file's mtime, which on the
 /// incremental hook path approximates "now" for freshly appended lines.
+#[derive(Clone, Copy)]
 pub struct TimestampCarry {
     carried: Option<i64>,
     fallback: Option<i64>,

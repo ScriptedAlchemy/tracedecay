@@ -1,5 +1,5 @@
 use super::*;
-use crate::diagnostics::lsp::semantic::ProductionSemanticAuthorities;
+use tracedecay_usecases::lsp_runtime::ProductionSemanticAuthorities;
 
 #[derive(Clone)]
 pub(crate) struct DaemonLspOwnerRegistrar {

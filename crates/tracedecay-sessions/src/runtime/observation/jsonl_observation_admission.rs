@@ -222,6 +222,7 @@ pub(in crate::runtime) struct JsonlObservationScan {
     pub replacement_rescan: bool,
     pub start_offset: u64,
     pub generation: u64,
+    pub mtime: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -1975,6 +1976,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         replacement_rescan: raw.replacement_generation,
         start_offset: raw.start_offset,
         generation: raw.new_cursor.file_id,
+        mtime: raw.new_cursor.mtime,
     });
     let active = ActiveAdmission {
         provider,

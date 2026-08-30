@@ -2792,7 +2792,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // violation it named.
                 if text_generation
                     .as_ref()
-                    .is_some_and(|latest| latest.text_serving_is_ready())
+                    .is_some_and(super::LatestCodeTextGenerationV1::text_serving_is_ready)
                 {
                     clear_convergence_park(&worker_convergence_park);
                 } else if convergence_park_retries_on_wake(&worker_convergence_park)

@@ -50,7 +50,6 @@
 
 pub mod agents;
 pub use tracedecay_agent_hosts::cli_fallback_args_invocation_lit;
-pub mod analytics_bridge;
 pub mod application_surface;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
@@ -58,7 +57,6 @@ pub mod application_surface;
 pub mod host_admission;
 pub use tracedecay_code_index::ast_grep_search;
 pub mod bench;
-pub mod branch_snapshots;
 pub mod catalog_composition;
 pub mod client_identity;
 pub mod cloud;
@@ -67,8 +65,6 @@ pub use tracedecay_query as query;
 pub mod config;
 pub mod daemon;
 pub mod dashboard;
-pub mod diagnostics;
-pub(crate) use diagnostics::lsp::semantic::production_semantic_authorities;
 pub mod doctor;
 pub use tracedecay_usecases::git_query;
 pub mod graph;
@@ -84,8 +80,6 @@ pub use runtime_ports::register_runtime_ports;
 #[path = "sessions/claude_observation_benchmark.rs"]
 mod claude_observation_benchmark;
 pub mod runtime_telemetry;
-pub mod search_eval;
-mod semantic_code;
 pub mod serve;
 #[cfg(test)]
 #[path = "sessions/ingest_tests.rs"]

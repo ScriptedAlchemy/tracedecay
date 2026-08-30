@@ -1,11 +1,12 @@
 //! Semantic code runtime: artifact store, model lifecycle, embedding
 //! projection, session pooling, and the daemon-callable scheduling handle.
 //!
-//! The crate owns the semantic implementation outright. Configuration
-//! ownership and application status projection stay with the root binary; the
+//! The crate owns the semantic implementation outright, including user-data-dir
+//! lifecycle-root discovery via `tracedecay_runtime_core::config::user_data_dir`.
+//! Application/Doctor status projection stays in `tracedecay-usecases`. The
 //! few contracts both sides need (resource ceilings, the fallback reason, the
 //! rerank compatibility pins, and the default catalog model id) are defined
-//! here and re-exported by the root's configuration modules.
+//! here and re-exported by configuration modules.
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -71,6 +72,7 @@ pub use model_lifecycle::{
     SemanticModelLifecycleEvaluationPublicationLeaseV1, SemanticModelLifecycleOwnerV1,
     SemanticModelLifecyclePublicationIdentityV1, SemanticModelLifecycleStateV1,
     SemanticModelLifecycleStatusV1, SemanticModelRemediationV1, apply_config_selection,
+    apply_default_config_selection, default_shared_lifecycle_owner,
     open_local_semantic_evaluation_lifecycle, shared_lifecycle_owner,
 };
 
@@ -95,10 +97,14 @@ pub use semantic_evaluation::{
 pub const DEFAULT_FASTEMBED_MODEL_ID: &str = "JinaEmbeddingsV2BaseCode";
 
 /// Resolve the lifecycle store root beneath a caller-supplied user data
-/// directory. The crate never discovers the data directory itself; the root
-/// binary owns that decision and passes the resolved path in.
+/// directory.
 pub fn default_lifecycle_root_in(user_data_dir: &Path) -> PathBuf {
     user_data_dir.join("semantic-models")
+}
+
+/// Resolve the lifecycle store root under the process user data directory.
+pub fn default_lifecycle_root() -> Option<PathBuf> {
+    tracedecay_runtime_core::config::user_data_dir().map(|root| default_lifecycle_root_in(&root))
 }
 
 /// Process ceilings applied before an installed semantic profile is admitted.

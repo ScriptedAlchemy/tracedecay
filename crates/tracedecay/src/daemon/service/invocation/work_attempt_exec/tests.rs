@@ -31,7 +31,7 @@ use tracedecay_domain::configuration::{
 
 use crate::config::registry::ConfigurationRegistry;
 use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
-use crate::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
+use tracedecay_usecases::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
 use tracedecay_application::{
     CancelWorkAttemptCommand, CancellationContext, CapabilityGrantSnapshot, Deadline,

@@ -264,7 +264,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
-    pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
+    pub diagnostics_cache: Option<&'a tracedecay_lsp::compile_diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor:

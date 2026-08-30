@@ -1,14 +1,14 @@
 //! query/semantic candidate-workload fixture integrity.
 //!
-//! This test validates the checked-in workload against the root-owned
-//! `search_eval` module and the root-checked-in fixture corpus, so it stays
-//! with the root crate while the query lane regressions live in
+//! This test validates the checked-in workload against `tracedecay-search-eval`
+//! and the root-checked-in fixture corpus, so it stays with the root crate
+//! while the query lane regressions live in
 //! `crates/tracedecay-query/tests/search_quality_suite`.
 
 use std::fs;
 
 use sha2::{Digest, Sha256};
-use tracedecay::search_eval::{
+use tracedecay_search_eval::{
     compute_workload_digest, load_candidate_workload, validate_direct_workload,
 };
 

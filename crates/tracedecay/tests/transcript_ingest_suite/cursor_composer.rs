@@ -1132,7 +1132,9 @@ async fn composer_envelope_todos_exact_duplicate_is_idempotent() {
 
 #[tokio::test]
 async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
-    const SECRET: &str = "AKIACOMPOSERTODO0001";
+    // Assemble a real AWS access-key-id shape at runtime so the privacy rule
+    // sees realistic input without checking a secret-shaped literal into Git.
+    let secret = ["AKIA", "COMPOSERTODO2345"].concat();
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
@@ -1140,7 +1142,7 @@ async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
     env["todos"] = serde_json::json!([
         {
             "id": "todo-secret",
-            "content": format!("rotate access key {SECRET}"),
+            "content": format!("rotate access key {secret}"),
             "status": "pending"
         }
     ]);
@@ -1158,7 +1160,7 @@ async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
     let joined = composer_observation_json_blobs(&db).await.join("\n");
     assert!(joined.contains("workflow_lifecycle"));
     assert!(
-        !joined.contains(SECRET),
+        !joined.contains(&secret),
         "secret-bearing todo content must be sanitized before persistence"
     );
 }

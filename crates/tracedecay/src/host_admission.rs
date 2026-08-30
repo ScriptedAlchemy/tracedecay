@@ -8,7 +8,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_code_index::parallelism::install_worker_plan;
 use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
 use tracedecay_private_fs::background_cpu::process_background_cpu;
-use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 #[cfg(test)]
@@ -18,6 +20,7 @@ use tracedecay_host_admission::{
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
+use tracedecay_sessions::runtime::codex::CodexDiscoveryHub;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -82,6 +85,16 @@ static SHARED_TEST_SESSION_REGISTRIES: LazyLock<
     AsyncMutex<WeakRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>>,
 > = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
 
+/// Process-scoped scratch-memory authority shared by every host-admission
+/// fixture in this test binary. Its capacity follows the same RAM-derived
+/// production policy; it is not a repository-size limit.
+static SESSION_CAPTURE_TEST_RESIDENT_MEMORY: LazyLock<Arc<ProcessResidentMemoryV1>> =
+    LazyLock::new(|| {
+        Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        ))
+    });
+
 /// Installs the process worker plan (and with it the background CPU
 /// authority) that host-admission capture requires. Production installs it
 /// during daemon worker-plan admission, which these fixtures never run;
@@ -91,21 +104,27 @@ static SHARED_TEST_SESSION_REGISTRIES: LazyLock<
 /// the background CPU width consistent with any later worker-plan install in
 /// the same test process instead of poisoning it with an ad-hoc width.
 fn ensure_process_background_cpu_authority() -> Result<()> {
-    if process_background_cpu().is_some() {
-        return Ok(());
+    if process_background_cpu().is_none() {
+        let memory = SESSION_CAPTURE_TEST_RESIDENT_MEMORY.snapshot();
+        if let Err(error) = install_worker_plan(
+            CodeIndexWorkerSelectionV1::Automatic {},
+            memory.limit_bytes.saturating_sub(memory.used_bytes),
+        ) && process_background_cpu().is_none()
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "host-admission test runtime could not install the worker plan: {error}"
+                ),
+            });
+        }
     }
-    if let Err(error) = install_worker_plan(
-        CodeIndexWorkerSelectionV1::Automatic {},
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
-    ) && process_background_cpu().is_none()
-    {
-        return Err(TraceDecayError::Config {
+    CodexDiscoveryHub::default()
+        .configure_preparation_resources(Arc::clone(&SESSION_CAPTURE_TEST_RESIDENT_MEMORY))
+        .map_err(|error| TraceDecayError::Config {
             message: format!(
-                "host-admission test runtime could not install the worker plan: {error}"
+                "host-admission test runtime could not install JSONL preparation resources: {error}"
             ),
-        });
-    }
-    Ok(())
+        })
 }
 
 /// Registered host-admission fixture assembled by the composition root.

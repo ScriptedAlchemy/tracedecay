@@ -8,23 +8,23 @@ const MAX_LOCAL_BRANCH_SCAN: usize = 4_096;
 pub struct LocalBranchReadControlV1 {
     pub max_refs: usize,
     pub after: Option<String>,
-    pub deadline: Option<tracedecay_application::Deadline>,
-    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+    pub deadline: Option<crate::Deadline>,
+    pub cancellation: Option<crate::CancellationSignal>,
 }
 
 impl LocalBranchReadControlV1 {
-    pub(crate) fn termination(&self) -> Option<LocalBranchSnapshotErrorV1> {
+    pub fn termination(&self) -> Option<LocalBranchSnapshotErrorV1> {
         if self
             .cancellation
             .as_ref()
-            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            .is_some_and(crate::CancellationSignal::is_cancelled)
         {
             return Some(LocalBranchSnapshotErrorV1::Cancelled);
         }
         self.deadline
             .as_ref()
             .is_some_and(|deadline| {
-                deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+                deadline.is_elapsed_at(crate::clock::now_micros())
             })
             .then_some(LocalBranchSnapshotErrorV1::TimedOut)
     }
@@ -328,9 +328,9 @@ mod tests {
         assert!(page.truncated);
         assert!(page.next_after.is_some());
 
-        let cancellation = tracedecay_application::CancellationSignal::active("cancel.branch-refs")
+        let cancellation = crate::CancellationSignal::active("cancel.branch-refs")
             .expect("cancellation");
-        cancellation.cancel(tracedecay_application::clock::now_micros());
+        cancellation.cancel(crate::clock::now_micros());
         assert_eq!(
             local_branch_snapshots_controlled(
                 root.path(),
@@ -344,7 +344,7 @@ mod tests {
             Err(LocalBranchSnapshotErrorV1::Cancelled)
         );
         let expired =
-            tracedecay_application::Deadline::new(tracedecay_application::clock::now_micros())
+            crate::Deadline::new(crate::clock::now_micros())
                 .expect("deadline");
         assert_eq!(
             local_branch_snapshots_controlled(
