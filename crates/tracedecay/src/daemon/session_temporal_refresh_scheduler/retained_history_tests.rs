@@ -15,7 +15,7 @@ use super::history::{
 use super::registry::SessionTemporalRefreshSchedulerRegistry;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_usecases::session::{
+use tracedecay_sessions::serving::{
     SessionProjectionServingState, SessionProjectionServingStatusPort, SessionProjectionStaleReason,
 };
 

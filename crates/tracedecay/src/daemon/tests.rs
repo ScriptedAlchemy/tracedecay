@@ -534,7 +534,7 @@ async fn apply_project_automation_patch_via_surface(
     )
     .expect("apply automation configuration patch");
     let target = graph.configuration_runtime().configuration_target().clone();
-    let scope = super::project_open_owners::resolved_scope_for_project(
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),
         &target.project_id,
     )

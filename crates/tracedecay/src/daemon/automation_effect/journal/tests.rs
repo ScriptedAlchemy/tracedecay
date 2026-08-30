@@ -227,7 +227,7 @@ fn external_admission_for_recovery_project(
     let FactOwnerV1::Project { project_id } = owner else {
         panic!("automation recovery fixture requires a project owner")
     };
-    let recovery_scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+    let recovery_scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         cg.project_root(),
         &project_id,
     )
@@ -251,7 +251,7 @@ fn retirement_admission_for_recovery_project(
     let FactOwnerV1::Project { project_id } = owner.clone() else {
         panic!("automation retirement fixture requires a project owner")
     };
-    let recovery_scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+    let recovery_scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         cg.project_root(),
         &project_id,
     )
@@ -2937,7 +2937,7 @@ async fn project_open_repairs_corrupt_append_intent_at_clean_eof_without_pending
     assert!(
         recovery_index::indexed_journals_blocking(
             dashboard_root,
-            &crate::daemon::project_open_owners::resolved_scope_for_project(
+            &tracedecay_code_index_runtime::resolved_scope_for_project(
                 cg.project_root(),
                 &match cg.project_memory_owner().expect("project owner") {
                     FactOwnerV1::Project { project_id } => project_id,
@@ -3469,7 +3469,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let FactOwnerV1::Project { project_id } = owner else {
         panic!("retained cleanup recovery requires a project owner")
     };
-    let recovery_scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+    let recovery_scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         cg.project_root(),
         &project_id,
     )

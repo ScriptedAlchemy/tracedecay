@@ -30,12 +30,14 @@ use crate::observation::{
 
 pub mod bounds;
 pub mod disposition;
+pub mod ingest;
 
 pub use bounds::{DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_SPOOL_BYTES};
 pub use disposition::{
     HostAdmissionDispositionClass, HostAdmissionStatus, HostAdmissionTelemetryDisposition,
     is_bounded_reason_code,
 };
+pub use ingest::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
 
 /// Boxed future returned by every [`HostAdmission`] method.
 ///

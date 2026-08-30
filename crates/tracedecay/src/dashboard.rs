@@ -92,7 +92,7 @@ pub async fn dashboard_automation_authority_for_test(
     }
     let project_id = configuration.target.project_id.clone();
     let scope =
-        crate::daemon::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
             .map_err(
                 |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!("dashboard automation fixture scope is invalid: {error}"),

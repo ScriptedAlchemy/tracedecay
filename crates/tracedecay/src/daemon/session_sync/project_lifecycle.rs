@@ -12,6 +12,7 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
 use super::{
     ActiveSessionImport, DaemonSessionSyncConfig, DaemonSessionSyncService,
@@ -427,7 +428,7 @@ impl DaemonSessionSyncService {
             | SessionSyncOutcomeV1::Joined(_)
             | SessionSyncOutcomeV1::Complete(_) => Ok(()),
             SessionSyncOutcomeV1::Unavailable { reason_code }
-                if reason_code == crate::daemon::SESSION_INGEST_DISABLED_REASON_V1 =>
+                if reason_code == SESSION_INGEST_DISABLED_REASON_V1 =>
             {
                 tracing::info!(
                     event = "session_sync_startup_import_skipped",

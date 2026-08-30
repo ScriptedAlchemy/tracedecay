@@ -50,7 +50,7 @@ impl SessionSyncProjectContext {
         request: &tracedecay_application::session_sync::SessionSyncRequestV1,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> GitTopologySyncOutcome {
-        let scope = match crate::daemon::project_open_owners::resolved_scope_for_project(
+        let scope = match tracedecay_code_index_runtime::resolved_scope_for_project(
             &self.project_root,
             &self.project_id,
         ) {
