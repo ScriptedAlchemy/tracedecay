@@ -3356,7 +3356,7 @@ fn evaluation_projection_plan_from_request(
 }
 
 fn evaluation_projection_plan_from_canonical_chunks(
-    canonical_chunks: &[CodeSearchChunkV1],
+    canonical_chunks: &[Arc<CodeSearchChunkV1>],
     request: &ProjectionBatchRequestV1,
     base_generation: Option<VectorGenerationIdV1>,
 ) -> VectorGenerationPlanV1 {
@@ -4802,7 +4802,7 @@ mod tests {
         let request = projection_request('o');
 
         let plan = evaluation_projection_plan_from_canonical_chunks(
-            &[alpha.clone(), beta.clone()],
+            &[Arc::new(alpha.clone()), Arc::new(beta.clone())],
             &request,
             None,
         );
@@ -4823,7 +4823,7 @@ mod tests {
         let request = FastEmbedSemanticGenerationRequestV1::new(
             source_generation('a'),
             projection_request('a'),
-            Vec::<CodeSearchChunkV1>::new(),
+            Vec::new(),
             SEMANTIC_EMBEDS_PER_COMMIT,
             move || {
                 let _ = started_tx.send(());

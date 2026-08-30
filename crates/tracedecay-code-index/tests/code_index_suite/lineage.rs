@@ -60,7 +60,11 @@ fn symbol(
 }
 
 fn index(sequence: u64, symbols: Vec<LineageSymbolRecordV1>) -> GenerationSymbolIndexV1 {
-    GenerationSymbolIndexV1::new(generation(sequence), symbols).expect("canonical symbol index")
+    GenerationSymbolIndexV1::new(
+        generation(sequence),
+        symbols.into_iter().map(std::sync::Arc::new).collect(),
+    )
+    .expect("canonical symbol index")
 }
 
 #[test]

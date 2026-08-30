@@ -28,7 +28,7 @@ pub(super) struct BatchCommitStateV1 {
 }
 
 pub(super) fn projection_input_bytes(
-    chunks: &[CodeSearchChunkV1],
+    chunks: &[Arc<CodeSearchChunkV1>],
 ) -> Result<u64, SemanticRuntimeScheduleFailureV1> {
     chunks.iter().try_fold(0_u64, |total, chunk| {
         let bytes = u64::try_from(chunk.sanitized_text.as_str().len())
@@ -46,7 +46,7 @@ pub(super) async fn commit_evaluation_prepared_generation(
     store: &GraphVectorGenerationStoreV1,
     build: &VectorGenerationBuildIdV1,
     prepared: PreparedVectorGenerationV1,
-    canonical_chunks: &[CodeSearchChunkV1],
+    canonical_chunks: &[Arc<CodeSearchChunkV1>],
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<(), SemanticRuntimeScheduleFailureV1> {
     let pages = split_projection_request(

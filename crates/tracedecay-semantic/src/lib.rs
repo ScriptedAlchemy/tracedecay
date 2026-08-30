@@ -337,7 +337,7 @@ impl LoadedSemanticArtifactV1 {
 pub struct FastEmbedSemanticGenerationRequestV1 {
     target_generation: CodeGenerationId,
     projection_request: ProjectionBatchRequestV1,
-    canonical_chunks: Vec<CodeSearchChunkV1>,
+    canonical_chunks: Vec<Arc<CodeSearchChunkV1>>,
     max_embeds_per_batch: usize,
     load_artifact: FastEmbedArtifactLoaderV1,
     resume_projection: SemanticProjectionResumeV1,
@@ -361,7 +361,7 @@ impl FastEmbedSemanticGenerationRequestV1 {
     >(
         target_generation: CodeGenerationId,
         projection_request: ProjectionBatchRequestV1,
-        canonical_chunks: Vec<CodeSearchChunkV1>,
+        canonical_chunks: Vec<Arc<CodeSearchChunkV1>>,
         max_embeds_per_batch: usize,
         load_artifact: LoadArtifact,
         resume_projection: ResumeProjection,

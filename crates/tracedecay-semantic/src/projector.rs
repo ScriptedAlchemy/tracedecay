@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -193,7 +194,7 @@ pub struct PreparedVectorGenerationV1 {
 pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
     admitted_projection: &AdmittedEmbeddingProjectionKeyV1,
     request: ProjectionBatchRequestV1,
-    canonical_chunks: &[CodeSearchChunkV1],
+    canonical_chunks: &[Arc<CodeSearchChunkV1>],
     encoder: &mut E,
 ) -> Result<PreparedVectorGenerationV1, SemanticProjectionErrorV1> {
     let embedding_key = admitted_projection.embedding_key();
@@ -383,7 +384,7 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectionRequestBatchV1 {
     pub request: ProjectionBatchRequestV1,
-    pub canonical_chunks: Vec<CodeSearchChunkV1>,
+    pub canonical_chunks: Vec<Arc<CodeSearchChunkV1>>,
 }
 
 /// One native encoder invocation derived from a file-local canonical order.
@@ -426,7 +427,7 @@ struct CanonicalEncoderGroupV1<'a> {
 #[hotpath::measure(label = "semantic.projector.batch")]
 pub fn split_projection_request(
     request: &ProjectionBatchRequestV1,
-    canonical_chunks: &[CodeSearchChunkV1],
+    canonical_chunks: &[Arc<CodeSearchChunkV1>],
     max_embeds_per_batch: usize,
     inference_batch_size: usize,
     inference_batch_bytes: usize,
@@ -640,7 +641,7 @@ fn take_full_encoder_groups<'a>(
 /// here.
 fn canonical_encoder_groups<'a, Missing>(
     changes: &'a [ChangedCodeChunkV1],
-    chunks: &BTreeMap<CodeSearchChunkId, &'a CodeSearchChunkV1>,
+    chunks: &BTreeMap<CodeSearchChunkId, &'a Arc<CodeSearchChunkV1>>,
     inference_batch_size: usize,
     inference_batch_bytes: usize,
     missing: Missing,
@@ -742,7 +743,7 @@ where
 
 fn append_canonical_encoder_groups<'a>(
     groups: &mut Vec<CanonicalEncoderGroupV1<'a>>,
-    ordered_changes: &[(&'a ChangedCodeChunkV1, &'a CodeSearchChunkV1)],
+    ordered_changes: &[(&'a ChangedCodeChunkV1, &'a Arc<CodeSearchChunkV1>)],
     inference_batch_size: usize,
     inference_batch_bytes: usize,
 ) {
@@ -782,7 +783,7 @@ fn encode_changes_windowed<E, Missing, Sink>(
     encoder: &mut E,
     embedding_key: &EmbeddingProjectionKeyV1,
     changes: &[ChangedCodeChunkV1],
-    chunks: &BTreeMap<CodeSearchChunkId, &CodeSearchChunkV1>,
+    chunks: &BTreeMap<CodeSearchChunkId, &Arc<CodeSearchChunkV1>>,
     missing: Missing,
     mut sink: Sink,
 ) -> Result<(), SemanticProjectionErrorV1>
@@ -829,12 +830,15 @@ where
                     .changes
                     .iter()
                     .map(|change| {
-                        chunks.get(&change.chunk_id).copied().ok_or_else(|| {
-                            SemanticProjectionErrorV1::Contract(
-                                "canonical encoder group lost a previously validated chunk"
-                                    .to_owned(),
-                            )
-                        })
+                        chunks
+                            .get(&change.chunk_id)
+                            .map(|chunk| chunk.as_ref())
+                            .ok_or_else(|| {
+                                SemanticProjectionErrorV1::Contract(
+                                    "canonical encoder group lost a previously validated chunk"
+                                        .to_owned(),
+                                )
+                            })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((group, group_chunks))
@@ -898,7 +902,7 @@ where
 pub async fn prepare_vector_generation_async<E>(
     admitted_projection: AdmittedEmbeddingProjectionKeyV1,
     request: ProjectionBatchRequestV1,
-    canonical_chunks: Vec<CodeSearchChunkV1>,
+    canonical_chunks: Vec<Arc<CodeSearchChunkV1>>,
     mut encoder: E,
 ) -> Result<PreparedVectorGenerationV1, SemanticProjectionErrorV1>
 where
@@ -961,10 +965,10 @@ mod encoder_group_tests {
     const BATCH_SIZE: usize = 32;
     const BATCH_BYTES: usize = 32 * 512 * 4;
 
-    fn chunk(file: &str, ordinal: u32) -> CodeSearchChunkV1 {
+    fn chunk(file: &str, ordinal: u32) -> Arc<CodeSearchChunkV1> {
         let text = "fn fixture() {}";
         let start_byte = u64::from(ordinal).saturating_mul(1024);
-        CodeSearchChunkV1 {
+        Arc::new(CodeSearchChunkV1 {
             id: CodeSearchChunkId::new(format!("grouping.chunk.{file}.{ordinal}"))
                 .expect("chunk fixture"),
             anchor: CodeSearchChunkAnchorV1 {
@@ -994,14 +998,14 @@ mod encoder_group_tests {
             exact_terms: Vec::new(),
             subtokens: Vec::new(),
             sanitized_text: BoundedSanitizedText::new(text).expect("sanitized fixture"),
-        }
+        })
     }
 
     /// Exact group membership, as chunk IDs, for one in-memory changed set.
     ///
     /// Membership — not just the shape — is projection identity, so the tests
     /// below assert on this rather than on sizes alone.
-    fn encoder_groups(chunks: &[CodeSearchChunkV1]) -> Vec<Vec<String>> {
+    fn encoder_groups(chunks: &[Arc<CodeSearchChunkV1>]) -> Vec<Vec<String>> {
         let changes = chunks
             .iter()
             .map(|chunk| ChangedCodeChunkV1 {
@@ -1030,7 +1034,7 @@ mod encoder_group_tests {
         .collect()
     }
 
-    fn group_sizes(chunks: &[CodeSearchChunkV1]) -> Vec<usize> {
+    fn group_sizes(chunks: &[Arc<CodeSearchChunkV1>]) -> Vec<usize> {
         encoder_groups(chunks).iter().map(Vec::len).collect()
     }
 

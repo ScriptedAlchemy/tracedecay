@@ -117,7 +117,7 @@ fn impact_reader() -> CodeGraphInteractiveReader {
         .collect::<Vec<_>>();
     let records = symbols
         .iter()
-        .map(|(symbol, _, digest)| LineageSymbolRecordV1 {
+        .map(|(symbol, _, digest)| Arc::new(LineageSymbolRecordV1 {
             occurrence: SymbolOccurrenceId::new(*symbol).unwrap(),
             identity: digest_value::<SymbolIdentityDigest>(*digest),
             qualified_name: (*symbol).to_owned(),
@@ -138,12 +138,12 @@ fn impact_reader() -> CodeGraphInteractiveReader {
             .unwrap(),
             content_digest: ContentDigest::new(format!("sha256:{}", digest.to_string().repeat(64)))
                 .unwrap(),
-        })
+        }))
         .collect::<Vec<_>>();
     let chunks = symbols
         .iter()
         .enumerate()
-        .map(|(ordinal, (symbol, _, digest))| CodeSearchChunkV1 {
+        .map(|(ordinal, (symbol, _, digest))| Arc::new(CodeSearchChunkV1 {
             id: CodeSearchChunkId::new(format!("chunk.{symbol}")).unwrap(),
             anchor: CodeSearchChunkAnchorV1 {
                 generation_id: generation.clone(),
@@ -171,7 +171,7 @@ fn impact_reader() -> CodeGraphInteractiveReader {
             exact_terms: Vec::new(),
             subtokens: Vec::new(),
             sanitized_text: BoundedSanitizedText::new("fn fixture() {}").unwrap(),
-        })
+        }))
         .collect::<Vec<_>>();
     let target = SymbolOccurrenceId::new("symbol.feedback.target").unwrap();
     let edges = vec![

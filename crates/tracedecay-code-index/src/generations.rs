@@ -21,6 +21,7 @@
 //! chunks as ordinary edits.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -695,7 +696,7 @@ pub enum GenerationJoinErrorV1 {
 pub fn join_chunks_to_generation(
     generation: &CodeGenerationManifestV1,
     document: &CodeSearchDocumentV1,
-    chunks: &[CodeSearchChunkV1],
+    chunks: &[Arc<CodeSearchChunkV1>],
 ) -> Result<Vec<ChunkGenerationBindingV1>, GenerationJoinErrorV1> {
     generation
         .validate()
@@ -1196,8 +1197,8 @@ mod tests {
         );
     }
 
-    fn chunk(id_str: &str, generation: &CodeGenerationId, file: &str) -> CodeSearchChunkV1 {
-        CodeSearchChunkV1 {
+    fn chunk(id_str: &str, generation: &CodeGenerationId, file: &str) -> Arc<CodeSearchChunkV1> {
+        Arc::new(CodeSearchChunkV1 {
             id: id(id_str),
             anchor: CodeSearchChunkAnchorV1 {
                 generation_id: generation.clone(),
@@ -1223,7 +1224,7 @@ mod tests {
             exact_terms: vec![],
             subtokens: vec![],
             sanitized_text: BoundedSanitizedText::new("text").expect("bounded text"),
-        }
+        })
     }
 
     #[test]

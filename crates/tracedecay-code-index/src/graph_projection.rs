@@ -342,7 +342,7 @@ impl InMemoryCodeGraphProjectionBuilder {
         &self,
         generation: &CodeGenerationId,
         edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
         cancellation: &CancellationSignal,
     ) -> Result<GraphWatermark, CodeGraphProjectionError> {
         self.publish_with_cancellation(
@@ -357,7 +357,7 @@ impl InMemoryCodeGraphProjectionBuilder {
         &self,
         generation: &CodeGenerationId,
         edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<GraphWatermark, CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
@@ -392,7 +392,7 @@ impl InMemoryCodeGraphProjectionBuilder {
         &self,
         generation: &CodeGenerationId,
         edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
         files: &[tracedecay_domain::SanitizedCodeFileV1],
         symbols: &crate::lineage::GenerationSymbolIndexV1,
         cancellation: Arc<dyn GraphCancellation>,
@@ -508,7 +508,7 @@ impl HermeticCodeGraphProjectionStore {
         &self,
         generation: &CodeGenerationId,
         edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
         cancellation: &CancellationSignal,
     ) -> Result<GraphWatermark, CodeGraphProjectionError> {
         self.inner
@@ -519,7 +519,7 @@ impl HermeticCodeGraphProjectionStore {
         &self,
         generation: &CodeGenerationId,
         edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<GraphWatermark, CodeGraphProjectionError> {
         self.inner
@@ -533,7 +533,7 @@ impl HermeticCodeGraphProjectionStore {
         &self,
         generation: &CodeGenerationId,
         edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
         files: &[tracedecay_domain::SanitizedCodeFileV1],
         symbols: &crate::lineage::GenerationSymbolIndexV1,
         cancellation: Arc<dyn GraphCancellation>,
@@ -646,7 +646,7 @@ pub fn build_code_graph_manifest(
     projection: GraphProjectionIdentity,
     generation: &CodeGenerationId,
     edges: &[CanonicalRelationEdgeV1],
-    chunks: &[CodeSearchChunkV1],
+    chunks: &[Arc<CodeSearchChunkV1>],
     projector_revision: &GraphProjectorRevision,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<GraphGenerationManifest, CodeGraphProjectionError> {
@@ -671,7 +671,7 @@ pub fn build_code_graph_manifest_checked(
     projection: GraphProjectionIdentity,
     generation: &CodeGenerationId,
     edges: &[CanonicalRelationEdgeV1],
-    chunks: &[CodeSearchChunkV1],
+    chunks: &[Arc<CodeSearchChunkV1>],
     projector_revision: &GraphProjectorRevision,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphGenerationManifest, CodeGraphProjectionError> {
@@ -690,7 +690,7 @@ fn build_code_graph_manifest_inputs_checked(
     projection: GraphProjectionIdentity,
     generation: &CodeGenerationId,
     edges: &[CanonicalRelationEdgeV1],
-    chunks: &[CodeSearchChunkV1],
+    chunks: &[Arc<CodeSearchChunkV1>],
     production: Option<ProductionCodeGraphInputs<'_>>,
     projector_revision: &GraphProjectorRevision,
     check: &dyn Fn() -> Result<(), GraphDbError>,

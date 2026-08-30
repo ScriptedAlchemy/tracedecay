@@ -431,10 +431,15 @@ pub fn resolve_generation_chunk<'a>(
     // The generation chunk manifest is canonically ordered by typed chunk
     // identity. Selecting its first exact symbol binding matches the graph
     // projection's canonical representative without reparsing mutable files.
-    generation.chunks().chunks().iter().find(|chunk| {
-        chunk.anchor.generation_id == generation.manifest().generation_id
-            && chunk.anchor.symbol_occurrence_id.as_ref() == Some(&symbol)
-    })
+    generation
+        .chunks()
+        .chunks()
+        .iter()
+        .find(|chunk| {
+            chunk.anchor.generation_id == generation.manifest().generation_id
+                && chunk.anchor.symbol_occurrence_id.as_ref() == Some(&symbol)
+        })
+        .map(Arc::as_ref)
 }
 
 fn encode_view(query: &[u8], document: &str) -> Vec<u8> {

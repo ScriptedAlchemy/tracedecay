@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use tracedecay_code_index::chunks::{CodeFileChunksV1, content_digest};
 use tracedecay_code_index::chunks::{CodeSearchDocumentV1, CodeSearchEligibilityV1};
@@ -39,8 +40,8 @@ fn chunk(
     grain: CodeSearchChunkGrainV1,
     text: &str,
     start_byte: u64,
-) -> CodeSearchChunkV1 {
-    CodeSearchChunkV1 {
+) -> Arc<CodeSearchChunkV1> {
+    Arc::new(CodeSearchChunkV1 {
         id: id::<CodeSearchChunkId>(chunk_id),
         anchor: CodeSearchChunkAnchorV1 {
             generation_id: generation_id.clone(),
@@ -65,7 +66,7 @@ fn chunk(
         exact_terms: vec![],
         subtokens: vec![],
         sanitized_text: BoundedSanitizedText::new(text).expect("bounded fixture text"),
-    }
+    })
 }
 
 fn file_chunks(
@@ -239,7 +240,7 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                 .anchor
                 .symbol_occurrence_id
                 .as_ref()
-                .map(|occurrence| LineageSymbolRecordV1 {
+                .map(|occurrence| Arc::new(LineageSymbolRecordV1 {
                     occurrence: occurrence.clone(),
                     identity: id::<SymbolIdentityDigest>(&format!(
                         "sha256:{}",
@@ -272,7 +273,7 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                     skip_test_coverage: false,
                     file_identity: id::<FileIdentityDigest>(&format!("sha256:{}", "f".repeat(64))),
                     content_digest: chunk.content_digest.clone(),
-                })
+                }))
         })
         .collect();
     let prior_symbols =

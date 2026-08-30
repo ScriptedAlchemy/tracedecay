@@ -9,7 +9,7 @@ use std::future::Future;
 #[cfg(test)]
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use tracedecay_application::retrieval::{
@@ -1051,7 +1051,7 @@ impl GenerationRecordIndexV1 {
     /// Canonical symbol positions whose full qualified name equals `selector`.
     pub fn qualified_name_positions<'a>(
         &'a self,
-        symbols: &'a [tracedecay_code_index::lineage::LineageSymbolRecordV1],
+        symbols: &'a [Arc<tracedecay_code_index::lineage::LineageSymbolRecordV1>],
         selector: &str,
     ) -> &'a [usize] {
         sorted_positions_for(&self.qualified_name_order, selector, |position| {
@@ -1062,7 +1062,7 @@ impl GenerationRecordIndexV1 {
     /// Canonical symbol positions whose last qualified segment equals `selector`.
     pub fn last_segment_positions<'a>(
         &'a self,
-        symbols: &'a [tracedecay_code_index::lineage::LineageSymbolRecordV1],
+        symbols: &'a [Arc<tracedecay_code_index::lineage::LineageSymbolRecordV1>],
         selector: &str,
     ) -> &'a [usize] {
         sorted_positions_for(&self.last_segment_order, selector, |position| {

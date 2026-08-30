@@ -181,12 +181,12 @@ fn fixture_edges() -> Vec<CanonicalRelationEdgeV1> {
     ]
 }
 
-fn fixture_chunks() -> Vec<CodeSearchChunkV1> {
+fn fixture_chunks() -> Vec<Arc<CodeSearchChunkV1>> {
     vec![
-        chunk("sym.alpha.run", "file.f1", 0),
-        chunk("sym.beta.run", "file.f2", 1),
-        chunk("sym.beta.runner", "file.f2", 2),
-        chunk("sym.gamma.main", "file.f3", 3),
+        Arc::new(chunk("sym.alpha.run", "file.f1", 0)),
+        Arc::new(chunk("sym.beta.run", "file.f2", 1)),
+        Arc::new(chunk("sym.beta.runner", "file.f2", 2)),
+        Arc::new(chunk("sym.gamma.main", "file.f3", 3)),
     ]
 }
 
@@ -202,10 +202,20 @@ fn fixture_symbols() -> GenerationSymbolIndexV1 {
     GenerationSymbolIndexV1::new(
         generation(),
         vec![
-            symbol_metadata("sym.alpha.run", "alpha::run", "function", '1'),
-            symbol_metadata("sym.beta.run", "beta::run", "function", '2'),
-            symbol_metadata("sym.beta.runner", "beta::Runner", "struct", '3'),
-            symbol_metadata("sym.gamma.main", "gamma::main", "function", '4'),
+            Arc::new(symbol_metadata("sym.alpha.run", "alpha::run", "function", '1')),
+            Arc::new(symbol_metadata("sym.beta.run", "beta::run", "function", '2')),
+            Arc::new(symbol_metadata(
+                "sym.beta.runner",
+                "beta::Runner",
+                "struct",
+                '3',
+            )),
+            Arc::new(symbol_metadata(
+                "sym.gamma.main",
+                "gamma::main",
+                "function",
+                '4',
+            )),
         ],
     )
     .expect("valid fixture symbol index")

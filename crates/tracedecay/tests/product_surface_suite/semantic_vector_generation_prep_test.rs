@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -73,8 +73,8 @@ fn admitted_key(
     key.admit().expect("valid embedding projection admission")
 }
 
-fn chunk(generation: &str, name: &str, text: &str, ordinal: u32) -> CodeSearchChunkV1 {
-    CodeSearchChunkV1 {
+fn chunk(generation: &str, name: &str, text: &str, ordinal: u32) -> Arc<CodeSearchChunkV1> {
+    Arc::new(CodeSearchChunkV1 {
         id: id::<CodeSearchChunkId>(&format!("chunk.v1.{name}")),
         anchor: CodeSearchChunkAnchorV1 {
             generation_id: id::<CodeGenerationId>(generation),
@@ -99,7 +99,7 @@ fn chunk(generation: &str, name: &str, text: &str, ordinal: u32) -> CodeSearchCh
         exact_terms: vec![],
         subtokens: vec![],
         sanitized_text: BoundedSanitizedText::new(text).expect("bounded fixture text"),
-    }
+    })
 }
 
 fn chunk_in_file(
@@ -108,11 +108,12 @@ fn chunk_in_file(
     name: &str,
     text: &str,
     ordinal: u32,
-) -> CodeSearchChunkV1 {
+) -> Arc<CodeSearchChunkV1> {
     let mut chunk = chunk(generation, name, text, ordinal);
     let start_byte = u64::from(ordinal).saturating_mul(128);
-    chunk.anchor.file_occurrence_id = id::<FileOccurrenceId>(&format!("file.v1.{file}"));
-    chunk.anchor.source_span = SourceSpan {
+    let rebound = Arc::make_mut(&mut chunk);
+    rebound.anchor.file_occurrence_id = id::<FileOccurrenceId>(&format!("file.v1.{file}"));
+    rebound.anchor.source_span = SourceSpan {
         start_byte,
         end_byte: start_byte.saturating_add(text.len() as u64),
     };
@@ -124,7 +125,7 @@ fn interleaved_file_chunks(
     file: &str,
     content: &str,
     chunk_count: u32,
-) -> Vec<CodeSearchChunkV1> {
+) -> Vec<Arc<CodeSearchChunkV1>> {
     (0..chunk_count)
         .map(|index| {
             let text = format!("fn {content}_{index:02}() {{}}");
@@ -995,7 +996,7 @@ fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
 }
 
 /// A corpus large enough to span several encoder groups and several commits.
-fn split_identity_corpus() -> Vec<CodeSearchChunkV1> {
+fn split_identity_corpus() -> Vec<Arc<CodeSearchChunkV1>> {
     (0..40)
         .map(|index| {
             chunk(
@@ -1009,7 +1010,7 @@ fn split_identity_corpus() -> Vec<CodeSearchChunkV1> {
 }
 
 fn whole_corpus_request(
-    corpus: &[CodeSearchChunkV1],
+    corpus: &[Arc<CodeSearchChunkV1>],
     projection_key: &ProjectionKeyV1,
 ) -> ProjectionBatchRequestV1 {
     let mut added = corpus

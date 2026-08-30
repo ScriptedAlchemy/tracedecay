@@ -7,7 +7,7 @@ impl CodeGraphEvidenceReader {
         repository_id: Option<RepositoryId>,
         freshness: SourceFreshness,
         edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
     ) -> Result<Self, CodeGraphProjectionError> {
         Self::from_in_memory(generation, repository_id, freshness, edges, chunks)
     }
@@ -18,7 +18,7 @@ impl CodeGraphEvidenceReader {
         repository_id: Option<RepositoryId>,
         freshness: SourceFreshness,
         edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
     ) -> Result<Self, CodeGraphProjectionError> {
         Self::from_in_memory(generation, repository_id, freshness, edges, chunks)
     }
@@ -29,7 +29,7 @@ impl CodeGraphEvidenceReader {
         repository_id: Option<RepositoryId>,
         freshness: SourceFreshness,
         edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
     ) -> Result<Self, CodeGraphProjectionError> {
         let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
         let application_cancellation = CancellationSignal::active("code-graph-memory")
