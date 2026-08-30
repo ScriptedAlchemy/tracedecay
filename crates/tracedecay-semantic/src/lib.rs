@@ -1154,7 +1154,9 @@ where
         if vectors.len() != 1 {
             return Err("semantic projector returned a non-unit vector batch".to_owned());
         }
-        Ok(vectors.pop().unwrap_or_else(|| panic!("unit vector batch")))
+        vectors
+            .pop()
+            .ok_or_else(|| "semantic projector returned a non-unit vector batch".to_owned())
     }
 
     #[hotpath::measure(label = "semantic.embed.encode")]
