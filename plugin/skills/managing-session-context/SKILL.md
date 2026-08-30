@@ -82,15 +82,23 @@ before assuming the compacted summary is complete.
 ## Freshness is explicit
 
 Recall never performs catch-up. If a read returns `refresh_required`, get clear
-host or user lifecycle intent before calling `tracedecay_session_refresh_begin`.
-Pass the authoritative scope selectors from the host/runtime, preserve its
-opaque handle, and inspect progress with the read-only
-`tracedecay_session_refresh_status`. Call `tracedecay_session_refresh_cancel`
-only on an explicit cancellation request; only a receipt-backed success proves
-durable cancellation. The compatibility `tracedecay_session_refresh` tool and
-the `tracedecay sessions refresh begin|status|cancel` CLI expose the same
-lifecycle. Never reconstruct refresh identity from chat text or a filesystem
-path.
+host or user lifecycle intent before starting refresh. Preserve the exact scope
+returned by the read:
+
+- For a project-scoped read with authoritative project identity, call
+  `tracedecay_session_refresh_begin`, preserve its opaque handle, inspect it
+  with the read-only `tracedecay_session_refresh_status`, and call
+  `tracedecay_session_refresh_cancel` only on an explicit cancellation request.
+- For an authorized profile-root read, use the compatibility
+  `tracedecay_session_refresh` lifecycle (`action`: `start` / `join` / `resume`
+  / `begin`, then `status` or `cancel`) with the same profile selectors. The
+  split tools require project identity and must not redirect a profile refresh
+  through whichever project happens to be active.
+
+Only a receipt-backed success proves durable cancellation. The
+`tracedecay sessions refresh begin|status|cancel` CLI follows the same
+scope-preserving rule. Never reconstruct refresh identity from chat text or a
+filesystem path.
 
 ## LCM status and diagnosis
 
