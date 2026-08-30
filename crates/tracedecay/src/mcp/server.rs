@@ -765,7 +765,6 @@ impl McpServer {
             project_session_refresh_wake,
             user_session_refresh_wake,
             project_session_refresh_serving,
-            user_session_refresh_serving: _user_session_refresh_serving,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
             automation_scheduler_reconciler,
