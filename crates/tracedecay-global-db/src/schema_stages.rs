@@ -702,7 +702,15 @@ async fn install_registered_schema_stages(
         "initialize registered external source state",
     )
     .await?;
-    if temporal_admission != session_temporal_schema::SessionTemporalSchemaAdmission::Current {
+    // `force_exhaustive` means admission observed damaged or missing guard
+    // triggers (for example a dropped guarded table takes its triggers with
+    // it). Reinstall them here so the post-commit contract validation sees a
+    // whole schema, and let the armed exhaustive audit re-earn trust; leaving
+    // them broken would fail every subsequent open of an otherwise
+    // repairable store.
+    if force_exhaustive
+        || temporal_admission != session_temporal_schema::SessionTemporalSchemaAdmission::Current
+    {
         ensure_authority_invariant_schema(transaction).await?;
         if !authority_invariant_triggers_intact(transaction).await? {
             return Err(global_db_operation_message(
@@ -1317,7 +1325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_trigger_is_refused_before_row_audit_without_repair() {
+    async fn restored_triggers_still_refuse_corrupt_rows_without_repairing_them() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
         install_registered_schema(&database_path).await;
@@ -1339,18 +1347,22 @@ mod tests {
                     ('cursor-b', 2, X'02', 200, NULL);
                  DELETE FROM authority_audit_checkpoints;",
                 )
-                .expect("seed a repair followed by a late audit failure");
+                .expect("seed corrupt rows behind dropped guard triggers");
         }
 
-        let error = registered_admission_error(&database_path).await;
+        // Damaged guard triggers are restored during admission so the store
+        // stays repairable, but restoration must not launder the rows the
+        // triggers failed to guard: the row audit still refuses the store.
+        for attempt in 1..=2u8 {
+            let error = registered_admission_error(&database_path).await;
+            assert!(
+                error
+                    .to_string()
+                    .contains("session cursor key rotation state is invalid"),
+                "open attempt {attempt} must keep refusing the corrupt rotation state: {error}"
+            );
+        }
         let connection = TestConnection::open(&database_path);
-        assert!(
-            error
-                .to_string()
-                .contains("projection_queue_identity_insert_v1"),
-            "schema refusal must identify the missing final trigger: {error}"
-        );
-
         let mut rows = connection
             .query("SELECT COUNT(*) FROM projection_queue", ())
             .await
@@ -1358,7 +1370,20 @@ mod tests {
         assert_eq!(
             rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             1,
-            "schema refusal must not repair queued rows before row admission"
+            "audit refusal must not repair queued rows before row admission"
+        );
+        drop(rows);
+        let mut rows = connection
+            .query(
+                "SELECT COUNT(*) FROM session_query_cursor_keys WHERE retired_at IS NULL",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            2,
+            "audit refusal must not retire or delete the conflicting cursor keys"
         );
         drop(rows);
         let mut rows = connection
@@ -1370,13 +1395,13 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            rows.next().await.unwrap().is_none(),
-            "schema refusal must not recreate a missing final trigger"
+            rows.next().await.unwrap().is_some(),
+            "admission must restore the dropped guard trigger before refusing on rows"
         );
     }
 
     #[tokio::test]
-    async fn missing_trigger_refusal_precedes_foreign_key_audit_without_repair() {
+    async fn restored_triggers_arm_a_persistent_audit_that_refuses_fk_violations() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
         install_registered_schema(&database_path).await;
@@ -1396,16 +1421,28 @@ mod tests {
                 .expect("seed a foreign-key violation behind a broken trigger");
         }
 
-        for attempt in 1..=2 {
+        // The damaged trigger arms an exhaustive foreign-key audit whose
+        // requirement is persisted before the trigger evidence is repaired,
+        // so every subsequent open keeps refusing the violation even though
+        // the trigger itself is already restored.
+        for attempt in 1..=2u8 {
             let error = registered_admission_error(&database_path).await;
             assert!(
-                error
-                    .to_string()
-                    .contains("projection_queue_identity_insert_v1"),
-                "open attempt {attempt} returned an unexpected error: {error}"
+                error.to_string().contains("foreign-key violation"),
+                "open attempt {attempt} must refuse the foreign-key violation: {error}"
             );
         }
         let connection = TestConnection::open(&database_path);
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM audit_child WHERE parent_id = 99", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1,
+            "audit refusal must not repair or delete the violating row"
+        );
+        drop(rows);
         let mut rows = connection
             .query(
                 "SELECT 1 FROM sqlite_schema
@@ -1415,8 +1452,46 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            rows.next().await.unwrap().is_none(),
-            "repeated schema refusals must not recreate the missing trigger"
+            rows.next().await.unwrap().is_some(),
+            "admission must restore the dropped guard trigger while the audit refuses"
+        );
+    }
+
+    #[tokio::test]
+    async fn damaged_triggers_on_a_clean_store_are_restored_and_admitted() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        install_registered_schema(&database_path).await;
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
+                     DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;",
+                )
+                .expect("drop guard triggers on an otherwise clean store");
+        }
+
+        // A guarded table rebuild drops its triggers with it; the next open
+        // must restore them and re-admit the store once the armed exhaustive
+        // audit finds nothing wrong, instead of refusing it forever.
+        install_registered_schema(&database_path).await;
+        let connection = TestConnection::open(&database_path);
+        let mut rows = connection
+            .query(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'trigger' AND name IN (
+                    'projection_queue_identity_insert_v1',
+                    'session_query_cursor_keys_insert_guard_v1'
+                 )",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            2,
+            "admission must restore every dropped guard trigger"
         );
     }
 }
