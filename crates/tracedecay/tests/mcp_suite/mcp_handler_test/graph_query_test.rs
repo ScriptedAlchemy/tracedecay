@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::mcp::tools::ToolResult;
+use tracedecay_mcp::ToolResult;
 use tracedecay_runtime_core::errors::TraceDecayError;
 
 struct GraphQueryFixture {

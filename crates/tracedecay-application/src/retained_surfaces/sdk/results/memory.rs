@@ -4,8 +4,9 @@ use tracedecay_domain::{FactAssertionId, FactEventId, FactId, UtcMicros};
 
 pub use crate::memory::{
     FactCommitOwnerV1, FactIdentitySourceResultV1, FactPayloadAccessV1, FactProjectionV1,
-    FactSearchCursorV1, FactSearchGraphCoverageV1, FactSearchGraphDegradationV1, FactSearchHitV1,
-    FactSearchScoresV1, FactStatusV1, FactTelemetryV1, FactV1,
+    FactRetrievalTelemetryDegradationV1, FactRetrievalTelemetryV1, FactSearchCursorV1,
+    FactSearchGraphCoverageV1, FactSearchGraphDegradationV1, FactSearchHitV1, FactSearchScoresV1,
+    FactStatusV1, FactTelemetryV1, FactV1,
 };
 use crate::retained_surfaces::FactFeedbackActionV1;
 
@@ -40,10 +41,22 @@ macro_rules! fact_search_result {
     };
 }
 
-fact_search_result!(FactStoreSearchResultV1);
 fact_search_result!(FactStoreProbeResultV1);
 fact_search_result!(FactStoreRelatedResultV1);
 fact_search_result!(FactStoreReasonResultV1);
+
+/// Explicit search additionally records retrieval telemetry for its returned
+/// hits; `retrieval_telemetry` reports whether that recall bookkeeping
+/// happened, so a served result can truthfully carry a degraded write lane.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FactStoreSearchResultV1 {
+    pub owner: FactCommitOwnerV1,
+    pub hits: Vec<FactSearchHitV1>,
+    pub next_after: Option<FactSearchCursorV1>,
+    pub graph_coverage: FactSearchGraphCoverageV1,
+    pub retrieval_telemetry: FactRetrievalTelemetryV1,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -224,7 +237,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        FactCommitReceiptV1, FactStoreAddCommitV1, FactStoreAddResultV1,
+        FactCommitReceiptV1, FactRetrievalTelemetryV1, FactStoreAddCommitV1, FactStoreAddResultV1,
         FactStoreContradictResultV1, FactStoreSearchResultV1, MemoryStatusResultV1,
     };
 
@@ -351,17 +364,46 @@ mod tests {
             "owner": {"kind": "project", "project_id": "project.alpha"},
             "hits": [],
             "next_after": null,
-            "graph_coverage": {"kind": "not_mounted"}
+            "graph_coverage": {"kind": "not_mounted"},
+            "retrieval_telemetry": {"kind": "not_applicable"}
         });
         serde_json::from_value::<FactStoreSearchResultV1>(page.clone())
             .expect("canonical search page");
 
-        let mut missing_coverage = page;
-        missing_coverage
-            .as_object_mut()
-            .expect("page is an object")
-            .remove("graph_coverage");
-        assert!(serde_json::from_value::<FactStoreSearchResultV1>(missing_coverage).is_err());
+        for lane in ["graph_coverage", "retrieval_telemetry"] {
+            let mut missing_lane = page.clone();
+            missing_lane
+                .as_object_mut()
+                .expect("page is an object")
+                .remove(lane);
+            assert!(
+                serde_json::from_value::<FactStoreSearchResultV1>(missing_lane).is_err(),
+                "search page must require the typed `{lane}` lane state"
+            );
+        }
+    }
+
+    #[test]
+    fn fact_search_retrieval_telemetry_round_trips_typed_states() {
+        for state in [
+            json!({"kind": "not_applicable"}),
+            json!({"kind": "read_only"}),
+            json!({"kind": "recorded", "fact_count": 3}),
+            json!({"kind": "degraded", "reason": "unavailable"}),
+            json!({"kind": "degraded", "reason": "saturated"}),
+        ] {
+            let telemetry: FactRetrievalTelemetryV1 =
+                serde_json::from_value(state.clone()).expect("typed telemetry state");
+            assert_eq!(
+                serde_json::to_value(telemetry).expect("serialize telemetry state"),
+                state
+            );
+        }
+        assert!(
+            serde_json::from_value::<FactRetrievalTelemetryV1>(json!({"kind": "skipped"}))
+                .is_err(),
+            "unknown telemetry states must be rejected"
+        );
     }
 
     #[test]

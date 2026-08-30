@@ -907,7 +907,7 @@ async fn registered_handles_share_one_serialized_writer() {
         "analytics bypassed the active transaction"
     );
 
-    let savings_write = savings.record_savings("/project", "tracedecay_runtime", 100, 50, 1);
+    let savings_write = savings.try_record_savings("/project", "tracedecay_runtime", 100, 50, 1);
     tokio::pin!(savings_write);
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(25), &mut savings_write)
@@ -925,8 +925,9 @@ async fn registered_handles_share_one_serialized_writer() {
     );
     tokio::time::timeout(std::time::Duration::from_secs(1), &mut savings_write)
         .await
-        .expect("savings insert timed out");
-    assert_eq!(first.sum_savings(None, 0).await.calls, 1);
+        .expect("savings insert timed out")
+        .expect("savings insert failed");
+    assert_eq!(first.sum_savings(None, 0).await.unwrap().calls, 1);
 }
 
 #[tokio::test]
@@ -958,21 +959,22 @@ async fn concurrent_registered_writes_remain_isolated() {
     let mut writes = tokio::task::JoinSet::new();
     for (index, db) in handles.iter().cloned().enumerate() {
         writes.spawn(async move {
-            db.record_savings(
+            db.try_record_savings(
                 "/shared/project",
                 &format!("writer-{index}"),
                 10,
                 5,
                 index as i64,
             )
-            .await;
+            .await
+            .expect("concurrent savings insert");
         });
     }
     while let Some(result) = writes.join_next().await {
         result.unwrap();
     }
 
-    assert_eq!(handles[0].sum_savings(None, 0).await.calls, 12);
+    assert_eq!(handles[0].sum_savings(None, 0).await.unwrap().calls, 12);
 }
 
 #[tokio::test]
@@ -1271,7 +1273,11 @@ async fn project_tokens_separate_a_genuine_zero_from_a_failed_read() {
     let harness = RegisteredGlobalDbHarness::open("project-tokens-failed-read").await;
     let project = std::path::Path::new("/tmp/tracedecay-project-tokens");
     let unregistered = std::path::Path::new("/tmp/tracedecay-never-registered");
-    harness.registered.upsert(project, 4_242).await;
+    harness
+        .registered
+        .try_upsert_project_tokens(project, 4_242)
+        .await
+        .expect("seed project token total");
 
     assert_eq!(
         harness.registered.try_get_project_tokens(project).await,
@@ -1316,11 +1322,6 @@ async fn project_tokens_separate_a_genuine_zero_from_a_failed_read() {
     assert!(
         error.contains("failed to query project tokens saved"),
         "{error}"
-    );
-    assert_eq!(
-        harness.registered.get_project_tokens(project).await,
-        None,
-        "the optional form reports unavailable rather than zero"
     );
 }
 

@@ -64,20 +64,22 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn delete_code_projects(&self, project_ids: &[String]) -> usize {
+    pub async fn delete_code_projects(&self, project_ids: &[String]) -> Result<usize> {
         self.profile_database
             .delete_code_projects(project_ids)
             .await
     }
 
     #[doc(hidden)]
-    pub async fn delete_project(&self, project_path: &Path) {
-        self.profile_database.delete_project(project_path).await;
+    pub async fn delete_project(&self, project_path: &Path) -> Result<usize> {
+        self.profile_database.delete_project(project_path).await
     }
 
     #[doc(hidden)]
-    pub async fn delete_projects(&self, project_paths: &[String]) -> usize {
-        self.profile_database.delete_projects(project_paths).await
+    pub async fn delete_project_paths(&self, project_paths: &[String]) -> Result<usize> {
+        self.profile_database
+            .delete_project_paths(project_paths)
+            .await
     }
 
     #[doc(hidden)]
@@ -116,9 +118,9 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         query: &str,
         limit: usize,
-    ) -> Vec<tracedecay_global_db::CodeProjectRecord> {
+    ) -> Result<Vec<tracedecay_global_db::CodeProjectRecord>> {
         self.profile_database
-            .search_code_projects(query, limit)
+            .try_search_code_projects(query, limit)
             .await
     }
 
@@ -159,7 +161,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn resolve_project_store_by_alias(
         &self,
         alias_path: &Path,
-    ) -> Option<tracedecay_global_db::ProjectStoreResolution> {
+    ) -> std::result::Result<
+        tracedecay_global_db::ProjectStoreResolution,
+        tracedecay_global_db::ProjectStoreResolutionError,
+    > {
         self.profile_database
             .resolve_project_store_by_alias(alias_path)
             .await
@@ -180,7 +185,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn resolve_unique_project_store_by_git_remote(
         &self,
         git_remote_url: &str,
-    ) -> Option<tracedecay_global_db::ProjectStoreResolution> {
+    ) -> std::result::Result<
+        tracedecay_global_db::ProjectStoreResolution,
+        tracedecay_global_db::ProjectStoreResolutionError,
+    > {
         self.profile_database
             .resolve_unique_project_store_by_git_remote(git_remote_url)
             .await

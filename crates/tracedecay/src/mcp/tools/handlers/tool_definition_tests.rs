@@ -91,7 +91,7 @@ fn canonical_and_retired_tools_keep_truthful_discovery() {
     assert!(tool_names.contains("tracedecay_ast_grep_search"));
     assert_eq!(
         tool_names.contains("tracedecay_ast_grep_rewrite"),
-        super::super::ast_grep_available(),
+        tracedecay_mcp::ast_grep_available(),
         "CLI-backed rewrite discovery must match host availability"
     );
 }
@@ -206,7 +206,7 @@ fn test_tool_definitions_have_schemas() {
 fn format_capable_tools_advertise_markdown_json_without_tables() {
     let tools = get_tool_definitions().expect("tool definitions");
     for tool_name in tracedecay_mcp::format_capable_tool_names() {
-        if *tool_name == "tracedecay_ast_grep_rewrite" && !super::super::ast_grep_available() {
+        if *tool_name == "tracedecay_ast_grep_rewrite" && !tracedecay_mcp::ast_grep_available() {
             continue;
         }
         let tool = tools

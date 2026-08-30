@@ -576,12 +576,16 @@ impl ProductionProjectCompositionHarnessV1 {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "production-composition harness is shut down".to_owned(),
             })?;
-        Ok(resources
+        resources
             .store_administration
             .registered_profile_database()
             .await?
             .sum_savings(project, since)
-            .await)
+            .await
+            .map_err(|message| TraceDecayError::Database {
+                message,
+                operation: "sum retained profile savings".to_owned(),
+            })
     }
 
     /// Reads one project's lifetime saved-token counter from the retained

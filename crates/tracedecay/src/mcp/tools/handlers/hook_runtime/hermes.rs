@@ -64,12 +64,12 @@ async fn run_user_review(
 
 async fn apply_projectless_hermes_receipt_plan(
     profile_root: &Path,
-    plan: crate::mcp::hook_events::HookEventPlan,
+    plan: tracedecay_mcp::hook_events::HookEventPlan,
 ) -> HostAdmissionOutcome {
     let dashboard_root =
         tracedecay_automation_runtime::automation::runner::user_automation_root(profile_root);
     match plan {
-        crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt { route, receipt } => {
+        tracedecay_mcp::hook_events::HookEventPlan::RecordTerminalReceipt { route, receipt } => {
             match tracedecay_automation_runtime::automation::host_receipts::record(
                 &dashboard_root,
                 route,
@@ -82,7 +82,7 @@ async fn apply_projectless_hermes_receipt_plan(
                 Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
             }
         }
-        crate::mcp::hook_events::HookEventPlan::MarkTurnIngested {
+        tracedecay_mcp::hook_events::HookEventPlan::MarkTurnIngested {
             route,
             transcript_watermark,
         } => match tracedecay_automation_runtime::automation::host_receipts::mark_turn_ingested(
@@ -137,46 +137,49 @@ async fn replay_projectless_hermes_receipts(
             }
             continue;
         }
-        let plan = match crate::mcp::hook_events::decode_durable_hook_event_plan(&record.payload) {
-            Ok(plan) => plan,
-            Err(crate::mcp::hook_events::DurableHookEventDecodeError::UnsupportedVersion) => {
-                let outcome = HostAdmissionOutcome::durable_payload_unsupported_version();
-                blocked_sources.insert(record.source);
-                retained_leases.push(record.seq);
-                retained_outcome.get_or_insert(outcome);
-                if target_seq == Some(record.seq) {
-                    target_outcome = Some(outcome);
+        let plan =
+            match tracedecay_mcp::hook_events::decode_durable_hook_event_plan(&record.payload) {
+                Ok(plan) => plan,
+                Err(
+                    tracedecay_mcp::hook_events::DurableHookEventDecodeError::UnsupportedVersion,
+                ) => {
+                    let outcome = HostAdmissionOutcome::durable_payload_unsupported_version();
+                    blocked_sources.insert(record.source);
+                    retained_leases.push(record.seq);
+                    retained_outcome.get_or_insert(outcome);
+                    if target_seq == Some(record.seq) {
+                        target_outcome = Some(outcome);
+                    }
+                    continue;
                 }
-                continue;
-            }
-            Err(crate::mcp::hook_events::DurableHookEventDecodeError::Malformed) => {
-                let outcome = HostAdmissionOutcome::durable_payload_malformed();
-                match replay
-                    .quarantine(record.seq, TerminalReason::MalformedPayload)
-                    .await
-                {
-                    Ok(_) => {
-                        retained_outcome.get_or_insert(outcome);
-                        if target_seq == Some(record.seq) {
-                            target_outcome = Some(outcome);
+                Err(tracedecay_mcp::hook_events::DurableHookEventDecodeError::Malformed) => {
+                    let outcome = HostAdmissionOutcome::durable_payload_malformed();
+                    match replay
+                        .quarantine(record.seq, TerminalReason::MalformedPayload)
+                        .await
+                    {
+                        Ok(_) => {
+                            retained_outcome.get_or_insert(outcome);
+                            if target_seq == Some(record.seq) {
+                                target_outcome = Some(outcome);
+                            }
+                        }
+                        Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
+                            blocked_sources.insert(record.source);
+                            retained_leases.push(record.seq);
+                            retained_outcome.get_or_insert(failure);
+                            if target_seq == Some(record.seq) {
+                                target_outcome = Some(failure);
+                            }
+                        }
+                        Err(failure) => {
+                            terminal_outcome = Some(failure);
+                            break;
                         }
                     }
-                    Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
-                        blocked_sources.insert(record.source);
-                        retained_leases.push(record.seq);
-                        retained_outcome.get_or_insert(failure);
-                        if target_seq == Some(record.seq) {
-                            target_outcome = Some(failure);
-                        }
-                    }
-                    Err(failure) => {
-                        terminal_outcome = Some(failure);
-                        break;
-                    }
+                    continue;
                 }
-                continue;
-            }
-        };
+            };
         let canonical_outcome = apply_projectless_hermes_receipt_plan(profile_root, plan).await;
         let outcome = if matches!(
             canonical_outcome.status,
@@ -289,18 +292,18 @@ pub(super) async fn hermes_receipt(
         return Err(config_error("Hermes event omitted receipt"));
     }
     let hook_event =
-        crate::mcp::hook_events::parse_hook_event(Some(&event_value)).ok_or_else(|| {
+        tracedecay_mcp::hook_events::parse_hook_event(Some(&event_value)).ok_or_else(|| {
             config_error(format!("unsupported Hermes receipt event: {}", event.event))
         })?;
-    let plan = crate::mcp::hook_events::plan_hook_event(&hook_event, profile_root, None);
+    let plan = tracedecay_mcp::hook_events::plan_hook_event(&hook_event, profile_root, None);
     let is_turn_ingested = matches!(
         plan,
-        crate::mcp::hook_events::HookEventPlan::MarkTurnIngested { .. }
+        tracedecay_mcp::hook_events::HookEventPlan::MarkTurnIngested { .. }
     );
     if !matches!(
         plan,
-        crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt { .. }
-            | crate::mcp::hook_events::HookEventPlan::MarkTurnIngested { .. }
+        tracedecay_mcp::hook_events::HookEventPlan::RecordTerminalReceipt { .. }
+            | tracedecay_mcp::hook_events::HookEventPlan::MarkTurnIngested { .. }
     ) {
         return Err(config_error(format!(
             "unsupported Hermes receipt event: {}",
@@ -318,7 +321,7 @@ pub(super) async fn hermes_receipt(
             "Hermes turnIngested omitted transcript watermark",
         ));
     }
-    let payload = crate::mcp::hook_events::encode_durable_hook_event_plan(&plan)
+    let payload = tracedecay_mcp::hook_events::encode_durable_hook_event_plan(&plan)
         .map_err(|()| config_error("invalid Hermes receipt host event plan"))?;
     let admitted = broker
         .admit(&hook_event.admission_source(), &payload)

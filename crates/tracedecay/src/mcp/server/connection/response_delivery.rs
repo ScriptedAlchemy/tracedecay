@@ -2,8 +2,8 @@ use serde_json::Value;
 
 use crate::mcp::server::McpServer;
 use crate::mcp::server::routing::SelectedProjectResponseLease;
-use crate::mcp::server::tool_errors::serialize_response_line;
-use crate::mcp::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::serialize_response_line;
+use tracedecay_mcp::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::errors::Result;
 
 impl McpServer {

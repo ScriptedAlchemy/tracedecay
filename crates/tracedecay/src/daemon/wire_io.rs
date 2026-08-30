@@ -66,7 +66,8 @@ fn read_line_handling_wire_oversized_inner<T: McpTransport + std::marker::Send>(
             Ok(line) => Ok(line),
             Err(error) if tracedecay_sessions::admission::is_wire_oversized_io_error(&error) => {
                 let _ =
-                    crate::mcp::transport::write_wire_oversized_rejection(transport, &error).await;
+                    tracedecay_mcp::transport::write_wire_oversized_rejection(transport, &error)
+                        .await;
                 Ok(None)
             }
             Err(error) => Err(error.into()),

@@ -6511,6 +6511,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-domain",
+ "tracedecay-hooks",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
  "tracedecay-tool-catalog",
@@ -6546,6 +6547,7 @@ dependencies = [
 name = "tracedecay-query"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "fst",
  "hex",
  "hmac 0.13.0",

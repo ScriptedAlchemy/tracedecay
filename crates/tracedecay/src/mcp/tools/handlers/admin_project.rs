@@ -13,8 +13,8 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 
-use super::super::ToolResult;
 use super::json_result;
+use tracedecay_mcp::ToolResult;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -183,12 +183,17 @@ pub(super) async fn handle_admin_project(
                 message: "daemon global database is unavailable".to_string(),
             })?;
             let tokens_saved = cg.get_tokens_saved().await?;
-            global_db.upsert(cg.project_root(), tokens_saved).await;
+            // An explicit accounting status action fails closed: a registry
+            // it cannot write or read is an error, not a null total.
+            global_db
+                .try_upsert_project_tokens(cg.project_root(), tokens_saved)
+                .await?;
             let global_tokens_saved = global_db
-                .global_tokens_saved()
+                .try_global_tokens_saved()
                 .await
+                .map_err(|message| TraceDecayError::Config { message })
                 .map(|total| total.saturating_sub(tokens_saved))
-                .filter(|total| *total > 0);
+                .map(|total| (total > 0).then_some(total))?;
             json!({
                 "tokens_saved": tokens_saved,
                 "global_tokens_saved": global_tokens_saved,

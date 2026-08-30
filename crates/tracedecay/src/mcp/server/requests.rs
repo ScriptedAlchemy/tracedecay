@@ -5,8 +5,8 @@ use super::dispatch_settlement::{
     ApplicationCancellationRegistration, DispatchControl, PreparedDispatchControl,
 };
 use super::*;
-use crate::mcp::ToolResult;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_mcp::ToolResult;
 
 mod tool_dispatch;
 
@@ -831,9 +831,7 @@ impl McpServer {
             analytics_arguments: analytics_arguments_snapshot(tool_name, &arguments),
             analytics_session_id: mcp_analytics_session_id(&arguments),
             arguments,
-            caller_deadline: crate::mcp::tool_call_deadline::caller_tool_call_deadline(Some(
-                params,
-            )),
+            caller_deadline: tracedecay_mcp::caller_tool_call_deadline(Some(params)),
         })
     }
 
@@ -1034,15 +1032,20 @@ impl McpServer {
                 failure_reason: failure_reason.as_deref(),
             });
             self.spawn_observed_ledger_write(async move {
-                registered
-                    .record_savings(
+                // Background ledger append: the tool response already went
+                // out, so a failed write degrades to a named warning.
+                if let Err(e) = registered
+                    .try_record_savings(
                         &project_path_str,
                         &tool_name_owned,
                         raw_file_tokens,
                         response_tokens,
                         ts,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(error = %e, "MCP savings ledger append failed");
+                }
                 if let Err(e) = registered.append_analytics_event(&analytics_event).await {
                     tracing::warn!(error = %e, "MCP analytics event insert failed");
                 }

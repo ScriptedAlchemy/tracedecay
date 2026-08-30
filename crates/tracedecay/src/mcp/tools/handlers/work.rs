@@ -12,8 +12,8 @@ use tracedecay_application::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
-use crate::mcp::tools::ToolResult;
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, invocation_now_micros};
+use tracedecay_mcp::ToolResult;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
@@ -243,7 +243,7 @@ mod tests {
         serde_json::from_slice(&body).expect("JSON Work HTTP response")
     }
 
-    fn mcp_json(result: crate::mcp::tools::ToolResult) -> Value {
+    fn mcp_json(result: tracedecay_mcp::ToolResult) -> Value {
         let text = result.value["content"][0]["text"]
             .as_str()
             .expect("MCP Work JSON content");
