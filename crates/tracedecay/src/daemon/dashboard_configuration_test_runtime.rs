@@ -107,7 +107,7 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
             )
             .with_resolved_scope(Some(self.scope.clone()))
             .with_delivery_route(
-                tracedecay_usecases::feedback::observations::FeedbackDeliveryRouteV1::Http,
+                tracedecay_application::feedback::observations::FeedbackDeliveryRouteV1::Http,
             );
             let response = self
                 .service
@@ -224,7 +224,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor
         &self,
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
-        _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }

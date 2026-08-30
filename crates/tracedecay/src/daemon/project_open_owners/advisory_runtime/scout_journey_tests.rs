@@ -4,10 +4,15 @@ use std::time::{Duration, Instant};
 use super::*;
 
 use crate::agents::context_scout_v2::{
-    ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1, ContextScoutDurableStoreOutcomeV1,
+    ContextScoutDurableStoreOutcomeV1, ContextScoutEvidenceEnvelopeExt,
+    context_scout_delivery_receipt_id,
+};
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
     ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
     ContextScoutEvidenceSourceReceiptV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
-    ContextScoutRedactionReceiptV1, context_scout_delivery_receipt_id,
+    ContextScoutRedactionReceiptV1,
 };
 use tracedecay_application::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
@@ -114,7 +119,7 @@ fn configured_model_input_at(
     delivery_window: ContextScoutDeliveryWindowV1,
 ) -> crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
     crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
-        address: crate::agents::context_scout_v2::ContextScoutAddressV1 {
+        address: ContextScoutAddressV1 {
             profile_id: [1; 16],
             provider_id: [2; 16],
             protected_session_id: [3; 32],
@@ -130,9 +135,9 @@ fn configured_model_input_at(
         now,
         delivery_window,
         delivered_dedupe_keys: BTreeSet::new(),
-        candidates: vec![crate::agents::context_scout_v2::ContextScoutCandidateV1 {
+        candidates: vec![ContextScoutCandidateV1 {
             dedupe_key: [marker; 32],
-            category: crate::agents::context_scout_v2::ContextScoutCategoryV1::Retrieval,
+            category: ContextScoutCategoryV1::Retrieval,
             relevance_score: 10,
             suggestion_text: "Use the admitted evidence.".to_owned(),
             evidence: configured_model_evidence(marker),
@@ -353,7 +358,7 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
         ),
         envelope_id: claim.entry.envelope.envelope_id,
         delivered_at: UtcMicros(now.0 + 4),
-        outcome: ContextScoutOutcomeV1::Displayed,
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
     assert_eq!(
         owner.record_delivery(&claim, &receipt).await,

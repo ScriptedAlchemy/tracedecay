@@ -66,7 +66,8 @@ use tracedecay_usecases::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
     OperationKind, OperationStreamConfig,
 };
-use tracedecay_usecases::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
+use tracedecay_application::retrieval::PrimitiveRequest;
+use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 static DASHBOARD_CONFIGURATION_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());

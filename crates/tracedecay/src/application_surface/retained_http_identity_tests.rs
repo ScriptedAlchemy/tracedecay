@@ -188,7 +188,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for StaticDaemonRespon
         &self,
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
-        _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_runtime_core::errors::Result<()>,

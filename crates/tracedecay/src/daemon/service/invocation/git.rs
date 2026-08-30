@@ -6,7 +6,7 @@ use tracedecay_domain::GitIndexPreviewV1;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn git_read_evidence_packet(
     request_id: &str,
-    request: &tracedecay_usecases::git_reads::GitReadRequestV1,
+    request: &tracedecay_application::git::GitReadRequestV1,
     current: &DaemonGitAuthorityStateV1,
     result: tracedecay_usecases::git_reads::GitReadResultV1,
     observed_at: UtcMicros,
@@ -202,19 +202,19 @@ pub(super) async fn execute_git_read(
         return concealed_application_problem(wire_request_id);
     };
     let expected_operation = match &request.request {
-        tracedecay_usecases::git_reads::GitReadRequestV1::Status => {
+        tracedecay_application::git::GitReadRequestV1::Status => {
             crate::application_surface::ApplicationSurfaceOperation::GitStatus
         }
-        tracedecay_usecases::git_reads::GitReadRequestV1::Diff { .. } => {
+        tracedecay_application::git::GitReadRequestV1::Diff { .. } => {
             crate::application_surface::ApplicationSurfaceOperation::GitDiff
         }
-        tracedecay_usecases::git_reads::GitReadRequestV1::History { .. } => {
+        tracedecay_application::git::GitReadRequestV1::History { .. } => {
             crate::application_surface::ApplicationSurfaceOperation::GitHistory
         }
-        tracedecay_usecases::git_reads::GitReadRequestV1::Blame { .. } => {
+        tracedecay_application::git::GitReadRequestV1::Blame { .. } => {
             crate::application_surface::ApplicationSurfaceOperation::GitBlame
         }
-        tracedecay_usecases::git_reads::GitReadRequestV1::Hunks { .. } => {
+        tracedecay_application::git::GitReadRequestV1::Hunks { .. } => {
             crate::application_surface::ApplicationSurfaceOperation::GitHunks
         }
     };
@@ -248,7 +248,7 @@ pub(super) async fn execute_git_read(
     let bounds = crate::git_query::GitQueryBounds {
         max_entries: if matches!(
             &request.request,
-            tracedecay_usecases::git_reads::GitReadRequestV1::Hunks { .. }
+            tracedecay_application::git::GitReadRequestV1::Hunks { .. }
         ) {
             request
                 .max_entries
@@ -262,7 +262,7 @@ pub(super) async fn execute_git_read(
     };
     let selected_scope = initial.scope.clone();
     let mut read_request = request.request.clone();
-    let hunk_capture = if let tracedecay_usecases::git_reads::GitReadRequestV1::Hunks {
+    let hunk_capture = if let tracedecay_application::git::GitReadRequestV1::Hunks {
         scope,
         daemon_binding,
     } = &mut read_request
@@ -332,7 +332,7 @@ pub(super) async fn execute_git_read(
             }
         };
         *daemon_binding = Some(
-            tracedecay_usecases::git_reads::DaemonGitHunkPreviewBindingV1 {
+            tracedecay_application::git::DaemonGitHunkPreviewBindingV1 {
                 preview_id,
                 snapshot_digest,
                 expires_at,

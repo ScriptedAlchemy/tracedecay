@@ -30,7 +30,7 @@ use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
-use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::maintenance::GuardedStoreTelemetryPort;
 
@@ -230,7 +230,7 @@ pub fn observability_read_from_model(
             ObservabilityReadV1::Absent
         }
         Ok(model) => {
-            use tracedecay_usecases::feedback::observations::FeedbackCoverageV1;
+            use tracedecay_application::feedback::observations::FeedbackCoverageV1;
             let (state, coverage) = match model.coverage {
                 FeedbackCoverageV1::Known => (
                     ObservabilityStateV1::Current,

@@ -17,6 +17,7 @@ use tracedecay_domain::feedback::{
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewLifecycleV1, GitHubReviewReadOperationV1,
     GitHubReviewStateV1,
 };
+use tracedecay_application::git::GitReadRequestV1;
 use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1, GitOperationStateV1};
 use tracedecay_usecases::advisory::GitHubReleaseV1;
 use tracedecay_usecases::delivery::{
@@ -36,7 +37,7 @@ use tracedecay_usecases::delivery::{
 };
 
 use crate::application::git_reads::{
-    GitReadAuthorityV1, GitReadOutcomeV1, GitReadRequestV1, GitReadResultV1, execute_git_read,
+    GitReadAuthorityV1, GitReadOutcomeV1, GitReadResultV1, execute_git_read,
 };
 use crate::git_query::{GitQueryBounds, GitStatusSummaryV1};
 

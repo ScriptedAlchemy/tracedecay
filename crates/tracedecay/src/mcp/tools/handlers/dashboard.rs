@@ -109,8 +109,8 @@ impl DashboardProfileCodeIndexWorkerSettingsPort
         let project_root = self.project_root.clone();
         let registrar = self.registrar.clone();
         Box::pin(async move {
-            let request_id = tracedecay_usecases::request_identity::mint_global_request_id(
-                tracedecay_usecases::request_identity::GlobalRequestSurface::DashboardSettings,
+            let request_id = tracedecay_application::request_identity::mint_global_request_id(
+                tracedecay_application::request_identity::GlobalRequestSurface::DashboardSettings,
             )
             .map_err(|_| DashboardCodeIndexWorkerSettingsErrorV1::Unavailable)?;
             let committed = registrar

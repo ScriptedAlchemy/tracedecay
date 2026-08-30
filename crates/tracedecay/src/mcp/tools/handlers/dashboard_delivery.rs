@@ -18,9 +18,8 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::advisory::GitHubReleaseReadControlV1;
 use tracedecay_usecases::delivery::{ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1};
 use tracedecay_usecases::git_query::GitQueryBounds;
-use tracedecay_usecases::git_reads::{
-    GitReadAuthorityV1, GitReadOutcomeV1, GitReadRequestV1, GitReadResultV1,
-};
+use tracedecay_application::git::GitReadRequestV1;
+use tracedecay_usecases::git_reads::{GitReadAuthorityV1, GitReadOutcomeV1, GitReadResultV1};
 
 use crate::daemon::DaemonInvocationService;
 use tracedecay_dashboard_api::{

@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use tracedecay_application::context_scout::{
+    ContextScoutModelBackendV1, ContextScoutModelReceiptV1,
+};
 
 use super::context_scout_v2::{
-    ContextScoutModelAssistantV1, ContextScoutModelBackendV1, ContextScoutModelCandidateV1,
-    ContextScoutModelErrorV1, ContextScoutModelExecutionV1, ContextScoutModelFuture,
-    ContextScoutModelProposalV1, ContextScoutModelReceiptV1, ContextScoutModelRequestV1,
-    serialized_token_count,
+    ContextScoutModelAssistantV1, ContextScoutModelCandidateV1, ContextScoutModelErrorV1,
+    ContextScoutModelExecutionV1, ContextScoutModelFuture, ContextScoutModelProposalV1,
+    ContextScoutModelRequestV1, serialized_token_count,
 };
 use crate::ports::pricing::cost_of_turn;
 use tracedecay_automation_runtime::automation::backend::{

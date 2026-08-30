@@ -121,6 +121,9 @@ tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+# Dev-only cycle: materialization tests bind the production host-config write
+# surface that agent-hosts registers at process start.
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

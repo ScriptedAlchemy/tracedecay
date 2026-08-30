@@ -636,15 +636,15 @@ fn application_request(
 ) -> ApplicationSurfaceRequest {
     match operation {
         ApplicationSurfaceOperation::GitStatus => {
-            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::Status)
+            git_read_request(tracedecay_application::git::GitReadRequestV1::Status)
         }
         ApplicationSurfaceOperation::GitDiff => {
-            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::Diff {
+            git_read_request(tracedecay_application::git::GitReadRequestV1::Diff {
                 scope: GitDiffScopeV1::WorkingTree,
             })
         }
         ApplicationSurfaceOperation::GitHistory => {
-            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::History {
+            git_read_request(tracedecay_application::git::GitReadRequestV1::History {
                 max_count: 10,
                 path: None,
                 follow: false,
@@ -652,13 +652,13 @@ fn application_request(
             })
         }
         ApplicationSurfaceOperation::GitBlame => {
-            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::Blame {
+            git_read_request(tracedecay_application::git::GitReadRequestV1::Blame {
                 path: "src/lib.rs".to_owned(),
                 follow_renames: false,
             })
         }
         ApplicationSurfaceOperation::GitHunks => {
-            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::Hunks {
+            git_read_request(tracedecay_application::git::GitReadRequestV1::Hunks {
                 scope: GitDiffScopeV1::WorkingTree,
                 daemon_binding: None,
             })
@@ -695,7 +695,7 @@ fn application_request(
 }
 
 fn git_read_request(
-    request: tracedecay_usecases::git_reads::GitReadRequestV1,
+    request: tracedecay_application::git::GitReadRequestV1,
 ) -> ApplicationSurfaceRequest {
     ApplicationSurfaceRequest::GitRead(GitReadSurfaceRequest {
         request,
