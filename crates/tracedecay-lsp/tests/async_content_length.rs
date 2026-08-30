@@ -4,9 +4,10 @@ use futures_util::SinkExt;
 use tokio::io::{AsyncWriteExt, duplex};
 use tokio::time::Instant;
 use tokio_util::codec::{FramedRead, FramedWrite};
+use tracedecay_daemon_protocol::{FramePoll, MAX_LSP_FRAME_BYTES};
 use tracedecay_lsp::{
-    AsyncContentLengthError, ContentLengthCodec, ContentLengthCodecError, FramePoll,
-    MAX_LSP_FRAME_BYTES, read_content_length_frame_until,
+    AsyncContentLengthError, ContentLengthCodec, ContentLengthCodecError,
+    read_content_length_frame_until,
 };
 
 #[tokio::test]

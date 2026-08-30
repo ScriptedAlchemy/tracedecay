@@ -3,7 +3,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture, MAX_LSP_WORKSPACE_ROOTS};
+use tracedecay_daemon_protocol::MAX_LSP_WORKSPACE_ROOTS;
+use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 use tracedecay_usecases::lsp_runtime::UpstreamCapabilityInitializationAuthority;
 
 struct CountingUpstreamCapabilityInitializer(Arc<AtomicUsize>);

@@ -29,10 +29,10 @@ use tracedecay_application::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
 };
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_lsp::ConnectionLocalRequestSequence;
 
 pub type ScopeSelector = InvocationTarget;
 
+use crate::lsp_wire::ConnectionLocalRequestSequence;
 use crate::output_format::RequestedOutputFormat;
 
 /// The shared cancellation reference carried into an application invocation.
