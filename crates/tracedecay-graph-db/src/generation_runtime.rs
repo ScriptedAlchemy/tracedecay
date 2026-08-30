@@ -909,6 +909,120 @@ impl GraphDb {
         }
     }
 
+    /// Releases this staging database's accumulated apply-state overhead
+    /// when enough mutation records have been committed since the last
+    /// release (or since open).
+    ///
+    /// The live engine keeps every applied record heap-resident, and bulk
+    /// staging additionally accumulates MVCC version chains and completed
+    /// transaction metadata that nothing prunes: the engine's version GC
+    /// runs only when called, and this crate never called it. On the glibc
+    /// allocator the freed chain nodes then stay in retained arenas, so the
+    /// process's anon RSS never comes back down either. Before this existed,
+    /// the only release was a process restart — a quarantine-recovery replay
+    /// staging several whole-corpus generations grew anon RSS until the
+    /// kernel OOM-killed the daemon, and the restart resumed from the
+    /// durable page receipts. This prunes in place at a publication
+    /// boundary instead — engine MVCC GC, then returning freed allocator
+    /// arenas to the kernel — so replay converges without a kill, and an
+    /// actual kill can only ever cost the current page batch.
+    ///
+    /// In-place on purpose: a close/reopen cycle was measured *worse* at
+    /// probe scale (`tests/quarantine_replay_rss.rs`) — the reopen rebuilds
+    /// the whole store beside the retained old heap, raising both resident
+    /// and peak — while this path touches only garbage and never blocks
+    /// reads on a container-sized rewrite.
+    pub fn maybe_release_apply_state(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<bool, GraphDbError> {
+        if self
+            .inner
+            .applied_mutations_since_release
+            .load(Ordering::Acquire)
+            < crate::limits::GRAPH_APPLY_STATE_RELEASE_MUTATIONS
+        {
+            return Ok(false);
+        }
+        self.release_apply_state(check)
+    }
+
+    /// Unconditional release for measurement probes and contract tests.
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn release_apply_state_now(&self) -> Result<bool, GraphDbError> {
+        self.release_apply_state(&|| Ok(()))
+    }
+
+    /// The unconditional release behind [`Self::maybe_release_apply_state`].
+    ///
+    /// Skips sealed read-only readers (immutable stores never accumulate
+    /// apply-state). The GC prunes only versions below the minimum active
+    /// transaction epoch, so concurrent readers keep every version they can
+    /// still observe.
+    #[hotpath::measure(label = "graph_db.generation.release_apply_state", impl_type = "GraphDb")]
+    pub(crate) fn release_apply_state(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<bool, GraphDbError> {
+        check()?;
+        if self.inner.sealed_read_only.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let staged_records = self
+            .inner
+            .applied_mutations_since_release
+            .load(Ordering::Acquire);
+        let started = std::time::Instant::now();
+        {
+            let guard = self.read_guard()?;
+            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            hotpath::measure_block!("graph_db.generation.release_apply_state.gc", database.gc());
+        }
+        // The pruned version chains and transaction metadata are freed heap,
+        // but glibc keeps them in retained arenas where the kernel still
+        // counts them as anon RSS. Returning them is what makes the release
+        // observable to the OOM killer this path exists to avoid.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        hotpath::measure_block!("graph_db.generation.release_apply_state.trim", {
+            // SAFETY: `malloc_trim` only releases free memory held by the
+            // glibc allocator; it does not touch live allocations.
+            unsafe {
+                libc::malloc_trim(0);
+            }
+        });
+        self.inner
+            .applied_mutations_since_release
+            .store(0, Ordering::Release);
+        self.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Open);
+        tracing::info!(
+            event = "graph_apply_state_released",
+            staged_records,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "pruned staged apply-state and returned freed arenas to the kernel"
+        );
+        Ok(true)
+    }
+
+    /// Mutation records committed through the batch apply paths since the
+    /// last apply-state release (test observability).
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    #[must_use]
+    pub fn applied_mutations_since_release(&self) -> u64 {
+        self.inner
+            .applied_mutations_since_release
+            .load(Ordering::Acquire)
+    }
+
+    /// Sets the applied-mutation counter (fixture surface for the
+    /// release-threshold contract; production only ever increments it
+    /// through the batch apply paths).
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn force_applied_mutations_for_test(&self, records: u64) {
+        self.inner
+            .applied_mutations_since_release
+            .store(records, Ordering::Release);
+    }
+
     pub(crate) fn install_verified_generation(
         &self,
         lease: std::sync::Arc<VerifiedGenerationLease>,

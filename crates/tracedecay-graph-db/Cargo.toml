@@ -144,6 +144,12 @@ tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 # slow. The fallback paths say so out loud.
 tracing = "0.1"
 
+# The apply-state release returns freed allocator arenas to the kernel after
+# the engine's MVCC GC; `malloc_trim` is glibc-specific, so the dependency is
+# scoped to exactly the target that has it.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
@@ -224,6 +230,13 @@ required-features = ["test-helpers"]
 # it is `#[ignore]`d, so it costs a compile and nothing else in a normal run.
 [[test]]
 name = "tiered_storage_rss"
+required-features = ["test-helpers"]
+
+# Residency harness for the quarantine-then-replay journey: several scope
+# generations accumulating in one staging database, then a store reset and a
+# full replay. `#[ignore]`d measurement probe, one scenario per process.
+[[test]]
+name = "quarantine_replay_rss"
 required-features = ["test-helpers"]
 
 # At-rest snapshot probe: reopen cost of a sealed generation, full LPG replay

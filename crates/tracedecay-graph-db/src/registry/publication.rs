@@ -688,18 +688,32 @@ impl GraphDbRegistry {
         publication_key: &GraphPublicationKeyV1,
         mode: GraphPublishModeV1,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
-        match self.prepare_verified_publication_inner(
+        let commit = match self.prepare_verified_publication_inner(
             operation,
             authority,
             context,
             publication_key,
             mode,
         )? {
-            GraphPublicationPreparationV1::Settled(commit) => Ok(*commit),
+            GraphPublicationPreparationV1::Settled(commit) => *commit,
             GraphPublicationPreparationV1::Proven(proven) => {
-                self.complete_verified_publication_inner(operation, authority, context, *proven)
+                self.complete_verified_publication_inner(operation, authority, context, *proven)?
             }
+        };
+        // The publication is durably linearized; releasing the accumulated
+        // apply-state is post-settlement maintenance and never converts this
+        // settled publication into a failure.
+        if let Err(error) = operation
+            .database()
+            .maybe_release_apply_state(&|| operation.check(self, context))
+        {
+            tracing::warn!(
+                event = "graph_apply_state_release_failed",
+                %error,
+                "apply-state release after a settled publication failed"
+            );
         }
+        Ok(commit)
     }
 
     /// The gateless phase of one verified publication: replay resolution,

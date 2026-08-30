@@ -335,12 +335,56 @@ impl CodeGraphPublicationFlightV1 {
 /// gate held. `flight` dedupes same-key publishers; see
 /// [`CodeGraphPublicationFlightV1`].
 ///
-/// Lock order is `replay-pool file lock -> flight -> gate`; the gate acquires
-/// nothing while held.
+/// `build` admits one corpus-sized sealed publish at a time across the whole
+/// shard, keys included. Every scope of a project stages into the one shared
+/// staging store, and each in-flight publish holds a decoded generation, a
+/// projection manifest, staging pages, and the sealed-store copy at once —
+/// several times the corpus in transient memory. A daemon recovering a
+/// quarantined store re-publishes every open scope's generation
+/// concurrently, and unbounded overlap of those transients is what grew the
+/// replay working set past physical memory (observed live: 39.9–45.6 GB anon
+/// RSS against a 12.4 GB store while several scopes staged at once). Waiters
+/// observe their typed interruption while parked, and no read or serving
+/// path ever takes this permit.
+///
+/// Lock order is `replay-pool file lock -> build -> flight -> gate`; the
+/// gate acquires nothing while held.
 #[derive(Default)]
 pub(crate) struct CodeGraphShardPublicationLocksV1 {
     gate: Mutex<()>,
+    build: Mutex<()>,
     flight: CodeGraphPublicationFlightV1,
+}
+
+/// How long one build-permit wait sleeps between interruption polls, matching
+/// the flight-table cadence: the permit turns over at corpus-publish
+/// granularity, and the poll only bounds how late a cancelled or expired
+/// waiter answers its typed interruption.
+const PUBLICATION_BUILD_INTERRUPTION_POLL: Duration = Duration::from_millis(250);
+
+impl CodeGraphShardPublicationLocksV1 {
+    /// Claims the shard-wide corpus build permit, observing `interruption`
+    /// while parked behind a peer's corpus-sized publish.
+    fn claim_build<'a>(
+        &'a self,
+        interruption: &dyn Fn() -> std::result::Result<(), GraphDbError>,
+    ) -> std::result::Result<std::sync::MutexGuard<'a, ()>, GraphDbError> {
+        loop {
+            interruption()?;
+            match self.build.try_lock() {
+                Ok(permit) => return Ok(permit),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    return Ok(poisoned.into_inner());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    hotpath::measure_block!(
+                        "daemon.session_registry.publish_snapshot.build_wait",
+                        std::thread::sleep(PUBLICATION_BUILD_INTERRUPTION_POLL)
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub(crate) struct RetainedCodeGraphRuntimeV1 {
@@ -1265,16 +1309,19 @@ impl RetainedCodeGraphRuntimeV1 {
             // corpus-sized prepare, then resumes through prepare's idempotent
             // historical arm on the winner's instance-cached proof instead of
             // duplicating staging and the sealed-store build.
-            let _flight =
-                self.publication_locks
-                    .flight
-                    .claim(key, &|| match probe.interruption() {
-                        Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                        Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                            Err(GraphDbError::DeadlineExceeded)
-                        }
-                        None => Ok(()),
-                    })?;
+            let interruption = || match probe.interruption() {
+                Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                    Err(GraphDbError::DeadlineExceeded)
+                }
+                None => Ok(()),
+            };
+            // One corpus-sized build at a time across the shard: the decoded
+            // generation, the projection manifest, the staging pages, and
+            // the sealed-store copy of concurrent scope publications
+            // otherwise overlap into an unbounded replay working set.
+            let _build = self.publication_locks.claim_build(&interruption)?;
+            let _flight = self.publication_locks.flight.claim(key, &interruption)?;
             // The already-built projection manifest rides along so first
             // publication does not re-read and re-project the sealed artifact
             // through the replay manifest provider; a pending predecessor
@@ -1297,13 +1344,43 @@ impl RetainedCodeGraphRuntimeV1 {
                 GraphPublicationPreparationV1::Settled(commit) => return Ok(*commit),
                 GraphPublicationPreparationV1::Proven(proven) => proven,
             };
-            let completion = publish_registration();
-            let _gate = self.hold_publication_gate();
-            hotpath::measure_block!(
-                "daemon.session_registry.publish_snapshot.gate_hold",
-                self.graph_registry
-                    .complete_verified_publication(completion, storage, &context, *proven,)
-            )
+            let commit = {
+                let completion = publish_registration();
+                let _gate = self.hold_publication_gate();
+                hotpath::measure_block!(
+                    "daemon.session_registry.publish_snapshot.gate_hold",
+                    self.graph_registry.complete_verified_publication(
+                        completion,
+                        storage,
+                        &context,
+                        *proven,
+                    )
+                )
+            }?;
+            // Post-settlement maintenance with every gate released: prune
+            // the staging store's accumulated apply-state once enough corpus
+            // has been staged since the last release. The publication above
+            // is durably linearized, so a release failure never converts
+            // this commit into a failure.
+            match self.graph_registry.resolve(publish_registration()) {
+                Ok(graph) => {
+                    if let Err(error) = graph.maybe_release_apply_state(&|| interruption()) {
+                        tracing::warn!(
+                            event = "graph_apply_state_release_failed",
+                            %error,
+                            "apply-state release after a sealed publication failed"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "graph_apply_state_release_failed",
+                        %error,
+                        "apply-state release could not resolve the staging database"
+                    );
+                }
+            }
+            Ok(commit)
         };
         // Classification slice: the manifest-provider bind (a shared-map
         // write the gate orders before the publish/recover reads that resolve

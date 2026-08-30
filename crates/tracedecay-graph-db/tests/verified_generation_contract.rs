@@ -30,6 +30,8 @@ use tracedecay_store::{
     RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
 };
 
+#[path = "verified_generation_contract/apply_state_release.rs"]
+mod apply_state_release;
 #[path = "verified_generation_contract/metadata_replay.rs"]
 mod metadata_replay;
 #[path = "verified_generation_contract/replay_decode.rs"]
