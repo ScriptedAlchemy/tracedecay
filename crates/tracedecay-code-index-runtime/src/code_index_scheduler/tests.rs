@@ -1893,7 +1893,7 @@ fn duplicate_save_and_overflow_equals_clean_scan() {
         hinted_publish.snapshot_content_identity,
         clean_publish.snapshot_content_identity
     );
-    assert_eq!(hinted_publish._lane_digest, clean_publish._lane_digest);
+    assert_eq!(hinted_publish.lane_digest, clean_publish.lane_digest);
     assert!(hinted_publish.overflow_reconciled);
 }
 
@@ -1946,7 +1946,7 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         second_publish.snapshot_content_identity
     );
     assert_ne!(
-        first_publish._file_occurrence_ids, second_publish._file_occurrence_ids,
+        first_publish.file_occurrence_ids, second_publish.file_occurrence_ids,
         "shared artifacts must never alias worktree occurrence identity"
     );
     assert_ne!(first_publish.generation_id, second_publish.generation_id);
@@ -2383,7 +2383,7 @@ fn superseding_notifies_publish_only_latest_content() {
         superseded.snapshot_content_identity, expected.snapshot_content_identity,
         "fair supersession must publish only the latest reconciled content"
     );
-    assert_eq!(superseded._lane_digest, expected._lane_digest);
+    assert_eq!(superseded.lane_digest, expected.lane_digest);
     assert!(superseded.overflow_reconciled);
 }
 
@@ -7998,7 +7998,7 @@ fn rename_reconciliation_matches_clean_scan() {
         "rename reconciliation must capture the same final tree as a clean scan"
     );
     assert_eq!(
-        renamed._lane_digest, clean._lane_digest,
+        renamed.lane_digest, clean.lane_digest,
         "rename reconciliation must publish byte-identical code lanes"
     );
     let latest = incremental.latest_complete().expect("renamed generation");
@@ -8062,7 +8062,7 @@ fn index_only_reconciliation_matches_clean_scan() {
         "staged-only reconciliation must capture the same final tree as a clean scan"
     );
     assert_eq!(
-        staged._lane_digest, clean._lane_digest,
+        staged.lane_digest, clean.lane_digest,
         "staged-only reconciliation must publish byte-identical code lanes"
     );
 }
@@ -8110,7 +8110,7 @@ fn deleting_a_file_tombstones_its_prior_chunks() {
     );
     assert!(
         !after
-            ._file_occurrence_ids
+            .file_occurrence_ids
             .iter()
             .any(|occurrence| gone_occurrences.contains(occurrence)),
         "the deleted file's occurrence must be absent from the new generation"
@@ -8392,7 +8392,7 @@ fn reparse_matches_full_parse_chunks() {
         "identical final content yields identical snapshot identity"
     );
     assert_eq!(
-        second._lane_digest, full_publish._lane_digest,
+        second.lane_digest, full_publish.lane_digest,
         "sequential-edit and fresh-store reconcile produce byte-identical chunk lanes"
     );
 }
@@ -9731,7 +9731,7 @@ fn real_branch_switch_reconcile_matches_clean_scan() {
         switched.snapshot_content_identity,
         clean_publish.snapshot_content_identity
     );
-    assert_eq!(switched._lane_digest, clean_publish._lane_digest);
+    assert_eq!(switched.lane_digest, clean_publish.lane_digest);
     assert_eq!(
         main_snapshot.reference.as_ref().map(RefId::as_str),
         Some("refs/heads/main")
@@ -9807,7 +9807,7 @@ fn real_rebase_reconcile_matches_clean_scan() {
         rebased.snapshot_content_identity,
         clean_publish.snapshot_content_identity
     );
-    assert_eq!(rebased._lane_digest, clean_publish._lane_digest);
+    assert_eq!(rebased.lane_digest, clean_publish.lane_digest);
     assert_eq!(
         rebased_generation
             .generation()

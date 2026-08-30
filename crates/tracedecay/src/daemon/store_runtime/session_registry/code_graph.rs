@@ -175,7 +175,7 @@ struct GraphPublicationProbeV1 {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     commit_started: AtomicBool,
-    /// One warn per probe when the deadline first trips: interruption() is
+    /// One warn per probe when the deadline first trips: `interruption()` is
     /// polled from hot loops, and `DeadlineExceeded` is a unit error that
     /// cannot otherwise be attributed to the deadline that armed it.
     deadline_warned: AtomicBool,

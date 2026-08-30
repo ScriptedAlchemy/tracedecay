@@ -424,9 +424,7 @@ mod tests {
         let hostile = "x".repeat(tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
         tx.send(hostile).unwrap();
         let err = transport.read_line().await.unwrap_err();
-        assert!(tracedecay_daemon_protocol::wire::is_wire_oversized_io_error(
-            &err
-        ));
+        assert!(tracedecay_daemon_protocol::wire::is_wire_oversized_io_error(&err));
         assert_eq!(
             err.to_string(),
             tracedecay_daemon_protocol::wire::WIRE_RECORD_TOO_LARGE
@@ -490,9 +488,7 @@ mod tests {
         // dedicated MCP helper's exact production cap is covered in wire tests.
         let first = line_outcome_to_io(read_bounded_line(&mut reader, max).await.unwrap());
         let err = first.unwrap_err();
-        assert!(tracedecay_daemon_protocol::wire::is_wire_oversized_io_error(
-            &err
-        ));
+        assert!(tracedecay_daemon_protocol::wire::is_wire_oversized_io_error(&err));
         assert_eq!(err.to_string(), WIRE_RECORD_TOO_LARGE);
         assert!(!err.to_string().contains('z'));
 
@@ -524,9 +520,7 @@ mod tests {
         let mut replay = ReplayTransport::new(inner);
         let hostile = "y".repeat(tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
         let err = replay.push_replay(hostile).unwrap_err();
-        assert!(tracedecay_daemon_protocol::wire::is_wire_oversized_io_error(
-            &err
-        ));
+        assert!(tracedecay_daemon_protocol::wire::is_wire_oversized_io_error(&err));
         assert!(!err.to_string().contains('y'));
     }
 

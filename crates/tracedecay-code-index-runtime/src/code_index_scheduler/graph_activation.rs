@@ -118,7 +118,7 @@ pub fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: b
 fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
     injected_resident_memory_refusals()
         .lock()
-        .expect("injected resident-memory refusal gate must not be poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains(worktree_id.as_str())
 }
 
@@ -126,7 +126,7 @@ fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
 fn take_injected_activation_failure(worktree_id: &WorktreeId) -> bool {
     let mut injected = injected_activation_failures()
         .lock()
-        .expect("injected activation failure gate must not be poisoned");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match injected.get_mut(worktree_id.as_str()) {
         Some(remaining) if *remaining > 0 => {
             *remaining = remaining.saturating_sub(1);
@@ -142,7 +142,7 @@ fn take_injected_activation_gate(
 ) -> Option<Arc<InjectedActivationGateStateV1>> {
     injected_activation_gates()
         .lock()
-        .expect("injected activation gate map must not be poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(worktree_id.as_str())
 }
 

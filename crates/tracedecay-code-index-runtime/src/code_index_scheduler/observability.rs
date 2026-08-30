@@ -136,9 +136,9 @@ mod tests {
                 .expect("repository id"),
             snapshot_content_identity: ContentDigest::new(format!("sha256:{}", "a".repeat(64)))
                 .expect("content digest"),
-            _lane_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
+            lane_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
                 .expect("lane digest"),
-            _file_occurrence_ids: Vec::new(),
+            file_occurrence_ids: Vec::new(),
             reextracted_files: 3,
             changed_chunks: 7,
             reused_chunks: 11,

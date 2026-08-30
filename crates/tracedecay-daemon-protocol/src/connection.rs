@@ -24,9 +24,9 @@ pub const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
 ///
 /// Shared by `tracedecay tool` and every `call_default_tool` / `daemon_tool_json`
 /// path. Override with [`TOOL_REQUEST_DEADLINE_ENV`].
-pub const DEFAULT_TOOL_REQUEST_DEADLINE: Duration = Duration::from_secs(120);
+pub const DEFAULT_TOOL_REQUEST_DEADLINE: Duration = Duration::from_mins(2);
 /// Upper bound matching the CLI's supported monotonic deadline range.
-pub const MAX_TOOL_REQUEST_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
+pub const MAX_TOOL_REQUEST_DEADLINE: Duration = Duration::from_hours(24);
 /// Millisecond override for [`DEFAULT_TOOL_REQUEST_DEADLINE`].
 pub const TOOL_REQUEST_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
 
@@ -58,6 +58,7 @@ impl DaemonConnection {
         }
     }
 
+    #[must_use]
     pub fn with_liveness(mut self, probe: Arc<dyn DaemonLivenessProbe>) -> Self {
         self.liveness = Some(probe);
         self
@@ -90,8 +91,7 @@ fn tool_request_deadline_from(raw: Option<String>) -> Result<Duration> {
     let deadline = raw
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|ms| *ms > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_TOOL_REQUEST_DEADLINE);
+        .map_or(DEFAULT_TOOL_REQUEST_DEADLINE, Duration::from_millis);
     if deadline > MAX_TOOL_REQUEST_DEADLINE {
         return Err(TraceDecayError::Config {
             message: format!(

@@ -75,6 +75,7 @@ pub enum NativeGitIndexError {
 impl NativeGitIndexError {
     /// Preserve ambiguity once a native publication/commit boundary may have
     /// happened. Callers must reconcile rather than retry the operation.
+    #[must_use]
     pub fn into_commit_boundary_unknown(self, operation: &'static str) -> Self {
         match self {
             Self::CommitBoundaryUnknown { .. } => self,

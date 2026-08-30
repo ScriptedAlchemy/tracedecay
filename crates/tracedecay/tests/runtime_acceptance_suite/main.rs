@@ -26,13 +26,13 @@ mod windows_durable_behavior;
 
 // Path-included by the former `windows_durable_behavior` crate root so
 // `crate::common` / `crate::support` in those files keep resolving.
-#[path = "../storage_suite/support.rs"]
-mod support;
-#[path = "../session_suite/lcm_summary_lineage_review.rs"]
-mod lcm_summary_lineage_review;
-#[path = "../session_suite/temporal_projection/mod.rs"]
-mod temporal_projection;
-#[path = "../storage_suite/fact_merge_hydration_test.rs"]
-mod fact_merge_hydration;
 #[path = "../../../../crates/tracedecay-domain/tests/session_contract.rs"]
 mod domain_session_contract;
+#[path = "../storage_suite/fact_merge_hydration_test.rs"]
+mod fact_merge_hydration;
+#[path = "../session_suite/lcm_summary_lineage_review.rs"]
+mod lcm_summary_lineage_review;
+#[path = "../storage_suite/support.rs"]
+mod support;
+#[path = "../session_suite/temporal_projection/mod.rs"]
+mod temporal_projection;

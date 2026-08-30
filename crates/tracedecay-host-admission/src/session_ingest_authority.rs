@@ -1,7 +1,6 @@
 //! Registered-database composition adapter for bounded session ingest.
 
 use std::borrow::Borrow;
-use std::future::Future;
 use std::path::PathBuf;
 
 use tracedecay_sessions::admission::HostAdmission;
@@ -114,20 +113,16 @@ where
         GlobalDbTranscriptStore::new(self.db.clone())
     }
 
-    fn registered_project_roots(&self) -> impl Future<Output = Option<Vec<PathBuf>>> + Send {
-        hotpath::future!(
-            async move {
-                let mut roots = self.db().try_list_project_paths().await.ok()?;
-                roots.extend(
-                    self.db()
-                        .try_list_code_project_paths(usize::MAX)
-                        .await
-                        .ok()?,
-                );
-                roots.extend(self.db().try_list_project_alias_paths().await.ok()?);
-                Some(roots)
-            },
-            label = "usecases.session_ingest.project_roots"
-        )
+    #[hotpath::measure(label = "usecases.session_ingest.project_roots", future = true)]
+    async fn registered_project_roots(&self) -> Option<Vec<PathBuf>> {
+        let mut roots = self.db().try_list_project_paths().await.ok()?;
+        roots.extend(
+            self.db()
+                .try_list_code_project_paths(usize::MAX)
+                .await
+                .ok()?,
+        );
+        roots.extend(self.db().try_list_project_alias_paths().await.ok()?);
+        Some(roots)
     }
 }

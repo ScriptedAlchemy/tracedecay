@@ -8,15 +8,15 @@ use tracedecay::agents::context_scout_v2::{
     ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt, ContextScoutLimitsV1,
     ContextScoutSelectionInputV1, select_deterministic_context_scout,
 };
+use tracedecay::agents::host_bundle_v2::{
+    HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
+};
+use tracedecay::tracedecay::TraceDecay;
 use tracedecay_application::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryWindowV1, ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
     ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
 };
-use tracedecay::agents::host_bundle_v2::{
-    HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
-};
-use tracedecay::tracedecay::TraceDecay;
 use tracedecay_application::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
     EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,

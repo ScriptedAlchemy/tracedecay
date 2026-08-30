@@ -86,8 +86,8 @@ mod wire_bound_tests {
     };
     use rmcp::transport::Transport;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    use tracedecay_mcp::McpTransport;
     use tracedecay_daemon_protocol::wire::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
+    use tracedecay_mcp::McpTransport;
 
     use tracedecay_daemon_protocol::{BrokerListener, BrokerStream, default_loopback_endpoint};
 

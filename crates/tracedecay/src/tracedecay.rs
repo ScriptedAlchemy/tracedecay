@@ -179,10 +179,7 @@ impl TraceDecay {
         hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
         lifecycle: &crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
         observed_at: tracedecay_domain::UtcMicros,
-    ) -> Option<(
-        ContextScoutAddressV1,
-        [u8; 32],
-    )> {
+    ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
         let mounted = self
             .context_scout_claim_authorities
             .read()

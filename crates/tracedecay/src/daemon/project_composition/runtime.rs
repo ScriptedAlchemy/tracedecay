@@ -205,8 +205,7 @@ mod tests {
             ProjectId::new(format!("project.deferred-graph-bind.{label}")).expect("project id");
         let identity = TestRuntimeProfileIdentityV1::new(
             BrainId::new(format!("brain.deferred-graph-bind.{label}")).expect("brain id"),
-            UserProfileId::new(format!("profile.deferred-graph-bind.{label}"))
-                .expect("profile id"),
+            UserProfileId::new(format!("profile.deferred-graph-bind.{label}")).expect("profile id"),
         );
         let sessions_runtime = RegisteredGlobalDbTestRuntime::project_for_profile_identity(
             profile_root.path(),
