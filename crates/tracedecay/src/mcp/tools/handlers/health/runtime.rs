@@ -301,7 +301,7 @@ pub(crate) async fn handle_runtime(
         .ok()
     });
     value["semantic_runtime"] = serde_json::to_value(
-        crate::semantic_code::resolve_project_semantic_runtime_status(
+        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
             Some(cg.project_root()),
             semantic_configuration,
         ),

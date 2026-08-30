@@ -525,7 +525,7 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
         .expect("semantic runtime setting key"),
         value: tracedecay_domain::configuration::ConfigurationValueV1::Text(
             serde_json::to_string(&crate::config::SemanticConfig {
-                selected_model: Some(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+                selected_model: Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
                 auto_download: false,
                 active_profile: None,
                 rollback_profile: None,
@@ -637,12 +637,12 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         .expect("linked-worktree retention journey requires the distribution FastEmbed fixture");
     let _profile = crate::config::PinnedUserDataDir::new();
     let lifecycle_root =
-        crate::semantic_code::default_lifecycle_root().expect("isolated lifecycle root");
+        tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
     let lifecycle =
-        crate::semantic_code::shared_lifecycle_owner().expect("production lifecycle owner");
+        tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
     seed_distribution_fixture(&lifecycle_root, &fixture_root, &lifecycle);
     lifecycle
-        .select_model(Some(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID), true)
+        .select_model(Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select production semantic model");
     lifecycle
         .acquire_blocking_for_tests()

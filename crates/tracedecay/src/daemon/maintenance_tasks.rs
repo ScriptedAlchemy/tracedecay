@@ -60,7 +60,7 @@ pub(super) fn spawn_semantic_artifact_gc_maintenance() -> SemanticArtifactGcMain
             loop {
                 interval.tick().await;
                 let Some(owner) =
-                    crate::semantic_code::SemanticModelLifecycleOwnerV1::mounted_shared()
+                    tracedecay_semantic::SemanticModelLifecycleOwnerV1::mounted_shared()
                 else {
                     continue;
                 };

@@ -1,27 +1,8 @@
-//! Root-owned seam onto the extracted search-quality evaluator crate.
-//!
-//! The implementation lives in `tracedecay-search-eval`. Only the one contract
-//! that genuinely needs the root binary stays here: resolving the authoritative
-//! repository identity of the checkout under evaluation, which reads the
-//! repository identity marker (`tracedecay_runtime_core::storage`) and the provenance admission
-//! context (`tracedecay_sessions::repository_provenance`). Everything else is re-exported so
-//! extraction does not change the root's public surface.
+//! Authoritative repository identity for the evaluator's historical lane.
 
 use std::path::Path;
 
-pub use tracedecay_search_eval::*;
-
-/// The evaluator's candidate-generation module, re-exported at its original
-/// root path.
-pub mod candidate_output {
-    pub use tracedecay_search_eval::candidate_output::*;
-}
-
-/// The evaluator's native semantic/rerank measurement module, re-exported at
-/// its original root path.
-pub mod semantic_native {
-    pub use tracedecay_search_eval::semantic_native::*;
-}
+use tracedecay_application::ResolvedScope;
 
 /// Resolve the authoritative project/repository/worktree identity of one
 /// checkout for the evaluator's historical lane.
@@ -30,9 +11,7 @@ pub mod semantic_native {
 /// identity marker, or when the marker does not admit a worktree identity. The
 /// evaluator turns that into an explicit contract failure rather than guessing
 /// an identity.
-pub fn root_admitted_corpus_scope(
-    repo_root: &Path,
-) -> Option<tracedecay_application::ResolvedScope> {
+pub fn root_admitted_corpus_scope(repo_root: &Path) -> Option<ResolvedScope> {
     let marker = tracedecay_runtime_core::storage::read_repository_identity_marker(repo_root)
         .ok()
         .flatten()?;
@@ -41,7 +20,7 @@ pub fn root_admitted_corpus_scope(
         tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext::
             from_authoritative_project_marker(repo_root, &project_id, &marker)
             .and_then(|context| context.admitted_identity())?;
-    tracedecay_application::ResolvedScope::new(project_id, repository_id, worktree_id, None).ok()
+    ResolvedScope::new(project_id, repository_id, worktree_id, None).ok()
 }
 
 #[cfg(test)]

@@ -3,8 +3,9 @@
 //! Candidate generation, direct (locked-quality) evaluation, and native
 //! semantic measurement over its packaged authoritative workload and corpus.
 //! Default validation and evaluation materialize those assets independently of
-//! the mounted project. Explicit developer workloads may still inject an
-//! admitted repository identity through [`AdmittedCorpusScopeFn`].
+//! the mounted project. Explicit developer workloads inject an admitted
+//! repository identity through [`root_admitted_corpus_scope`] (or another
+//! [`AdmittedCorpusScopeFn`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod admitted_corpus;
 pub mod candidate_output;
 mod controlled_workloads;
 mod native_qualification;
@@ -49,6 +51,7 @@ pub use controlled_workloads::{
     compare_controlled_workloads, run_cursor_parse_batch_workload,
     run_framed_log_durability_workload, write_controlled_workload_reports,
 };
+pub use admitted_corpus::root_admitted_corpus_scope;
 pub use native_qualification::{
     NativeQualificationEvaluatorKeyV1, NativeQualificationExecutionResourceKeyV1,
     NativeQualificationExpectationsV1, NativeQualificationKeyV1, NativeQualificationModelKeyV1,

@@ -1,10 +1,12 @@
 //! `tracedecay_diagnostics` — compiler and LSP diagnostics mapped to enclosing symbols.
 
 use super::*;
+use tracedecay_lsp::compile_diagnostics::{
+    Diagnostic, DiagnosticsCache, Scope, is_rust_diagnostics_cold, rust_diagnostics_target_dir,
+    run_all, spawn_rust_diagnostics_prewarm,
+};
 
-fn diagnostics_scope_arg(args: &Value) -> Result<(&str, crate::diagnostics::Scope)> {
-    use crate::diagnostics::Scope;
-
+fn diagnostics_scope_arg(args: &Value) -> Result<(&str, Scope)> {
     let scope_str = args
         .get("scope")
         .and_then(|v| v.as_str())
@@ -86,7 +88,7 @@ fn diagnostics_prewarm_enabled(config_flag: bool) -> bool {
 /// Build the early-return `warming` payload for a cold prewarm. Factored out so
 /// the warming path is unit-testable without spawning cargo.
 fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> ToolResult {
-    let target_dir = crate::diagnostics::rust_diagnostics_target_dir(project_root);
+    let target_dir = rust_diagnostics_target_dir(project_root);
     let payload = json!({
         "status": "warming",
         "message": format!(
@@ -150,12 +152,10 @@ pub(crate) async fn handle_diagnostics(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
-    diagnostics_cache: Option<&crate::diagnostics::DiagnosticsCache>,
+    diagnostics_cache: Option<&DiagnosticsCache>,
     diagnostics_lsp: Option<&tokio::sync::Mutex<DiagnosticBroker>>,
     session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
-    use crate::diagnostics::run_all;
-
     let (scope_str, scope) = diagnostics_scope_arg(&args)?;
     let project_root = cg.project_root().to_path_buf();
 
@@ -165,9 +165,9 @@ pub(crate) async fn handle_diagnostics(
     // keep working and re-call once it is warm. Default-off preserves the
     // original blocking behaviour for callers who want the answer inline.
     if diagnostics_prewarm_enabled(cg.get_config().diagnostics_prewarm)
-        && crate::diagnostics::is_rust_diagnostics_cold(&project_root)
+        && is_rust_diagnostics_cold(&project_root)
     {
-        crate::diagnostics::spawn_rust_diagnostics_prewarm(&project_root)?;
+        spawn_rust_diagnostics_prewarm(&project_root)?;
         return Ok(diagnostics_warming_result(&project_root, &args));
     }
 
@@ -188,7 +188,7 @@ pub(crate) async fn handle_diagnostics(
     )
     .await?;
 
-    if let crate::diagnostics::Scope::File { path } = &scope {
+    if let Scope::File { path } = &scope {
         diagnostics.retain(|d| d.file == *path);
     }
 
@@ -253,10 +253,10 @@ pub(crate) async fn handle_diagnostics(
 
 async fn lsp_file_diagnostics(
     cg: &TraceDecay,
-    scope: &crate::diagnostics::Scope,
+    scope: &Scope,
     diagnostics_lsp: Option<&tokio::sync::Mutex<DiagnosticBroker>>,
-) -> Result<Option<Vec<crate::diagnostics::Diagnostic>>> {
-    let crate::diagnostics::Scope::File { path } = scope else {
+) -> Result<Option<Vec<Diagnostic>>> {
+    let Scope::File { path } = scope else {
         return Ok(None);
     };
     let Some(diagnostics_lsp) = diagnostics_lsp else {
@@ -312,10 +312,8 @@ async fn lsp_file_diagnostics(
     ))
 }
 
-fn lsp_diagnostic_to_compiler_diagnostic(
-    diagnostic: CodeDiagnostic,
-) -> crate::diagnostics::Diagnostic {
-    crate::diagnostics::Diagnostic {
+fn lsp_diagnostic_to_compiler_diagnostic(diagnostic: CodeDiagnostic) -> Diagnostic {
+    Diagnostic {
         file: diagnostic.file,
         line_start: diagnostic.line_start,
         line_end: diagnostic.line_end,

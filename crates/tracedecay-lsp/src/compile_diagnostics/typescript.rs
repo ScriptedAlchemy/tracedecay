@@ -17,7 +17,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
 
-use crate::diagnostics::{Diagnostic, Driver, Scope, is_diagnostic_level};
+use super::{Diagnostic, Driver, Scope, is_diagnostic_level};
 use tracedecay_runtime_core::errors::Result;
 
 pub struct TscDriver;
@@ -61,14 +61,14 @@ impl Driver for TscDriver {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 Ok(parse_tsc_output(&stdout))
             },
-            label = "diagnostics.typescript.tsc"
+            label = "compile_diagnostics.typescript.tsc"
         ))
     }
 }
 
 /// Parse the full tsc stdout into a flat diagnostic list. Top-level so it
 /// can be unit-tested without spawning tsc.
-#[hotpath::measure(label = "diagnostics.typescript.parse")]
+#[hotpath::measure(label = "compile_diagnostics.typescript.parse")]
 pub fn parse_tsc_output(stdout: &str) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = Vec::new();
     for line in stdout.lines() {

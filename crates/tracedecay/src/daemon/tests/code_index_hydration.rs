@@ -440,12 +440,12 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
         candidate.candidate.occurrences[0].source_namespace,
         provenance.source_namespace
     );
-    let rerank_symbol = crate::semantic_code::rerank_adapter::resolve_generation_chunk(
+    let rerank_symbol = tracedecay_semantic::rerank_adapter::resolve_generation_chunk(
         generation,
         &format!("code-symbol:{}", symbol_occurrence.as_str()),
     )
     .expect("symbol rerank payload");
-    let rerank_chunk = crate::semantic_code::rerank_adapter::resolve_generation_chunk(
+    let rerank_chunk = tracedecay_semantic::rerank_adapter::resolve_generation_chunk(
         generation,
         &format!("code-chunk:{}", chunk_id.as_str()),
     )

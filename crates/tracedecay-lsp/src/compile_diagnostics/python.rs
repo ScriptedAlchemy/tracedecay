@@ -19,7 +19,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use crate::diagnostics::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
+use super::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
 use tracedecay_runtime_core::errors::Result;
 
 pub struct PyrightDriver;
@@ -61,7 +61,7 @@ impl Driver for PyrightDriver {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 Ok(parse_pyright_output(&stdout, project_root))
             },
-            label = "diagnostics.python.pyright"
+            label = "compile_diagnostics.python.pyright"
         ))
     }
 }
@@ -69,7 +69,7 @@ impl Driver for PyrightDriver {
 /// Parse a pyright `--outputjson` document into a flat diagnostic list.
 /// Returns an empty Vec for unparseable input rather than erroring — a
 /// pyright crash shouldn't take down a sync.
-#[hotpath::measure(label = "diagnostics.python.parse")]
+#[hotpath::measure(label = "compile_diagnostics.python.parse")]
 pub fn parse_pyright_output(stdout: &str, project_root: &Path) -> Vec<Diagnostic> {
     let parsed: PyrightReport = match serde_json::from_str(stdout) {
         Ok(p) => p,

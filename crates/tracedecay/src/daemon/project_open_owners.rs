@@ -848,11 +848,13 @@ pub(super) async fn register_project_open_production_owners(
         message: format!("project-open Work authority is invalid: {error}"),
     })?;
     let work_topology_policy =
-        crate::config::topology::resolved_work_topology_policy(&configuration.snapshot)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("project-open work topology policy is unavailable: {error}"),
-            })?
-            .clone();
+        tracedecay_usecases::config::topology::resolved_work_topology_policy(
+            &configuration.snapshot,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open work topology policy is unavailable: {error}"),
+        })?
+        .clone();
     let work_proposal_routing =
         crate::daemon::service::invocation::DaemonWorkProposalRoutingAuthorityV1::mount(
             scope.clone(),

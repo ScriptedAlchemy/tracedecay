@@ -392,7 +392,7 @@ fn activate_evaluated_semantic_profile(
 ) -> ManifestDigest {
     let _ = wait_for_semantic_generation(home, project);
     let mut evaluator =
-        std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay-search-eval-direct"));
+        std::process::Command::new(common::search_eval_bin("tracedecay-search-eval-direct"));
     common::apply_tracedecay_home_env(&mut evaluator, home);
     eprintln!("semantic evaluate-and-publish starting");
     let evaluation_started = Instant::now();

@@ -30,9 +30,9 @@ hotpath-cpu = [
     "tracedecay-policy/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
 ]
-# Mounts the native `gix` historical-blob reader beside its port. Off by
-# default so the crate stays a pure contract surface for consumers that only
-# need the typed values.
+# Mounts native `gix` readers (historical blob, local branch-ref snapshots)
+# beside their ports. Off by default so the crate stays a pure contract
+# surface for consumers that only need the typed values.
 native-git = ["dep:gix"]
 
 [dependencies]
@@ -57,6 +57,7 @@ tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
 
 # These are test modules declared inside automation/tests.rs, which is linked

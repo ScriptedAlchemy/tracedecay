@@ -316,7 +316,7 @@ async fn dispatch_admin_cli(
             .await
         }
         AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
-            crate::analytics_bridge::analytics_diagnostics_with_db(
+            tracedecay_usecases::analytics_bridge::analytics_diagnostics_with_db(
                 context.require_accounting_db()?,
                 context
                     .registered_project_session_db

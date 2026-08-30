@@ -130,6 +130,7 @@ use tracedecay_usecases::feedback::{
 };
 use tracedecay_usecases::lsp_runtime::{
     DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
+    production_semantic_authorities,
 };
 use tracedecay_usecases::operation_stream::{
     OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
@@ -139,9 +140,6 @@ use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
     SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
 };
-// Re-exported so daemon-internal call sites can keep naming the contract
-// through `service::invocation::`.
-use crate::production_semantic_authorities;
 use tracedecay_application::request_identity::{
     GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
     mint_global_opaque_id,
