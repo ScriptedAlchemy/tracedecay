@@ -14,10 +14,11 @@ use tracedecay_automation_runtime::automation::runner::{
 
 use super::scheduler_automation_effect;
 use crate::daemon::DaemonEngine;
+use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
+
 use crate::daemon::automation_effect::{
-    AutomationEffectAdmission, AutomationEffectAuthority, AutomationSettledTerminal,
-    DeferredProblemSettlementRequest, DeferredRunSettlementRequest, DeferredSettlementOutcome,
-    DeferredSettlementRequest,
+    AutomationEffectAdmission, AutomationEffectAuthority, DeferredProblemSettlementRequest,
+    DeferredRunSettlementRequest, DeferredSettlementOutcome, DeferredSettlementRequest,
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::errors::Result;
@@ -887,7 +888,7 @@ pub(super) async fn prepare_combined_effects(
         requested_run_id,
         configuration_digest.clone(),
         |run_id| {
-            crate::daemon::automation_effect::session_reflector_run_request(
+            tracedecay_automation_runtime::automation::effect_runtime::session_reflector_run_request(
                 run_id,
                 &options.session_reflector,
             )
@@ -904,7 +905,7 @@ pub(super) async fn prepare_combined_effects(
         Some(&skill_run_id),
         configuration_digest,
         |run_id| {
-            crate::daemon::automation_effect::skill_writer_run_request(
+            tracedecay_automation_runtime::automation::effect_runtime::skill_writer_run_request(
                 run_id,
                 &options.skill_writer,
             )
@@ -1352,7 +1353,7 @@ mod tests {
                     Some(run_id),
                     fixture.configuration_digest.clone(),
                     |run_id| {
-                        crate::daemon::automation_effect::session_reflector_run_request(
+                        tracedecay_automation_runtime::automation::effect_runtime::session_reflector_run_request(
                             run_id,
                             &conflicting,
                         )
@@ -1374,7 +1375,7 @@ mod tests {
                     Some(&skill_run_id),
                     fixture.configuration_digest.clone(),
                     |run_id| {
-                        crate::daemon::automation_effect::skill_writer_run_request(
+                        tracedecay_automation_runtime::automation::effect_runtime::skill_writer_run_request(
                             run_id,
                             &conflicting,
                         )
@@ -1434,7 +1435,7 @@ mod tests {
         let cancellation = CancellationSignal::active(format!("cancel.{run_id}"))
             .expect("combined recovery cancellation");
         let report =
-            crate::daemon::automation_effect::reconcile_reserved_automation_effects_for_project(
+            crate::daemon::automation_effect::recovery_index::reconcile_reserved_automation_effects_for_project(
                 fixture.memory.as_ref(),
                 &fixture.dashboard_root,
                 &cancellation,
@@ -1455,7 +1456,7 @@ mod tests {
         assert!(!conflicting_journal.exists());
         assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
         let report =
-            crate::daemon::automation_effect::reconcile_reserved_automation_effects_for_project(
+            crate::daemon::automation_effect::recovery_index::reconcile_reserved_automation_effects_for_project(
                 fixture.memory.as_ref(),
                 &fixture.dashboard_root,
                 &cancellation,
@@ -1514,7 +1515,7 @@ mod tests {
             Some(combined_run_id),
             fixture.configuration_digest.clone(),
             |run_id| {
-                crate::daemon::automation_effect::session_reflector_run_request(
+                tracedecay_automation_runtime::automation::effect_runtime::session_reflector_run_request(
                     run_id,
                     &options.session_reflector,
                 )

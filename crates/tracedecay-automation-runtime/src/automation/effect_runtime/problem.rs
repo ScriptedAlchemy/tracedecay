@@ -7,12 +7,14 @@ use tracedecay_application::{
     ProblemOwningLayer, RequestAdmission, RequestContext, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_automation::backend::AgentTaskFailureClass;
-use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 
-use super::{AutomationSettledProblem, contract_error};
+use crate::automation::run_ledger::AutomationRunLedgerRecord;
+
+use super::contract::contract_error;
+use super::terminal::AutomationSettledProblem;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-pub(super) fn reset_required_problem(
+pub fn reset_required_problem(
     operation: &tracedecay_application::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
@@ -33,7 +35,7 @@ pub(super) fn reset_required_problem(
     )
 }
 
-pub(super) fn indeterminate_external_effect_problem(
+pub fn indeterminate_external_effect_problem(
     operation: &tracedecay_application::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
@@ -54,7 +56,7 @@ pub(super) fn indeterminate_external_effect_problem(
     )
 }
 
-pub(super) fn shipped_proposal_reset_required_problem(
+pub fn shipped_proposal_reset_required_problem(
     operation: &tracedecay_application::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
@@ -75,7 +77,7 @@ pub(super) fn shipped_proposal_reset_required_problem(
     )
 }
 
-pub(super) fn failed_ledger_problem(
+pub fn failed_ledger_problem(
     context: &RequestContext,
     cancellation: &CancellationSignal,
     ledger: &AutomationRunLedgerRecord,
@@ -126,7 +128,7 @@ fn failure_class_problem(
     problem.map_err(contract_error)
 }
 
-pub(super) fn runtime_problem(
+pub fn runtime_problem(
     context: &RequestContext,
     cancellation: &CancellationSignal,
     error: &TraceDecayError,
@@ -217,7 +219,7 @@ mod tests {
         ResolvedScope,
     };
     use tracedecay_automation::backend::AgentTaskFailureClass;
-    use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
+    use crate::automation::run_ledger::AutomationRunLedgerRecord;
     use tracedecay_domain::{
         ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
     };

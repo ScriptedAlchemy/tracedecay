@@ -20,10 +20,12 @@ use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RunId};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
 use tracedecay_store::FactReadControl;
 
-use super::{
-    AutomationSettledTerminal, contract_error, digest,
-    journal::{self, DurableAutomationAdmission},
-    projection::project_recovered_committed_receipts,
+use tracedecay_automation_runtime::automation::effect_runtime::journal::{
+    self, DurableAutomationAdmission,
+};
+use tracedecay_automation_runtime::automation::effect_runtime::projection::project_recovered_committed_receipts;
+use tracedecay_automation_runtime::automation::effect_runtime::{
+    AutomationSettledTerminal, contract_error, digest, retirement,
 };
 use tracedecay_runtime_core::errors::Result;
 
@@ -184,7 +186,7 @@ pub(super) fn reject_unbound_retirement_witness_if_index_empty(
     with_index_lock(&path, || {
         let index = read_index(&path)?;
         if index.entries.is_empty() && index.retirement_transitions.is_empty() {
-            super::retirement::reject_unbound_retirement_witness(dashboard_root)?;
+            retirement::reject_unbound_retirement_witness(dashboard_root)?;
         }
         Ok(())
     })
@@ -269,9 +271,9 @@ async fn reconcile_indexed_retirement_transition(
     let capture_expected = indexed.capture_expected;
     tokio::task::spawn_blocking(move || {
         let closure =
-            super::retirement::closure_for_durable_transition(&root, &binding, capture_expected)?;
+            retirement::closure_for_durable_transition(&root, &binding, capture_expected)?;
         remove_pending_for_retirement_blocking(&root, &path, &admission, &closure)?;
-        super::retirement::complete_after_pending_removal(&closure)?;
+        retirement::complete_after_pending_removal(&closure)?;
         finish_retirement_transition_blocking(&root, &path, &admission, &closure)
     })
     .await
@@ -789,7 +791,7 @@ pub(super) fn remove_pending_for_retirement_blocking(
     dashboard_root: &Path,
     journal_path: &Path,
     admission: &DurableAutomationAdmission,
-    closure: &super::retirement::RetirementClosure,
+    closure: &retirement::RetirementClosure,
 ) -> Result<()> {
     remove_pending_for_retirement_with_writer(
         dashboard_root,
@@ -804,7 +806,7 @@ fn remove_pending_for_retirement_with_writer(
     dashboard_root: &Path,
     journal_path: &Path,
     admission: &DurableAutomationAdmission,
-    closure: &super::retirement::RetirementClosure,
+    closure: &retirement::RetirementClosure,
     mut write_index: impl FnMut(&Path, &[u8]) -> Result<()>,
 ) -> Result<()> {
     let expected = entry_for(journal_path, &admission.scope)?;
@@ -924,7 +926,7 @@ pub(super) fn finish_retirement_transition_blocking(
     dashboard_root: &Path,
     journal_path: &Path,
     admission: &DurableAutomationAdmission,
-    closure: &super::retirement::RetirementClosure,
+    closure: &retirement::RetirementClosure,
 ) -> Result<()> {
     let entry = entry_for(journal_path, &admission.scope)?;
     let transition = retirement_transition_for(&entry, admission, closure)?;
@@ -971,7 +973,7 @@ fn finish_retirement_transition_with_writer(
 fn retirement_transition_for(
     entry: &PendingIndexEntry,
     admission: &DurableAutomationAdmission,
-    closure: &super::retirement::RetirementClosure,
+    closure: &retirement::RetirementClosure,
 ) -> Result<PendingRetirementTransition> {
     let binding = admission.retirement().ok_or_else(|| {
         contract_error("automation retirement transition has no durable admission binding")
@@ -1087,7 +1089,7 @@ fn mutate_index_with_writer(
 
 fn write_pending_index(path: &Path, bytes: &[u8]) -> Result<()> {
     write_pending_index_with_publisher(path, bytes, |temporary, destination| {
-        super::journal::replace_automation_file_atomically(
+        journal::replace_automation_file_atomically(
             temporary,
             destination,
             "automation pending recovery index",
@@ -1400,7 +1402,7 @@ mod tests {
             },
             |path, bytes| {
                 write_pending_index_with_publisher(path, bytes, |temporary, destination| {
-                    super::journal::replace_automation_file_atomically(
+                    journal::replace_automation_file_atomically(
                         temporary,
                         destination,
                         "automation pending recovery index",
@@ -1444,7 +1446,7 @@ mod tests {
             },
             |path, bytes| {
                 write_pending_index_with_publisher(path, bytes, |temporary, destination| {
-                    super::journal::replace_automation_file_atomically(
+                    journal::replace_automation_file_atomically(
                         temporary,
                         destination,
                         "automation pending recovery index",

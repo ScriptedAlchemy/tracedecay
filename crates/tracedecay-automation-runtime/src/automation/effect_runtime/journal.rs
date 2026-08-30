@@ -14,42 +14,83 @@ use tracedecay_application::{
     ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
-use tracedecay_automation_runtime::automation::run_ledger::ExactRunPublication;
+use crate::automation::run_ledger::ExactRunPublication;
 use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
 
+use super::contract::contract_error;
 use super::retirement::RetirementBinding;
-use super::{AutomationSettledProblem, AutomationSettledTerminal, contract_error};
+use super::terminal::{AutomationSettledProblem, AutomationSettledTerminal};
 use tracedecay_runtime_core::errors::Result;
 
-const MAX_AUTOMATION_JOURNAL_BYTES: u64 = 512 * 1024;
+/// Production builds keep the item crate-private. Test / `test-helpers` builds
+/// expose it so composition-root journal tests can drive internals without
+/// shipping fixture surface in the production crate.
+macro_rules! test_helpers_pub {
+    ($(#[$attr:meta])* const $($rest:tt)*) => {
+        $(#[$attr])*
+        #[cfg(any(test, feature = "test-helpers"))]
+        pub const $($rest)*
+        $(#[$attr])*
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        const $($rest)*
+    };
+    ($(#[$attr:meta])* enum $($rest:tt)*) => {
+        $(#[$attr])*
+        #[cfg(any(test, feature = "test-helpers"))]
+        pub enum $($rest)*
+        $(#[$attr])*
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        enum $($rest)*
+    };
+    ($(#[$attr:meta])* struct $($rest:tt)*) => {
+        $(#[$attr])*
+        #[cfg(any(test, feature = "test-helpers"))]
+        pub struct $($rest)*
+        $(#[$attr])*
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        struct $($rest)*
+    };
+    ($(#[$attr:meta])* fn $($rest:tt)*) => {
+        $(#[$attr])*
+        #[cfg(any(test, feature = "test-helpers"))]
+        pub fn $($rest)*
+        $(#[$attr])*
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        fn $($rest)*
+    };
+}
+
+test_helpers_pub! {
+    const MAX_AUTOMATION_JOURNAL_BYTES: u64 = 512 * 1024;
+}
 const MAX_AUTOMATION_TERMINAL_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DurableAutomationAdmission {
-    pub(super) schema_version: u32,
-    pub(super) request: AutomationRunRequestV1,
-    pub(super) input_digest: ManifestDigest,
-    pub(super) configuration_digest: ManifestDigest,
+pub struct DurableAutomationAdmission {
+    pub schema_version: u32,
+    pub request: AutomationRunRequestV1,
+    pub input_digest: ManifestDigest,
+    pub configuration_digest: ManifestDigest,
     /// Exact registered grant/catalog/privacy authority used to prepare the
     /// outer retained effect. Restart recovery must reproduce this binding;
     /// a newly registered grant cannot silently inherit an older admission.
-    pub(super) effect_authority_digest: ManifestDigest,
-    pub(super) grant_id: CapabilityGrantId,
-    pub(super) grant_revision: u64,
-    pub(super) grant_digest: ManifestDigest,
-    pub(super) disclosure: DisclosureClass,
+    pub effect_authority_digest: ManifestDigest,
+    pub grant_id: CapabilityGrantId,
+    pub grant_revision: u64,
+    pub grant_digest: ManifestDigest,
+    pub disclosure: DisclosureClass,
     /// Exact prepared outer-effect receipt material. Recovery changes only
     /// its committed-state digest; it never mints a new grant or request.
-    pub(super) effect_receipt_template: EffectReceipt,
-    pub(super) actor: ActorId,
-    pub(super) scope: ResolvedScope,
-    pub(super) request_id: RequestId,
-    pub(super) process_run_id: String,
-    pub(super) recovery: AutomationRecoveryBinding,
+    pub effect_receipt_template: EffectReceipt,
+    pub actor: ActorId,
+    pub scope: ResolvedScope,
+    pub request_id: RequestId,
+    pub process_run_id: String,
+    pub recovery: AutomationRecoveryBinding,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -59,7 +100,7 @@ pub(super) struct DurableAutomationAdmission {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-pub(super) enum AutomationRecoveryBinding {
+pub enum AutomationRecoveryBinding {
     Memory {
         owner: FactOwnerV1,
         recovery_problem: AutomationSettledProblem,
@@ -75,7 +116,7 @@ pub(super) enum AutomationRecoveryBinding {
 }
 
 impl DurableAutomationAdmission {
-    pub(super) fn recovery_problem(&self) -> &AutomationSettledProblem {
+    pub fn recovery_problem(&self) -> &AutomationSettledProblem {
         match &self.recovery {
             AutomationRecoveryBinding::Memory {
                 recovery_problem, ..
@@ -84,21 +125,21 @@ impl DurableAutomationAdmission {
         }
     }
 
-    pub(super) fn memory_owner(&self) -> Option<&FactOwnerV1> {
+    pub fn memory_owner(&self) -> Option<&FactOwnerV1> {
         match &self.recovery {
             AutomationRecoveryBinding::Memory { owner, .. } => Some(owner),
             AutomationRecoveryBinding::External { .. } => None,
         }
     }
 
-    pub(super) fn retirement(&self) -> Option<&RetirementBinding> {
+    pub fn retirement(&self) -> Option<&RetirementBinding> {
         match &self.recovery {
             AutomationRecoveryBinding::Memory { retirement, .. } => retirement.as_ref(),
             AutomationRecoveryBinding::External { .. } => None,
         }
     }
 
-    pub(super) fn reset_source_digest(&self) -> Option<&str> {
+    pub fn reset_source_digest(&self) -> Option<&str> {
         match &self.recovery {
             AutomationRecoveryBinding::Memory {
                 reset_source_digest,
@@ -108,36 +149,40 @@ impl DurableAutomationAdmission {
         }
     }
 
-    pub(super) fn is_external(&self) -> bool {
+    pub fn is_external(&self) -> bool {
         matches!(self.recovery, AutomationRecoveryBinding::External { .. })
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(
-    tag = "state",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-enum DurableAutomationState {
-    Reserved,
-    Prepared {
-        terminal: DurableAutomationTerminalBinding,
-        publication: ExactRunPublication,
-    },
-    Terminal {
-        terminal: DurableAutomationTerminalBinding,
-        publication: Option<ExactRunPublication>,
-    },
+test_helpers_pub! {
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(
+        tag = "state",
+        content = "value",
+        rename_all = "snake_case",
+        deny_unknown_fields
+    )]
+    enum DurableAutomationState {
+        Reserved,
+        Prepared {
+            terminal: DurableAutomationTerminalBinding,
+            publication: ExactRunPublication,
+        },
+        Terminal {
+            terminal: DurableAutomationTerminalBinding,
+            publication: Option<ExactRunPublication>,
+        },
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct DurableAutomationTerminalBinding {
-    schema_version: u32,
-    digest: ManifestDigest,
-    payload_len: u64,
+test_helpers_pub! {
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct DurableAutomationTerminalBinding {
+        schema_version: u32,
+        digest: ManifestDigest,
+        payload_len: u64,
+    }
 }
 
 impl DurableAutomationTerminalBinding {
@@ -156,10 +201,20 @@ impl DurableAutomationTerminalBinding {
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DurableAutomationRecord {
+pub struct DurableAutomationRecord {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub admission: DurableAutomationAdmission,
+    #[cfg(not(any(test, feature = "test-helpers")))]
     admission: DurableAutomationAdmission,
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub state: DurableAutomationState,
+    #[cfg(not(any(test, feature = "test-helpers")))]
     state: DurableAutomationState,
     #[serde(skip)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub legacy_terminal: Option<AutomationSettledTerminal>,
+    #[serde(skip)]
+    #[cfg(not(any(test, feature = "test-helpers")))]
     legacy_terminal: Option<AutomationSettledTerminal>,
 }
 
@@ -226,22 +281,22 @@ impl<'de> Deserialize<'de> for DurableAutomationRecord {
 }
 
 impl DurableAutomationRecord {
-    pub(super) fn admission(&self) -> &DurableAutomationAdmission {
+    pub fn admission(&self) -> &DurableAutomationAdmission {
         &self.admission
     }
 
-    pub(super) fn is_terminal(&self) -> bool {
+    pub fn is_terminal(&self) -> bool {
         matches!(self.state, DurableAutomationState::Terminal { .. })
     }
 
-    pub(super) fn prepared(&self) -> Option<&ExactRunPublication> {
+    pub fn prepared(&self) -> Option<&ExactRunPublication> {
         match &self.state {
             DurableAutomationState::Prepared { publication, .. } => Some(publication),
             DurableAutomationState::Reserved | DurableAutomationState::Terminal { .. } => None,
         }
     }
 
-    pub(super) fn publication(&self) -> Option<&ExactRunPublication> {
+    pub fn publication(&self) -> Option<&ExactRunPublication> {
         match &self.state {
             DurableAutomationState::Prepared { publication, .. } => Some(publication),
             DurableAutomationState::Terminal { publication, .. } => publication.as_ref(),
@@ -250,7 +305,7 @@ impl DurableAutomationRecord {
     }
 }
 
-pub(super) enum ReservationResult {
+pub enum ReservationResult {
     Execute {
         claim: AutomationReservationClaim,
         retirement: Option<RetirementBinding>,
@@ -286,7 +341,7 @@ pub(super) enum ReservationResult {
 /// whose future was dropped before it could persist a terminal. The weak
 /// registry entry makes dropping the authority release ownership without an
 /// async cleanup path or a second durable lease authority.
-pub(super) struct AutomationReservationClaim {
+pub struct AutomationReservationClaim {
     path: PathBuf,
     token: Arc<()>,
 }
@@ -342,7 +397,7 @@ fn reservation_claim_is_live(path: &Path) -> bool {
         .is_some()
 }
 
-pub(super) fn retained_source_bindings(
+pub fn retained_source_bindings(
     path: &Path,
 ) -> Result<(Option<RetirementBinding>, Option<String>)> {
     with_journal_lock(path, || {
@@ -357,8 +412,8 @@ pub(super) fn retained_source_bindings(
     })
 }
 
-#[cfg(test)]
-pub(super) fn reserve_or_replay_blocking(
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reserve_or_replay_blocking(
     path: &Path,
     requested: DurableAutomationAdmission,
 ) -> Result<ReservationResult> {
@@ -366,7 +421,7 @@ pub(super) fn reserve_or_replay_blocking(
 }
 
 #[hotpath::measure(label = "daemon.automation.effect.reserve_or_replay")]
-pub(super) fn reserve_or_replay_indexed_blocking(
+pub fn reserve_or_replay_indexed_blocking(
     path: &Path,
     requested: DurableAutomationAdmission,
     ensure_pending: impl FnOnce() -> Result<()>,
@@ -375,8 +430,8 @@ pub(super) fn reserve_or_replay_indexed_blocking(
     reserve_or_replay_with_index_and_writer(path, requested, ensure_pending, write_record)
 }
 
-#[cfg(test)]
-fn reserve_or_replay_with_index(
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reserve_or_replay_with_index(
     path: &Path,
     requested: DurableAutomationAdmission,
     ensure_pending: impl FnOnce() -> Result<()>,
@@ -385,6 +440,7 @@ fn reserve_or_replay_with_index(
     reserve_or_replay_with_index_and_writer(path, requested, ensure_pending, write_record)
 }
 
+test_helpers_pub! {
 fn reserve_or_replay_with_index_and_writer(
     path: &Path,
     requested: DurableAutomationAdmission,
@@ -446,12 +502,13 @@ fn reserve_or_replay_with_index_and_writer(
         }
     })
 }
+}
 
-pub(super) fn read_indexed_record_blocking(path: &Path) -> Result<Option<DurableAutomationRecord>> {
+pub fn read_indexed_record_blocking(path: &Path) -> Result<Option<DurableAutomationRecord>> {
     with_journal_lock(path, || read_stabilized_record(path))
 }
 
-pub(super) fn read_indexed_terminal_blocking(
+pub fn read_indexed_terminal_blocking(
     path: &Path,
 ) -> Result<Option<AutomationSettledTerminal>> {
     with_journal_lock(path, || {
@@ -475,7 +532,7 @@ pub(super) fn read_indexed_terminal_blocking(
 /// also cannot generically release without separate exact-row absence proof;
 /// any admission, terminal, or publication conflict is returned as an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DurableSettlementClassification {
+pub enum DurableSettlementClassification {
     Missing,
     Reserved,
     Prepared,
@@ -483,13 +540,13 @@ pub(super) enum DurableSettlementClassification {
 }
 
 impl DurableSettlementClassification {
-    pub(super) fn is_terminal(self) -> bool {
+    pub fn is_terminal(self) -> bool {
         matches!(self, Self::Terminal)
     }
 }
 
 /// Revalidates the exact intended settlement without changing journal state.
-pub(super) fn classify_durable_settlement_blocking(
+pub fn classify_durable_settlement_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
     intended_terminal: &AutomationSettledTerminal,
@@ -504,6 +561,7 @@ pub(super) fn classify_durable_settlement_blocking(
     )
 }
 
+test_helpers_pub! {
 fn classify_durable_settlement_with_stabilizer(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -555,6 +613,7 @@ fn classify_durable_settlement_with_stabilizer(
         }
     })
 }
+}
 
 /// Revalidates the sole state in which run-id-wide spool cleanup is safe.
 ///
@@ -563,7 +622,7 @@ fn classify_durable_settlement_with_stabilizer(
 /// order used by binding and makes the state check atomic with subsequent
 /// cleanup: a writer cannot stage and bind `Prepared` between this check and
 /// deletion.
-pub(super) fn unbound_reserved_cleanup_is_safe_blocking(
+pub fn unbound_reserved_cleanup_is_safe_blocking(
     path: &Path,
     expected: &DurableAutomationAdmission,
 ) -> Result<bool> {
@@ -581,7 +640,7 @@ pub(super) fn unbound_reserved_cleanup_is_safe_blocking(
 /// reservation owned by a prior process. This is the only path allowed to
 /// close a foreign reservation, and it retains the original admission bytes.
 #[hotpath::measure(label = "daemon.automation.effect.persist_recovered")]
-pub(super) fn persist_recovered_terminal_blocking(
+pub fn persist_recovered_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
     terminal: AutomationSettledTerminal,
@@ -647,7 +706,7 @@ pub(super) fn persist_recovered_terminal_blocking(
 }
 
 #[hotpath::measure(label = "daemon.automation.effect.persist_prepared")]
-pub(super) fn persist_prepared_terminal_blocking(
+pub fn persist_prepared_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
     terminal: &AutomationSettledTerminal,
@@ -717,7 +776,7 @@ pub(super) fn persist_prepared_terminal_blocking(
 /// matching `Prepared` (or already promoted `Terminal`) proves the binding was
 /// durable despite the surfaced I/O/readback error; `Reserved` proves no
 /// journal binding and leaves the spool for recovery cleanup.
-pub(super) fn replay_exact_binding_after_error_blocking(
+pub fn replay_exact_binding_after_error_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
     terminal: &AutomationSettledTerminal,
@@ -757,7 +816,7 @@ pub(super) fn replay_exact_binding_after_error_blocking(
 }
 
 #[hotpath::measure(label = "daemon.automation.effect.promote_prepared")]
-pub(super) fn promote_prepared_terminal_blocking(
+pub fn promote_prepared_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
     terminal: AutomationSettledTerminal,
@@ -773,8 +832,8 @@ pub(super) fn promote_prepared_terminal_blocking(
     )
 }
 
-#[cfg(test)]
-fn promote_prepared_terminal_with_writer(
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn promote_prepared_terminal_with_writer(
     path: &Path,
     requested: &DurableAutomationAdmission,
     terminal: AutomationSettledTerminal,
@@ -791,6 +850,7 @@ fn promote_prepared_terminal_with_writer(
     )
 }
 
+test_helpers_pub! {
 fn promote_prepared_terminal_with_writers(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -863,9 +923,10 @@ fn promote_prepared_terminal_with_writers(
         }
     })
 }
+}
 
 #[hotpath::measure(label = "daemon.automation.effect.persist_terminal")]
-pub(super) fn persist_terminal_blocking(
+pub fn persist_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
     terminal: AutomationSettledTerminal,
@@ -936,7 +997,7 @@ pub(super) fn persist_terminal_blocking(
 }
 
 #[hotpath::measure(label = "daemon.automation.effect.abandon")]
-pub(super) fn abandon_reservation_blocking(
+pub fn abandon_reservation_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
 ) -> Result<()> {
@@ -983,10 +1044,6 @@ pub(super) fn abandon_reservation_blocking(
         })
     })
 }
-
-#[cfg(test)]
-#[path = "journal/tests.rs"]
-mod tests;
 
 fn with_journal_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let parent = path
@@ -1040,6 +1097,7 @@ fn stabilize_bound_record_after_visibility(
     stabilize_bound_record_after_visibility_with(path, expected, write_record)
 }
 
+test_helpers_pub! {
 fn stabilize_bound_record_after_visibility_with(
     path: &Path,
     expected: &DurableAutomationRecord,
@@ -1068,7 +1126,9 @@ fn stabilize_bound_record_after_visibility_with(
     }
     Ok(stabilized)
 }
+}
 
+test_helpers_pub! {
 fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
     let Some(file) = open_regular_nofollow(path)? else {
         return Ok(None);
@@ -1144,6 +1204,7 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
         Ok(Some(record))
     }
 }
+}
 
 fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
@@ -1184,13 +1245,16 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
+test_helpers_pub! {
 #[hotpath::measure(label = "daemon.automation.effect.journal_write")]
 fn write_record(path: &Path, record: &DurableAutomationRecord) -> Result<()> {
     write_record_with_publisher(path, record, |temporary, destination| {
         replace_automation_file_atomically(temporary, destination, "automation terminal journal")
     })
 }
+}
 
+test_helpers_pub! {
 fn write_record_with_publisher(
     path: &Path,
     record: &DurableAutomationRecord,
@@ -1216,8 +1280,9 @@ fn write_record_with_publisher(
     }
     Ok(())
 }
+}
 
-pub(super) fn replace_automation_file_atomically(
+pub fn replace_automation_file_atomically(
     temporary: &Path,
     destination: &Path,
     record_name: &str,
@@ -1240,12 +1305,14 @@ pub(super) fn replace_automation_file_atomically(
     Ok(())
 }
 
+test_helpers_pub! {
 fn terminal_sidecar_path(journal_path: &Path) -> Result<PathBuf> {
     let filename = journal_path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| contract_error("automation journal has no terminal sidecar identity"))?;
     Ok(journal_path.with_file_name(format!("{filename}.terminal")))
+}
 }
 
 fn remove_terminal_sidecar_if_present(journal_path: &Path) -> Result<()> {
@@ -1273,6 +1340,7 @@ fn remove_terminal_sidecar_if_present(journal_path: &Path) -> Result<()> {
         })
 }
 
+test_helpers_pub! {
 fn terminal_binding(
     terminal: &AutomationSettledTerminal,
 ) -> Result<DurableAutomationTerminalBinding> {
@@ -1280,7 +1348,9 @@ fn terminal_binding(
     serde_json::to_writer(&mut writer, terminal).map_err(contract_error)?;
     writer.finish()
 }
+}
 
+test_helpers_pub! {
 #[hotpath::measure(label = "daemon.automation.effect.sidecar_write")]
 fn write_terminal_sidecar(
     journal_path: &Path,
@@ -1290,7 +1360,9 @@ fn write_terminal_sidecar(
         replace_automation_file_atomically(temporary, destination, "automation terminal sidecar")
     })
 }
+}
 
+test_helpers_pub! {
 fn write_terminal_sidecar_with_publisher(
     journal_path: &Path,
     terminal: &AutomationSettledTerminal,
@@ -1325,7 +1397,9 @@ fn write_terminal_sidecar_with_publisher(
     }
     Ok(binding)
 }
+}
 
+test_helpers_pub! {
 fn read_terminal_sidecar(
     journal_path: &Path,
     binding: &DurableAutomationTerminalBinding,
@@ -1335,7 +1409,9 @@ fn read_terminal_sidecar(
         contract_error("automation terminal sidecar is missing from its durable journal")
     })
 }
+}
 
+test_helpers_pub! {
 fn read_terminal_sidecar_if_present(
     path: &Path,
     binding: &DurableAutomationTerminalBinding,
@@ -1381,6 +1457,7 @@ fn read_terminal_sidecar_if_present(
     serde_json::from_reader(file.take(binding.payload_len))
         .map(Some)
         .map_err(contract_error)
+}
 }
 
 fn open_regular_nofollow(path: &Path) -> Result<Option<std::fs::File>> {

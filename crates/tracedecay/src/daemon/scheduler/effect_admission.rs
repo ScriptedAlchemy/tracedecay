@@ -409,7 +409,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
             None,
             configuration.configuration_digest.clone(),
             |run_id| {
-                crate::daemon::automation_effect::memory_curator_run_request(
+                tracedecay_automation_runtime::automation::effect_runtime::memory_curator_run_request(
                     run_id,
                     memory_curator_options.fact_review_limit,
                     memory_curator_options.min_confidence,
@@ -540,7 +540,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
                 None,
                 configuration.configuration_digest.clone(),
                 |run_id| {
-                    crate::daemon::automation_effect::session_reflector_run_request(
+                    tracedecay_automation_runtime::automation::effect_runtime::session_reflector_run_request(
                         run_id,
                         &session_options,
                     )
@@ -619,7 +619,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
                 None,
                 configuration.configuration_digest.clone(),
                 |run_id| {
-                    crate::daemon::automation_effect::skill_writer_run_request(
+                    tracedecay_automation_runtime::automation::effect_runtime::skill_writer_run_request(
                         run_id,
                         &skill_options,
                     )

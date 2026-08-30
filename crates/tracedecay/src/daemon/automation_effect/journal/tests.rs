@@ -19,13 +19,15 @@ use tracedecay_application::{
     OperationReceipt, PolicyDecisionRef, ReconciliationState, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
+    ActorId, ComponentVersion, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
     ManifestDigest, ProjectId, ProvenanceId, RepositoryId, RunId, UtcMicros, WorktreeId,
     canonical_sha256,
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use crate::daemon::automation_effect::{AutomationSettledTerminal, recovery_index};
+use crate::daemon::automation_effect::recovery_index;
+use tracedecay_automation_runtime::automation::effect_runtime::journal::*;
+use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 
 struct NeverAutomationBackend;
 
@@ -100,7 +102,7 @@ fn seal_effect_authority(mut admission: DurableAutomationAdmission) -> DurableAu
     let operation =
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .expect("operation");
-    admission.effect_authority_digest = super::super::recovery_index::effect_authority_digest(
+    admission.effect_authority_digest = super::recovery_index::effect_authority_digest(
         admission.schema_version,
         &operation,
         &admission.request,
@@ -243,7 +245,7 @@ fn retirement_admission_for_recovery_project(
     cg: &crate::tracedecay::TraceDecay,
     run_id: &str,
     request_id: &str,
-    binding: super::super::retirement::RetirementBinding,
+    binding: super::retirement::RetirementBinding,
 ) -> DurableAutomationAdmission {
     let owner = cg.project_memory_owner().expect("project memory owner");
     let FactOwnerV1::Project { project_id } = owner.clone() else {
@@ -306,7 +308,7 @@ fn retained_external_authority(
     dashboard_root: &std::path::Path,
     admission: DurableAutomationAdmission,
 ) -> (
-    super::super::AutomationEffectAuthority,
+    super::AutomationEffectAuthority,
     std::path::PathBuf,
     DurableAutomationAdmission,
 ) {
@@ -350,7 +352,7 @@ fn retained_external_authority(
         operation: &operation,
         observed_at: UtcMicros(2),
     };
-    let prepared = super::super::prepare_retained_effect(
+    let prepared = super::prepare_retained_effect(
         &execution,
         RetainedSurfaceOperation::FactStoreCurate,
         &admission.configuration_digest,
@@ -387,7 +389,7 @@ fn retained_external_authority(
     };
     let expected_admission = admission.clone();
     (
-        super::super::AutomationEffectAuthority {
+        super::AutomationEffectAuthority {
             context,
             cancellation,
             operation,
@@ -614,7 +616,7 @@ fn assert_effect_authority(admission: &DurableAutomationAdmission, expected: boo
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .expect("operation");
     assert_eq!(
-        super::super::recovery_index::admission_has_exact_authority(admission, &operation)
+        super::recovery_index::admission_has_exact_authority(admission, &operation)
             .expect("authority classification"),
         expected,
         "{label}"
@@ -1812,7 +1814,7 @@ fn recovery_authority_digest_rejects_every_mutable_recovery_and_digest_domain() 
     let AutomationRecoveryBinding::Memory { retirement, .. } = &mut changed.recovery else {
         panic!("memory admission must carry memory recovery")
     };
-    *retirement = Some(super::super::retirement::RetirementBinding {
+    *retirement = Some(super::retirement::RetirementBinding {
         source_digest: format!("sha256:{}", "d".repeat(64)),
         archive_name: format!("fact_proposals.{}.json", "d".repeat(64)),
     });
@@ -1943,7 +1945,7 @@ async fn direct_recover_retires_spool_staged_before_prepared_binding() {
         ReservationResult::Recover { .. }
     ));
 
-    super::super::discard_direct_recovery_unbound_spools(temp.path(), &path, &original)
+    super::discard_direct_recovery_unbound_spools(temp.path(), &path, &original)
         .await
         .expect("discard abandoned spool");
 
@@ -2025,7 +2027,7 @@ fn project_open_crash_recovery_defers_retirement_until_exact_finalization() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let mut original = admission("run.memory-retirement", "request.memory-retirement");
-    let binding = super::super::retirement::RetirementBinding {
+    let binding = super::retirement::RetirementBinding {
         source_digest: format!("sha256:{}", "a".repeat(64)),
         archive_name: format!("fact_proposals.{}.json", "a".repeat(64)),
     };
@@ -2047,14 +2049,14 @@ fn project_open_crash_recovery_defers_retirement_until_exact_finalization() {
         .expect("reserved retirement");
     assert_eq!(reopened_record.admission().retirement(), Some(&binding));
     assert_eq!(
-        super::super::recovery_index::special_recovery_defer_reason(
+        super::recovery_index::special_recovery_defer_reason(
             reopened_record.admission(),
             true,
         ),
         Some("retirement_requires_exact_finalization")
     );
     assert_eq!(
-        super::super::recovery_index::special_recovery_defer_reason(
+        super::recovery_index::special_recovery_defer_reason(
             reopened_record.admission(),
             false,
         ),
@@ -2079,14 +2081,14 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     let source_path = dashboard_root.join("fact_proposals.json");
     let source_bytes = br#"{"schema_version":1,"proposals":[]}"#.to_vec();
     write_private_test_file(&source_path, &source_bytes);
-    let plan = match super::super::retirement::classify_for_task(
+    let plan = match super::retirement::classify_for_task(
         AutomationTaskV1::SessionReflector,
         &dashboard_root,
     )
     .await
     .expect("classify exact retirement source")
     {
-        super::super::retirement::RetirementClassification::Terminal(plan) => plan,
+        super::retirement::RetirementClassification::Terminal(plan) => plan,
         _ => panic!("terminal shipped history must yield an exact retirement plan"),
     };
     let binding = plan.binding.clone();
@@ -2205,7 +2207,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     );
 
     write_private_test_file(&source_path, &source_bytes);
-    let pending_retirement = super::super::retirement::finalize_after_terminal(
+    let pending_retirement = super::retirement::finalize_after_terminal(
         &dashboard_root,
         &plan.binding,
         Some(&plan),
@@ -2228,7 +2230,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
             .expect("retirement transition removes pending entry")
             .is_empty()
     );
-    super::super::retirement::complete_after_pending_removal(&pending_retirement)
+    super::retirement::complete_after_pending_removal(&pending_retirement)
         .expect("complete retirement witness after pending removal");
     assert_eq!(retirement_capture_count(&dashboard_root), 0);
     recovery_index::finish_retirement_transition_blocking(
@@ -2252,7 +2254,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     write_private_test_file(&source_path, &source_bytes);
     recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
         .expect("re-index Terminal before pending-absent crash");
-    let orphaned_retirement = super::super::retirement::finalize_after_terminal(
+    let orphaned_retirement = super::retirement::finalize_after_terminal(
         &dashboard_root,
         &plan.binding,
         Some(&plan),
@@ -2347,7 +2349,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     write_private_test_file(&source_path, &source_bytes);
     recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
         .expect("re-index Terminal before entry-plus-marker restart");
-    let entry_plus_marker_retirement = super::super::retirement::finalize_after_terminal(
+    let entry_plus_marker_retirement = super::retirement::finalize_after_terminal(
         &dashboard_root,
         &plan.binding,
         Some(&plan),
@@ -2521,7 +2523,7 @@ fn project_open_crash_recovery_preserves_shipped_reset_digest_until_exact_diagno
         Some(reset_digest.as_str())
     );
     assert_eq!(
-        super::super::recovery_index::special_recovery_defer_reason(
+        super::recovery_index::special_recovery_defer_reason(
             reopened_record.admission(),
             true,
         ),
@@ -2740,12 +2742,12 @@ async fn reserved_admission_conflict_preserves_recovery_index() {
         panic!("stable mismatch must be a conflict")
     };
     assert!(!terminal);
-    let admission = super::super::reservation_conflict_admission(dashboard_root, &path, terminal)
+    let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal)
         .await
         .expect("map conflict");
     assert!(matches!(
         admission,
-        super::super::AutomationEffectAdmission::Conflict
+        super::AutomationEffectAdmission::Conflict
     ));
     assert_eq!(
         recovery_index::indexed_journals_blocking(dashboard_root, &scope())
@@ -2782,12 +2784,12 @@ async fn terminal_admission_conflict_preserves_existing_cleanup_authority() {
         panic!("terminal mismatch must be a conflict")
     };
     assert!(terminal);
-    let admission = super::super::reservation_conflict_admission(dashboard_root, &path, terminal)
+    let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal)
         .await
         .expect("map conflict");
     assert!(matches!(
         admission,
-        super::super::AutomationEffectAdmission::Conflict
+        super::AutomationEffectAdmission::Conflict
     ));
     assert_eq!(
         recovery_index::indexed_journals_blocking(dashboard_root, &scope())
@@ -3101,30 +3103,30 @@ fn retained_settlement_waiter_is_send_and_static() {
     fn assert_send_static<T: Send + 'static>() {}
 
     assert_send_static::<
-        super::super::RetainedSettlementWaiter<tracedecay_runtime_core::errors::Result<()>>,
+        super::RetainedSettlementWaiter<tracedecay_runtime_core::errors::Result<()>>,
     >();
     assert_send_static::<
-        super::super::RetainedSettlementWaiter<
+        super::RetainedSettlementWaiter<
             tracedecay_runtime_core::errors::Result<(
-                super::super::AutomationSettledTerminal,
+                super::AutomationSettledTerminal,
                 AutomationRunLedgerRecord,
             )>,
         >,
     >();
     assert_send_static::<
-        super::super::RetainedSettlementWaiter<
+        super::RetainedSettlementWaiter<
             tracedecay_runtime_core::errors::Result<(
-                super::super::AutomationSettledProblem,
+                super::AutomationSettledProblem,
                 Option<AutomationRunLedgerRecord>,
             )>,
         >,
     >();
-    assert_send_static::<super::super::RetainedSettlementPairWaiter>();
-    assert_send_static::<super::super::DeferredSettlementPairSubmission<()>>();
+    assert_send_static::<super::RetainedSettlementPairWaiter>();
+    assert_send_static::<super::DeferredSettlementPairSubmission<()>>();
     assert_send_static::<
-        super::super::RetainedSettlementWaiter<
+        super::RetainedSettlementWaiter<
             tracedecay_runtime_core::errors::Result<
-                super::super::RetainedAutomationSettlementOutcome,
+                super::RetainedAutomationSettlementOutcome,
             >,
         >,
     >();
@@ -3135,7 +3137,7 @@ async fn dropping_retained_waiter_does_not_abort_blocking_owner() {
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
     let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(0);
-    let waiter = super::super::RetainedSettlementWaiter {
+    let waiter = super::RetainedSettlementWaiter {
         task: tokio::task::spawn_blocking(move || {
             started_tx.send(()).expect("signal blocking owner");
             release_rx.recv().expect("release blocking owner");
@@ -3513,7 +3515,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Arc::new(Mutex::new(release_rx));
     let phase_release = Arc::clone(&release_rx);
-    let phase_hook = super::super::SettlementPhaseHook::new(move |phase| {
+    let phase_hook = super::SettlementPhaseHook::new(move |phase| {
         phase_tx.send(phase).expect("publish settlement phase");
         phase_release
             .lock()
@@ -3525,13 +3527,13 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let attempted_publications = Arc::clone(&publications);
     let fail_once = Arc::new(AtomicBool::new(true));
     let prepared_fail_once = Arc::clone(&fail_once);
-    let prepared_write_hook = super::super::PreparedWriteHook::new(move |publication| {
+    let prepared_write_hook = super::PreparedWriteHook::new(move |publication| {
         attempted_publications
             .lock()
             .expect("publication attempts")
             .push(publication.clone());
         if prepared_fail_once.swap(false, Ordering::SeqCst) {
-            return Err(super::super::contract_error(
+            return Err(super::contract_error(
                 "injected prepared journal write failure",
             ));
         }
@@ -3564,7 +3566,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         phase_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("unbound retry phase"),
-        super::super::RetainedSettlementPhase::PreparedWriteFailed
+        super::RetainedSettlementPhase::PreparedWriteFailed
     );
     let reserved = read_indexed_record_blocking(&journal_path)
         .expect("reserved journal read")
@@ -3588,7 +3590,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         phase_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("prepared phase"),
-        super::super::RetainedSettlementPhase::Prepared
+        super::RetainedSettlementPhase::Prepared
     );
     assert!(
         read_indexed_record_blocking(&journal_path)
@@ -3619,7 +3621,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         phase_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("published phase"),
-        super::super::RetainedSettlementPhase::Published
+        super::RetainedSettlementPhase::Published
     );
     assert_eq!(
         tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
@@ -3877,7 +3879,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
 }
 
 struct RequestWaitingPairFixture {
-    submission: Option<super::super::DeferredSettlementPairSubmission<()>>,
+    submission: Option<super::DeferredSettlementPairSubmission<()>>,
     journal_paths: [std::path::PathBuf; 2],
     admissions: [DurableAutomationAdmission; 2],
     run_ids: [String; 2],
@@ -3907,7 +3909,7 @@ async fn request_waiting_pair_fixture(
     recovery_index::add_pending_blocking(dashboard_root, &second_journal, &second_admission)
         .expect("retain second request-waiting pair authority");
     let submission =
-        super::super::AutomationEffectAuthority::start_request_waiting_settlement_pair_with_phase_hooks(
+        super::AutomationEffectAuthority::start_request_waiting_settlement_pair_with_phase_hooks(
             (first_authority, first_guard),
             (second_authority, second_guard),
             None,
@@ -4016,8 +4018,8 @@ async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_owne
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _waiter = submission
             .submit_with_hook(
-                super::super::DeferredSettlementRequest::Abandon,
-                super::super::DeferredSettlementRequest::Abandon,
+                super::DeferredSettlementRequest::Abandon,
+                super::DeferredSettlementRequest::Abandon,
                 || panic!("injected unwind after first pair request submission"),
             )
             .expect("unreachable pair submission result");
@@ -4092,8 +4094,8 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Arc::new(Mutex::new(release_rx));
     let phase_release = Arc::clone(&release_rx);
-    let second_phase_hook = super::super::SettlementPhaseHook::new(move |phase| {
-        if phase == super::super::RetainedSettlementPhase::Prepared {
+    let second_phase_hook = super::SettlementPhaseHook::new(move |phase| {
+        if phase == super::RetainedSettlementPhase::Prepared {
             phase_tx.send(phase).expect("second leg prepared");
             phase_release
                 .lock()
@@ -4104,7 +4106,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
     });
     let (second_observed_tx, second_observed_rx) = std::sync::mpsc::channel();
     let submission =
-        super::super::AutomationEffectAuthority::start_request_waiting_settlement_pair_with_phase_hooks(
+        super::AutomationEffectAuthority::start_request_waiting_settlement_pair_with_phase_hooks(
             (first_authority, first_guard),
             (second_authority, second_guard),
             None,
@@ -4112,15 +4114,15 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         );
     let waiter = submission
         .submit(
-            super::super::DeferredSettlementRequest::Run(Box::new(
-                super::super::DeferredRunSettlementRequest {
+            super::DeferredSettlementRequest::Run(Box::new(
+                super::DeferredRunSettlementRequest {
                     ledger: first_run.ledger_record,
                     committed: first_run.committed_receipt,
                     observer: None,
                 },
             )),
-            super::super::DeferredSettlementRequest::Run(Box::new(
-                super::super::DeferredRunSettlementRequest {
+            super::DeferredSettlementRequest::Run(Box::new(
+                super::DeferredRunSettlementRequest {
                     ledger: second_run.ledger_record,
                     committed: second_run.committed_receipt,
                     observer: Some(Box::new(move |record| {
@@ -4137,9 +4139,9 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         phase_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("second pair leg attempted"),
-        super::super::RetainedSettlementPhase::Prepared
+        super::RetainedSettlementPhase::Prepared
     );
-    let super::super::RetainedSettlementPairWaiter { first, second, .. } = waiter;
+    let super::RetainedSettlementPairWaiter { first, second, .. } = waiter;
     let first_result = tokio::time::timeout(Duration::from_secs(5), first.wait())
         .await
         .expect("first pair owner must finish while second remains paused");
@@ -4168,7 +4170,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         .await
         .expect("second pair owner must finish")
         .expect("second pair settlement");
-    let super::super::DeferredSettlementOutcome::Settled(second_outcome) = &second_owned.outcome
+    let super::DeferredSettlementOutcome::Settled(second_outcome) = &second_owned.outcome
     else {
         panic!("second pair leg must settle its exact terminal")
     };
@@ -4314,14 +4316,14 @@ async fn retained_settlement_exceeds_retry_budget_instead_of_hanging_forever() {
     let terminal = authority
         .terminal_for_run(&run.ledger_record, run.committed_receipt.as_ref())
         .expect("terminal for retry-budget fixture");
-    let always_fails_write_hook = super::super::PreparedWriteHook::new(|_publication| {
-        Err(super::super::contract_error(
+    let always_fails_write_hook = super::PreparedWriteHook::new(|_publication| {
+        Err(super::contract_error(
             "injected prepared journal write failure (always fails, for retry-budget test)",
         ))
     });
-    let state = super::super::RetainedBoundSettlement {
+    let state = super::RetainedBoundSettlement {
         authority,
-        guard: super::super::RetainedSettlementGuardOwner::Single(guard),
+        guard: super::RetainedSettlementGuardOwner::Single(guard),
         terminal,
         ledger: run.ledger_record,
         publication: None,
@@ -4330,9 +4332,9 @@ async fn retained_settlement_exceeds_retry_budget_instead_of_hanging_forever() {
         prepared_write_hook: Some(always_fails_write_hook),
     };
 
-    let waiter = super::super::RetainedSettlementWaiter {
+    let waiter = super::RetainedSettlementWaiter {
         task: tokio::task::spawn_blocking(move || {
-            super::super::settle_bound_owner_with_budget(state, Duration::from_millis(200))
+            super::settle_bound_owner_with_budget(state, Duration::from_millis(200))
                 .map(|owned| owned.value)
         }),
     };

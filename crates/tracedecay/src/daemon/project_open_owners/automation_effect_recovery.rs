@@ -31,7 +31,7 @@ pub(crate) async fn reconcile_project_open_automation_effects(project: Arc<Trace
         }
     };
     let dashboard_root = project.hook_store_layout().dashboard_root.clone();
-    match crate::daemon::automation_effect::reconcile_reserved_automation_effects_for_project(
+    match crate::daemon::automation_effect::recovery_index::reconcile_reserved_automation_effects_for_project(
         project.as_ref(),
         &dashboard_root,
         &cancellation,
