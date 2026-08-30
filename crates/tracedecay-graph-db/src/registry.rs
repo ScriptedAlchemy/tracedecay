@@ -221,6 +221,17 @@ struct RegistryInner {
     manifest_provider: Arc<dyn GraphGenerationManifestProvider>,
     state: Mutex<RegistryState>,
     changed: Condvar,
+    /// Live direct-sealed readers. `recover_verified_sealed_snapshot` never
+    /// resolves the shared database runtime, so its leases are invisible to
+    /// the per-database verified-generation state; replay retirement unions
+    /// these locators into its retained set so a sealed store is never
+    /// deleted under an active direct-sealed reader.
+    direct_sealed_readers: Mutex<
+        Vec<(
+            crate::lease::GenerationLocator,
+            std::sync::Weak<crate::lease::VerifiedGenerationLease>,
+        )>,
+    >,
     #[cfg(test)]
     retirement_completion_failure: Mutex<Option<GraphDbError>>,
     #[cfg(test)]
@@ -597,12 +608,42 @@ impl GraphDbRegistry {
                 manifest_provider,
                 state: Mutex::new(RegistryState::default()),
                 changed: Condvar::new(),
+                direct_sealed_readers: Mutex::new(Vec::new()),
                 #[cfg(test)]
                 retirement_completion_failure: Mutex::new(None),
                 #[cfg(test)]
                 close_completion_failure: Mutex::new(None),
             }),
         })
+    }
+
+    /// Records a live direct-sealed reader so replay retirement keeps its
+    /// generation's sealed store on disk. Dead entries are pruned in place;
+    /// liveness is the lease's strong count, so no drop hook is required.
+    pub(crate) fn track_direct_sealed_reader(
+        &self,
+        lease: &Arc<crate::lease::VerifiedGenerationLease>,
+    ) -> Result<(), GraphDbError> {
+        let mut readers = self.inner.direct_sealed_readers.lock().map_err(|_| {
+            GraphDbError::unavailable("direct-sealed reader table lock is poisoned")
+        })?;
+        readers.retain(|(_, weak)| weak.strong_count() > 0);
+        readers.push((lease.locator.clone(), Arc::downgrade(lease)));
+        Ok(())
+    }
+
+    /// Locators of generations currently held by a live direct-sealed reader.
+    pub(crate) fn live_direct_sealed_locators(
+        &self,
+    ) -> Result<std::collections::BTreeSet<crate::lease::GenerationLocator>, GraphDbError> {
+        let mut readers = self.inner.direct_sealed_readers.lock().map_err(|_| {
+            GraphDbError::unavailable("direct-sealed reader table lock is poisoned")
+        })?;
+        readers.retain(|(_, weak)| weak.strong_count() > 0);
+        Ok(readers
+            .iter()
+            .map(|(locator, _)| locator.clone())
+            .collect())
     }
 
     #[cfg(test)]
