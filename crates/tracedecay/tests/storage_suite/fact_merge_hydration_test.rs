@@ -818,7 +818,9 @@ async fn contradictions_are_recorded_explicitly_in_lineage() {
         first.fact_id.clone(),
         owner.clone(),
         FactLineageEventKindV1::Curated {
-            action: FactCurationActionV1::ContradictedBy { fact_id: missing },
+            action: FactCurationActionV1::ContradictedBy {
+                fact_id: missing.clone(),
+            },
             evidence_ids: Vec::new(),
         },
         UtcMicros(4_000),
@@ -845,8 +847,8 @@ async fn contradictions_are_recorded_explicitly_in_lineage() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, FactStoreError::Storage { .. }),
-        "missing curation target should fail as a storage error, got {error:?}"
+        matches!(error, FactStoreError::FactNotFound { ref fact_id } if fact_id == &missing),
+        "missing curation target should fail as typed FactNotFound, got {error:?}"
     );
     assert_eq!(lineage(&store, &owner, &first.fact_id).await.len(), 2);
 }
@@ -893,7 +895,9 @@ async fn failed_fact_batch_rolls_back_identity_assertion_anchor_and_lineage() {
         fact_id.clone(),
         owner.clone(),
         FactLineageEventKindV1::Curated {
-            action: FactCurationActionV1::ContradictedBy { fact_id: missing },
+            action: FactCurationActionV1::ContradictedBy {
+                fact_id: missing.clone(),
+            },
             evidence_ids: Vec::new(),
         },
         UtcMicros(2_000),
@@ -918,8 +922,8 @@ async fn failed_fact_batch_rolls_back_identity_assertion_anchor_and_lineage() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, FactStoreError::Storage { .. }),
-        "missing curation target should fail after staged writes, got {error:?}"
+        matches!(error, FactStoreError::FactNotFound { ref fact_id } if fact_id == &missing),
+        "missing curation target should fail after staged writes as typed FactNotFound, got {error:?}"
     );
     assert!(current(&store, &owner, &fact_id).await.is_none());
     assert!(lineage(&store, &owner, &fact_id).await.is_empty());

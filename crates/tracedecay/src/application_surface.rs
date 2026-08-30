@@ -30,8 +30,8 @@ use tracedecay_application::git::{
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
-    GraphRelationRequest, HealthDeltaRequest, ImplementationsRequest, SignatureSearchRequest,
-    TypeHierarchyRequest,
+    GraphRelationRequest, HealthDeltaRequest, ImplementationsRequest, PrimitiveRequest,
+    SignatureSearchRequest, TypeHierarchyRequest,
 };
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
@@ -77,7 +77,7 @@ use tracedecay_daemon_protocol::{
     InvocationControls, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
-use tracedecay_usecases::feedback::observations::{
+use tracedecay_application::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
     FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
 };
@@ -87,11 +87,10 @@ use tracedecay_usecases::operation_stream::{
 };
 use tracedecay_usecases::primitives::{
     CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
-    FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, PrimitiveRequest,
-    QualifiedNamePrimitiveRequest, SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest,
-    StorageStatusPrimitiveRequest,
+    FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, QualifiedNamePrimitiveRequest,
+    SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest, StorageStatusPrimitiveRequest,
 };
-use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 mod configuration_wire;
 mod handoff;
@@ -2906,7 +2905,7 @@ pub async fn execute_application_surface(
                 tracedecay_daemon_protocol::DaemonInvocationRequest::primitive(
                     request_id.as_str(),
                     operation,
-                    tracedecay_usecases::primitives::PrimitiveRequest::RecentTestResults(
+                    PrimitiveRequest::RecentTestResults(
                         invocation.page,
                     ),
                     observed_at,

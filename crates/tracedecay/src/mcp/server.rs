@@ -29,7 +29,7 @@ use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
-use tracedecay_usecases::request_identity::McpConnectionIdentityAuthority;
+use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
 
 use super::tools::{
     ProjectRegistryReadPort, SessionRefreshServicePort, default_catalog_discovery_authority,
@@ -1408,7 +1408,7 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 }
 
 fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
-    tracedecay_usecases::request_identity::mcp_connection_request_id(id, connection_scope)
+    tracedecay_application::request_identity::mcp_connection_request_id(id, connection_scope)
         .map(|request_id| request_id.as_str().to_owned())
 }
 

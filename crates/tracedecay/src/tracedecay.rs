@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use crate::config::TraceDecayConfig;
+use tracedecay_application::context_scout::ContextScoutAddressV1;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
@@ -71,7 +72,7 @@ struct MountedContextScoutClaimAuthorityV1 {
     pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
     context: tracedecay_application::RequestContext,
     lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-    address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    address: ContextScoutAddressV1,
     input_watermark: [u8; 32],
 }
 
@@ -131,7 +132,7 @@ impl TraceDecay {
         pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
         context: tracedecay_application::RequestContext,
         lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-        address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+        address: ContextScoutAddressV1,
         input_watermark: [u8; 32],
         observed_at: tracedecay_domain::UtcMicros,
     ) -> bool {
@@ -179,7 +180,7 @@ impl TraceDecay {
         lifecycle: &crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<(
-        crate::agents::context_scout_v2::ContextScoutAddressV1,
+        ContextScoutAddressV1,
         [u8; 32],
     )> {
         let mounted = self

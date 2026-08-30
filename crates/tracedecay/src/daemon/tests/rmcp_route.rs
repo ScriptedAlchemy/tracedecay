@@ -549,7 +549,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ControlledCancella
         &self,
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_runtime_core::errors::Result<()>,

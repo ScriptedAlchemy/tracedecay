@@ -52,6 +52,7 @@ pub mod observatory_surface;
 pub mod policy;
 pub mod remote;
 pub mod result;
+pub mod request_identity;
 pub mod retained_surfaces;
 pub mod retrieval;
 pub mod sdk_catalog;
