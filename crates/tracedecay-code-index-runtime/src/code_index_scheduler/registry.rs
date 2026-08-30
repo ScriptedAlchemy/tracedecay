@@ -2897,6 +2897,17 @@ impl CodeIndexSchedulerRegistryV1 {
                         evidence,
                     );
                 }
+                // A retained-generation Noop on an empty serving slot consumed
+                // the mount wake, so the dirty-checkout successor rebuild never
+                // started. Follow-up notify starts that pass.
+                if serving_empty
+                    && matches!(
+                        &source_result,
+                        Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_)))
+                    )
+                {
+                    worker_wake.notify_one();
+                }
                 if let Ok(Ok(outcome)) = &source_result {
                     Self::record_source_reconcile_observation(
                         worker_index_observability.get(),

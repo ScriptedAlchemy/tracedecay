@@ -92,7 +92,6 @@ pub mod serve;
 mod session_ingest_tests;
 pub mod session_temporal_benchmark;
 pub mod tracedecay;
-pub mod types;
 #[doc(hidden)]
 pub mod vector_generation_test_support;
 pub mod version;

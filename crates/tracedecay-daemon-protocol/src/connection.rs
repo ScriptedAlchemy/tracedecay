@@ -145,6 +145,23 @@ pub fn daemon_response_stalled(elapsed: Duration) -> TraceDecayError {
     )
 }
 
+/// [`daemon_response_stalled`] with the in-flight stage and request named, for
+/// deadline runners that know which stage of which request timed out.
+pub fn daemon_response_stalled_during(
+    stage: &'static str,
+    request_label: &str,
+    elapsed: Duration,
+) -> TraceDecayError {
+    TraceDecayError::project_route(
+        DAEMON_RESPONSE_STALLED,
+        true,
+        format!(
+            "daemon did not answer after {}s ({stage} stage of '{request_label}'); stalled or saturated — run `tracedecay daemon status`",
+            elapsed.as_secs()
+        ),
+    )
+}
+
 #[hotpath::measure(label = "daemon_protocol.client.ensure_live", future = true)]
 pub async fn ensure_daemon_connection_live(
     connection: &DaemonConnection,

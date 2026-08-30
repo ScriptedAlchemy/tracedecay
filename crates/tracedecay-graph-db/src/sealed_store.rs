@@ -76,6 +76,7 @@ pub(crate) fn open_direct_sealed_generation(
     generation: crate::GraphGenerationId,
     expected: &GraphRecoveredGenerationDigestV1,
     authority_lease: Arc<dyn tracedecay_store::RetainedGraphStoreLeaseV1>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Option<(crate::GraphDbLeaseV1, GraphGenerationManifestIdentity)>, GraphDbError> {
     if sealed_store_disabled() {
         return Ok(None);
@@ -130,7 +131,7 @@ pub(crate) fn open_direct_sealed_generation(
     let verification = {
         let guard = database.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        verify_sealed_copy_generation(native, &identity, expected, &|| Ok(()))
+        verify_sealed_copy_generation(native, &identity, expected, check)
     };
     if let Err(error) = verification {
         let _ = database.close();

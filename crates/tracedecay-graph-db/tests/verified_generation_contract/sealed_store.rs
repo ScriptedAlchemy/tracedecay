@@ -537,6 +537,153 @@ fn retirement_deletes_the_superseded_sealed_artifact() {
     );
 }
 
+/// A live direct-sealed reader (recovered through
+/// `recover_verified_sealed_snapshot`, which bypasses the staging database's
+/// verified-generation state) must gate retirement of its generation exactly
+/// like an ordinary live snapshot; retirement proceeds once it drops.
+#[test]
+fn retirement_waits_for_a_live_direct_sealed_reader() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:reader-gate", "code");
+    let sealed_generation = CodeGenerationId::new("code-generation.sealed-reader-gate").unwrap();
+    let sealed_digest =
+        SealedGraphStateDigest::try_from(format!("sha256:{}", "9".repeat(64))).unwrap();
+
+    let g1 = rich_manifest(identity.clone(), "gate-g1", "old");
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:gate-g1",
+        None,
+        '7',
+    );
+    let g1_commit = publish(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &g1_record.publication.key,
+    );
+    let g1_head = g1_commit.head.clone();
+    drop(g1_commit);
+    // Rewrite the journal row as a sealed code generation replay so both the
+    // direct-sealed recovery and the production retirement path own it.
+    let sealed_publication = g1
+        .relational_sealed_replay(
+            registered.binding.shard_id.clone(),
+            GraphIdempotencyKey::new("publish:gate-g1").unwrap(),
+            digest('7'),
+            None,
+            SealedCodeGenerationReplay {
+                repository: RepositoryId::new("repository.sealed-reader-gate").unwrap(),
+                generation: sealed_generation.clone(),
+                sealed_state_digest: sealed_digest.clone(),
+                projector_revision: GraphProjectorRevision::try_from(
+                    "projector.sealed-reader-gate".to_owned(),
+                )
+                .unwrap(),
+            },
+            &|| Ok(()),
+        )
+        .unwrap();
+    let rewritten =
+        GraphPublicationReplayRecordV1::new(g1_record.sequence, sealed_publication).unwrap();
+    let rewritten_head =
+        GraphVerifiedHeadV1::from_replay(&rewritten, g1_head.recovered_digest.clone()).unwrap();
+    authority
+        .records
+        .insert(g1_record.publication.key.clone(), rewritten);
+    authority.heads.insert(
+        g1_record.publication.key.projection.clone(),
+        rewritten_head.clone(),
+    );
+
+    // Direct-sealed recovery serves cold starts: the staging shard is closed,
+    // so the sealed artifact is the only open handle on this generation.
+    assert!(
+        registered
+            .registry
+            .close(&registration(registered.binding.clone(), temp.path()))
+            .unwrap(),
+        "the publishing runtime must close before cold direct recovery"
+    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let reader = registered
+        .registry
+        .recover_verified_sealed_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key.projection,
+        )
+        .expect("direct-sealed recovery of the g1 head");
+    assert_eq!(reader.generation(), &g1.generation);
+
+    // The staging runtime comes back while the direct-sealed reader is live —
+    // the successor generation publishes through it.
+    registered.mount().unwrap();
+    let g2 = rich_manifest(identity.clone(), "gate-g2", "new");
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:gate-g2",
+        Some(rewritten_head),
+        '8',
+    );
+    let g2_commit = publish(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &g2_record.publication.key,
+    );
+    drop(g2_commit);
+    assert!(receipt_for_generation(temp.path(), "gate-g1").is_some());
+
+    assert!(
+        matches!(
+            registered
+                .registry
+                .retire_one_code_generation_replay(
+                    registration(registered.binding.clone(), temp.path()),
+                    &mut authority,
+                    &context,
+                    &sealed_generation,
+                    &sealed_digest,
+                )
+                .unwrap(),
+            GraphReplayCollectionOutcome::Retained
+        ),
+        "a live direct-sealed reader must retain its generation"
+    );
+    assert!(
+        receipt_for_generation(temp.path(), "gate-g1").is_some(),
+        "the sealed artifact must survive while the direct-sealed reader lives"
+    );
+
+    drop(reader);
+    assert!(matches!(
+        registered
+            .registry
+            .retire_one_code_generation_replay(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &sealed_generation,
+                &sealed_digest,
+            )
+            .unwrap(),
+        GraphReplayCollectionOutcome::Retired(_)
+    ));
+    assert!(
+        receipt_for_generation(temp.path(), "gate-g1").is_none(),
+        "retirement must delete the artifact once the reader drops"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // At-rest measurement probe (ignored): sealed artifact open vs staging replay
 // ---------------------------------------------------------------------------
