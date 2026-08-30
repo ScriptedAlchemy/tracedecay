@@ -7,6 +7,11 @@
 //! `mcp_handler_test::…`) and `.config/nextest.toml` can keep the original
 //! Windows test-group assignments per module.
 
+// Deeply nested async fixture bodies exceed rustc's default layout query
+// depth under the perf profile; match the workspace-standard limit used by
+// the tracedecay lib and CLI crate roots.
+#![recursion_limit = "256"]
+
 #[path = "../common/mod.rs"]
 mod common;
 
