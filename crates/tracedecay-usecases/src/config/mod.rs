@@ -33,7 +33,7 @@ use tracedecay_domain::configuration::{
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::StoreLayout;
 
 #[derive(Debug, Clone, PartialEq)]

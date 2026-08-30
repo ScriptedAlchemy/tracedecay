@@ -20,7 +20,7 @@ async fn is_fresh_install() -> bool {
 }
 
 /// When invoked with no subcommand, offer to create the index if none exists.
-pub(crate) async fn handle_no_command() -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn handle_no_command() -> tracedecay_domain::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(None);
     if TraceDecay::has_initialized_store(&project_path).await {
         // Already initialized — show help via clap
@@ -50,7 +50,7 @@ pub(crate) async fn handle_no_command() -> tracedecay_runtime_core::errors::Resu
     io::stderr().flush().ok();
     let mut answer = String::new();
     io::stdin().lock().read_line(&mut answer).map_err(|e| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("failed to read stdin: {}", e),
         }
     })?;
@@ -77,13 +77,13 @@ pub(crate) async fn handle_init(
     adopt_project: Option<String>,
     fresh: bool,
     assume_yes: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     if let Some(message) =
         tracedecay_global_db::ephemeral_root_rejection(&project_path, &profile_root)
     {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config { message });
+        return Err(tracedecay_domain::errors::TraceDecayError::Config { message });
     }
     let adoption = moved_store_adoption_request(adopt_project, fresh, assume_yes)?;
     let mut handshake = tracedecay::daemon::handshake_for_current_client(
@@ -119,9 +119,9 @@ fn moved_store_adoption_request(
     adopt_project: Option<String>,
     fresh: bool,
     assume_yes: bool,
-) -> tracedecay_runtime_core::errors::Result<tracedecay::tracedecay::MovedStoreAdoption> {
+) -> tracedecay_domain::errors::Result<tracedecay::tracedecay::MovedStoreAdoption> {
     if fresh && adopt_project.is_some() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "--fresh mints a new project identity and contradicts --adopt-project; \
                       pass exactly one"
                 .to_owned(),
@@ -142,11 +142,11 @@ fn moved_store_adoption_request(
 /// names the exact command for this project instead of leaving the raw
 /// refusal as the last word.
 fn annotate_reset_required_init_error(
-    error: tracedecay_runtime_core::errors::TraceDecayError,
+    error: tracedecay_domain::errors::TraceDecayError,
     project_path: &Path,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
+) -> tracedecay_domain::errors::TraceDecayError {
     let is_reset_required = match &error {
-        tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { .. } => true,
+        tracedecay_domain::errors::TraceDecayError::ResetRequired { .. } => true,
         // Daemon-brokered opens serialize the typed state over JSON-RPC; the
         // schema-shape refusal text is the stable marker that survives it.
         other => other.to_string().contains("shape this binary creates"),
@@ -154,7 +154,7 @@ fn annotate_reset_required_init_error(
     if !is_reset_required {
         return error;
     }
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: format!(
             "{error}\n\nthis store cannot be opened until it is reset; run:\n  \
              tracedecay storage reset-project-store --project-root {} --yes\n\
@@ -172,12 +172,12 @@ async fn handle_init_with_daemon_availability(
     include_folders: Vec<String>,
     handshake: tracedecay_daemon_protocol::DaemonHandshake,
     daemon_available: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if daemon_available {
         return brokered_init(&project_path, &skip_folders, &include_folders, &handshake).await;
     }
     Err(
-        tracedecay_runtime_core::errors::TraceDecayError::project_route(
+        tracedecay_domain::errors::TraceDecayError::project_route(
             "code_index_scheduler_unavailable",
             true,
             "project initialization requires the daemon-owned code-index scheduler; start the daemon and retry",
@@ -190,9 +190,9 @@ async fn brokered_init(
     skip_folders: &[String],
     include_folders: &[String],
     handshake: &tracedecay_daemon_protocol::DaemonHandshake,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if !skip_folders.is_empty() || !include_folders.is_empty() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first".to_string(),
         });
     }
@@ -241,7 +241,7 @@ async fn brokered_init(
 
 async fn code_index_reconciliation_is_optional(
     project_path: &Path,
-    error: &tracedecay_runtime_core::errors::TraceDecayError,
+    error: &tracedecay_domain::errors::TraceDecayError,
 ) -> bool {
     if !error
         .to_string()
@@ -467,11 +467,11 @@ mod init_bootstrap_tests {
             .status()
             .unwrap();
         assert!(initialized.success());
-        let unavailable = tracedecay_runtime_core::errors::TraceDecayError::Config {
+        let unavailable = tracedecay_domain::errors::TraceDecayError::Config {
             message: "daemon tool call failed: code_index_scheduler_unavailable: admin sync was not accepted"
                 .to_string(),
         };
-        let unrelated = tracedecay_runtime_core::errors::TraceDecayError::Config {
+        let unrelated = tracedecay_domain::errors::TraceDecayError::Config {
             message: "daemon tool call failed: storage unavailable".to_string(),
         };
 
@@ -490,9 +490,9 @@ pub(crate) async fn handle_sync(
     include_folders: Vec<String>,
     doctor: bool,
     verbose: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if !skip_folders.is_empty() || !include_folders.is_empty() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first".to_string(),
         });
     }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::store_runtime::{
     VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,
 };
@@ -166,7 +166,7 @@ impl RegisteredWorkProductServicesV1 {
     pub fn attach(
         db: &RegisteredGlobalDb,
         binding: tracedecay_application::WorkProductBindingV1,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let storage = db.work_storage()?;
         Ok(Self {
             reads: tracedecay_application::WorkProductReadServiceV1::new(
@@ -236,7 +236,7 @@ impl RegisteredWorkProductServicesV1 {
 }
 
 impl RegisteredWorkApplicationServicesV1 {
-    pub fn attach(db: &RegisteredGlobalDb) -> tracedecay_runtime_core::errors::Result<Self> {
+    pub fn attach(db: &RegisteredGlobalDb) -> tracedecay_domain::errors::Result<Self> {
         let storage = db.work_storage()?;
         let runtime = db.project_graph_runtime().cloned().ok_or_else(|| {
             attach_error(
@@ -343,7 +343,7 @@ pub struct RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredWorkflowApplicationServicesV1 {
-    pub fn attach(db: &RegisteredGlobalDb) -> tracedecay_runtime_core::errors::Result<Self> {
+    pub fn attach(db: &RegisteredGlobalDb) -> tracedecay_domain::errors::Result<Self> {
         let authority = db.workflow_storage()?;
         let runtime = db.project_graph_runtime().cloned().ok_or_else(|| {
             attach_error(
@@ -393,7 +393,7 @@ impl RegisteredWorkflowApplicationServicesV1 {
 pub fn work_intelligence_service(
     db: &RegisteredGlobalDb,
     binding: tracedecay_application::WorkProductBindingV1,
-) -> tracedecay_runtime_core::errors::Result<
+) -> tracedecay_domain::errors::Result<
     tracedecay_application::WorkIntelligenceServiceV1<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,

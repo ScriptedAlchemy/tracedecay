@@ -27,11 +27,11 @@ trait RegisteredSessionTestExt {
     async fn append_analytics_event(
         &self,
         event: &AnalyticsEventInsert,
-    ) -> tracedecay_runtime_core::errors::Result<i64>;
+    ) -> tracedecay_domain::errors::Result<i64>;
     async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>>;
+    ) -> tracedecay_domain::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>>;
     async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord>;
     async fn get_session_message(
         &self,
@@ -73,12 +73,12 @@ trait RegisteredSessionTestExt {
         &self,
         observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
-    ) -> tracedecay_runtime_core::errors::Result<i64>;
-    async fn session_message_count(&self) -> tracedecay_runtime_core::errors::Result<i64>;
+    ) -> tracedecay_domain::errors::Result<i64>;
+    async fn session_message_count(&self) -> tracedecay_domain::errors::Result<i64>;
     async fn session_message_count_for_project(
         &self,
         project_key: &str,
-    ) -> tracedecay_runtime_core::errors::Result<i64>;
+    ) -> tracedecay_domain::errors::Result<i64>;
     async fn set_parse_offset(&self, path: &str, offset: tracedecay_global_db::ParseOffset);
     async fn session_ingest_health(&self) -> tracedecay_global_db::SessionIngestHealth;
     async fn session_ingest_health_for_provider(
@@ -91,14 +91,14 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
     async fn append_analytics_event(
         &self,
         event: &AnalyticsEventInsert,
-    ) -> tracedecay_runtime_core::errors::Result<i64> {
+    ) -> tracedecay_domain::errors::Result<i64> {
         self.append_profile_analytics_event_for_test(event).await
     }
 
     async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>>
+    ) -> tracedecay_domain::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>>
     {
         self.query_profile_analytics_events_for_test(query).await
     }
@@ -204,12 +204,12 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
         &self,
         observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
-    ) -> tracedecay_runtime_core::errors::Result<i64> {
+    ) -> tracedecay_domain::errors::Result<i64> {
         self.record_session_span_for_test(HostAdmissionScope::Profile, observation, merge_gap_secs)
             .await
     }
 
-    async fn session_message_count(&self) -> tracedecay_runtime_core::errors::Result<i64> {
+    async fn session_message_count(&self) -> tracedecay_domain::errors::Result<i64> {
         self.session_message_count_for_test(HostAdmissionScope::Profile, None)
             .await
     }
@@ -217,7 +217,7 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
     async fn session_message_count_for_project(
         &self,
         project_key: &str,
-    ) -> tracedecay_runtime_core::errors::Result<i64> {
+    ) -> tracedecay_domain::errors::Result<i64> {
         self.session_message_count_for_test(HostAdmissionScope::Profile, Some(project_key))
             .await
     }

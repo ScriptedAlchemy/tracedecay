@@ -1,5 +1,5 @@
 use std::path::Path;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::super::{StoreAdministration, remote_recovery_lifecycle};
 

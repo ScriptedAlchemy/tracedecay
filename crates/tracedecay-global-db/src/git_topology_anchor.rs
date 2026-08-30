@@ -170,7 +170,7 @@ fn binding_matches_owner(database: &RegisteredGlobalDb, owner: &ObservationScope
 }
 
 fn map_database_error(
-    error: tracedecay_runtime_core::errors::TraceDecayError,
+    error: tracedecay_domain::errors::TraceDecayError,
 ) -> GitTopologyAnchorAuthorityErrorV2 {
     if error.reset_required_context().is_some() {
         GitTopologyAnchorAuthorityErrorV2::ResetRequired

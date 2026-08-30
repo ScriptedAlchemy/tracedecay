@@ -1,5 +1,5 @@
 use crate::db::engine::Executor;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(super) const EVIDENCE_ASSEMBLY_SCHEMA: &str = r"
     CREATE TABLE IF NOT EXISTS evidence_source_occurrences (

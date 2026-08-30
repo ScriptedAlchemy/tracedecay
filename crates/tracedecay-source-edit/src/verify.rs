@@ -2,7 +2,7 @@ use tracedecay_application::{
     SourceEditDiagnosticV1, SourceEditVerificationStateV1, SourceEditVerificationV1,
 };
 
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 #[hotpath::measure(label = "usecases.edit.verify.file", future = true)]

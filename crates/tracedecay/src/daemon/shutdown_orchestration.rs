@@ -17,7 +17,7 @@ use super::{
     DaemonLifecycle, core_lifecycle::DaemonShutdownClaim,
 };
 use tracedecay_code_index_runtime::SemanticEvaluationShutdownReceiptV1;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Map a collected semantic-evaluation receipt onto the daemon shutdown
 /// status vocabulary. Project-runtime drain still uses `is_clean` for the
@@ -529,7 +529,7 @@ mod tests {
 
     use super::*;
     use crate::daemon::DAEMON_SHUTDOWN_DEADLINE;
-    use tracedecay_runtime_core::errors::TraceDecayError;
+    use tracedecay_domain::errors::TraceDecayError;
 
     /// A phase that never finishes used to spend the whole global deadline,
     /// so the phases behind it never ran: the project-server drain reported an

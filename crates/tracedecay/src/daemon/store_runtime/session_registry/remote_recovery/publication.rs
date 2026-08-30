@@ -66,7 +66,7 @@ impl RemoteRecoveryPublicationContextV1 {
         project_id: &ProjectId,
         mut replacement: ProjectSessionReplacementReservationV1,
         operation: &'static str,
-        error: tracedecay_runtime_core::errors::TraceDecayError,
+        error: tracedecay_domain::errors::TraceDecayError,
     ) -> Result<T> {
         // A recovered candidate has never been published to Ready. Its prior
         // exact close proof remains the only authority for another physical

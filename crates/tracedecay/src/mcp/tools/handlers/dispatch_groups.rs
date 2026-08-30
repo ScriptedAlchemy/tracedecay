@@ -8,7 +8,7 @@ use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_to
 use crate::tracedecay::TraceDecay;
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use tracedecay_mcp::ToolResult;
 

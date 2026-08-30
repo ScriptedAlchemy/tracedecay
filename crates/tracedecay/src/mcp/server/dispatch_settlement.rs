@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const SETTLEMENT_NOT_STARTED: u8 = 0;
 const SETTLEMENT_SETTLING: u8 = 1;
@@ -726,7 +726,7 @@ mod tests {
                 .run_retained(&runner_registry, async move {
                     started.notify_one();
                     release.notified().await;
-                    Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>("not committed")
+                    Ok::<_, tracedecay_domain::errors::TraceDecayError>("not committed")
                 })
                 .await
         });
@@ -773,7 +773,7 @@ mod tests {
                 .run_retained(&runner_registry, async move {
                     started.notify_one();
                     release.notified().await;
-                    Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>("committed")
+                    Ok::<_, tracedecay_domain::errors::TraceDecayError>("committed")
                 })
                 .await
         });
@@ -819,7 +819,7 @@ mod tests {
                 .run_retained(&runner_registry, async move {
                     started.notify_one();
                     release.notified().await;
-                    Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>(
+                    Ok::<_, tracedecay_domain::errors::TraceDecayError>(
                         "effect state is the daemon's to say",
                     )
                 })

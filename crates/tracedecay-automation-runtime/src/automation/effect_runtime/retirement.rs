@@ -18,7 +18,7 @@ use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

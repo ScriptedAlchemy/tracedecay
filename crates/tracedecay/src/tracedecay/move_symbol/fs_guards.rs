@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Reject a destination whose existing file or nearest existing parent
 /// resolves outside the canonical project root. This covers both a symlinked

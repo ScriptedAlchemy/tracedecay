@@ -9,6 +9,7 @@ use std::future::Future;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::canonical_text::{CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     AnchorOwnerBindingV1, FactOwnerV1, ProjectionGenerationId, RetrievalAnchorId,
     RetrievalAnchorRecordV2, RetrievalAnchorRecordV3, UtcMicros,
@@ -25,6 +26,15 @@ pub enum RetrievalAnchorStoreError {
 }
 
 pub type RetrievalAnchorStoreResult<T> = Result<T, RetrievalAnchorStoreError>;
+
+impl From<RetrievalAnchorStoreError> for TraceDecayError {
+    fn from(error: RetrievalAnchorStoreError) -> Self {
+        Self::Database {
+            message: error.to_string(),
+            operation: "retrieval anchor authority".to_owned(),
+        }
+    }
+}
 
 /// Exact physical owner encoding for both byte-compatible V2 anchors and V3
 /// profile/privacy-bound anchors. Untagged serialization preserves the

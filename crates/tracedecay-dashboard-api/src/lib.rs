@@ -162,7 +162,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadConnection, DatabaseStorageTelemetryHandle,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{StorageMode, StoreLayout};
 
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server

@@ -47,7 +47,7 @@ use tracedecay_application::{
 use tracedecay_domain::{EnrollmentGrantV1, ProjectId};
 
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const MAX_HTTP_APPLICATION_PROJECT_ROUTERS: usize = 8;
 const MAX_HTTP_APPLICATION_COLD_RESOLUTIONS: usize = 8;

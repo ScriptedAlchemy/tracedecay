@@ -40,7 +40,7 @@ impl McpServer {
         &self,
         event: &hook_events::HookEvent,
         route_cache: &mut HookProjectRouteCache,
-    ) -> tracedecay_runtime_core::errors::Result<crate::mcp::project_route::ResolvedProjectRoute>
+    ) -> tracedecay_domain::errors::Result<crate::mcp::project_route::ResolvedProjectRoute>
     {
         let route = match HookProjectRouteCache::route_cwd(event) {
             Some(cwd) => {
@@ -71,7 +71,7 @@ impl McpServer {
         route_cache.observe_workspace_route(event, route);
         self.hook_project_routes.store(route_cache)?;
         resolved.ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+            tracedecay_domain::errors::TraceDecayError::project_route(
                 "project_route_unavailable",
                 true,
                 "hook route was not retained under its structural identity",

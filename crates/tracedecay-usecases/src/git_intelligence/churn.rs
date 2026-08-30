@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Returns a map of `file_path` → `commit_count` for the last `days` days.
 /// Shells out to `git log --format= --name-only --since='{days} days ago'`.

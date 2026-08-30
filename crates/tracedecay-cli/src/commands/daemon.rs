@@ -10,7 +10,7 @@ pub(crate) fn env_duration_ms(
     name: &str,
     default: Duration,
     max: Duration,
-) -> tracedecay_runtime_core::errors::Result<Duration> {
+) -> tracedecay_domain::errors::Result<Duration> {
     let deadline = std::env::var(name)
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -18,7 +18,7 @@ pub(crate) fn env_duration_ms(
         .map(Duration::from_millis)
         .unwrap_or(default);
     if deadline > max {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("{name} exceeds the supported monotonic deadline range"),
         });
     }
@@ -31,7 +31,7 @@ pub(crate) fn env_duration_ms(
 #[hotpath::measure(label = "cli.daemon.handshake")]
 fn client_handshake(
     project_path: Option<&std::path::Path>,
-) -> tracedecay_runtime_core::errors::Result<tracedecay_daemon_protocol::DaemonHandshake> {
+) -> tracedecay_domain::errors::Result<tracedecay_daemon_protocol::DaemonHandshake> {
     tracedecay::daemon::handshake_for_current_client(
         project_path.map(std::path::Path::to_path_buf),
         None,
@@ -46,7 +46,7 @@ pub(crate) async fn daemon_tool_json(
     project_path: Option<&std::path::Path>,
     tool_name: &str,
     arguments: serde_json::Value,
-) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
+) -> tracedecay_domain::errors::Result<serde_json::Value> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.daemon.tool").set(&tool_name);
     let handshake = client_handshake(project_path)?;
@@ -68,7 +68,7 @@ pub(crate) async fn daemon_tool_json_until(
     project_path: Option<&std::path::Path>,
     tool_name: &str,
     arguments: serde_json::Value,
-) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
+) -> tracedecay_domain::errors::Result<serde_json::Value> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.daemon.tool").set(&tool_name);
     let handshake = client_handshake(project_path)?;
@@ -90,7 +90,7 @@ async fn recover_truncated_payload(
     tool_name: &str,
     result: serde_json::Value,
     deadline: Option<Instant>,
-) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
+) -> tracedecay_domain::errors::Result<serde_json::Value> {
     let payload = tracedecay::daemon::tool_json_payload(&result, tool_name)?;
     if payload
         .get("truncated")
@@ -103,7 +103,7 @@ async fn recover_truncated_payload(
         .get("handle")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(
-            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+            || tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "daemon tool {tool_name} returned truncated JSON without a retrieval handle"
                 ),
@@ -136,7 +136,7 @@ async fn recover_truncated_payload(
         .get("content")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(
-            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+            || tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("daemon retrieval for {tool_name} omitted response content"),
             },
         )?;
@@ -152,7 +152,7 @@ pub(crate) async fn recover_truncated_mcp_result(
     tool_name: &str,
     result: serde_json::Value,
     deadline: Option<Instant>,
-) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
+) -> tracedecay_domain::errors::Result<serde_json::Value> {
     let Ok(payload) = tracedecay::daemon::tool_json_payload(&result, tool_name) else {
         return Ok(result);
     };
@@ -171,7 +171,7 @@ pub(crate) async fn recover_truncated_mcp_result(
         .get_mut("content")
         .and_then(serde_json::Value::as_array_mut)
         .ok_or_else(
-            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+            || tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("daemon tool {tool_name} returned no content blocks"),
             },
         )?;
@@ -190,7 +190,7 @@ pub(crate) async fn recover_truncated_mcp_result(
         }
     }
     if !replaced {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("daemon tool {tool_name} omitted its truncation payload"),
         });
     }
@@ -209,7 +209,7 @@ pub(crate) fn is_truncation_envelope(value: &Value) -> bool {
 pub(crate) fn reject_truncation_envelope(
     value: &Value,
     tool_name: &str,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if !is_truncation_envelope(value) {
         return Ok(());
     }
@@ -226,5 +226,5 @@ pub(crate) fn reject_truncation_envelope(
         ),
         _ => format!("daemon tool {tool_name} returned truncated JSON"),
     };
-    Err(tracedecay_runtime_core::errors::TraceDecayError::Config { message })
+    Err(tracedecay_domain::errors::TraceDecayError::Config { message })
 }

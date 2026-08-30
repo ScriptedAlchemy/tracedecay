@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use crate::db::engine::QueryExecutor;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SchemaObject {

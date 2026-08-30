@@ -15,7 +15,7 @@ use tracedecay_tool_catalog::OperationId;
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, invocation_now_micros};
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::tool_call_support::json_result;
 
@@ -230,7 +230,7 @@ mod tests {
             _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
         ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
-            tracedecay_runtime_core::errors::Result<()>,
+            tracedecay_domain::errors::Result<()>,
         > {
             Box::pin(async { Ok(()) })
         }

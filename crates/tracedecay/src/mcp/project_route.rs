@@ -25,9 +25,9 @@ pub(crate) struct ResolvedProjectRoute {
 impl ResolvedProjectRoute {
     pub(crate) fn retained_server(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Arc<crate::mcp::server::McpServer>> {
+    ) -> tracedecay_domain::errors::Result<Arc<crate::mcp::server::McpServer>> {
         self.server.upgrade().ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+            tracedecay_domain::errors::TraceDecayError::project_route(
                 "project_route_unavailable",
                 true,
                 format!(
@@ -58,10 +58,10 @@ pub(crate) async fn resolve_registered_project_route(
     requested_path: &Path,
     global_db: &tracedecay_global_db::RegisteredGlobalDb,
     resolver: Option<crate::mcp::server::RetainedProjectServerResolver>,
-) -> tracedecay_runtime_core::errors::Result<ResolvedProjectRoute> {
+) -> tracedecay_domain::errors::Result<ResolvedProjectRoute> {
     let Some(resolver) = resolver else {
         return Err(
-            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+            tracedecay_domain::errors::TraceDecayError::project_route(
                 "project_route_unavailable",
                 true,
                 "registered project server resolver is unavailable",
@@ -74,7 +74,7 @@ pub(crate) async fn resolve_registered_project_route(
         requested_path.clone(),
     );
     let server = resolver.resolve(request).await?.ok_or_else(|| {
-        tracedecay_runtime_core::errors::TraceDecayError::project_route(
+        tracedecay_domain::errors::TraceDecayError::project_route(
             "project_route_unavailable",
             true,
             format!(
@@ -125,8 +125,8 @@ pub(crate) struct ProjectRouteFailure {
 }
 
 impl ProjectRouteFailure {
-    pub(crate) fn into_error(self) -> tracedecay_runtime_core::errors::TraceDecayError {
-        tracedecay_runtime_core::errors::TraceDecayError::project_route(
+    pub(crate) fn into_error(self) -> tracedecay_domain::errors::TraceDecayError {
+        tracedecay_domain::errors::TraceDecayError::project_route(
             self.kind.reason_code(),
             self.kind.retryable(),
             self.detail,
@@ -134,11 +134,11 @@ impl ProjectRouteFailure {
     }
 
     pub(crate) fn from_selection_error(
-        error: &tracedecay_runtime_core::errors::TraceDecayError,
+        error: &tracedecay_domain::errors::TraceDecayError,
     ) -> Self {
         let detail = error.to_string();
         let kind = match error {
-            tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
+            tracedecay_domain::errors::TraceDecayError::ProjectRoute {
                 reason_code, ..
             } => match reason_code.as_str() {
                 "project_route_not_found" => ProjectRouteFailureKind::NotFound,
@@ -146,17 +146,17 @@ impl ProjectRouteFailure {
                 "project_route_ambiguous" => ProjectRouteFailureKind::Ambiguous,
                 _ => ProjectRouteFailureKind::Unavailable,
             },
-            tracedecay_runtime_core::errors::TraceDecayError::Config { message }
+            tracedecay_domain::errors::TraceDecayError::Config { message }
                 if message.contains("not found for selector") =>
             {
                 ProjectRouteFailureKind::NotFound
             }
-            tracedecay_runtime_core::errors::TraceDecayError::Config { message }
+            tracedecay_domain::errors::TraceDecayError::Config { message }
                 if message.contains("ambiguous") || message.contains("multiple stores") =>
             {
                 ProjectRouteFailureKind::Ambiguous
             }
-            tracedecay_runtime_core::errors::TraceDecayError::Config { message }
+            tracedecay_domain::errors::TraceDecayError::Config { message }
                 if message.contains("registry is unavailable")
                     || message.contains("profile identity") =>
             {
@@ -390,8 +390,8 @@ pub(crate) struct SharedHookProjectRouteCache {
 }
 
 impl SharedHookProjectRouteCache {
-    fn unavailable(operation: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-        tracedecay_runtime_core::errors::TraceDecayError::project_route(
+    fn unavailable(operation: &str) -> tracedecay_domain::errors::TraceDecayError {
+        tracedecay_domain::errors::TraceDecayError::project_route(
             "project_route_unavailable",
             true,
             format!("project route cache is unavailable during {operation}"),
@@ -400,7 +400,7 @@ impl SharedHookProjectRouteCache {
 
     pub(crate) fn snapshot(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<HookProjectRouteCache> {
+    ) -> tracedecay_domain::errors::Result<HookProjectRouteCache> {
         let state = self
             .inner
             .lock()
@@ -413,7 +413,7 @@ impl SharedHookProjectRouteCache {
     pub(crate) fn store(
         &self,
         cache: &HookProjectRouteCache,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let mut state = self.inner.lock().map_err(|_| Self::unavailable("update"))?;
         state.cache.clone_from(cache);
         state.cache.connection_route = None;
@@ -427,7 +427,7 @@ impl SharedHookProjectRouteCache {
     pub(crate) fn refresh_into(
         &self,
         target: &mut HookProjectRouteCache,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let state = self
             .inner
             .lock()
@@ -446,7 +446,7 @@ impl SharedHookProjectRouteCache {
         &self,
         profile_id: &tracedecay_domain::UserProfileId,
         project_id: &str,
-    ) -> Result<(), tracedecay_runtime_core::errors::TraceDecayError> {
+    ) -> Result<(), tracedecay_domain::errors::TraceDecayError> {
         let mut state = self
             .inner
             .lock()

@@ -6,7 +6,7 @@ use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
     engine::{Row, Value},
 };
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectRegistryContext,

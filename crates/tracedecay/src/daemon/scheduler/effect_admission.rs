@@ -12,7 +12,7 @@ use super::{
 };
 use crate::daemon::automation_effect::AutomationEffectAdmission;
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(super) fn log_scheduler_pre_admission_problem(
     project_path: &Path,

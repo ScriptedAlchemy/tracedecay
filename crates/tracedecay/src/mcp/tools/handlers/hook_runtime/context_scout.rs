@@ -19,7 +19,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };

@@ -5,7 +5,7 @@ use std::net::TcpStream as StdTcpStream;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[cfg(unix)]
 use super::default_socket_path;

@@ -13,7 +13,7 @@ pub use tracedecay_agent_hosts::agents::*;
 
 use std::sync::OnceLock;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 static ADVERTISED_MCP_TOOLS: OnceLock<
     Vec<tracedecay_agent_hosts::ports::mcp_tools::AdvertisedToolV1>,

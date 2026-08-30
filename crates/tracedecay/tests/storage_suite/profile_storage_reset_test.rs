@@ -53,7 +53,7 @@ async fn init_with_maintenance(
     project_root: &Path,
     profile_root: &Path,
     open_options: TraceDecayOpenOptions,
-) -> tracedecay_runtime_core::errors::Result<TraceDecay> {
+) -> tracedecay_domain::errors::Result<TraceDecay> {
     prepare_maintenance_profile(profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         profile_root,
@@ -73,7 +73,7 @@ async fn open_with_maintenance(
     project_root: &Path,
     profile_root: &Path,
     open_options: TraceDecayOpenOptions,
-) -> tracedecay_runtime_core::errors::Result<TraceDecay> {
+) -> tracedecay_domain::errors::Result<TraceDecay> {
     prepare_maintenance_profile(profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         profile_root,
@@ -94,7 +94,7 @@ async fn open_branch_with_maintenance(
     branch_name: &str,
     profile_root: &Path,
     open_options: TraceDecayOpenOptions,
-) -> tracedecay_runtime_core::errors::Result<TraceDecay> {
+) -> tracedecay_domain::errors::Result<TraceDecay> {
     prepare_maintenance_profile(profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         profile_root,
@@ -210,7 +210,7 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
         Ok(_) => panic!("an incompatible profile store must require a reset"),
         Err(error) => error,
     };
-    let tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { authority, reason } =
+    let tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, reason } =
         error
     else {
         panic!("incompatible profile store returned the wrong error: {error}");

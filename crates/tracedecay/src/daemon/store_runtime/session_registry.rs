@@ -34,7 +34,7 @@ use tracedecay_runtime_core::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1,
     DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
 };

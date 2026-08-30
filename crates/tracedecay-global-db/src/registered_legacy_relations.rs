@@ -1,5 +1,5 @@
 use tracedecay_runtime_core::db::engine::QueryExecutor;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 
 const LEGACY_SESSION_RELATION_TABLES: [&str; 5] = [
@@ -13,7 +13,7 @@ const LEGACY_SESSION_RELATION_TABLES: [&str; 5] = [
 pub(crate) async fn reject_legacy_session_relation_shape(
     connection: &impl QueryExecutor,
     binding: &StoreRuntimeBindingV1,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if !matches!(
         &binding.shard_id.scope,
         StoreShardScopeV1::ProjectSessions { .. } | StoreShardScopeV1::ProfileSessions

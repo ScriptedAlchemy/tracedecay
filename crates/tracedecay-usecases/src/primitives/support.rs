@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tracedecay_application::{CancellationContext, Deadline, try_now_micros};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 const SOURCE_SEARCH_CEILING: Duration = Duration::from_secs(10);
 static SOURCE_SEARCH_CAPACITY: LazyLock<Arc<Semaphore>> =

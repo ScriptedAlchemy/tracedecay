@@ -8,7 +8,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use sha2::Digest;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::SOCKET_ENV;
 

@@ -43,7 +43,7 @@ use crate::mcp::McpServer;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;

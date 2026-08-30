@@ -160,7 +160,7 @@ pub(crate) use tracedecay_daemon_protocol::{
 };
 use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).

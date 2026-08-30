@@ -16,8 +16,8 @@ use super::summary::{
     diagnostics_summary_from_parts, durable_analytics_event_row, read_hook_analytics_rows_at,
 };
 
-fn cli_error(message: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+fn cli_error(message: impl std::fmt::Display) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: message.to_string(),
     }
 }
@@ -27,7 +27,7 @@ async fn registered_diagnostics_message_count(
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
     all_projects: bool,
-) -> tracedecay_runtime_core::errors::Result<i64> {
+) -> tracedecay_domain::errors::Result<i64> {
     let mut total = match project_sessions {
         Some(database) => database.session_message_count().await.map_err(cli_error)?,
         None => 0,
@@ -49,7 +49,7 @@ pub async fn analytics_diagnostics_with_db(
     project_root: Option<&Path>,
     all_projects: bool,
     no_sync: bool,
-) -> tracedecay_runtime_core::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
     const EVENT_SAMPLE_LIMIT: usize = 10_000;
 
     let import = if no_sync {

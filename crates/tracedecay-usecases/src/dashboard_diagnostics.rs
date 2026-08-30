@@ -25,7 +25,7 @@ use tracedecay_lsp::analyzer::host_ownership::HostAnalyzerOwnership;
 use tracedecay_lsp::analyzer::settings::{
     CodeDiagnosticsSettings, IdleBackfillMode, save_settings,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::lsp_support::analyzer_runtime_config_error;
 

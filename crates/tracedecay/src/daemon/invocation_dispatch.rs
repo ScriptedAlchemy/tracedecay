@@ -30,7 +30,7 @@ fn semantic_invocation_interruption_response(
 
 fn record_project_open_refusal(
     operation: &str,
-    error: &tracedecay_runtime_core::errors::TraceDecayError,
+    error: &tracedecay_domain::errors::TraceDecayError,
 ) {
     hotpath::gauge!("daemon.invocation.route.project_open_failed_total").inc(1_u64);
     tracing::warn!(
@@ -45,7 +45,7 @@ fn record_project_open_refusal(
 
 fn record_project_route_refusal(
     operation: &str,
-    error: &tracedecay_runtime_core::errors::TraceDecayError,
+    error: &tracedecay_domain::errors::TraceDecayError,
 ) {
     hotpath::gauge!("daemon.invocation.route.project_route_failed_total").inc(1_u64);
     tracing::warn!(
@@ -711,7 +711,7 @@ pub(super) async fn execute_daemon_invocation(
 }
 
 fn project_open_problem(
-    error: &tracedecay_runtime_core::errors::TraceDecayError,
+    error: &tracedecay_domain::errors::TraceDecayError,
     workflow_application: bool,
     git_operation: bool,
 ) -> service::invocation::DaemonInvocationProblem {
@@ -724,7 +724,7 @@ fn project_open_problem(
     // budget was gone, never learning that the only legal action is `reset`.
     if matches!(
         error,
-        tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { authority, .. }
+        tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, .. }
             if workflow_application || authority != "workflow"
     ) {
         service::invocation::DaemonInvocationProblem::ResetRequired
@@ -904,7 +904,7 @@ mod workflow_reset_tests {
 
     #[test]
     fn workflow_project_open_reset_remains_a_daemon_reset_problem() {
-        let error = tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+        let error = tracedecay_domain::errors::TraceDecayError::reset_required(
             "workflow",
             "partial workflow schema",
         );
@@ -934,7 +934,7 @@ mod workflow_reset_tests {
 
     #[test]
     fn failed_project_open_keeps_the_terminal_problem_split() {
-        let failed = tracedecay_runtime_core::errors::TraceDecayError::Config {
+        let failed = tracedecay_domain::errors::TraceDecayError::Config {
             message: "project store rejected".to_owned(),
         };
         assert_eq!(

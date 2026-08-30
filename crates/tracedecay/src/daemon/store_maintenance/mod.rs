@@ -1825,7 +1825,7 @@ enum RetainedCompactionStore<'a> {
 impl RetainedCompactionStore<'_> {
     async fn storage_page_counts(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
+    ) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
         match self {
             Self::Registered(database) => database.storage_page_counts().await,
             Self::Project(database) => database.storage_page_counts().await,
@@ -1835,7 +1835,7 @@ impl RetainedCompactionStore<'_> {
     async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         match self {
             Self::Registered(database) => {
                 database.run_bounded_incremental_compaction(max_pages).await

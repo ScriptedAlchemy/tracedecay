@@ -13,7 +13,7 @@ impl RegisteredGlobalDb {
         &self,
         project_path: &Path,
         tokens_saved: u64,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         crate::hotpath_observe::record_transaction_rows(1);
         let path = super::project_path_alias_key(project_path);
         let transaction = self.begin_write_transaction().await?;
@@ -78,7 +78,7 @@ impl RegisteredGlobalDb {
         before_tokens: u64,
         after_tokens: u64,
         timestamp: i64,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         crate::hotpath_observe::record_transaction_rows(1);
         let project_path = RegisteredGlobalDb::canonical_project_key(Path::new(project_path));
         let transaction = self.begin_write_transaction().await?;

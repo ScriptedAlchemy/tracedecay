@@ -7,7 +7,7 @@ use fs2::FileExt;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, set_owner_private_file_mode};
 
 use crate::config;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[cfg(windows)]
 use super::DURABLE_REMOVAL_TOMBSTONE_PREFIX;

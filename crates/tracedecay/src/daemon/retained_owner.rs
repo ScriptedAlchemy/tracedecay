@@ -12,7 +12,7 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 mod automation;
 mod lcm;

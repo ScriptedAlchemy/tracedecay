@@ -9,7 +9,7 @@ use tracedecay_runtime_core::db::engine::Executor;
 /// deleted, so recovery evidence survives restart.
 pub async fn ensure_git_index_transaction_schema(
     connection: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS git_index_preview_inputs (

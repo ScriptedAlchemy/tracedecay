@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::super::ToolCallRegistryOptions;
 use super::super::{health, redundancy};

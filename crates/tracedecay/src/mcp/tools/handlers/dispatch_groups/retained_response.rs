@@ -4,7 +4,7 @@ use tracedecay_application::{
 };
 
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationProblem};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::{retained_problem_envelope, retained_safe_diagnostic};
 

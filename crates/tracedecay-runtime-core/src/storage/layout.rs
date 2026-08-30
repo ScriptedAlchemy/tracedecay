@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::config;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     EnrollmentMarker, ProjectIdentity, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,

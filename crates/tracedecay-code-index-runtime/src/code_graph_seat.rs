@@ -27,7 +27,7 @@ use tracedecay_graph_db::{
     SealedReadBundleArtifactStateV1, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 use tracedecay_usecases::semantic_runtime::{

@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use serde_json::Value as JsonValue;
 
 use tracedecay_runtime_core::db::engine::Value;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::retrieval_content::{
@@ -405,7 +405,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.activity")]
     pub async fn latest_session_activity_secs(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Option<i64>> {
+    ) -> tracedecay_domain::errors::Result<Option<i64>> {
         const OPERATION: &str = "read latest session activity";
         let mut rows = self
             .read_connection()
@@ -456,7 +456,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<SessionMessageRecord>> {
+    ) -> tracedecay_domain::errors::Result<Option<SessionMessageRecord>> {
         const OPERATION: &str = "read registered session message";
         let snapshot = self.read_snapshot().await?;
         let mut rows = snapshot
@@ -491,7 +491,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
+    ) -> tracedecay_domain::errors::Result<Vec<SessionMessageSearchResult>> {
         const OPERATION: &str = "search registered session messages";
         let fts_query = session_fts_query(query);
         if fts_query.is_empty() || limit == 0 {
@@ -596,7 +596,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         &self,
         project_key: Option<&str>,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
+    ) -> tracedecay_domain::errors::Result<Vec<SessionMessageSearchResult>> {
         const OPERATION: &str = "list recent registered session goals";
         if limit == 0 {
             return Ok(Vec::new());
@@ -734,10 +734,10 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_facts")]
     pub async fn workflow_fact_rows(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<(String, Option<String>, Option<String>)>>
+    ) -> tracedecay_domain::errors::Result<Vec<(String, Option<String>, Option<String>)>>
     {
         let snapshot = self.read_snapshot().await.map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "begin registered workflow fact snapshot".to_owned(),
                 message: error.to_string(),
             }
@@ -751,33 +751,33 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             )
             .await
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "query registered workflow facts".to_owned(),
                     message: error.to_string(),
                 },
             )?;
         let mut values = Vec::new();
         while let Some(row) = rows.next().await.map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "read registered workflow fact row".to_owned(),
                 message: error.to_string(),
             }
         })? {
             values.push((
                 row.get(0).map_err(|error| {
-                    tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    tracedecay_domain::errors::TraceDecayError::Database {
                         operation: "decode registered workflow fact kind".to_owned(),
                         message: error.to_string(),
                     }
                 })?,
                 row.get(1).map_err(|error| {
-                    tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    tracedecay_domain::errors::TraceDecayError::Database {
                         operation: "decode registered workflow fact status".to_owned(),
                         message: error.to_string(),
                     }
                 })?,
                 row.get(2).map_err(|error| {
-                    tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    tracedecay_domain::errors::TraceDecayError::Database {
                         operation: "decode registered workflow fact state".to_owned(),
                         message: error.to_string(),
                     }
@@ -795,7 +795,7 @@ async fn search_workflow_facts(
     project_key: Option<&str>,
     query: &str,
     limit: usize,
-) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
+) -> tracedecay_domain::errors::Result<Vec<SessionMessageSearchResult>> {
     const OPERATION: &str = "search registered workflow facts";
     let terms = query
         .split_whitespace()

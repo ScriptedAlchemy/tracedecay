@@ -2,6 +2,7 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::{
     db::{
         Database, DatabaseAuthority, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
@@ -10,7 +11,6 @@ use tracedecay_runtime_core::{
         DatabaseRuntimeClientV1, DatabaseStorageTelemetryHandle, DatabaseWriteTransaction,
         engine::{Executor, IntoParams, QueryExecutor, Rows},
     },
-    errors::TraceDecayError,
     store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1},
 };
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
@@ -67,7 +67,7 @@ impl RegisteredGlobalDbOwnerV1 {
     #[hotpath::measure(future = true, label = "global_db.registered.admit")]
     pub async fn admit_and_attach(
         database: DatabaseOwnerV1,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_database(temporary);
         super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
@@ -85,10 +85,8 @@ impl RegisteredGlobalDbOwnerV1 {
     #[hotpath::measure(future = true, label = "global_db.registered.admit_daemon")]
     pub async fn admit_and_attach_for_daemon(
         database: DatabaseOwnerV1,
-    ) -> tracedecay_runtime_core::errors::Result<(
-        Self,
-        super::schema_stages::RegisteredSchemaConvergence,
-    )> {
+    ) -> tracedecay_domain::errors::Result<(Self, super::schema_stages::RegisteredSchemaConvergence)>
+    {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_database(temporary);
         let convergence =
@@ -243,15 +241,15 @@ impl RegisteredGlobalDb {
     pub async fn converge_schema(
         &self,
         convergence: super::schema_stages::RegisteredSchemaConvergence,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         super::schema_stages::converge_registered_schema(&self.database, convergence).await
     }
 
-    pub async fn release_connection_memory(&self) -> tracedecay_runtime_core::errors::Result<()> {
+    pub async fn release_connection_memory(&self) -> tracedecay_domain::errors::Result<()> {
         self.database.release_connection_memory().await
     }
 
-    pub(crate) async fn checkpoint_database(&self) -> tracedecay_runtime_core::errors::Result<()> {
+    pub(crate) async fn checkpoint_database(&self) -> tracedecay_domain::errors::Result<()> {
         self.database.checkpoint().await
     }
 
@@ -260,16 +258,13 @@ impl RegisteredGlobalDb {
     /// exclusive maintenance role.
     pub(crate) fn write_authority_role(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_runtime_core::db::DatabaseAuthorityRole>
-    {
+    ) -> tracedecay_domain::errors::Result<tracedecay_runtime_core::db::DatabaseAuthorityRole> {
         Ok(self.database.write_authority()?.role())
     }
 
     /// Truncates the drained WAL file through the runtime's exclusive
     /// maintenance facade.
-    pub(crate) async fn truncate_database_wal(
-        &self,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    pub(crate) async fn truncate_database_wal(&self) -> tracedecay_domain::errors::Result<()> {
         self.database.truncate_wal_for_offline_maintenance().await
     }
 
@@ -370,17 +365,14 @@ impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.registered.txn.snapshot")]
     pub async fn read_snapshot(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<DatabaseEngineReadSnapshot> {
+    ) -> tracedecay_domain::errors::Result<DatabaseEngineReadSnapshot> {
         self.database
             .begin_engine_read_snapshot("open registered database read snapshot")
             .await
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.snapshot_to")]
-    pub async fn snapshot_to(
-        &self,
-        destination: &Path,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    pub async fn snapshot_to(&self, destination: &Path) -> tracedecay_domain::errors::Result<()> {
         self.prepare_snapshot_destination(destination)?;
         self.database.snapshot_to(destination).await
     }
@@ -396,8 +388,7 @@ impl RegisteredGlobalDb {
         &self,
         destination: &Path,
         probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt>
-    {
+    ) -> tracedecay_domain::errors::Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt> {
         self.prepare_snapshot_destination(destination)?;
         self.database
             .snapshot_to_interruptible(destination, probe)
@@ -407,7 +398,7 @@ impl RegisteredGlobalDb {
     fn prepare_snapshot_destination(
         &self,
         destination: &Path,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         if destination == self.database.canonical_database_path() {
             return Err(registered_error(
                 "snapshot registered global database",
@@ -446,7 +437,7 @@ impl RegisteredGlobalDb {
         Ok(())
     }
 
-    async fn rearm_queued_projection_retries(&self) -> tracedecay_runtime_core::errors::Result<()> {
+    async fn rearm_queued_projection_retries(&self) -> tracedecay_domain::errors::Result<()> {
         let transaction = self
             .database
             .begin_write_transaction("rearm queued projection retries")
@@ -471,7 +462,7 @@ impl RegisteredGlobalDb {
     #[doc(hidden)]
     pub async fn validate_registry_schema_contract_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let snapshot = self
             .read_snapshot()
             .await
@@ -481,7 +472,7 @@ impl RegisteredGlobalDb {
 
     pub fn writer_connection(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbWriterConnection<'_>> {
+    ) -> tracedecay_domain::errors::Result<RegisteredGlobalDbWriterConnection<'_>> {
         if !self.database.is_writable() {
             return Err(registered_error(
                 "acquire registered global database writer",
@@ -499,7 +490,7 @@ impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.registered.txn.begin")]
     pub async fn begin_write_transaction(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbWriteTransaction<'_>> {
+    ) -> tracedecay_domain::errors::Result<RegisteredGlobalDbWriteTransaction<'_>> {
         let authority = self.database.write_authority()?;
         authority.require_active_write_scope("begin registered global database transaction")?;
         let transaction = self
@@ -523,14 +514,14 @@ impl RegisteredGlobalDb {
 
     pub fn work_storage(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
+    ) -> tracedecay_domain::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
     {
         self.database.work_storage()
     }
 
     pub fn authorized_scope_set_storage(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
     > {
         self.database.authorized_scope_set_storage()
@@ -540,7 +531,7 @@ impl RegisteredGlobalDb {
     /// exact-SQL handle.
     pub fn workflow_storage(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     > {
         self.database.workflow_storage()
@@ -548,7 +539,7 @@ impl RegisteredGlobalDb {
 
     pub fn handoff_open_storage(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority,
     > {
         self.database.handoff_open_storage()
@@ -556,13 +547,11 @@ impl RegisteredGlobalDb {
 
     pub fn storage_telemetry_handle(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<DatabaseStorageTelemetryHandle> {
+    ) -> tracedecay_domain::errors::Result<DatabaseStorageTelemetryHandle> {
         self.database.storage_telemetry_handle()
     }
 
-    pub async fn storage_page_counts(
-        &self,
-    ) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
+    pub async fn storage_page_counts(&self) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
         self.database.storage_page_counts().await
     }
 
@@ -570,7 +559,7 @@ impl RegisteredGlobalDb {
     pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         self.database.run_incremental_vacuum(max_pages).await
     }
 
@@ -582,7 +571,7 @@ impl RegisteredGlobalDb {
         config: &tracedecay_sessions::runtime::lcm::retention::LcmRetentionConfig,
         mode: tracedecay_sessions::runtime::lcm::retention::RetentionMode,
         now: i64,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         tracedecay_sessions::runtime::lcm::retention::LcmRetentionReport,
     > {
         let storage_root = self.db_path().parent().ok_or_else(|| {
@@ -611,9 +600,8 @@ impl RegisteredGlobalDb {
         config: &super::observation::retention::ObservationRetentionConfig,
         mode: super::observation::retention::RetentionMode,
         now: i64,
-    ) -> tracedecay_runtime_core::errors::Result<
-        super::observation::retention::ObservationRetentionReport,
-    > {
+    ) -> tracedecay_domain::errors::Result<super::observation::retention::ObservationRetentionReport>
+    {
         if matches!(mode, super::observation::retention::RetentionMode::Apply) {
             self.database
                 .write_authority()?

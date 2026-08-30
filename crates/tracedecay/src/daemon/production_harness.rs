@@ -35,7 +35,7 @@ pub fn capture_exact_git_snapshot_for_test(
     repository_id: tracedecay_domain::RepositoryId,
     worktree_id: tracedecay_domain::WorktreeId,
     captured_at: tracedecay_domain::UtcMicros,
-) -> tracedecay_runtime_core::errors::Result<tracedecay_domain::RepositoryStateSnapshotV1> {
+) -> tracedecay_domain::errors::Result<tracedecay_domain::RepositoryStateSnapshotV1> {
     git_transactions::capture_exact_snapshot_for_test(
         repository_root,
         project_id,

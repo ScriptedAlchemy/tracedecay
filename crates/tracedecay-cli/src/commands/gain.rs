@@ -35,7 +35,7 @@ pub async fn handle_gain(
     history: bool,
     range: &str,
     json_output: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     handle_gain_inner(all, history, range, json_output).await
 }
 
@@ -45,17 +45,17 @@ fn handle_gain_inner(
     range: &str,
     json_output: bool,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + '_>,
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
 > {
     // Erase the deeply nested gain-read future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let since = tracedecay_usecases::provider_usage::provider_usage_range_start(range)
             .map_err(
-                |message| tracedecay_runtime_core::errors::TraceDecayError::Config { message },
+                |message| tracedecay_domain::errors::TraceDecayError::Config { message },
             )?;
         let since = i64::try_from(since).map_err(|_| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: "savings range exceeds the supported timestamp domain".to_owned(),
             }
         })?;
@@ -83,7 +83,7 @@ fn handle_gain_inner(
                 .get("history")
                 .and_then(serde_json::Value::as_array)
                 .ok_or_else(
-                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    || tracedecay_domain::errors::TraceDecayError::Config {
                         message: "daemon gain history response is missing history rows".to_owned(),
                     },
                 )?;

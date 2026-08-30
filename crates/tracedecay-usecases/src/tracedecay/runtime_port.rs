@@ -10,7 +10,7 @@ use std::pin::Pin;
 use tracedecay_domain::{ProjectId, UserProfileId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 

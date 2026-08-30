@@ -11,7 +11,7 @@ use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOpera
 use crate::application_surface::normalize_application_tool_args;
 use crate::catalog_composition::{ApplicationCatalogComposition, compose_application_catalog};
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{ToolCallRegistryOptions, application_surface};
 use tracedecay_mcp::ToolResult;
