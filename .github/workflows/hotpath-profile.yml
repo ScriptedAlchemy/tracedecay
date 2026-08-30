@@ -152,10 +152,12 @@ jobs:
           jq -r '"base peak RSS bytes: \(.peak_rss_bytes)"' /tmp/metrics/base_workload.json
 
       - name: Save PR metadata
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           echo '${{ github.event.pull_request.number }}' > /tmp/metrics/pr_number.txt
           echo '${{ github.base_ref }}' > /tmp/metrics/base_ref.txt
-          echo '${{ github.head_ref }}' > /tmp/metrics/head_ref.txt
+          printf '%s\n' "$HEAD_REF" > /tmp/metrics/head_ref.txt
           echo '${{ steps.head_bench.outputs.available }}' > /tmp/metrics/head_bench_available.txt
           echo '${{ steps.base_bench.outputs.available }}' > /tmp/metrics/base_bench_available.txt
 
