@@ -329,11 +329,23 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
             if referenced.contains_key(file_name.as_str()) {
                 None
             } else {
+                // A completed SQLite artifact can never be empty. A zero-byte
+                // file at its final content-addressed path is the only state
+                // left when publication created the destination but failed
+                // before writing any bytes. It contains no recoverable data,
+                // so retain the regular-file/inode/size checks while allowing
+                // retention to collect that publish-crash placeholder. Every
+                // non-empty candidate still requires its full content proof.
+                let candidate_verification = if metadata.len() == 0 {
+                    GenerationDigestVerificationV1::MetadataOnly
+                } else {
+                    verification
+                };
                 verify_unreferenced_completed_text_artifact(
                     &path,
                     digest,
                     metadata.len(),
-                    verification,
+                    candidate_verification,
                     is_cancelled,
                 )?;
                 Some(CodeTextArtifactRetentionCandidateV1 {
@@ -733,11 +745,16 @@ pub(super) fn stage_collectable_text_artifacts_cancellable(
                                     .to_owned(),
                             )
                         })?;
+                    let candidate_verification = if candidate.size_bytes == 0 {
+                        GenerationDigestVerificationV1::MetadataOnly
+                    } else {
+                        GenerationDigestVerificationV1::Full
+                    };
                     verify_unreferenced_completed_text_artifact(
                         &source,
                         digest,
                         candidate.size_bytes,
-                        GenerationDigestVerificationV1::Full,
+                        candidate_verification,
                         is_cancelled,
                     )?;
                 }

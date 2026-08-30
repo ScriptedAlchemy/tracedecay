@@ -521,6 +521,45 @@ fn text_artifact_retention_preserves_references_and_collects_orphans() {
 }
 
 #[test]
+fn text_artifact_retention_collects_empty_publish_crash_placeholder() {
+    let (store, generations) = fixture_store(1);
+    let active = generations.last().expect("active generation");
+    let referenced = attach_fixture_text_artifact(&store, active, b"durably referenced");
+    let artifacts_root = code_text_artifacts_root(store.path());
+    let placeholder_name = format!("text-artifact-{}.bin", "5".repeat(64));
+    let placeholder_path = artifacts_root.join(&placeholder_name);
+    std::fs::write(&placeholder_path, []).expect("write interrupted publish placeholder");
+
+    let plan = plan_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("an empty daemon-owned publish placeholder is collectable crash debris");
+    assert_eq!(plan.collectable_text_artifacts.len(), 1);
+    assert_eq!(
+        plan.collectable_text_artifacts[0].artifact_file,
+        placeholder_name
+    );
+    assert_eq!(plan.collectable_text_artifacts[0].size_bytes, 0);
+
+    let report = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(11),
+        None,
+    )
+    .expect("collect interrupted publish placeholder");
+    assert_eq!(report.deleted_text_artifacts.len(), 1);
+    assert!(!placeholder_path.exists());
+    assert!(
+        artifacts_root.join(referenced.artifact_file).is_file(),
+        "the exact referenced artifact must survive placeholder recovery"
+    );
+}
+
+#[test]
 fn text_artifact_retention_collects_staging_database_sidecars_with_their_owner() {
     let (store, _generations) = fixture_store(1);
     let artifacts_root = code_text_artifacts_root(store.path());

@@ -82,13 +82,23 @@ before assuming the compacted summary is complete.
 ## Freshness is explicit
 
 Recall never performs catch-up. If a read returns `refresh_required`, get clear
-host or user lifecycle intent before invoking `tracedecay_session_refresh`
-(`action`: `start` / `join` / `resume` / `begin` for the same idempotent
-begin-or-join, then `status` or `cancel` with the returned handle). The CLI
-equivalents are `tracedecay sessions refresh begin`, `status`, and `cancel`,
-using the same selectors and returned handle. Use the authoritative
-selectors provided by the host/runtime; do not reconstruct refresh identity
-from chat text or a filesystem path.
+host or user lifecycle intent before starting refresh. Preserve the exact scope
+returned by the read:
+
+- For a project-scoped read with authoritative project identity, call
+  `tracedecay_session_refresh_begin`, preserve its opaque handle, inspect it
+  with the read-only `tracedecay_session_refresh_status`, and call
+  `tracedecay_session_refresh_cancel` only on an explicit cancellation request.
+- For an authorized profile-root read, use the compatibility
+  `tracedecay_session_refresh` lifecycle (`action`: `start` / `join` / `resume`
+  / `begin`, then `status` or `cancel`) with the same profile selectors. The
+  split tools require project identity and must not redirect a profile refresh
+  through whichever project happens to be active.
+
+Only a receipt-backed success proves durable cancellation. The
+`tracedecay sessions refresh begin|status|cancel` CLI follows the same
+scope-preserving rule. Never reconstruct refresh identity from chat text or a
+filesystem path.
 
 ## LCM status and diagnosis
 
@@ -108,8 +118,11 @@ chat content.
 
 ## Guardrails
 
-- Every callable LCM tool in this workflow is read-only. Grep/status may touch
-  access counters, but no tool here compacts, repairs, cleans, or applies state.
+- Recall and inspection tools in this workflow, including refresh status, are
+  read-only; grep/status may touch access counters. Refresh begin and cancel
+  are lifecycle mutations, require clear intent, and cancellation is proven
+  only by receipt-backed success. Neither path compacts, repairs, cleans, or
+  applies maintenance state.
 - When a read supports `provider`, use an exact provider for provider-local
   evidence or `all` only where its schema permits aggregation.
 - For multi-step recall, dispatch scoped read-only subagents by session id, time
@@ -125,7 +138,7 @@ chat content.
 ## If tools are deferred or MCP fails
 
 - Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_describe,tracedecay_lcm_expand,tracedecay_lcm_expand_query,tracedecay_lcm_status,tracedecay_sessions_for,tracedecay_workflows,tracedecay_session_refresh,tracedecay_project_search,tracedecay_project_context`
+  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_describe,tracedecay_lcm_expand,tracedecay_lcm_expand_query,tracedecay_lcm_status,tracedecay_sessions_for,tracedecay_workflows,tracedecay_session_refresh,tracedecay_session_refresh_begin,tracedecay_session_refresh_status,tracedecay_session_refresh_cancel,tracedecay_project_search,tracedecay_project_context`
   (one batched call, add only the rungs needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
   `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
