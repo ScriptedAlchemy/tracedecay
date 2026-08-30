@@ -1627,7 +1627,7 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
     drop(resumed);
 
     let mut expected_indexes = 0i64;
-    for expected_position in 0..=7u64 {
+    for expected_position in 0..=8u64 {
         let mut resumed =
             CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
                 &artifact_path,
@@ -1647,16 +1647,39 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
                 ("indexes".to_owned(), 0),
                 "the vocabulary step alone transitions to index construction"
             );
-        } else {
-            expected_indexes += 1;
-            let expected_state = if expected_position == 7 {
-                ("digest".to_owned(), 0)
-            } else {
-                ("indexes".to_owned(), expected_position)
-            };
+        } else if expected_position == 8 {
             assert_eq!(
                 persisted_finalization_position(&artifact_path),
-                expected_state
+                ("digest".to_owned(), 0),
+                "the ngram-statistics step alone transitions to digest verification"
+            );
+            let connection = rusqlite::Connection::open(&artifact_path)
+                .expect("inspect derived ngram statistics");
+            let ngram_statistics: i64 = connection
+                .query_row("SELECT COUNT(*) FROM ngram_statistics", [], |row| {
+                    row.get(0)
+                })
+                .expect("count derived ngram statistics");
+            assert!(
+                ngram_statistics > 0,
+                "the final index-phase wake derives ngram statistics from committed postings"
+            );
+            let indexes: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count committed serving indexes");
+            assert_eq!(
+                indexes, expected_indexes,
+                "the ngram-statistics wake adds no serving index"
+            );
+        } else {
+            expected_indexes += 1;
+            assert_eq!(
+                persisted_finalization_position(&artifact_path),
+                ("indexes".to_owned(), expected_position)
             );
             let connection =
                 rusqlite::Connection::open(&artifact_path).expect("inspect serving indexes");
@@ -2499,11 +2522,11 @@ fn disk_artifact_resume_rejects_current_revision_with_wrong_term_index_shape() {
             .expect("freeze current artifact"),
         CodeLexicalArtifactFinalizationStepV1::Pending { .. }
     ));
-    for _ in 0..10 {
+    for _ in 0..11 {
         assert!(matches!(
             builder
                 .advance_finalization(&source_receipt, 4_096, &control)
-                .expect("advance one statistics or serving-index step"),
+                .expect("advance one bounded pre-digest step"),
             CodeLexicalArtifactFinalizationStepV1::Pending { .. }
         ));
     }

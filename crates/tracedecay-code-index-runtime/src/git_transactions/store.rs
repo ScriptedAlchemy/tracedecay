@@ -456,9 +456,9 @@ fn run_store_actor(
         } else if let Some(expires_at) = next_expiry {
             let observed_at = match current_utc_micros() {
                 Ok(observed_at) => observed_at,
-                Err(_) => match receiver.recv() {
+                Err(clock_error) => match receiver.recv() {
                     Ok(command) => {
-                        reject_store_command(command);
+                        reject_store_command(command, clock_error);
                         continue;
                     }
                     Err(_) => break,
@@ -482,9 +482,9 @@ fn run_store_actor(
 
         let observed_at = match current_utc_micros() {
             Ok(observed_at) => observed_at,
-            Err(_) => {
+            Err(clock_error) => {
                 if let Some(command) = command {
-                    reject_store_command(command);
+                    reject_store_command(command, clock_error);
                 }
                 continue;
             }
@@ -504,7 +504,16 @@ fn run_store_actor(
                 Err(error) => {
                     tracing::warn!(%error, "git index preview input GC failed");
                     if let Some(command) = command {
-                        reject_store_command(command);
+                        let cause = match &error {
+                            GitIndexTransactionStoreError::Unavailable(reason) => reason.clone(),
+                            other => other.to_string(),
+                        };
+                        reject_store_command(
+                            command,
+                            GitIndexTransactionStoreError::unavailable(format!(
+                                "expired preview-input purge failed before this command: {cause}"
+                            )),
+                        );
                     }
                     continue;
                 }
@@ -611,39 +620,40 @@ fn duration_until(expires_at: UtcMicros, observed_at: UtcMicros) -> Duration {
     Duration::from_micros(expires_at.0.saturating_sub(observed_at.0).unsigned_abs())
 }
 
-fn reject_store_command(command: StoreCommand) {
-    let error =
-        || GitIndexTransactionStoreError::unavailable("git index store actor rejected the command");
+/// Reject a queued command with the typed cause that prevented executing it,
+/// so callers observe the real failure (for example a failed due purge)
+/// instead of a fabricated generic rejection.
+fn reject_store_command(command: StoreCommand, error: GitIndexTransactionStoreError) {
     match command {
         StoreCommand::SavePreviewInput(_, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
         StoreCommand::ReadPreviewInput(_, _, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
         StoreCommand::PurgeExpiredPreviewInputs(_, _, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
         StoreCommand::SavePreview(_, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
         StoreCommand::ReadCode(_, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
         StoreCommand::BeginOrReplay(_, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
         StoreCommand::CompareAndSwapJournal(_, _, _, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
         StoreCommand::WriteTerminal(_, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
         StoreCommand::QuarantineRepository(_, _, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
         StoreCommand::ClearRepositoryQuarantine(_, _, _, reply) => {
-            let _ = reply.send(Err(error()));
+            let _ = reply.send(Err(error));
         }
     }
 }
