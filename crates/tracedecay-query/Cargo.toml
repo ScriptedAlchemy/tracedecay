@@ -74,6 +74,7 @@ test-helpers = ["tracedecay-temporal-query/test-helpers"]
 production = ["tracedecay-code-index/lite", "tracedecay-code-index/full"]
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 static_assertions = "1.1.0"
 tempfile = "3"
 # Test-only: the relocated search-quality suites build lexical/exact fixtures
@@ -85,6 +86,10 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", feat
 
 [[bench]]
 name = "code_lexical_catchup"
+harness = false
+
+[[bench]]
+name = "semantic_flat_scan"
 harness = false
 
 # Daemon-free indexing workload profiled by `.github/workflows/hotpath-profile.yml`.

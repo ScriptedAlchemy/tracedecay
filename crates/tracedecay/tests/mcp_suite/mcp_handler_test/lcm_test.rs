@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 use std::time::SystemTime;
 #[cfg(feature = "test-transport")]
 use tracedecay::host_admission::LcmLineageFaultForTest;
-use tracedecay::mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
+use tracedecay_mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]

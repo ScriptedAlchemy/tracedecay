@@ -18,7 +18,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::mcp::JsonRpcResponse;
+use tracedecay_mcp::JsonRpcResponse;
 
 /// Distinguishes read-only queries from queries that mutate a scratch file.
 #[derive(Clone)]
@@ -620,7 +620,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups
 }
 
-/// Mirrors `tracedecay::mcp::tools::ast_grep_available` without depending on
+/// Mirrors `tracedecay_mcp::ast_grep_available` without depending on
 /// internal-module visibility: shells out to `ast-grep --version`. Cached
 /// for the lifetime of the bench process.
 fn ast_grep_on_path() -> bool {

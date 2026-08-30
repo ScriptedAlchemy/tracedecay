@@ -166,7 +166,8 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
     entries.sort_by_key(|(k, _)| (*k).clone());
     let mut has_non_scalar = false;
     for (key, schema) in &entries {
-        let ty = schema_type(schema);
+        let resolved = resolve_property_schema(&def.input_schema, schema);
+        let ty = schema_type(resolved);
         if matches!(ty, "array" | "object") {
             has_non_scalar = true;
         }
@@ -178,9 +179,10 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
         let mut desc = schema
             .get("description")
             .and_then(Value::as_str)
+            .or_else(|| resolved.get("description").and_then(Value::as_str))
             .unwrap_or("")
             .to_string();
-        if let Some(constraint) = param_shape_note(schema, ty) {
+        if let Some(constraint) = param_shape_note(resolved, ty) {
             if desc.is_empty() {
                 desc = constraint;
             } else {
@@ -219,6 +221,45 @@ Reserved flags: --args <json|-|@file|file> (whole MCP arguments object; `-` read
   --dry-run (validate + print the resolved arguments, don't invoke), --json (raw payload),\n\
   --project <path>, -h/--help.\n\
 Per-key values starting with @ are read from that file; @- reads stdin.";
+
+/// Resolve a property schema through local `#/$defs/…` references and
+/// nullable `anyOf` unions to the schema that actually constrains the value.
+///
+/// schemars emits optional typed fields as
+/// `{"anyOf": [{"$ref": "#/$defs/Type"}, {"type": "null"}]}`, which hid the
+/// referenced enum vocabulary from help rendering and client-side validation
+/// and advertised such parameters as bare strings.
+pub fn resolve_property_schema<'a>(root: &'a Value, schema: &'a Value) -> &'a Value {
+    resolve_property_schema_bounded(root, schema, 8)
+}
+
+fn resolve_property_schema_bounded<'a>(
+    root: &'a Value,
+    schema: &'a Value,
+    depth: usize,
+) -> &'a Value {
+    let Some(depth) = depth.checked_sub(1) else {
+        return schema;
+    };
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        if let Some(resolved) = reference
+            .strip_prefix("#/$defs/")
+            .and_then(|name| root.get("$defs").and_then(|defs| defs.get(name)))
+        {
+            return resolve_property_schema_bounded(root, resolved, depth);
+        }
+        return schema;
+    }
+    if let Some(variants) = schema.get("anyOf").and_then(Value::as_array) {
+        let mut non_null = variants
+            .iter()
+            .filter(|variant| variant.get("type").and_then(Value::as_str) != Some("null"));
+        if let (Some(only), None) = (non_null.next(), non_null.next()) {
+            return resolve_property_schema_bounded(root, only, depth);
+        }
+    }
+    schema
+}
 
 /// The effective JSON type of a property schema.
 ///
@@ -586,6 +627,36 @@ mod tests {
         assert!(
             help.contains("selector=trait") && help.contains("selector=method"),
             "variant labels missing in:\n{help}"
+        );
+    }
+
+    /// Optional typed fields arrive as `anyOf: [$ref, null]`; help must
+    /// resolve the local reference so the enum vocabulary renders.
+    #[test]
+    fn help_resolves_ref_enums_through_defs() {
+        let help = help_for(json!({
+            "type": "object",
+            "required": ["content"],
+            "$defs": {
+                "CategoryV1": {"type": "string", "enum": ["general", "decision", "code_area"]}
+            },
+            "properties": {
+                "content": {"type": "string"},
+                "category": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/CategoryV1"},
+                        {"type": "null"}
+                    ]
+                }
+            }
+        }));
+        assert!(
+            help.contains("one of: general | decision | code_area"),
+            "referenced enum vocabulary missing in:\n{help}"
+        );
+        assert!(
+            help.contains("--category                   string"),
+            "referenced enum must render as its resolved scalar type:\n{help}"
         );
     }
 

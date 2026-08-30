@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use tracedecay_mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 use super::{ConnectionRouteState, McpServer};
 
@@ -537,7 +537,7 @@ mod tests {
         let error = RmcpConnectionAdapter::response_result::<ListToolsResult>(
             JsonRpcResponse::error_with_data(
                 json!("request"),
-                crate::mcp::transport::ErrorCode::InvalidParams,
+                tracedecay_mcp::transport::ErrorCode::InvalidParams,
                 "invalid arguments".to_owned(),
                 Some(json!({"reason": "missing_query"})),
             ),

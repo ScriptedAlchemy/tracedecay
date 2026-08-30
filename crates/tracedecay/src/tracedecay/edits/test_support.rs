@@ -247,14 +247,10 @@ pub(super) async fn fixture_graph(
         "source-edit-owner-test-runtime",
     )
     .unwrap();
-    let runtime_registry = Arc::new(
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-            identity,
-        )
+    let runtime_registry = crate::project_store_runtime::open_project_store_runtime(identity)
         .await
-        .unwrap(),
-    );
-    let profile_database = runtime_registry.profile_database().await.unwrap();
+        .unwrap();
+    let profile_database = runtime_registry.port().profile_database().await.unwrap();
     let store_layout = TraceDecay::resolve_first_touch_configuration_layout(
         project_root,
         &open_options,
@@ -276,9 +272,10 @@ pub(super) async fn fixture_graph(
     )
     .unwrap();
     let configuration_database = runtime_registry
+        .port()
         .project_sessions(
             project_id,
-            [
+            vec![
                 project_root.to_path_buf(),
                 store_layout.project_root.clone(),
             ],

@@ -18,7 +18,7 @@ Announce: "Using tracedecay:project-memory to <recall/store/curate>."
 |---|---|
 | Need a prior decision/preference/pitfall | `tracedecay_fact_store_search` (`query`, `min_trust`) — before web search, before asking the user |
 | Prior conversations, not facts | `tracedecay_message_search` (`query`, `limit`) — this skill owns FTS→fact; raw replay/scoped grep → `tracedecay:managing-session-context` |
-| A durable decision/correction/pitfall just surfaced | `tracedecay_fact_store_add` (`content`, `category`, `tags`, `trust`) — proactively, do NOT wait to be asked, and do NOT write MEMORY.md instead |
+| A durable decision/correction/pitfall just surfaced | `tracedecay_fact_store_add` (`content`, `category` — one of `general \| user_pref \| project \| tool \| decision \| code_area`, `tags`, `trust`) — proactively, do NOT wait to be asked, and do NOT write MEMORY.md instead |
 | User rates a recalled fact | `tracedecay_fact_feedback` (`helpful`/`unhelpful`) |
 | A recalled fact you were shown helped or misled you | `tracedecay_fact_feedback` on its `fact_id` (`helpful`/`unhelpful`) — don't wait to be asked |
 | User asks to run or inspect broad memory cleanup | Agent-managed curation flow below |

@@ -8,7 +8,7 @@ use std::process::Command;
 
 use crate::common::tracedecay_command_with_home;
 use tempfile::TempDir;
-use tracedecay::mcp::tools::{get_tool_definitions, render_tool_cli_help};
+use tracedecay_mcp::{get_tool_definitions, render_tool_cli_help};
 
 /// MCP tools intentionally exempt from bundled-skill coverage.
 /// Keep empty unless a tool is truly internal.

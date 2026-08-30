@@ -27,9 +27,9 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
 use super::dashboard_lcm::DashboardLcmReadAdapter;
 use super::support::generic_tool_result;
+use tracedecay_mcp::ToolResult;
 
 use tracedecay_dashboard_api::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
@@ -778,20 +778,21 @@ pub(super) async fn handle_dashboard(
             // Shared construction with the CLI path: resolved LCM/session store
             // selection included. No catch-up ingest spawn here — the host
             // MCP server already swept hookless transcripts at startup.
-            let retained_server = retained_project_server_resolver.as_ref().ok_or_else(|| {
-                TraceDecayError::Config {
+            let retained_server = retained_project_server_resolver
+                .as_ref()
+                .ok_or_else(|| TraceDecayError::Config {
                     message: "retained dashboard project server resolver is unavailable"
                         .to_string(),
-                }
-            })?(
-                crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
-                    cg.project_root().to_path_buf(),
-                ),
-            )
-            .await?
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "retained dashboard project server is unavailable".to_string(),
-            })?;
+                })?
+                .resolve(
+                    crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
+                        cg.project_root().to_path_buf(),
+                    ),
+                )
+                .await?
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "retained dashboard project server is unavailable".to_string(),
+                })?;
             if let Some(expected_profile_id) = daemon_user_profile_id.as_ref()
                 && retained_server
                     .profile_identity()

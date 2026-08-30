@@ -12,6 +12,19 @@ type ProjectOwnerAwaitFutureV1<'a, T> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,
 >;
 
+type BrokerConnectionPhaseFutureV1<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>;
+
+#[inline(never)]
+fn boxed_broker_connection_phase<'a, T>(
+    future: impl std::future::Future<Output = Result<T>> + Send + 'a,
+) -> BrokerConnectionPhaseFutureV1<'a, T>
+where
+    T: Send + 'a,
+{
+    Box::pin(future)
+}
+
 fn report_profile_host_admission_bootstrap_status(
     status: Option<ProfileHostAdmissionBootstrapStatus>,
 ) {
@@ -615,7 +628,7 @@ fn serve_broker_socket_client_inner(
             first_request_line,
             setup_activity,
             _per_client_permit,
-        )) = Box::pin(async move {
+        )) = boxed_broker_connection_phase(async move {
             let mut transport = BrokerStreamTransport::new(stream);
         if let Some(expected_token) = auth_token.as_deref() {
             let preface_line = tokio::select! {
@@ -704,7 +717,7 @@ fn serve_broker_socket_client_inner(
             return Ok(());
         };
 
-        Box::pin(async move {
+        boxed_broker_connection_phase(async move {
         let Some((
             mut transport,
             engine,
@@ -713,7 +726,7 @@ fn serve_broker_socket_client_inner(
             setup_activity,
             _per_client_permit,
             initialize_route,
-        )) = Box::pin(async move {
+        )) = boxed_broker_connection_phase(async move {
         if let Some(cancellation) =
             tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(
                 &first_request_line,
@@ -801,9 +814,9 @@ fn serve_broker_socket_client_inner(
             return Ok(());
         };
 
-        Box::pin(async move {
+        boxed_broker_connection_phase(async move {
         if let Some(request) = parse_branch_admin_request(&first_request_line) {
-            return Box::pin(async move {
+            return boxed_broker_connection_phase(async move {
             let result = match request.action.clone() {
                 Ok(action) => engine.execute_branch_admin(&handshake, action).await,
                 Err(message) => Err(TraceDecayError::Config { message }),
@@ -815,7 +828,7 @@ fn serve_broker_socket_client_inner(
             .await;
         }
         if let Some(request) = parse_branch_add_request(&first_request_line) {
-            return Box::pin(async move {
+            return boxed_broker_connection_phase(async move {
             let response = match await_project_owner_or_disconnect(
                 &mut transport,
                 engine.project_server_for_request(&handshake, ProjectServerRequirement::Core),
@@ -845,7 +858,7 @@ fn serve_broker_socket_client_inner(
             .await;
         }
         if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
-            return Box::pin(async move {
+            return boxed_broker_connection_phase(async move {
             let mut invocation = invocation;
             let mut owned_lsp_sessions = HashMap::new();
             let mut pending_line = None;
@@ -854,7 +867,7 @@ fn serve_broker_socket_client_inner(
             // transport wrapper is polled on Tokio's ordinary worker stack;
             // embedding this loop there makes construction alone exceed that
             // stack before the first request can be served.
-            let result = Box::pin(async {
+            let result = boxed_broker_connection_phase(async {
                 loop {
                     let delivery = invocation.as_ref().ok().and_then(|request| {
                         DaemonWorkDeliveryDescriptorV1::from_request(request, &handshake)
@@ -1056,7 +1069,7 @@ fn serve_broker_socket_client_inner(
             })
             .await;
         }
-        let bootstrap_handled = Box::pin(async {
+        let bootstrap_handled = boxed_broker_connection_phase(async {
         if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
             let initialized_project_server_ready =
                 matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
@@ -1148,7 +1161,7 @@ fn serve_broker_socket_client_inner(
         }
 
         let user_session_request = projectless_user_session_request(&first_request_line);
-        let project_owner = Box::pin(async {
+        let project_owner = boxed_broker_connection_phase(async {
         if handshake.project_path.is_some() && !user_session_request {
             match await_project_owner_or_disconnect(
                 &mut transport,
@@ -1875,8 +1888,8 @@ mod delivery_ack_tests {
     use super::{
         DaemonDeliveryAckWait, await_daemon_delivery_ack, classify_daemon_delivery_ack_wait,
     };
-    use crate::mcp::transport::ChannelTransport;
     use std::time::Duration;
+    use tracedecay_mcp::transport::ChannelTransport;
 
     #[tokio::test(start_paused = true)]
     async fn delivery_ack_wait_uses_the_exact_deadline_budget() {

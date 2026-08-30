@@ -10,7 +10,7 @@ use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
+use tracedecay_mcp::ToolResult;
 
 use super::ToolCallRegistryOptions;
 use super::tool_call_support::handle_retrieve;
@@ -955,8 +955,8 @@ fn dispatch_retained_application_tools_inner<'a>(
                 normalized.request,
             )
         )
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!("invalid retained application request for {tool_name}"),
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid retained application request for {tool_name}: {error}"),
         })?;
         if request.operation() != retained_operation {
             return Err(TraceDecayError::Config {

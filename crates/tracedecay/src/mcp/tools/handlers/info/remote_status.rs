@@ -5,8 +5,8 @@ use std::path::Path;
 use serde_json::Value;
 use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
 
-use crate::mcp::tools::ToolResult;
 use tracedecay_application::remote::status::RemoteOperationalStatusReadPort;
+use tracedecay_mcp::ToolResult;
 use tracedecay_runtime_core::errors::Result;
 
 use super::super::support::tool_json;
@@ -48,13 +48,13 @@ mod tests {
 
     use super::handle_remote_status;
     use crate::config::lock_user_data_dir_test_env;
-    use crate::mcp::tools::ToolResult;
     use crate::mcp::tools::binding::{McpToolDispatchGroup, dispatch_group_for_tool};
     use crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv;
     use crate::mcp::tools::handlers::{
         ToolCallRegistryOptions, handle_tool_call_with_registry_options,
     };
     use crate::tracedecay::TraceDecay;
+    use tracedecay_mcp::ToolResult;
 
     fn available_authority() -> CurrentRemoteAuthorityStateV1 {
         serde_json::from_value(json!({
