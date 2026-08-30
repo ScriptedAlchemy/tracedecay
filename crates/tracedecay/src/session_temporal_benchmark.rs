@@ -66,7 +66,7 @@ const HISTORICAL_RESULT_PATH: &str = "benchmark_data/session-temporal/result-pro
 const HISTORICAL_RESULT_FILE_NAME: &str = "result-provisional.json";
 const HISTORICAL_HARNESS_PATH: &str = "src/sessions/session_temporal_benchmark.rs";
 const RUNNER_PATH: &str = "scripts/run-session-temporal-benchmark.sh";
-const HARNESS_PATH: &str = "src/session_temporal_benchmark.rs";
+const HARNESS_PATH: &str = "crates/tracedecay/src/session_temporal_benchmark.rs";
 const SANITIZATION_RECEIPT_PATH: &str =
     "benchmark_data/session-temporal/fixtures/codex-sanitization-receipt.json";
 const P95_LABEL: &str = "descriptive nearest-rank sample p95";

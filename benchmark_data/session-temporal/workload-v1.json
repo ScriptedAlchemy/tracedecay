@@ -7,7 +7,7 @@
     },
     {
       "path": "crates/tracedecay/src/session_temporal_benchmark.rs",
-      "sha256": "568c1c5c9eff85e5fa61ea110735c106919b27a4913a7d439c446ce1babb945f"
+      "sha256": "c7d39bda6d1c2546720ccb9eab34cfeaf2900ed92bfb256dd2fcfeee77a7d759"
     },
     {
       "path": "crates/tracedecay/src/session_temporal_benchmark/root_relation_fixture.rs",
@@ -58,7 +58,7 @@
   },
   "implementation": {
     "path": "crates/tracedecay/src/session_temporal_benchmark.rs",
-    "sha256": "568c1c5c9eff85e5fa61ea110735c106919b27a4913a7d439c446ce1babb945f"
+    "sha256": "c7d39bda6d1c2546720ccb9eab34cfeaf2900ed92bfb256dd2fcfeee77a7d759"
   },
   "measurement_contract": {
     "measured_repetitions": 30,
