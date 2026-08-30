@@ -510,6 +510,15 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// lag until graph/text seating; observers of "latest" must not stay on
     /// the prior seated generation after a new id is published.
     published_generation_id: Arc<RwLock<Option<CodeGenerationId>>>,
+    /// The exact-source currency witness for the seated generation, readable
+    /// without the scheduler mutex. Armed when the quiet exact-source probe
+    /// passes or when a generation extracted this pass seats as the active
+    /// publication; cleared when the probe fails or the slot is rewritten
+    /// with an unproven generation. A background reconcile owns the scheduler
+    /// mutex for its whole pass — sealing a production-scale corpus holds it
+    /// for minutes — and verified graph reads re-prove the witness against
+    /// the live checkout through that window instead of refusing.
+    serving_source_witness: Arc<RwLock<Option<super::ServingSourceWitnessV1>>>,
     /// Immutable progress snapshot independently readable while the scheduler
     /// owns a long reconcile or text-artifact transaction.
     pub build_progress: super::CodeIndexBuildProgressSlotV1,
@@ -1798,6 +1807,20 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    /// The exact-source currency witness for one mounted root, so tests can
+    /// stage the unproven-seat state a restart restore leaves behind.
+    #[cfg(test)]
+    pub(crate) async fn serving_source_witness_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<RwLock<Option<super::ServingSourceWitnessV1>>>> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.serving_source_witness))
+    }
+
     /// Drop the retained serving generation, reproducing a mount whose restore
     /// produced nothing servable.
     #[cfg(test)]
@@ -1817,6 +1840,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 *serving = None;
                 *worktree
                     .text_generation
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *worktree
+                    .serving_source_witness
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 worktree
@@ -1929,6 +1956,7 @@ impl CodeIndexSchedulerRegistryV1 {
             active_installation,
             text_generation,
             published_generation_id,
+            serving_source_witness,
         ) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
@@ -1940,6 +1968,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation_installation),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.published_generation_id),
+                Arc::clone(&worktree.serving_source_witness),
             )
         };
         let mut serving = serving_generation
@@ -1962,6 +1991,11 @@ impl CodeIndexSchedulerRegistryV1 {
         if retire {
             *serving = None;
             serving_epoch.fetch_add(1, Ordering::AcqRel);
+            // A retired seat has no currency to witness; a busy read must not
+            // serve a slot the rollback just cleared.
+            *serving_source_witness
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             // `latest_generation_id` falls through to the text slot when
             // serving is empty. Leaving the retired generation there would
             // keep it publicly addressable after the exact rollback token
@@ -2645,6 +2679,8 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::new(RwLock::new(None));
         let published_generation_id: Arc<RwLock<Option<CodeGenerationId>>> =
             Arc::new(RwLock::new(None));
+        let serving_source_witness: Arc<RwLock<Option<super::ServingSourceWitnessV1>>> =
+            Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
         let serving_generation_installation = Arc::new(Mutex::new(None));
         let hints = Arc::clone(&opened.hints);
@@ -2664,6 +2700,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_text_generation = Arc::clone(&text_generation);
         let worker_convergence_park = Arc::clone(&convergence_park);
         let worker_published_generation_id = Arc::clone(&published_generation_id);
+        let worker_serving_source_witness = Arc::clone(&serving_source_witness);
         let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let worker_wake = Arc::clone(&wake);
         // The code-index control epoch. It advances exactly when new input is
@@ -3519,6 +3556,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let scheduler = Arc::clone(&worker_scheduler);
                     let serving_generation = Arc::clone(&worker_serving_generation);
                     let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
+                    let serving_source_witness = Arc::clone(&worker_serving_source_witness);
                     let text_generation = Arc::clone(&worker_text_generation);
                     let text_latest = latest.clone();
                     let latest = latest.clone();
@@ -3554,6 +3592,26 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .write()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                     Some(latest.text_generation_handle());
+                                // Only a generation extracted from the live
+                                // checkout this pass and seated as the active
+                                // publication carries its pass's freshness
+                                // proof into the witness. A stale seat and a
+                                // retained/restored seat stay unproven until
+                                // the quiet exact-source probe passes, so busy
+                                // verified reads never serve bytes no proof
+                                // has vouched for.
+                                *serving_source_witness
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    if published_pass
+                                        && matches!(outcome, ServingSwapOutcomeV1::Seated)
+                                    {
+                                        scheduler.source_currency_witness_for(
+                                            &latest.generation().manifest().generation_id,
+                                        )
+                                    } else {
+                                        None
+                                    };
                             }
                             drop(serving);
                             // Semantic admission is independently retryable. A
@@ -3754,6 +3812,7 @@ impl CodeIndexSchedulerRegistryV1 {
             text_generation,
             convergence_park,
             published_generation_id,
+            serving_source_witness,
             build_progress,
             serving_generation_epoch,
             serving_generation_installation,
@@ -4984,7 +5043,10 @@ impl CodeIndexSchedulerRegistryV1 {
     /// seated generation it can serve. Validate that immutable serving
     /// authority directly rather than consulting the publication decoder cache:
     /// unrelated activation work may own that cache while the seated generation
-    /// remains fully decoded and current.
+    /// remains fully decoded and current. When a background reconcile owns the
+    /// scheduler mutex, the recorded exact-source witness answers for the
+    /// seated generation instead of refusing for the whole pass (see
+    /// [`MountedCodeIndexWorktreeV1::serving_source_witness`]).
     pub async fn latest_complete_ready_decoded_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -5007,7 +5069,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
-        let (scheduler, serving_generation) = {
+        let (scheduler, serving_generation, serving_source_witness) = {
             let mounted = self.mounted.try_lock().ok()?;
             let worktree = mounted.get(&project_root)?;
             if worktree.repository_id != scope.repository_id
@@ -5018,6 +5080,7 @@ impl CodeIndexSchedulerRegistryV1 {
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.serving_source_witness),
             )
         };
         // The census asks only whether a fully decoded generation is already
@@ -5030,20 +5093,62 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()?;
-        let mut scheduler = match scheduler.try_lock() {
-            Ok(scheduler) => scheduler,
-            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return None,
+        let scheduler = match scheduler.try_lock() {
+            Ok(scheduler) => Some(scheduler),
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
         };
-        if !scheduler
-            .serving_generation_ready_for_exact_source(&serving)
-            .ok()?
-        {
-            return None;
+        match scheduler {
+            Some(mut scheduler) => {
+                if !scheduler
+                    .serving_generation_ready_for_exact_source(&serving)
+                    .ok()?
+                {
+                    // The probe disproved currency (source drift or a
+                    // different-content durable successor); withdraw the
+                    // witness so busy reads refuse this seat until it is
+                    // re-proven or replaced.
+                    *serving_source_witness
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    return None;
+                }
+                *serving_source_witness
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = scheduler
+                    .source_currency_witness_for(&serving.generation().manifest().generation_id);
+            }
+            None => {
+                // A background reconcile owns the scheduler mutex for its
+                // whole pass; on a production-scale corpus one sealing pass
+                // holds it for minutes. Joining that work would turn bounded
+                // background convergence into a verified-read outage, so the
+                // read re-proves the seat's currency witness directly against
+                // the live checkout — the same git-metadata and stat fences
+                // the quiet probe runs, needing no scheduler — and serves the
+                // immutable seat only on a passing proof. An unproven seat
+                // (boot restore, stale seat, or a withdrawn proof) and any
+                // drift since the proof stay typed abstentions, and the
+                // in-flight pass remains the remedy for what it reconciles.
+                // This is a pure availability read shared with the readiness
+                // census, so it must not fabricate a wake.
+                let witness = serving_source_witness
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let Some(witness) = witness else {
+                    return None;
+                };
+                if witness.generation_id != serving.generation().manifest().generation_id
+                    || !witness.proves_current(&project_root)
+                {
+                    return None;
+                }
+            }
         }
-        // Checkout-identity gate: the ready probe above already proved the
-        // generation current against the live worktree, and the sealed
-        // reference label is attribution, not identity (see
+        // Checkout-identity gate: the ready probe (or its recorded witness)
+        // proved the generation current against the live worktree, and the
+        // sealed reference label is attribution, not identity (see
         // [`latest_matches_scope_identity`]).
         if !latest_matches_scope_identity(&serving, scope) {
             return None;

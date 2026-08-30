@@ -4987,12 +4987,15 @@ fn moved_reference_scope(scope: &ResolvedScope) -> ResolvedScope {
     .expect("moved scope")
 }
 
-/// The defect this covers: during any generation rebuild the ready gate
-/// abstains, and search used to collapse into `GenerationUnavailable` for the
-/// whole window while callers/grep/context kept serving. Holding the scheduler
-/// mutex reproduces exactly that window — the background worker owns the
-/// scheduler, so the ready gate's `try_lock` abstains — while the last complete
-/// generation stays in `serving_generation`.
+/// The defect this covers: during any generation rebuild search used to
+/// collapse into `GenerationUnavailable` for the whole window while
+/// callers/grep/context kept serving. Holding the scheduler mutex reproduces
+/// exactly that window — the background worker owns the scheduler — while the
+/// last complete generation stays in `serving_generation`. A seat whose
+/// currency witness still re-proves against the unchanged checkout serves as
+/// current; once the checkout drifts under the held mutex the witness
+/// disproves, the ready gate abstains, and the fallback serves the same
+/// complete generation reported stale.
 // Holding the scheduler guard across the awaits is the scenario, not an
 // oversight: it is how this test occupies the rebuild window that the fallback
 // exists to serve through. The guard is released before shutdown.
@@ -5042,13 +5045,32 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
         "the last complete generation is still held and needs no re-read"
     );
 
+    // An unchanged checkout re-proves the seat's currency witness without the
+    // scheduler, so the rebuild window alone does not degrade the answer.
+    let witnessed = registry
+        .execute_query_search(&scope, core_search_request("main"))
+        .await
+        .expect("search keeps serving through the rebuild instead of failing");
+    assert!(
+        !witnessed.served_stale,
+        "a seat re-proven current against the unchanged checkout serves as current"
+    );
+
+    // Drift the checkout while the rebuild still owns the scheduler: the
+    // witness disproves, the ready gate abstains, and the fallback serves the
+    // last complete generation reported stale.
+    std::fs::write(
+        fixture.path().join("src/main.rs"),
+        "fn main() { drifted(); }\n",
+    )
+    .expect("drift the checkout under the held scheduler");
     let stale = registry
         .execute_query_search(&scope, core_search_request("main"))
         .await
         .expect("search keeps serving through the rebuild instead of failing");
     assert!(
         stale.served_stale,
-        "a fallback answer must be reported stale, never as current"
+        "a fallback answer past the disproved witness must be reported stale, never as current"
     );
     assert_eq!(
         stale.generation, fresh_generation,
@@ -5297,6 +5319,388 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     );
 
     drop(held_decode);
+    registry.shutdown().await;
+}
+
+/// The live outage this covers: a background reconcile owns the scheduler
+/// mutex for its whole pass — sealing a production-scale corpus holds it for
+/// minutes per generation — while the seated serving generation stays fully
+/// decoded, activated, and proven current from before the pass began.
+/// Verified graph reads (redundancy, diagnose, dead_code, callers, impact)
+/// resolve through `latest_complete_ready_decoded_for_root_scope`; refusing
+/// them "not ready" for the whole pass turned bounded background work into a
+/// tool outage that outlived exact/lexical retrieval by 25+ minutes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proven_seated_generation_serves_verified_reads_while_reconcile_owns_the_scheduler() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    // Seating races the publication event; poll the ready gate bounded until
+    // the quiet probe proves the seated generation current (arming the
+    // busy-read witness).
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the mounted generation becomes ready-decoded");
+    let generation_id = ready.generation().manifest().generation_id.clone();
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    // Occupy the scheduler mutex exactly as an in-flight reconcile pass does:
+    // a std mutex held on a blocking thread until released.
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = locked_tx.send(());
+        let _ = release_rx.recv();
+    });
+    locked_rx.await.expect("scheduler mutex held");
+
+    let busy = tokio::time::timeout(
+        Duration::from_secs(30),
+        registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope),
+    )
+    .await
+    .expect("verified reads must not join the in-flight reconcile")
+    .expect("the proven seated generation keeps serving while the scheduler is busy");
+    assert_eq!(
+        busy.generation().manifest().generation_id,
+        generation_id,
+        "the busy read serves the exact generation the quiet probe proved current"
+    );
+    assert!(
+        registry.has_current_ready_decoded_for_root_scope(fixture.path(), &scope),
+        "the readiness census reports the proven seated generation while the scheduler is busy"
+    );
+
+    release_tx.send(()).expect("release the held scheduler");
+    holder.join().expect("scheduler holder thread");
+    registry.shutdown().await;
+}
+
+/// Fail-closed half of the busy-read witness: a seated generation whose
+/// currency was never proven (a boot-restored seat, a stale seat, or a
+/// withdrawn proof) must stay a typed abstention while the scheduler mutex is
+/// busy, exactly as before. Only the exact-source probe's own verdict may arm
+/// busy serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_witness() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the mounted generation becomes ready-decoded");
+    let generation_id = ready.generation().manifest().generation_id.clone();
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let witness = registry
+        .serving_source_witness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree witness");
+    // Hold the scheduler first so no reconcile pass can re-prove the seat,
+    // then withdraw the proof — the exact state a restart-restored seat is in
+    // before its first passing probe.
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = locked_tx.send(());
+        let _ = release_rx.recv();
+    });
+    locked_rx.await.expect("scheduler mutex held");
+    *witness
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "an unproven seat must stay a typed abstention while the scheduler is busy"
+    );
+    assert!(
+        !registry.has_current_ready_decoded_for_root_scope(fixture.path(), &scope),
+        "the readiness census must not report an unproven seat while the scheduler is busy"
+    );
+
+    release_tx.send(()).expect("release the held scheduler");
+    holder.join().expect("scheduler holder thread");
+
+    // With the scheduler quiet again the exact-source probe re-proves the
+    // unchanged checkout and re-arms the witness.
+    let reproved = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the quiet probe re-proves the unchanged seat");
+    assert_eq!(reproved.generation().manifest().generation_id, generation_id);
+
+    registry.shutdown().await;
+}
+
+/// A quiet probe that disproves currency (worktree drift) must refuse the read
+/// and withdraw the busy-read witness, so later busy reads cannot keep serving
+/// the disproved seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the mounted generation becomes ready-decoded");
+    let disproved_generation_id = ready.generation().manifest().generation_id.clone();
+
+    let witness = registry
+        .serving_source_witness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree witness");
+
+    // Drift the worktree; the stat-signature fence disproves the seat.
+    std::fs::write(
+        fixture.path().join("src/main.rs"),
+        "fn main() { drifted(); }\n",
+    )
+    .expect("drift the worktree");
+
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "a drifted worktree disproves the seated generation's currency"
+    );
+    // The probe posts a reconcile wake, so the worker may already be sealing a
+    // successor; what must hold is that the witness never keeps naming the
+    // disproved generation.
+    assert_ne!(
+        witness
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|witness| witness.generation_id.clone()),
+        Some(disproved_generation_id),
+        "the disproving probe withdraws the busy-read witness"
+    );
+
+    registry.shutdown().await;
+}
+
+/// Flip the last hexadecimal character of a durable identifier so the result
+/// stays format-valid while naming something else.
+fn flip_trailing_hex(value: &str) -> String {
+    let mut renamed = value.to_owned();
+    let last = renamed.pop().expect("identifier has a trailing character");
+    renamed.push(if last == '0' { '1' } else { '0' });
+    renamed
+}
+
+/// Rewrite the durable publication pointer exactly as a convergence
+/// republication leaves it between its publish and its seat: the active
+/// generation id advances to an unseated successor, replacing the
+/// predecessor's index entry (same-revision entries are replaced, not
+/// appended), while the sealed artifact and Git evidence stay in place.
+/// `drift_content` additionally flips the sealed source content identity,
+/// staging a successor sealed from different bytes.
+fn advance_pointer_to_unseated_successor(scoped_store_root: &Path, drift_content: bool) {
+    use tracedecay_code_index_retention::code_index_generations::durable_generation_index_digest;
+
+    let pointer_path = scoped_store_root.join("active-code-generation-v1.json");
+    let mut pointer: super::DurablePublicationPointerV1 =
+        serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
+            .expect("decode active pointer");
+    let predecessor_id = pointer.generation_id.clone();
+    pointer.generation_id = flip_trailing_hex(&predecessor_id);
+    if drift_content {
+        pointer.snapshot_content_identity = flip_trailing_hex(&pointer.snapshot_content_identity);
+    }
+    let active_entry = pointer
+        .generation_index
+        .iter_mut()
+        .find(|entry| entry.generation_id == predecessor_id)
+        .expect("active generation index entry");
+    active_entry.generation_id = pointer.generation_id.clone();
+    active_entry.snapshot_content_identity = pointer.snapshot_content_identity.clone();
+    pointer.generation_index_digest = Some(
+        durable_generation_index_digest(
+            &pointer.generation_index,
+            pointer.generation_index_truncated,
+        )
+        .expect("digest successor publication index"),
+    );
+    std::fs::write(
+        &pointer_path,
+        serde_json::to_vec(&pointer).expect("encode successor pointer"),
+    )
+    .expect("write successor pointer");
+}
+
+/// The pointer-supersession half of the verified-read outage: a reconcile
+/// pass publishes a successor generation and flips the durable pointer
+/// minutes before the successor's O(store) decode + native activation seats
+/// it. When that successor sealed the SAME source content — a convergence or
+/// repair republication, not an edit — the seated predecessor still describes
+/// exactly the bytes on disk, so verified reads must keep serving it through
+/// the successor's activation window instead of refusing "not ready".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_same_content_successor_pointer_keeps_the_seated_generation_serving() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the mounted generation becomes ready-decoded");
+    let generation_id = ready.generation().manifest().generation_id.clone();
+
+    // Flip the durable pointer to an unseated successor sealed from the same
+    // source content — the exact durable state between a convergence
+    // republication's publish and its seat.
+    advance_pointer_to_unseated_successor(
+        &super::scoped_code_index_store_root(store.path(), fixture.path()),
+        false,
+    );
+
+    let served = registry
+        .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        .await
+        .expect("the same-content predecessor keeps serving while its successor activates");
+    assert_eq!(
+        served.generation().manifest().generation_id,
+        generation_id,
+        "the read serves the seated predecessor, not a phantom of the unseated successor"
+    );
+    assert!(
+        registry.has_current_ready_decoded_for_root_scope(fixture.path(), &scope),
+        "the readiness census reports the same-content predecessor through the activation window"
+    );
+
+    registry.shutdown().await;
+}
+
+/// Fail-closed half of pointer supersession: a successor sealed from
+/// DIFFERENT source content means the seat lags the reconciled truth. The
+/// read must refuse and withdraw the busy-read witness so neither the quiet
+/// nor the busy path serves the stale seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_different_content_successor_pointer_refuses_the_stale_seat() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the mounted generation becomes ready-decoded");
+    let stale_generation_id = ready.generation().manifest().generation_id.clone();
+
+    let witness = registry
+        .serving_source_witness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree witness");
+    advance_pointer_to_unseated_successor(
+        &super::scoped_code_index_store_root(store.path(), fixture.path()),
+        true,
+    );
+
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "a different-content successor pointer disproves the seat"
+    );
+    assert_ne!(
+        witness
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|witness| witness.generation_id.clone()),
+        Some(stale_generation_id),
+        "the disproving probe withdraws the busy-read witness"
+    );
+
     registry.shutdown().await;
 }
 
