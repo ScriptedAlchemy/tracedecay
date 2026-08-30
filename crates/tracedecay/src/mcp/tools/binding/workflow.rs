@@ -41,15 +41,30 @@ pub(super) fn workflow_executable_binding_for_tool(
 }
 
 /// Project every canonical Workflow executable into a dispatch entry.
+///
+/// Resolves the registry once and looks each operation up in it, rather than
+/// re-fetching the registry per operation through
+/// [`workflow_executable_binding_for_tool`].
 pub(super) fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::super::dispatch::McpDispatchMetadataError> {
+    let registry = tracedecay_application::workflow_executable_binding_registry()
+        .map_err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation)?;
     tracedecay_api::WorkflowOperation::ALL
         .into_iter()
         .map(|operation| {
             let name = format!("tracedecay_workflow_{}", operation.operation_key());
-            let binding = workflow_executable_binding_for_tool(&name)?.ok_or_else(|| {
-                invalid_workflow_binding("canonical Workflow operation is not executable")
-            })?;
+            let operation_id =
+                tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned())
+                    .map_err(|_| {
+                        invalid_workflow_binding("must name one canonical Workflow operation")
+                    })?;
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .cloned()
+                .ok_or_else(|| {
+                    invalid_workflow_binding("canonical Workflow operation is not executable")
+                })?;
             Ok(DispatchCatalogBinding {
                 name,
                 group: Some(McpToolDispatchGroup::Workflow),

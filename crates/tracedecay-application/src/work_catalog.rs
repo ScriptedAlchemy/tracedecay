@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use schemars::JsonSchema;
 use tracedecay_domain::{
     ManifestDigest, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
@@ -192,7 +194,22 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
     ),
 ];
 
+/// Every input to the registry is process-static (operation tables and
+/// schemars-derived schemas), but each binding regenerates and cross-validates
+/// its request/result schemas, so assembling it is expensive. Per-operation
+/// lookups such as [`work_executable_binding`] used to rebuild the whole
+/// registry per call, which made every consumer that iterates the operation
+/// table quadratic in schema generations and put multiple seconds of pure CPU
+/// on the daemon startup path. Build it once per process and clone the
+/// assembled value instead.
 pub fn work_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
+    static REGISTRY: LazyLock<Result<ExecutableBindingRegistryV1, CatalogValidationError>> =
+        LazyLock::new(build_work_executable_binding_registry);
+    REGISTRY.clone()
+}
+
+fn build_work_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     let bindings = vec![
         available::<GenerateProposalRequest, GeneratedWorkProposal>(
