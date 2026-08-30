@@ -29,10 +29,8 @@ hotpath = [
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-session-temporal-store/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-store/hotpath",
-    "tracedecay-temporal-query/hotpath",
     "tracedecay-tool-catalog/hotpath",
     "tracedecay-usecases/hotpath",
 ]
@@ -52,10 +50,8 @@ hotpath-alloc = [
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
-    "tracedecay-temporal-query/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
     "tracedecay-usecases/hotpath-alloc",
 ]
@@ -75,10 +71,8 @@ hotpath-cpu = [
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
-    "tracedecay-temporal-query/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
     "tracedecay-usecases/hotpath-cpu",
 ]
@@ -130,10 +124,8 @@ tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 
