@@ -11,8 +11,10 @@ use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -31,6 +33,12 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay_private_fs::background_cpu::{
+    install_process_background_cpu, process_background_cpu,
+};
+use tracedecay_runtime_core::resident_memory::{
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+};
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
@@ -689,7 +697,40 @@ fn measurement_result(source_identity: Value, measurement: Value) -> Value {
     })
 }
 
+static BENCHMARK_RESIDENT_MEMORY: OnceLock<Arc<ProcessResidentMemoryV1>> = OnceLock::new();
+
+/// Installs the process-wide background CPU and resident-memory authorities
+/// the production Codex admission path requires.
+///
+/// Production installs both during daemon bootstrap, which this harness never
+/// runs; without them every capture is refused with the typed
+/// `BackgroundResourceUnavailable` states. The claude-observation benchmark
+/// composes the same authorities for the same reason.
+fn ensure_admission_resource_authorities() {
+    if process_background_cpu().is_none() {
+        // A sibling benchmark or fixture can win the process-wide installation
+        // race at a different canonical width; reuse that authority rather
+        // than making success depend on execution order.
+        if install_process_background_cpu(NonZeroUsize::MIN).is_err() {
+            assert!(
+                process_background_cpu().is_some(),
+                "background CPU authority is neither installable nor already installed"
+            );
+        }
+    }
+
+    let memory = Arc::clone(BENCHMARK_RESIDENT_MEMORY.get_or_init(|| {
+        Arc::new(ProcessResidentMemoryV1::new(
+            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        ))
+    }));
+    // Tolerates a racing installation by a sibling harness in this process;
+    // admission only needs some authority to be installed.
+    let _ = codex::CodexDiscoveryHub::default().configure_preparation_resources(memory);
+}
+
 async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition> {
+    ensure_admission_resource_authorities();
     let env = IsolatedBenchmarkEnv::enter("session-temporal-")?;
     let project = env.path().join("project");
     fs::create_dir_all(&project).map_err(|error| format!("create project: {error}"))?;
