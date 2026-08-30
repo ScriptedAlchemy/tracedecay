@@ -4981,6 +4981,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
+    #[cfg(test)]
     fn reconcile_retained_text_generation(
         &mut self,
         metadata: &VerifiedSealedTextGenerationMetadataV1,
