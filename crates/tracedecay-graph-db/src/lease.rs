@@ -23,7 +23,8 @@ use crate::{
     GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
     GraphProjectionPage, GraphProjectionReadRequest, GraphProjectionTelemetry,
     GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationRef,
-    TraversalRequest, VectorSearchRequest, VectorSearchResult,
+    GraphVectorIndexRequest, GraphVectorIndexStatus, TraversalRequest, VectorSearchRequest,
+    VectorSearchResult,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -401,6 +402,22 @@ impl VerifiedGraphSnapshot {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
         self.with_operation(|| self.database.vector_search(request))
+    }
+
+    /// Typed coverage of the vector index serving this snapshot's head
+    /// generation. Callers that require the index to cover a complete row
+    /// set compare the reported vector count before trusting searches.
+    #[hotpath::measure(
+        label = "graph_db.lease.vector_index_status",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
+    pub fn vector_index_status(
+        &self,
+        mut request: GraphVectorIndexRequest,
+    ) -> Result<GraphVectorIndexStatus, GraphDbError> {
+        self.require_head_projection(&request.namespace, &request.projection)?;
+        request.namespace = self.head.locator.physical_namespace()?;
+        self.with_operation(|| self.database.vector_index_status(request))
     }
 
     #[hotpath::measure(

@@ -9,7 +9,7 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphLabel, GraphProjectionTelemetryRequest,
     GraphProperty, GraphRelation, GraphVector, GraphWatermark,
     semantic_vector_native::{
-        BASE_GENERATION, BASE_KIND, BATCH_COUNT, BUILD_BATCH_LABEL, BUILD_ID, BUILD_LABEL,
+        self, BASE_GENERATION, BASE_KIND, BATCH_COUNT, BUILD_BATCH_LABEL, BUILD_ID, BUILD_LABEL,
         BUILD_MEMBER_LABEL, CHECKPOINT, CHUNK_DIGEST, CHUNK_ID, CONTAINS_KIND, CONTROL_ID,
         CONTROL_LABEL, EMBEDDING_KEY, EXPECTED_COUNT, GENERATION_CATALOG_KIND, GENERATION_ID,
         GENERATION_LABEL, GENERATION_RECEIPT_LABEL, GENERATION_TOMBSTONE_LABEL,
@@ -214,11 +214,11 @@ pub(crate) fn encode_generation_batch_delta(
                         "committed semantic vector receipt has no staged vector".to_owned(),
                     )
                 })?;
-                let child = scoped_entity_id(
-                    "generation-vector",
+                let child = semantic_vector_native::generation_vector_entity_id(
                     generation_id.as_digest().as_str(),
                     &receipt.chunk_id.to_string(),
-                )?;
+                )
+                .map_err(map_graph_error)?;
                 insert_entity(
                     &mut entities,
                     vector_entity(

@@ -2709,7 +2709,7 @@ mod tests {
                     cancellation: Arc::new(NeverCancelled),
                 })
                 .unwrap(),
-            GraphVectorIndexStatus::Available,
+            GraphVectorIndexStatus::Available { vectors: 1 },
             "a vector shape first seen after page one must create its native index"
         );
         owner.close().unwrap();
