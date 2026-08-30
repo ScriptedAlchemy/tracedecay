@@ -6544,6 +6544,7 @@ dependencies = [
 name = "tracedecay-query"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "fst",
  "hex",
  "hmac 0.13.0",

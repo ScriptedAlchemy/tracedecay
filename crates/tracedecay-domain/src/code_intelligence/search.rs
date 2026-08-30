@@ -1128,6 +1128,11 @@ impl AdmittedEmbeddingProjectionKeyV1 {
 #[serde(rename_all = "snake_case")]
 pub enum SemanticSearchIndexKindV1 {
     ExactFlat,
+    /// Approximate HNSW candidate generation over the serving generation's
+    /// persisted vector index, exact-rescored with the canonical distance.
+    /// Candidate coverage is index-bounded: published distances stay exact,
+    /// but the candidate set is not guaranteed to equal a full scan's.
+    AnnHnswExactRescore,
 }
 
 /// Complete identity inputs for one semantic search structure.
@@ -1157,6 +1162,22 @@ impl SemanticSearchIndexProfileV1 {
                 "tracedecay.semantic-exact-flat-parameters.v1",
                 "scan-all-compatible-vectors",
                 "canonical-distance-then-anchor",
+            ))?,
+        })
+    }
+
+    /// HNSW candidate generation with exact rescoring. The parameters digest
+    /// commits to the candidate-oversample policy so a tuning change mints a
+    /// new index identity instead of silently shifting served candidate sets.
+    pub fn ann_hnsw_exact_rescore_v1() -> Result<Self, DomainError> {
+        Ok(Self {
+            kind: SemanticSearchIndexKindV1::AnnHnswExactRescore,
+            implementation_revision: "semantic.ann-hnsw-exact-rescore.v1".to_owned(),
+            parameters_digest: canonical_sha256(&(
+                "tracedecay.semantic-ann-hnsw-exact-rescore-parameters.v1",
+                "hnsw-candidates-oversample-4x",
+                "exact-rescore-canonical-distance-then-anchor",
+                "flat-fallback-on-missing-or-incomplete-index",
             ))?,
         })
     }

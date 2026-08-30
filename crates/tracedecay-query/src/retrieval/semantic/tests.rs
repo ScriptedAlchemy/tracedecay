@@ -83,6 +83,15 @@ fn search_index_key() -> &'static SemanticSearchIndexKeyV1 {
     })
 }
 
+fn ann_search_index_key() -> &'static SemanticSearchIndexKeyV1 {
+    static KEY: OnceLock<SemanticSearchIndexKeyV1> = OnceLock::new();
+    KEY.get_or_init(|| {
+        SemanticSearchIndexProfileV1::ann_hnsw_exact_rescore_v1()
+            .and_then(|profile| profile.index_key())
+            .expect("ann search index key")
+    })
+}
+
 fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
     RetrievalBudget {
         max_candidates_per_lane,
@@ -237,9 +246,20 @@ impl SemanticQueryEmbeddingPort for FakeQueryEmbedder {
     }
 }
 
+/// How the fake port answers `ann_candidates`.
+enum FakeAnnBehavior {
+    /// A typed unavailability state the lane must observe and fall back on.
+    Unavailable(SemanticAnnIndexStateV1),
+    /// Row indices to answer with, in "index order". Deliberately not
+    /// bounded by the requested limit so overrun contract tests can exceed it.
+    CandidateIndices(Vec<usize>),
+}
+
 struct FakeVectorReadPort {
     rows: Vec<SemanticVectorRecordV1>,
     scans: Cell<u32>,
+    ann_calls: Cell<u32>,
+    ann: Option<FakeAnnBehavior>,
     summary: Option<SemanticVectorScanSummaryV1>,
     after_scan_cancel: Option<Rc<Cell<bool>>>,
     after_scan_elapsed: Option<(Rc<Cell<u64>>, u64)>,
@@ -255,6 +275,8 @@ impl FakeVectorReadPort {
         Self {
             rows,
             scans: Cell::new(0),
+            ann_calls: Cell::new(0),
+            ann: None,
             summary: None,
             after_scan_cancel: None,
             after_scan_elapsed: None,
@@ -300,6 +322,41 @@ impl SemanticVectorReadPort for FakeVectorReadPort {
             excluded: 0,
             unknown: 0,
         }))
+    }
+
+    fn ann_candidates(
+        &self,
+        request: SemanticVectorReadRequestV1<'_>,
+        query: &[f32],
+        _limit: usize,
+    ) -> Result<SemanticAnnCandidatesV1<'_>, RetrievalPortError> {
+        self.ann_calls.set(self.ann_calls.get() + 1);
+        assert_eq!(
+            request.search_kind,
+            SemanticSearchKindV1::AnnHnswExactRescore
+        );
+        assert_eq!(request.vector_generation, &self.vector_generation);
+        assert_eq!(request.projection_key, &self.projection_key);
+        assert_eq!(request.search_index_key, &self.search_index_key);
+        assert_eq!(request.source_generation, &self.source_generation);
+        assert_eq!(
+            request.capability_manifest_digest,
+            &self.capability_manifest_digest
+        );
+        assert_eq!(query, [1.0, 0.0], "the transient query embedding");
+        match &self.ann {
+            None => Ok(SemanticAnnCandidatesV1::Unavailable(
+                SemanticAnnIndexStateV1::Unsupported,
+            )),
+            Some(FakeAnnBehavior::Unavailable(state)) => {
+                Ok(SemanticAnnCandidatesV1::Unavailable(*state))
+            }
+            Some(FakeAnnBehavior::CandidateIndices(indices)) => {
+                Ok(SemanticAnnCandidatesV1::Candidates(
+                    indices.iter().map(|index| &self.rows[*index]).collect(),
+                ))
+            }
+        }
     }
 }
 
@@ -2008,4 +2065,202 @@ fn partial_cancelled_and_failed_semantic_attempts_preserve_query_bytes() {
             fallback_bytes
         );
     }
+}
+
+fn ann_request<'a>(
+    query_view: &'a tracedecay_domain::EphemeralSanitizedQueryViewV1,
+    projection: &'a AdmittedEmbeddingProjectionKeyV1,
+    max_candidates_per_lane: u32,
+) -> SemanticRetrievalRequestV1<'a> {
+    let mut request = request(query_view, projection, max_candidates_per_lane);
+    request.search_index_key = ann_search_index_key();
+    request
+}
+
+/// The rows every ANN identity test scores: canonical cosine distances to the
+/// fixture query `[1, 0]` are identical=0 < diagonal < orthogonal < opposite.
+fn ann_fixture_rows(request: &SemanticRetrievalRequestV1<'_>) -> Vec<SemanticVectorRecordV1> {
+    vec![
+        record(request, "orthogonal", vec![0.0, 1.0]),
+        record(request, "opposite", vec![-1.0, 0.0]),
+        record(request, "identical", vec![1.0, 0.0]),
+        record(request, "diagonal", vec![1.0, 1.0]),
+    ]
+}
+
+#[test]
+fn ann_candidates_are_exact_rescored_into_the_flat_scans_top_k() {
+    let query_view = query_view();
+    let projection = projection();
+
+    // Baseline: the exact-flat lane over the same four rows.
+    let flat_request = request(&query_view, &projection, 2);
+    let flat_embedder = FakeQueryEmbedder::default();
+    let flat_vectors = FakeVectorReadPort::new(&flat_request, ann_fixture_rows(&flat_request));
+    let flat_control = FixedExecutionControl::default();
+    let flat = SemanticCodeRetriever::new(&flat_embedder, &flat_vectors, &flat_control);
+    let RetrieverOutcome::Complete(flat_batch) =
+        Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
+            &flat, &flat_request,
+        )
+        .expect("flat retrieval succeeds")
+    else {
+        panic!("expected a complete flat batch");
+    };
+
+    // ANN path: the index answers with every row (perfect recall), in a
+    // deliberately scrambled index order the exact rescore must overrule.
+    let ann_request = ann_request(&query_view, &projection, 2);
+    let embedder = FakeQueryEmbedder::default();
+    let mut vectors = FakeVectorReadPort::new(&ann_request, ann_fixture_rows(&ann_request));
+    vectors.ann = Some(FakeAnnBehavior::CandidateIndices(vec![1, 3, 0, 2]));
+    let control = FixedExecutionControl::default();
+    let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let RetrieverOutcome::Complete(batch) =
+        Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
+            &retriever,
+            &ann_request,
+        )
+        .expect("ann retrieval succeeds")
+    else {
+        panic!("expected a complete ann batch");
+    };
+
+    assert_eq!(vectors.ann_calls.get(), 1);
+    assert_eq!(vectors.scans.get(), 0, "no flat scan on the served ann path");
+
+    // Top-k identity: same occurrences, same order, bit-identical scores.
+    assert_eq!(
+        batch
+            .candidates
+            .iter()
+            .map(|candidate| candidate.source_occurrence_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["occurrence.identical", "occurrence.diagonal"]
+    );
+    assert_eq!(
+        batch
+            .candidates
+            .iter()
+            .map(|candidate| (
+                candidate.source_occurrence_id.as_str(),
+                candidate.raw_score
+            ))
+            .collect::<Vec<_>>(),
+        flat_batch
+            .candidates
+            .iter()
+            .map(|candidate| (
+                candidate.source_occurrence_id.as_str(),
+                candidate.raw_score
+            ))
+            .collect::<Vec<_>>(),
+        "ann exact rescore must publish the flat scan's exact scores"
+    );
+    for (occurrence, evidence) in &batch.evidence_by_occurrence {
+        assert_eq!(evidence.search_kind, SemanticSearchKindV1::AnnHnswExactRescore);
+        let flat_evidence = flat_batch
+            .evidence_by_occurrence
+            .get(occurrence)
+            .expect("flat run scored the same occurrence");
+        assert_eq!(
+            evidence.distance, flat_evidence.distance,
+            "published distances are bit-identical to the flat scan"
+        );
+    }
+
+    // Candidate coverage is index-bounded: the lane must never claim
+    // exhaustion even with every row returned.
+    assert_eq!(batch.coverage.examined, 4);
+    assert_eq!(batch.coverage.eligible, 4);
+    assert_eq!(batch.coverage.capped, 2);
+    let continuation = batch.continuation.expect("ann continuation");
+    assert!(
+        !continuation.exhausted,
+        "an index-bounded candidate set cannot prove no better row exists"
+    );
+}
+
+#[test]
+fn ann_unavailability_falls_back_to_the_exact_flat_scan() {
+    let query_view = query_view();
+    let projection = projection();
+    let states = [
+        SemanticAnnIndexStateV1::Missing,
+        SemanticAnnIndexStateV1::IncompleteCoverage {
+            indexed: 2,
+            resident: 4,
+        },
+        SemanticAnnIndexStateV1::Unsupported,
+    ];
+    for state in states {
+        let request = ann_request(&query_view, &projection, 2);
+        let embedder = FakeQueryEmbedder::default();
+        let mut vectors = FakeVectorReadPort::new(&request, ann_fixture_rows(&request));
+        vectors.ann = Some(FakeAnnBehavior::Unavailable(state));
+        let control = FixedExecutionControl::default();
+        let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+        let RetrieverOutcome::Complete(batch) =
+            Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
+                &retriever, &request,
+            )
+            .expect("fallback retrieval succeeds")
+        else {
+            panic!("expected a complete fallback batch for {state:?}");
+        };
+        assert_eq!(vectors.ann_calls.get(), 1, "index consulted for {state:?}");
+        assert_eq!(vectors.scans.get(), 1, "flat fallback for {state:?}");
+        assert_eq!(
+            batch
+                .candidates
+                .iter()
+                .map(|candidate| candidate.source_occurrence_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["occurrence.identical", "occurrence.diagonal"]
+        );
+        for evidence in batch.evidence_by_occurrence.values() {
+            assert_eq!(
+                evidence.search_kind,
+                SemanticSearchKindV1::ExactFlat,
+                "fallback evidence is truthfully flat-scanned for {state:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ann_candidate_overrun_is_a_contract_error() {
+    let query_view = query_view();
+    let projection = projection();
+    // cap = 1, oversampled limit = 4; answering five rows breaks the bound.
+    let request = ann_request(&query_view, &projection, 1);
+    let mut rows = ann_fixture_rows(&request);
+    rows.push(record(&request, "fifth", vec![0.5, 0.5]));
+    let embedder = FakeQueryEmbedder::default();
+    let mut vectors = FakeVectorReadPort::new(&request, rows);
+    vectors.ann = Some(FakeAnnBehavior::CandidateIndices(vec![0, 1, 2, 3, 4]));
+    let control = FixedExecutionControl::default();
+    let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let error = retriever
+        .retrieve_semantic(&request)
+        .expect_err("an over-limit candidate set is a port contract violation");
+    assert!(matches!(error, RetrievalPortError::Contract(_)));
+    assert_eq!(vectors.scans.get(), 0, "contract violations must not fall back");
+}
+
+#[test]
+fn ann_duplicate_occurrences_are_a_contract_error() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = ann_request(&query_view, &projection, 2);
+    let embedder = FakeQueryEmbedder::default();
+    let mut vectors = FakeVectorReadPort::new(&request, ann_fixture_rows(&request));
+    vectors.ann = Some(FakeAnnBehavior::CandidateIndices(vec![2, 2]));
+    let control = FixedExecutionControl::default();
+    let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let error = retriever
+        .retrieve_semantic(&request)
+        .expect_err("duplicate ann occurrences are a port contract violation");
+    assert!(matches!(error, RetrievalPortError::Contract(_)));
+    assert_eq!(vectors.scans.get(), 0, "contract violations must not fall back");
 }
