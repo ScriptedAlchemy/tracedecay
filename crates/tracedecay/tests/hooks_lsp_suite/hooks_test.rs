@@ -6,7 +6,7 @@ use tracedecay_agent_hosts::hooks::{
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
     codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
     codex_workspace_status_from_event, cursor_project_root_from_event, cursor_session_start_json,
-    cursor_should_run_sync, cursor_staleness_hint, evaluate_codex_subagent_start,
+    cursor_staleness_hint, evaluate_codex_subagent_start,
     evaluate_cursor_subagent_start, evaluate_hook_decision, evaluate_kiro_pre_tool_use,
     kiro_post_tool_use_rel_paths, record_codex_subagent_start,
 };
@@ -396,14 +396,6 @@ fn test_kiro_post_tool_use_rel_paths_skips_paths_outside_root() {
     );
 
     assert!(kiro_post_tool_use_rel_paths(&input, &root).is_empty());
-}
-
-#[test]
-fn test_cursor_should_run_sync_respects_debounce_window() {
-    assert!(cursor_should_run_sync(1_000, None, 3));
-    assert!(cursor_should_run_sync(1_000, Some(996), 3));
-    assert!(!cursor_should_run_sync(1_000, Some(998), 3));
-    assert!(!cursor_should_run_sync(1_000, Some(1_000), 3));
 }
 
 #[test]
