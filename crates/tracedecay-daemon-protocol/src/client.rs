@@ -578,7 +578,9 @@ impl DaemonInvocationClient {
         if result.is_err() {
             *state = None;
         }
-        result.map_err(|error| with_daemon_version_skew_context(error, &self.connection, &self.handshake))
+        result.map_err(|error| {
+            with_daemon_version_skew_context(error, &self.connection, &self.handshake)
+        })
     }
 
     pub async fn acknowledge_work_delivery(
@@ -1310,10 +1312,8 @@ pub(crate) fn handshake_refusal_error(
     refusal: &crate::handshake::DaemonHandshakeRefusal,
     handshake: &crate::handshake::DaemonHandshake,
 ) -> tracedecay_runtime_core::errors::TraceDecayError {
-    let action = crate::handshake::version_skew_action(
-        &refusal.daemon_version,
-        &handshake.client_version,
-    );
+    let action =
+        crate::handshake::version_skew_action(&refusal.daemon_version, &handshake.client_version);
     tracedecay_runtime_core::errors::TraceDecayError::project_route(
         DAEMON_PROTOCOL_REVISION_SKEW,
         false,

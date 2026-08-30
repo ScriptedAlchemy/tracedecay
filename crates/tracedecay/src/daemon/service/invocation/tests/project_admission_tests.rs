@@ -55,8 +55,7 @@ async fn project_quiescence_denies_semantic_and_git_cached_routes() {
             true,
             now,
             deadline.clone(),
-            CancellationContext::active("cancel.quiesced-semantic-activate")
-                .expect("cancellation"),
+            CancellationContext::active("cancel.quiesced-semantic-activate").expect("cancellation"),
         ),
         DaemonInvocationRequest {
             protocol: tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL.to_owned(),

@@ -326,14 +326,11 @@ async fn wire_drifted_handshake_reads_typed_refusal_then_clean_eof() {
         .expect("write pipelined request");
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
-    let refusal_line = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        lines.next_line(),
-    )
-    .await
-    .expect("refusal must arrive before the read deadline")
-    .expect("the refusal read must not fail with a transport reset")
-    .expect("the daemon must answer a drifted handshake with a refusal line");
+    let refusal_line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("refusal must arrive before the read deadline")
+        .expect("the refusal read must not fail with a transport reset")
+        .expect("the daemon must answer a drifted handshake with a refusal line");
     let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
         .expect("the refusal line must parse as the typed refusal frame");
     assert_eq!(
@@ -382,14 +379,11 @@ async fn non_json_handshake_reads_invalid_handshake_refusal() {
     writer.shutdown().await.expect("shutdown writer");
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
-    let refusal_line = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        lines.next_line(),
-    )
-    .await
-    .expect("refusal must arrive before the read deadline")
-    .expect("the refusal read must not fail with a transport reset")
-    .expect("the daemon must answer a non-json handshake with a refusal line");
+    let refusal_line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("refusal must arrive before the read deadline")
+        .expect("the refusal read must not fail with a transport reset")
+        .expect("the daemon must answer a non-json handshake with a refusal line");
     let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
         .expect("the refusal line must parse as the typed refusal frame");
     assert_eq!(

@@ -135,7 +135,10 @@ fn load_deadline_fires_while_the_open_is_still_running() {
     // The abandoned load still holds its slot and byte reservation while the
     // runtime genuinely occupies memory.
     let held = pool.stats();
-    assert_eq!(held.active, 1, "abandoned load must keep its slot: {held:?}");
+    assert_eq!(
+        held.active, 1,
+        "abandoned load must keep its slot: {held:?}"
+    );
     assert_eq!(held.resident_bytes, 1024);
     assert_eq!(held.sessions_opened, 0);
 

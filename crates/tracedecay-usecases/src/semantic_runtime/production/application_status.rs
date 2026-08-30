@@ -240,8 +240,7 @@ pub fn prefer_lifecycle_over_generic_unavailable(
     }
     match lifecycle.state.as_ref() {
         Some(state) => {
-            let runtime_state =
-                lifecycle_to_runtime_state(state, scheduler.configuration.as_ref());
+            let runtime_state = lifecycle_to_runtime_state(state, scheduler.configuration.as_ref());
             SemanticRuntimeStatusV1::new(scheduler.configuration, runtime_state)
         }
         None if is_deliberate_disablement(lifecycle) => SemanticRuntimeStatusV1::new(
@@ -401,7 +400,10 @@ mod tests {
         for (configuration, state) in [(None, indexing(3, 10)), (Some(pin()), indexing(0, 0))] {
             let status = resolve_semantic_application_status(
                 None,
-                Some(&lifecycle_status(Some("JinaEmbeddingsV2BaseCode"), Some(state))),
+                Some(&lifecycle_status(
+                    Some("JinaEmbeddingsV2BaseCode"),
+                    Some(state),
+                )),
                 configuration,
             );
 

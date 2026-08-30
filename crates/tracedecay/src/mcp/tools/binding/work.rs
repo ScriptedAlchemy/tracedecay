@@ -58,17 +58,15 @@ pub(super) fn dispatch_catalog_bindings()
         .into_iter()
         .map(|operation| {
             let name = format!("tracedecay_work_{}", operation.operation_key());
-            let operation_id =
-                tracedecay_tool_catalog::OperationId::new(operation.operation_id()).map_err(
-                    |_| {
-                        super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
-                            tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
-                                field: "MCP Work operation identity",
-                                reason: "must name one canonical Work operation",
-                            },
-                        )
-                    },
-                )?;
+            let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
+                .map_err(|_| {
+                    super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
+                        tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
+                            field: "MCP Work operation identity",
+                            reason: "must name one canonical Work operation",
+                        },
+                    )
+                })?;
             let binding = registry
                 .get(&operation_id)
                 .and_then(|availability| availability.binding())

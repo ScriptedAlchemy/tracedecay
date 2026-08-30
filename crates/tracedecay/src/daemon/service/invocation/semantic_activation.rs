@@ -214,12 +214,11 @@ impl DaemonInvocationService {
                 })
                 .ok()
             });
-        let runtime_state =
-            crate::semantic_code::resolve_project_semantic_runtime_status(
-                Some(&project_root_path),
-                pin,
-            )
-            .state;
+        let runtime_state = crate::semantic_code::resolve_project_semantic_runtime_status(
+            Some(&project_root_path),
+            pin,
+        )
+        .state;
         // The invocation wire carries the observed state as serialized JSON
         // (the protocol crate does not depend on the usecases state enum).
         let runtime_state = match serde_json::to_value(&runtime_state) {
@@ -325,9 +324,15 @@ pub(super) fn compose_activated_semantic_config(
         artifact_path: material.install_path.clone(),
     };
     let rollback = if set_rollback {
-        current.active_profile.clone().filter(|prior| prior != &active)
+        current
+            .active_profile
+            .clone()
+            .filter(|prior| prior != &active)
     } else {
-        current.rollback_profile.clone().filter(|prior| prior != &active)
+        current
+            .rollback_profile
+            .clone()
+            .filter(|prior| prior != &active)
     };
     let rollback_profile_id = rollback.as_ref().map(|profile| profile.profile_id.clone());
     ComposedSemanticActivationV1 {
@@ -465,7 +470,10 @@ mod tests {
             composed.rollback_profile_id.as_deref(),
             Some("hybrid-conservative")
         );
-        composed.config.validate().expect("composed configuration is valid");
+        composed
+            .config
+            .validate()
+            .expect("composed configuration is valid");
     }
 
     #[test]
@@ -486,7 +494,10 @@ mod tests {
         );
         assert_eq!(composed.config.rollback_profile, None);
         assert_eq!(composed.rollback_profile_id, None);
-        composed.config.validate().expect("composed configuration is valid");
+        composed
+            .config
+            .validate()
+            .expect("composed configuration is valid");
     }
 
     #[test]
@@ -509,6 +520,9 @@ mod tests {
             composed.config.rollback_profile,
             Some(selection("hybrid-aggressive", 'd'))
         );
-        composed.config.validate().expect("composed configuration is valid");
+        composed
+            .config
+            .validate()
+            .expect("composed configuration is valid");
     }
 }
