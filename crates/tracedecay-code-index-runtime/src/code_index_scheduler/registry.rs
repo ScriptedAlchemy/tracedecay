@@ -2419,6 +2419,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
         serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+        pending_wake: Arc<PendingWakeV1>,
         shutting_down: Arc<AtomicBool>,
         project_id: ProjectId,
         semantic_schedule: Option<
@@ -2463,7 +2464,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 // A replaced hook must not leave the worker parked: the next
                 // reconcile (including an edit that raced the remount) needs a
                 // wake even when this pass already finished text.
-                scheduler.wake.notify_one();
+                Self::note_wake(
+                    pending_wake.as_ref(),
+                    scheduler.wake.as_ref(),
+                    CodeIndexCadenceTriggerV1::BusyFollowUp,
+                );
                 return Ok(());
             }
         })
@@ -2529,6 +2534,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .update_policy(graph_activation.policy());
                 let scheduler = Arc::clone(&existing.scheduler);
                 let serving_generation = Arc::clone(&existing.serving_generation);
+                let pending_wake = Arc::clone(&existing.pending_wake);
                 let shutting_down = Arc::clone(&existing.shutting_down);
                 drop(mounted);
                 drop(retiring);
@@ -2538,6 +2544,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     &project_root,
                     scheduler,
                     serving_generation,
+                    pending_wake,
                     shutting_down,
                     project_id,
                     semantic_schedule,
@@ -2676,6 +2683,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .update_policy(graph_activation.policy());
             let scheduler = Arc::clone(&existing.scheduler);
             let serving_generation = Arc::clone(&existing.serving_generation);
+            let pending_wake = Arc::clone(&existing.pending_wake);
             let shutting_down = Arc::clone(&existing.shutting_down);
             drop(mounted);
             drop(retiring);
@@ -2685,6 +2693,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 &project_root,
                 scheduler,
                 serving_generation,
+                pending_wake,
                 shutting_down,
                 worker_project_id,
                 semantic_schedule,

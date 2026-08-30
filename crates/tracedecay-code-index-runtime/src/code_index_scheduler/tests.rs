@@ -11494,6 +11494,119 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
     registry.shutdown().await;
 }
 
+/// A same-root remount is a control-plane reconciliation request, not an
+/// expendable text-projection follow-up. If an unhinted edit races the remount,
+/// the remount wake must enter the canonical pending-work authority so the
+/// graph-off settled-text fast path cannot discard the only source probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, generation_a) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation"));
+        let latest = scheduler.latest_complete().expect("retained generation");
+        let snapshot = latest.generation.snapshot();
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                snapshot.worktree.clone().expect("worktree id"),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            latest.generation.manifest().generation_id.clone(),
+        )
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off retained generation");
+    let settled_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text_ready = registry
+            .latest_text_serving_freshness_for_scope(&scope)
+            .await
+            .is_some_and(|(latest, _)| latest.query_owners_are_warm());
+        if text_ready
+            && !registry
+                .reconcile_in_progress_for_test(fixture.path())
+                .await
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= settled_deadline,
+            "graph-off retained generation never settled"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold worker after remount dequeue");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    fixture.edit("src/lib.rs", "pub fn beta() -> usize { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "unhinted remount edit"]);
+
+    assert!(
+        !registry
+            .mount_worktree_with_graph_policy(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+                super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+            )
+            .await
+            .expect("remount existing graph-off owner"),
+        "same-root remount must reuse the mounted owner"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|micros| micros != 0),
+        "the remount must publish authoritative pending work"
+    );
+    drop(admission);
+
+    let reconcile_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let generation = registry.latest_generation_id(fixture.path()).await;
+        if generation
+            .as_ref()
+            .is_some_and(|generation| generation != &generation_a)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= reconcile_deadline,
+            "the remount wake never reconciled the unhinted edit"
+        );
+        tokio::task::yield_now().await;
+    }
+    registry.shutdown().await;
+}
+
 /// A retryable graph-activation failure may delay only native graph serving.
 /// Exact and lexical refresh must still publish a changed worktree generation
 /// while activation retries remain isolated to the immutable graph artifact.
