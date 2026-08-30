@@ -9,8 +9,21 @@ use tracedecay_domain::{
 };
 
 use crate::error::ApplicationContractError;
+use crate::handlers::ApplicationOperation;
 use crate::result::OpaqueCursor;
-use crate::retrieval::symbol_graph::SymbolPrimitiveRecord;
+use crate::retrieval::grep_analysis::{
+    AstGrepRequestV1, ComplexityRequestV1, DependencyDepthRequestV1, GrepRequestV1,
+    RedundancyRequestV1,
+};
+use crate::retrieval::source_read::SourceReadPrimitiveRequest;
+use crate::retrieval::symbol_graph::{
+    ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationsRequest,
+    SignatureSearchRequest, SymbolPrimitiveRecord, SymbolSearchPrimitiveRequest,
+    TypeHierarchyRequest,
+};
+use crate::retrieval::test_attribution::{
+    AffectedFileTestsPrimitiveRequest, TestMapPrimitiveRequest,
+};
 
 pub const MAX_APPLICATION_PAGE_SIZE: u32 = 1_000;
 
@@ -504,4 +517,48 @@ pub struct DiagnosticsPrimitiveResult {
     pub findings_cleared: bool,
     pub diagnostics: Vec<DiagnosticPrimitiveRecord>,
     pub next_cursor: Option<String>,
+}
+
+/// Closed typed request enum accepted by direct daemon invocation.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "primitive", content = "request", rename_all = "snake_case")]
+pub enum PrimitiveRequest {
+    #[serde(skip)]
+    SymbolSearch(SymbolSearchPrimitiveRequest),
+    ExactSymbol(ExactSymbolRequest),
+    SignatureSearch(SignatureSearchRequest),
+    Implementations(ImplementationsRequest),
+    TypeHierarchy(TypeHierarchyRequest),
+    Callers(GraphRelationRequest),
+    Callees(GraphRelationRequest),
+    Impact(GraphImpactPrimitiveRequest),
+    SourceRead(SourceReadPrimitiveRequest),
+    TestMap(TestMapPrimitiveRequest),
+    AffectedFileTests(AffectedFileTestsPrimitiveRequest),
+    LexicalGrep(GrepRequestV1),
+    AstGrep(AstGrepRequestV1),
+    Complexity(ComplexityRequestV1),
+    Redundancy(RedundancyRequestV1),
+    DependencyDepth(DependencyDepthRequestV1),
+    SessionLookup(SessionLookupRequest),
+    QualifiedName(QualifiedNamePrimitiveRequest),
+    CallChain(CallChainPrimitiveRequest),
+    FileDependents(FileDependentsPrimitiveRequest),
+    SourceLines(SourceLinesRequest),
+    SourceBody(SourceBodyPrimitiveRequest),
+    SourceOutline(SourceOutlinePrimitiveRequest),
+    ModuleApi(ModuleApiPrimitiveRequest),
+    FileMetadata(FileMetadataPrimitiveRequest),
+    HealthRead(HealthReadRequest),
+    HealthDelta(HealthDeltaRequest),
+    StorageStatus(StorageStatusPrimitiveRequest),
+    DiagnosticsRead(DiagnosticsPrimitiveRequest),
+    RecentTestResults(PageRequest),
+}
+
+/// One catalog operation plus its closed typed primitive request.
+#[derive(Debug)]
+pub struct PrimitiveInvocation {
+    pub operation: ApplicationOperation,
+    pub request: PrimitiveRequest,
 }

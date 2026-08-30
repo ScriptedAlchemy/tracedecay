@@ -131,8 +131,9 @@ impl TraceDecay {
         let profile_root = open_options.resolved_profile_root()?;
         if !lifecycle_lease.is_exclusive() || !lifecycle_lease.guards_profile(&profile_root) {
             return Err(TraceDecayError::Config {
-                message: "branch open requires the exact profile's exclusive lifecycle lease"
-                    .to_owned(),
+                message:
+                    "branch snapshot open requires the exact profile's exclusive lifecycle lease"
+                        .to_owned(),
             });
         }
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;

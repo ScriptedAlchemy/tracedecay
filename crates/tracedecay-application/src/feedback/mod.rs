@@ -8,6 +8,7 @@ mod adapters;
 mod advisory_surface;
 mod catalog;
 mod github_ci_proximity;
+pub mod observations;
 mod ports;
 mod problem_terminal;
 mod read;

@@ -275,6 +275,7 @@ fn canonical(path: &Path) -> PathBuf {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
+    crate::common::register_test_schema_installer();
     let tmp = TempDir::new().unwrap();
     let profile_root = canonical(tmp.path());
     let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");
@@ -619,10 +620,12 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
 async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outcomes() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("memory.db");
-    let db_left = fact_db(&db_path).await;
-    let db_right = fact_db(&db_path).await;
-    let store_left = DatabaseFactStore::new(&db_left);
-    let store_right = DatabaseFactStore::new(&db_right);
+    // One writer authority, two clients. A second initialized handle is
+    // rejected (the file already exists), and a second writer connection
+    // with busy_timeout=0 loses to SQLITE_BUSY instead of a typed replay.
+    let db = fact_db(&db_path).await;
+    let store_left = DatabaseFactStore::new(&db);
+    let store_right = DatabaseFactStore::new(&db);
     let owner = profile_owner();
     let scope = ObservationScopeV1::Profile;
 
@@ -828,6 +831,7 @@ async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outc
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_token() {
+    crate::common::register_test_schema_installer();
     let tmp = TempDir::new().unwrap();
     let profile_root = canonical(tmp.path());
     let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");

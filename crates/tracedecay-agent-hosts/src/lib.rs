@@ -59,6 +59,12 @@ pub mod shell;
 pub mod task_classifier;
 pub mod tool_name;
 
+/// The automation runtime whose host-io ports [`register_automation_host_io`]
+/// binds. Exposed so downstream test processes (including the runtime crate's
+/// own unit tests, which compile as a separate crate copy) can reach the
+/// registered production surface instead of re-implementing it.
+pub use tracedecay_automation_runtime as automation_runtime;
+
 pub use product_version::PRODUCT_VERSION;
 pub(crate) use tracedecay_usecases::user_config;
 
