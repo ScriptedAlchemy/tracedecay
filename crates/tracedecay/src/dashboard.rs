@@ -15,6 +15,16 @@ use tracedecay_dashboard_api::{
     DashboardProfileCodeIndexWorkerSettingsPort, standalone_dashboard_automation_writer,
 };
 
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub use tracedecay_dashboard_api::contract_schema;
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub use tracedecay_dashboard_api::{
+    DashboardHostAdmissionTestAuthorityV1, DashboardTestProjectGraphsV1,
+    run_until_shutdown_for_tests_with_host_admission,
+};
+
 pub(crate) mod assets;
 
 /// Canonical observation-capture seeding for dashboard integration fixtures.

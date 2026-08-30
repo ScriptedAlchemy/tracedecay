@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aab0edf27a29036adc9723a1baf0d06b82f37ac7#aab0edf27a29036adc9723a1baf0d06b82f37ac7"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2744,7 +2744,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aab0edf27a29036adc9723a1baf0d06b82f37ac7#aab0edf27a29036adc9723a1baf0d06b82f37ac7"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2764,7 +2764,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aab0edf27a29036adc9723a1baf0d06b82f37ac7#aab0edf27a29036adc9723a1baf0d06b82f37ac7"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2789,7 +2789,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aab0edf27a29036adc9723a1baf0d06b82f37ac7#aab0edf27a29036adc9723a1baf0d06b82f37ac7"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2811,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=fa21515d0c7c2edf41597e8706e2a56e972268dd#fa21515d0c7c2edf41597e8706e2a56e972268dd"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=aab0edf27a29036adc9723a1baf0d06b82f37ac7#aab0edf27a29036adc9723a1baf0d06b82f37ac7"
 dependencies = [
  "bincode",
  "byteorder",
@@ -6285,7 +6285,6 @@ dependencies = [
  "tracedecay-mcp",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
- "tracedecay-search-eval",
  "tracedecay-sessions",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
