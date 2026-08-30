@@ -2901,10 +2901,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // the mount wake, so the dirty-checkout successor rebuild never
                 // started. Follow-up notify starts that pass.
                 if serving_empty
-                    && matches!(
-                        &source_result,
-                        Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_)))
-                    )
+                    && matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_))))
                 {
                     worker_wake.notify_one();
                 }
