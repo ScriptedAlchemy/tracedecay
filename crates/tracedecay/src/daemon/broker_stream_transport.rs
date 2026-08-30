@@ -490,6 +490,9 @@ mod peer_close_tests {
         producer: Arc<BoundedObservabilityProducerV1>,
         db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         project_id: ProjectId,
+        // The lease alone does not own daemon write authority. Keep the test
+        // runtime alive until every asynchronous settlement has drained.
+        _runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
     }
 
     async fn delivery_settlement_fixture() -> DeliverySettlementFixture {
@@ -531,6 +534,7 @@ mod peer_close_tests {
             producer,
             db,
             project_id,
+            _runtime: runtime,
         }
     }
 
