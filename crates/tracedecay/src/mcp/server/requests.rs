@@ -1032,15 +1032,20 @@ impl McpServer {
                 failure_reason: failure_reason.as_deref(),
             });
             self.spawn_observed_ledger_write(async move {
-                registered
-                    .record_savings(
+                // Background ledger append: the tool response already went
+                // out, so a failed write degrades to a named warning.
+                if let Err(e) = registered
+                    .try_record_savings(
                         &project_path_str,
                         &tool_name_owned,
                         raw_file_tokens,
                         response_tokens,
                         ts,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(error = %e, "MCP savings ledger append failed");
+                }
                 if let Err(e) = registered.append_analytics_event(&analytics_event).await {
                     tracing::warn!(error = %e, "MCP analytics event insert failed");
                 }

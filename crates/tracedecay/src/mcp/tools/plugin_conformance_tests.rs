@@ -9,7 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use super::{ToolDefinition, get_tool_definitions};
+use tracedecay_mcp::{ToolDefinition, get_tool_definitions};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use tracedecay_agent_hosts::agents::plugin_bundle;

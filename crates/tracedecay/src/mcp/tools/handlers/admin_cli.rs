@@ -332,9 +332,21 @@ async fn dispatch_admin_cli(
         }
         AdminCliAction::RegistryUpdate { tokens } => {
             let cg = context.require_project()?;
-            let previous = global_db.get_project_tokens(cg.project_root()).await;
-            global_db.upsert(cg.project_root(), tokens).await;
-            json!({ "previous": previous, "current": tokens })
+            // The previous total is informational; an unreadable ledger is
+            // reported beside the update rather than blocking the write or
+            // being shown as zero. The write itself fails closed.
+            let previous = global_db.try_get_project_tokens(cg.project_root()).await;
+            global_db
+                .try_upsert_project_tokens(cg.project_root(), tokens)
+                .await?;
+            match previous {
+                Ok(previous) => json!({ "previous": previous, "current": tokens }),
+                Err(error) => json!({
+                    "previous": Value::Null,
+                    "previous_error": error,
+                    "current": tokens,
+                }),
+            }
         }
         AdminCliAction::RegistryList { limit, query } => {
             registry_list(context.project, global_db, limit, query.as_deref()).await?
@@ -410,7 +422,7 @@ async fn dispatch_admin_cli(
             project_arg,
             since,
             history,
-        } => gain_query(global_db, project_arg.as_deref(), since, history).await,
+        } => gain_query(global_db, project_arg.as_deref(), since, history).await?,
     };
     Ok(json_result(&value))
 }
@@ -439,25 +451,34 @@ async fn registry_project_tokens(
     json!({ "projects": projects })
 }
 
+/// Gain queries fail closed: an unreadable savings ledger is an error the
+/// caller sees, never an empty history or a measured zero.
 async fn gain_query(
     global_db: &RegisteredGlobalDb,
     project_arg: Option<&Path>,
     since: i64,
     history: bool,
-) -> Value {
+) -> Result<Value> {
+    let accounting_error = |message| TraceDecayError::Config { message };
     let project = project_arg.map(|path| path.to_string_lossy().to_string());
     if history {
-        let rows = global_db.savings_history(project.as_deref(), since).await;
-        return json!({
+        let rows = global_db
+            .savings_history(project.as_deref(), since)
+            .await
+            .map_err(accounting_error)?;
+        return Ok(json!({
             "history": rows.iter().map(|row| json!({
                 "day": row.day,
                 "saved_tokens": row.saved_tokens,
                 "calls": row.calls,
             })).collect::<Vec<_>>(),
-        });
+        }));
     }
-    let total = global_db.sum_savings(project.as_deref(), since).await;
-    json!({ "saved_tokens": total.saved_tokens, "calls": total.calls })
+    let total = global_db
+        .sum_savings(project.as_deref(), since)
+        .await
+        .map_err(accounting_error)?;
+    Ok(json!({ "saved_tokens": total.saved_tokens, "calls": total.calls }))
 }
 
 async fn registry_list(

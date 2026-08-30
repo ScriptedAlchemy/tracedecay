@@ -63,39 +63,55 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    pub async fn latest_session_activity_secs(&self) -> Option<i64> {
+    /// Unix seconds of the most recent session activity.
+    ///
+    /// `Ok(None)` is the truthful "this store holds no timestamped messages";
+    /// a failed query or an unreadable timestamp stays an error rather than
+    /// masquerading as an idle store.
+    pub async fn latest_session_activity_secs(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Option<i64>> {
         SessionStoreAccess::new(self)
             .latest_session_activity_secs()
             .await
     }
 
+    /// Reads one message by provider and id. `Ok(None)` is truthful absence;
+    /// snapshot, query, and row-decode failures stay typed errors.
     pub async fn get_session_message(
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<SessionMessageRecord> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<SessionMessageRecord>> {
         SessionStoreAccess::new(self)
             .get_session_message(provider, message_id)
             .await
     }
 
+    /// Searches message text for a provider, optionally constrained to one project.
+    ///
+    /// `Ok(vec![])` is the truthful "nothing matched"; snapshot, query, and
+    /// row-decode failures are typed errors instead of an empty result page.
     pub async fn search_session_messages(
         &self,
         provider: &str,
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> Vec<SessionMessageSearchResult> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
         SessionStoreAccess::new(self)
             .search_session_messages(provider, project_key, query, limit)
             .await
     }
 
+    /// Lists each session's latest canonical goal state, newest first.
+    /// Goals with no native timestamp rank after all timestamped goals
+    /// instead of being assigned a fabricated epoch-zero time.
     pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
         limit: usize,
-    ) -> Vec<SessionMessageSearchResult> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
         SessionStoreAccess::new(self)
             .recent_session_goals(project_key, limit)
             .await

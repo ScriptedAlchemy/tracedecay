@@ -1,9 +1,12 @@
 //! User-level database that tracks all `TraceDecay` projects and their saved tokens.
 //!
 //! Stored at `~/.tracedecay/global.db`, this database holds one row per project
-//! with the project's database path and its cumulative tokens-saved count. Read
-//! paths are generally best-effort; authoritative open and maintenance
-//! interfaces preserve failures for callers that must fail closed.
+//! with the project's database path and its cumulative tokens-saved count.
+//! Every read and write in this crate reports its outcome as a typed state:
+//! absence is a truthful `Ok(None)` / empty page, and a failed snapshot,
+//! query, decode, or commit is an error naming the failing operation — never
+//! a silent zero, empty result, or fabricated timestamp. Callers decide at
+//! the call site whether to fail closed or degrade with a named warning.
 //!
 //! ## Dependency edges
 //!
@@ -120,8 +123,8 @@ use project_registry::project_path_alias_key;
 /// Registry reap contract. Lives beside `plan_registry_reap`, its only producer.
 pub use project_registry::{
     EPHEMERAL_PROJECT_ROOT_REASON_CODE, GIT_COMMON_DIR_ALIAS_PREFIX, PROJECT_REGISTRY_AUTHORITY,
-    ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry, alias_key_path,
-    ephemeral_root_rejection, is_ephemeral_path,
+    ProjectStoreResolutionError, ReapEntryKind, RegistryReapEntry, RegistryReapPlan,
+    RetainedRegistryEntry, alias_key_path, ephemeral_root_rejection, is_ephemeral_path,
 };
 pub use registered::{
     DeliveryAttemptClaimV1, DeliverySourceReceiptReadV1, DurableDeliverySettlementReceiptV1,

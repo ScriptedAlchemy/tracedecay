@@ -396,14 +396,16 @@ impl DashboardTestRuntimeV1 {
         timestamp: i64,
     ) {
         self.profile_database
-            .record_savings(project, tool, before, after, timestamp)
-            .await;
+            .try_record_savings(project, tool, before, after, timestamp)
+            .await
+            .expect("seed dashboard savings ledger entry");
     }
 
     pub(crate) async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
         self.profile_database
-            .upsert(project_path, tokens_saved)
-            .await;
+            .try_upsert_project_tokens(project_path, tokens_saved)
+            .await
+            .expect("seed dashboard project token total");
     }
 
     pub(crate) async fn upsert_session_for_test(
