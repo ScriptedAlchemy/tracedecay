@@ -46,6 +46,10 @@ pub trait DaemonLivenessProbe: Send + Sync {
 pub struct DaemonConnection {
     pub endpoint: DaemonEndpoint,
     pub auth_token: Option<String>,
+    /// The daemon version advertised by the authority record that named this
+    /// endpoint. Lets transport failures name version skew instead of hiding
+    /// it behind a raw io error.
+    pub daemon_version: Option<String>,
     liveness: Option<Arc<dyn DaemonLivenessProbe>>,
 }
 
@@ -54,6 +58,7 @@ impl DaemonConnection {
         Self {
             endpoint,
             auth_token,
+            daemon_version: None,
             liveness: None,
         }
     }
@@ -61,6 +66,11 @@ impl DaemonConnection {
     #[must_use]
     pub fn with_liveness(mut self, probe: Arc<dyn DaemonLivenessProbe>) -> Self {
         self.liveness = Some(probe);
+        self
+    }
+
+    pub fn with_daemon_version(mut self, daemon_version: impl Into<String>) -> Self {
+        self.daemon_version = Some(daemon_version.into());
         self
     }
 

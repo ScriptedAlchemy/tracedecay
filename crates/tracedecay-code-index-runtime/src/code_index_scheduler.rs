@@ -4981,14 +4981,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
-    #[cfg(test)]
-    fn reconcile_retained_text_generation(
-        &mut self,
-        metadata: &VerifiedSealedTextGenerationMetadataV1,
-    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        self.reconcile_retained_text_generation_with(metadata, true)
-    }
-
     fn reconcile_retained_text_generation_with(
         &mut self,
         metadata: &VerifiedSealedTextGenerationMetadataV1,
@@ -5734,21 +5726,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             || self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
         {
             self.request_background_reconcile();
-            return Ok(None);
-        }
-        Ok(self.latest_complete_with(admission))
-    }
-
-    /// Admit a generation only when the current worktree stat signature still
-    /// matches the signature sealed by the last reconcile. Workspace-wide
-    /// completeness needs this stronger fence because a file can be added
-    /// inside the ordinary bounded-staleness window.
-    #[cfg(test)]
-    fn latest_complete_ready_for_exact_source_with(
-        &mut self,
-        admission: GenerationDecodeAdmissionV1,
-    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
-        if !self.exact_source_is_ready()? {
             return Ok(None);
         }
         Ok(self.latest_complete_with(admission))

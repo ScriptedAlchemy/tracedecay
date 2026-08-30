@@ -93,7 +93,9 @@ impl DaemonConnection {
         let connection =
             tracedecay_daemon_protocol::DaemonConnection::new(self.endpoint, self.auth_token);
         match self.authority_record {
-            Some(record) => connection.with_liveness(Arc::new(AuthorityLivenessProbe { record })),
+            Some(record) => connection
+                .with_daemon_version(record.version.clone())
+                .with_liveness(Arc::new(AuthorityLivenessProbe { record })),
             None => connection,
         }
     }
