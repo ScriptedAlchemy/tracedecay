@@ -32,6 +32,9 @@ use tracedecay_query::retrieval::lexical::{
 use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
 };
+use tracedecay_query::retrieval::{
+    QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_GRAPH_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1,
+};
 
 use crate::candidate_producers::{
     base_request, budget, chunk, complete, id, lexical_request, projection_metadata,
@@ -116,9 +119,9 @@ fn profile() -> FusionProfile {
             })
             .collect(),
         score_domain_calibrations: [
-            (RetrieverKind::ExactLiteral, "score.exact.v1"),
-            (RetrieverKind::Lexical, "score.lexical.v1"),
-            (RetrieverKind::Graph, "score.graph.v1"),
+            (RetrieverKind::ExactLiteral, QUERY_EXACT_SCORE_DOMAIN_V1),
+            (RetrieverKind::Lexical, QUERY_LEXICAL_SCORE_DOMAIN_V1),
+            (RetrieverKind::Graph, QUERY_GRAPH_SCORE_DOMAIN_V1),
         ]
         .into_iter()
         .map(|(lane, score_domain)| {
@@ -220,7 +223,7 @@ fn graph_pair(
     candidate.source_occurrence_id = id(&format!("occurrence.graph.{name}"));
     candidate.retriever = RetrieverKind::Graph;
     candidate.retriever_revision = id("retriever.graph.v1");
-    candidate.score_domain = id("score.graph.v1");
+    candidate.score_domain = id(QUERY_GRAPH_SCORE_DOMAIN_V1);
     candidate.raw_score = FixedPointScore(score_micros);
     candidate.ordinal_rank = 0;
     candidate.exact_admission_proof = None;

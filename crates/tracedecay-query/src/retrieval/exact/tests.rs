@@ -304,7 +304,7 @@ fn exact_pair(
         evidence_role: EvidenceRole::Primary,
         retriever: RetrieverKind::ExactLiteral,
         retriever_revision: id("retriever.exact.v1"),
-        score_domain: id("score.exact.v1"),
+        score_domain: id(crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1),
         raw_score: FixedPointScore(0),
         ordinal_rank: 0,
         exact_admission_proof: Some(proof.clone()),

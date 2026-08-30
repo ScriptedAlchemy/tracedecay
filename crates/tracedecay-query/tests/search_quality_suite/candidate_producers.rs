@@ -59,6 +59,7 @@ use tracedecay_query::retrieval::lexical::{
     MAX_LEXICAL_QUERY_TERM_BYTES_V1, VerifiedCodeLexicalArtifactV1,
 };
 use tracedecay_query::retrieval::ports::{ExactTermPostingReadPort, LexicalPostingReadPort};
+use tracedecay_query::retrieval::{QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1};
 
 struct ArtifactControl {
     cancelled: bool,
@@ -518,7 +519,7 @@ fn real_lexical_source_fixture_from_sources(
         freshness: freshness(FreshnessCompatibilityV1::Current),
         exact_retriever_revision: id::<ComponentRevision>("retriever.exact.v1"),
         lexical_retriever_revision: id::<ComponentRevision>("retriever.lexical.v1"),
-        exact_score_domain: id::<ScoreDomainId>("score.exact.v1"),
+        exact_score_domain: id::<ScoreDomainId>(QUERY_EXACT_SCORE_DOMAIN_V1),
     };
     RealLexicalSourceFixture {
         sealed,
@@ -858,7 +859,7 @@ pub(crate) fn projection_metadata(
         freshness: freshness(compatibility),
         exact_retriever_revision: id::<ComponentRevision>("retriever.exact.v1"),
         lexical_retriever_revision: id::<ComponentRevision>("retriever.lexical.v1"),
-        exact_score_domain: id::<ScoreDomainId>("score.exact.v1"),
+        exact_score_domain: id::<ScoreDomainId>(QUERY_EXACT_SCORE_DOMAIN_V1),
     }
 }
 
@@ -4173,7 +4174,7 @@ pub(crate) fn lexical_request(
         field_filters: Vec::<LexicalFieldFilterV1>::new(),
         fuzzy_budget,
         lexical_profile_revision: id("lexical-profile.v1"),
-        score_domain: id("score.lexical.v1"),
+        score_domain: id(QUERY_LEXICAL_SCORE_DOMAIN_V1),
         budget: budget(max_candidates),
     }
 }
