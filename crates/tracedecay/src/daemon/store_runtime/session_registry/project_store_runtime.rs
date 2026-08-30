@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::{ProjectId, UserProfileId};
-use tracedecay_global_db::{CodeProjectRecord, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use tracedecay_usecases::tracedecay::{ProjectStoreRuntimeV1, RuntimeFuture};
 
@@ -59,12 +59,5 @@ impl ProjectStoreRuntimeV1 for DaemonSessionRuntimeRegistryV1 {
         Box::pin(DaemonSessionRuntimeRegistryV1::project_graph_registered(
             self, project_id, db_path, access,
         ))
-    }
-
-    fn list_code_projects(&self, limit: usize) -> RuntimeFuture<'_, Vec<CodeProjectRecord>> {
-        Box::pin(async move {
-            let database = DaemonSessionRuntimeRegistryV1::profile_database(self).await?;
-            database.list_code_projects(limit).await
-        })
     }
 }

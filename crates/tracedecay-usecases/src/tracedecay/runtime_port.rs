@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use tracedecay_domain::{ProjectId, UserProfileId};
-use tracedecay_global_db::{CodeProjectRecord, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use tracedecay_runtime_core::errors::Result;
 
@@ -39,7 +39,4 @@ pub trait ProjectStoreRuntimeV1: Send + Sync {
         db_path: PathBuf,
         access: DatabaseAccessMode,
     ) -> RuntimeFuture<'_, Database>;
-    /// Profile-store project list. The session registry has no inherent list;
-    /// this forwards through the profile database lease.
-    fn list_code_projects(&self, limit: usize) -> RuntimeFuture<'_, Vec<CodeProjectRecord>>;
 }

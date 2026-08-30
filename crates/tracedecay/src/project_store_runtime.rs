@@ -6,7 +6,6 @@
 //! daemon and MCP callers of [`TraceDecay::store_runtime_registry`] keep
 //! compiling without this slice retargeting them.
 
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
@@ -32,7 +31,8 @@ static STANDALONE_SESSION_REGISTRIES: LazyLock<
 /// Root-owned handle around the sole [`ProjectStoreRuntimeV1`] implementor.
 ///
 /// The aggregate stores this and calls [`Self::port`]. Out-of-tree daemon
-/// consumers still auto-deref to the concrete registry.
+/// consumers reach the concrete registry through
+/// [`TraceDecay::store_runtime_registry`](crate::tracedecay::TraceDecay::store_runtime_registry).
 #[derive(Clone)]
 pub(crate) struct ProjectStoreRuntimeHandle {
     registry: Arc<DaemonSessionRuntimeRegistryV1>,
@@ -51,20 +51,6 @@ impl ProjectStoreRuntimeHandle {
 impl From<Arc<DaemonSessionRuntimeRegistryV1>> for ProjectStoreRuntimeHandle {
     fn from(registry: Arc<DaemonSessionRuntimeRegistryV1>) -> Self {
         Self::from_registry(registry)
-    }
-}
-
-impl Deref for ProjectStoreRuntimeHandle {
-    type Target = DaemonSessionRuntimeRegistryV1;
-
-    fn deref(&self) -> &Self::Target {
-        self.registry.as_ref()
-    }
-}
-
-impl AsRef<DaemonSessionRuntimeRegistryV1> for ProjectStoreRuntimeHandle {
-    fn as_ref(&self) -> &DaemonSessionRuntimeRegistryV1 {
-        self.registry.as_ref()
     }
 }
 
