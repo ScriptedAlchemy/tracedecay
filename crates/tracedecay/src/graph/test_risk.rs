@@ -4,9 +4,9 @@ use serde::Serialize;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::code_intelligence::NodeKind;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const ATTRIBUTION_DEPTH: usize = 3;
 const MAX_TEST_RISK_SYMBOLS: usize = 500_000;
@@ -227,7 +227,8 @@ pub(crate) async fn analyze_test_risk(
         .filter(|risk| include_tested || !risk.has_test())
         .collect();
 
-    let churn_map = tracedecay_usecases::git_intelligence::churn::file_churn(cg.project_root(), 90).await?;
+    let churn_map =
+        tracedecay_usecases::git_intelligence::churn::file_churn(cg.project_root(), 90).await?;
     for risk in &mut risks {
         let churn = churn_map.get(&risk.file).copied().unwrap_or(0);
         risk.churn = churn;

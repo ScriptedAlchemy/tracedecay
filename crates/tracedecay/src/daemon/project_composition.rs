@@ -475,8 +475,8 @@ async fn production_project_server_inner(
     let dashboard_code_index_freshness_reader =
         project_dashboard_freshness_reader(invocation.code_index_schedulers.clone());
     let configuration_client = cg.configuration_runtime().client();
-    let dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader = Arc::new(
-        move |project_root: std::path::PathBuf| {
+    let dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader =
+        Arc::new(move |project_root: std::path::PathBuf| {
             let configuration_client = Arc::clone(&configuration_client);
             Box::pin(async move {
                 let activated =
@@ -505,11 +505,11 @@ async fn production_project_server_inner(
                 );
                 tracedecay_dashboard_api::ExplorerSemanticReadV1 { activated, status }
             })
-        },
-    );
-    let dashboard_feedback_status_reader = tracedecay_dashboard_api::feedback_api::feedback_status_reader(
-        invocation.feedback_runtime_registrar(),
-    );
+        });
+    let dashboard_feedback_status_reader =
+        tracedecay_dashboard_api::feedback_api::feedback_status_reader(
+            invocation.feedback_runtime_registrar(),
+        );
     let application_invocation_executor: Arc<
         dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     > = Arc::new(InProcessDaemonInvocationExecutor::new(

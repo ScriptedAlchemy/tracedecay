@@ -17,7 +17,10 @@ use crate::daemon::profile_identity;
 use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
-async fn publish_foreign_memory_owner(path: &Path, label: &str) -> tracedecay_runtime_core::db::DatabaseOwnerV1 {
+async fn publish_foreign_memory_owner(
+    path: &Path,
+    label: &str,
+) -> tracedecay_runtime_core::db::DatabaseOwnerV1 {
     let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(path, label)
         .expect("foreign memory-owner fixture authority");
     let fixture = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control(
@@ -180,11 +183,18 @@ async fn cold_read_only_mount_denies_publication_and_degrades_graph_assist_truth
     let project_id = project_id("cold-read-only");
     let project_root = temporary.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
-    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
-        .expect("project enrollment");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 37, "seed cold read-only")
-        .expect("seed database scope");
+    let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        37,
+        "seed cold read-only",
+    )
+    .expect("seed database scope");
     let registry = super::super::DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .expect("seed registry");
@@ -229,9 +239,12 @@ async fn cold_read_only_mount_denies_publication_and_degrades_graph_assist_truth
         .expect("join seed graph reconciliation");
     drop((database, registry, scope));
 
-    let _restarted_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 38, "cold read-only reopen")
-            .expect("cold read-only database scope");
+    let _restarted_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        38,
+        "cold read-only reopen",
+    )
+    .expect("cold read-only database scope");
     let restarted = super::super::DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("cold read-only registry");

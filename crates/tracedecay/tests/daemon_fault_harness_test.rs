@@ -11,7 +11,6 @@ use serde_json::Value;
 use serde_json::json;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use tracedecay::daemon::{DaemonHandshake, call_tool};
-use tracedecay_global_db::GlobalDbObservationStore;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_domain::{
@@ -21,6 +20,7 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationReplayRequest,
     ObservationStore, ObservationStoreError, ObservationWrite,

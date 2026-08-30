@@ -28,8 +28,8 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -983,7 +983,8 @@ async fn stale_owner_cannot_persist_after_cancellation() {
     let temp = TempDir::new().unwrap();
     let authority =
         Arc::new(registered_test_database(&temp, "stale-owner", HostAdmissionScope::Profile).await);
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(authority.database());
+    let store =
+        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(authority.database());
     store
         .begin_or_join_session_refresh(request("session.stale.owner", 0))
         .await

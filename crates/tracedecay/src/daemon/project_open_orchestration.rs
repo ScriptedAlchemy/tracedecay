@@ -276,9 +276,10 @@ pub(super) fn durable_enrollment_resolves_existing_store(
     let Ok(identity) = store_administration.profile_identity() else {
         return false;
     };
-    let Ok(Some(layout)) =
-        tracedecay_runtime_core::storage::resolve_persisted_layout(project_path, identity.profile_root())
-    else {
+    let Ok(Some(layout)) = tracedecay_runtime_core::storage::resolve_persisted_layout(
+        project_path,
+        identity.profile_root(),
+    ) else {
         return false;
     };
     layout.graph_db_path.is_file()

@@ -657,7 +657,9 @@ impl DaemonAdvisoryRuntimeRegistrar {
     }
 }
 
-impl tracedecay_dashboard_api::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {
+impl tracedecay_dashboard_api::feedback_api::FeedbackStatusRuntime
+    for DaemonFeedbackRuntimeRegistrar
+{
     fn read_feedback_status(
         &self,
         project_root: PathBuf,

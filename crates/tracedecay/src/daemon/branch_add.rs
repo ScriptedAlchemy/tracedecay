@@ -377,17 +377,19 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
                 ),
             )
         })?;
-        let source_branch =
-            tracedecay_runtime_core::branch::current_branch(&canonical_worktree_root).ok_or_else(|| {
-                TraceDecayError::project_route(
-                    GIT_SNAPSHOT_UNAVAILABLE,
-                    false,
-                    format!(
-                        "branch graph publication requires an attached source branch for '{}'",
-                        canonical_worktree_root.display()
-                    ),
-                )
-            })?;
+        let source_branch = tracedecay_runtime_core::branch::current_branch(
+            &canonical_worktree_root,
+        )
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                GIT_SNAPSHOT_UNAVAILABLE,
+                false,
+                format!(
+                    "branch graph publication requires an attached source branch for '{}'",
+                    canonical_worktree_root.display()
+                ),
+            )
+        })?;
         let source = capture_exact_branch_source(
             graph,
             schedulers,
@@ -410,7 +412,9 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
                 format!("failed to prepare branch tracking for '{branch}': {error}"),
             )
         })? {
-            tracedecay_runtime_core::branch::BranchTrackingPreparation::Added(prepared) => Some(prepared),
+            tracedecay_runtime_core::branch::BranchTrackingPreparation::Added(prepared) => {
+                Some(prepared)
+            }
             tracedecay_runtime_core::branch::BranchTrackingPreparation::AlreadyTracked => None,
             tracedecay_runtime_core::branch::BranchTrackingPreparation::Deferred => {
                 return Ok(BranchAddOutcome::Deferred);
@@ -868,15 +872,16 @@ async fn rollback_failed_branch_tracking(
         return Ok(());
     }
     if let Some(prepared) = prepared {
-        match tracedecay_runtime_core::branch::rollback_prepared_branch_tracking(data_root, prepared).map_err(
-            |error| {
-                TraceDecayError::project_route(
-                    BRANCH_TRACKING_FAILED,
-                    true,
-                    format!("branch publication failed: {cause}; branch rollback failed: {error}"),
-                )
-            },
-        )? {
+        match tracedecay_runtime_core::branch::rollback_prepared_branch_tracking(
+            data_root, prepared,
+        )
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                BRANCH_TRACKING_FAILED,
+                true,
+                format!("branch publication failed: {cause}; branch rollback failed: {error}"),
+            )
+        })? {
             tracedecay_runtime_core::branch::PreparedBranchRollbackOutcome::RolledBack
             | tracedecay_runtime_core::branch::PreparedBranchRollbackOutcome::NoMatch => {}
         }

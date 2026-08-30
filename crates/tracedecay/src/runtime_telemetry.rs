@@ -11,8 +11,8 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::runtime_telemetry::{
     DatabaseSnapshot, GenerationCensusReader, GenerationCensusSnapshot,
     GenerationCensusUnavailableReason, ReaderPoolOccupancy, RuntimeRegistrySnapshot,
-    RuntimeSnapshot, WriterOwnerSnapshot, file_size, read_cached_process_sample,
-    read_dirty_marker, unix_epoch_secs, with_suffix,
+    RuntimeSnapshot, WriterOwnerSnapshot, file_size, read_cached_process_sample, read_dirty_marker,
+    unix_epoch_secs, with_suffix,
 };
 
 /// Capture a runtime snapshot for the given project.
@@ -91,13 +91,17 @@ async fn collect_database_with_generation_census(
     let dirty_marker = read_dirty_marker(&with_suffix(&db_path, ".dirty"));
     let writer_owner = match tracedecay_runtime_core::db::probe_writer_owner(&db_path) {
         Ok(tracedecay_runtime_core::db::WriterOwnership::Idle) => WriterOwnerSnapshot::Idle,
-        Ok(tracedecay_runtime_core::db::WriterOwnership::Active(owner)) => WriterOwnerSnapshot::Active {
-            pid: owner.pid,
-            started_epoch_ms: owner.started_epoch_ms,
-            version: owner.version,
-            intent: owner.intent,
-        },
-        Ok(tracedecay_runtime_core::db::WriterOwnership::ActiveUnknown) => WriterOwnerSnapshot::ActiveUnknown,
+        Ok(tracedecay_runtime_core::db::WriterOwnership::Active(owner)) => {
+            WriterOwnerSnapshot::Active {
+                pid: owner.pid,
+                started_epoch_ms: owner.started_epoch_ms,
+                version: owner.version,
+                intent: owner.intent,
+            }
+        }
+        Ok(tracedecay_runtime_core::db::WriterOwnership::ActiveUnknown) => {
+            WriterOwnerSnapshot::ActiveUnknown
+        }
         Err(error) => WriterOwnerSnapshot::ProbeFailed {
             error: error.to_string(),
         },

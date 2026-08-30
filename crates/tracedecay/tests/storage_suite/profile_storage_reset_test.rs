@@ -4,8 +4,8 @@ use std::path::Path;
 use tempfile::TempDir;
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::serve;
-use tracedecay_runtime_core::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_runtime_core::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 
 use crate::common::{EnvVarGuard, canonical_existing_path};
 use crate::home_env_lock::HOME_ENV_LOCK;

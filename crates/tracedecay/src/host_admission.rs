@@ -15,14 +15,14 @@ use tracedecay_sessions::admission::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_store::StoreShardScopeV1;
 
 #[path = "host_admission/accounting_test_support.rs"]
@@ -201,8 +201,9 @@ impl HostAdmissionTestRuntimeV1 {
             "host-admission-test-runtime",
         )?;
         let session_registry = {
-            let profile_key =
-                tracedecay_runtime_core::lifecycle_lease::canonical_or_original(identity.profile_root());
+            let profile_key = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                identity.profile_root(),
+            );
             // Held across construction so two concurrent opens of one profile
             // cannot race into two registries (the loser would fail the
             // exclusive profile session store open).
@@ -373,7 +374,8 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn observation_store(
         &self,
         scope: HostAdmissionScope,
-    ) -> std::result::Result<tracedecay_global_db::GlobalDbObservationStore, HostAdmissionOutcome> {
+    ) -> std::result::Result<tracedecay_global_db::GlobalDbObservationStore, HostAdmissionOutcome>
+    {
         let database = self
             .registered_database(scope)
             .ok_or_else(registered_authority_unavailable_outcome)?;
@@ -405,10 +407,17 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn session_temporal_store_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> Result<tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>> {
-        Ok(tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
-            self.session_database_for_test(scope)?,
-        ))
+    ) -> Result<
+        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
+            '_,
+            tracedecay_global_db::RegisteredGlobalDb,
+        >,
+    > {
+        Ok(
+            tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
+                self.session_database_for_test(scope)?,
+            ),
+        )
     }
 
     #[doc(hidden)]

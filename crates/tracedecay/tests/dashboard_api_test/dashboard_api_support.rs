@@ -202,18 +202,19 @@ pub(crate) async fn setup_project(
         &project_root.join("src/lib.rs"),
         "pub fn seed_fixture() -> &'static str { \"dashboard\" }\n",
     );
-    let project_id = tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)
-        .unwrap_or_else(|error| panic!("read dashboard fixture identity: {error}"))
-        .and_then(|marker| ProjectId::new(marker.project_id).ok())
-        .unwrap_or_else(|| {
-            let suffix = project_root
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .unwrap_or("project")
-                .replace(|character: char| !character.is_ascii_alphanumeric(), "_");
-            ProjectId::new(format!("dashboard_fixture_{suffix}"))
-                .unwrap_or_else(|error| panic!("mint dashboard fixture identity: {error}"))
-        });
+    let project_id =
+        tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)
+            .unwrap_or_else(|error| panic!("read dashboard fixture identity: {error}"))
+            .and_then(|marker| ProjectId::new(marker.project_id).ok())
+            .unwrap_or_else(|| {
+                let suffix = project_root
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .unwrap_or("project")
+                    .replace(|character: char| !character.is_ascii_alphanumeric(), "_");
+                ProjectId::new(format!("dashboard_fixture_{suffix}"))
+                    .unwrap_or_else(|error| panic!("mint dashboard fixture identity: {error}"))
+            });
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()
         .unwrap_or_else(|error| panic!("resolve dashboard fixture profile root: {error}"));
     let open_options = tracedecay::tracedecay::TraceDecayOpenOptions {
@@ -282,11 +283,11 @@ pub(crate) async fn record_dashboard_automatic_fact(
     run_id: &str,
     content: &str,
 ) -> DashboardAutomaticFactReceipt {
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
     use tracedecay_automation_runtime::automation::AutomationRunControl;
     use tracedecay_automation_runtime::automation::automatic_facts::{
         AutomaticFactState, record_session_automatic_facts,
     };
+    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
     use tracedecay_usecases::memory::MemoryApplication;
 
     let owner = dashboard_fixture_project_owner(cg);

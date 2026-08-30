@@ -1282,7 +1282,8 @@ mod doctor_runtime_route_tests {
             "fixture must provide an uninitialized sessions placeholder"
         );
         assert!(
-            !tracedecay_runtime_core::storage::has_sqlite_database_header(&session_path).unwrap_or(true),
+            !tracedecay_runtime_core::storage::has_sqlite_database_header(&session_path)
+                .unwrap_or(true),
             "sessions placeholder must not be a SQLite database yet"
         );
         let handshake = handshake(project, profile.clone(), registry_path);

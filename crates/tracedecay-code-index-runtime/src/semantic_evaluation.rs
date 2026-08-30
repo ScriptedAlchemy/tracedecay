@@ -1529,7 +1529,8 @@ impl LinuxProcessResourceWindowV1 {
     fn begin() -> Option<Self> {
         Some(Self {
             cpu_ticks: tracedecay_usecases::runtime_telemetry::read_linux_process_cpu_ticks()?,
-            ticks_per_second: tracedecay_usecases::runtime_telemetry::linux_clock_ticks_per_second()?,
+            ticks_per_second: tracedecay_usecases::runtime_telemetry::linux_clock_ticks_per_second(
+            )?,
         })
     }
 

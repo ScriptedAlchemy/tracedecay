@@ -465,7 +465,9 @@ async fn registry_list(
     limit: usize,
     query: Option<&str>,
 ) -> Result<Value> {
-    use tracedecay_dashboard_api::project_registry::{PublicCodeProject, build_project_registry_view};
+    use tracedecay_dashboard_api::project_registry::{
+        PublicCodeProject, build_project_registry_view,
+    };
 
     let limit = limit.clamp(1, 100_000);
     let mut projects = match query {

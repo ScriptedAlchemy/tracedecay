@@ -92,10 +92,10 @@ pub mod serve;
 #[path = "sessions/ingest_tests.rs"]
 mod session_ingest_tests;
 pub mod session_temporal_benchmark;
-#[doc(hidden)]
-pub mod vector_generation_test_support;
 pub mod tracedecay;
 pub mod types;
+#[doc(hidden)]
+pub mod vector_generation_test_support;
 pub mod version;
 #[cfg(test)]
 #[path = "sessions/workflow_ingest_tests.rs"]

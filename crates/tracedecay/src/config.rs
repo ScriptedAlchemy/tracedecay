@@ -1594,7 +1594,9 @@ pub fn brand_env(suffix: &str) -> Option<String> {
 /// Returns the path to the configuration file (`config.json`) within the
 /// resolved data directory.
 pub fn get_config_path(project_root: &Path) -> PathBuf {
-    if let Ok(layout) = tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root) {
+    if let Ok(layout) =
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root)
+    {
         return layout.config_path;
     }
     get_tracedecay_dir(project_root).join(CONFIG_FILENAME)

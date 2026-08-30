@@ -794,13 +794,13 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
 #[cfg(unix)]
 #[tokio::test]
 async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exits() {
-    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
     use tracedecay_automation_runtime::automation::config::{
         AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
     };
     use tracedecay_automation_runtime::automation::scheduler::{
         AutomationSchedulerControl, save_scheduler_control,
     };
+    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
 
     let dir = TempDir::new().expect("temp dir");
     let _codex_bin = isolate_codex_app_server_binary(dir.path());

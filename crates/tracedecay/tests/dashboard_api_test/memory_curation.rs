@@ -303,12 +303,12 @@ fn retained_mutations_deny_foreign_project_scope_without_a_receipt() {
 
 #[test]
 fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_receipts() {
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
     use tracedecay_domain::{
         ActorId, ComponentVersion, FactOwnerV1, PayloadReferenceV1, ProvenanceId,
         SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1,
     };
+    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
     use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddMaterialV1};
     use tracedecay_usecases::memory::{
         MemoryApplication, ProjectMemoryFactAddRequest, automatic_fact_add_command,

@@ -34,8 +34,8 @@ mod observability_rollup;
 pub mod observation;
 mod observation_adapter;
 mod observation_projection;
-mod workflow_adapter;
 mod registered_maintenance;
+mod workflow_adapter;
 pub use registered_maintenance::{
     REGISTERED_WAL_RECLAIM_TRIGGER_BYTES, RegisteredWalCheckpointReceiptV1, RegisteredWalReclaimV1,
 };
@@ -44,6 +44,7 @@ mod registered_provider_usage;
 mod stack_delivery_tests;
 mod support;
 pub use discovery_queue::HostDiscoveryQueueEntry;
+pub use git_correlation_adapter::GlobalDbGitCorrelationStore;
 pub use git_topology_anchor::RegisteredGitTopologyAnchorAuthorityV2;
 pub use observability_rollup::{
     ObservabilityRollupCompactionCandidateV1, ObservabilityRollupCompactionReceiptV1,
@@ -54,15 +55,14 @@ pub use observability_rollup::{
     ObservabilityRollupRebuildReceiptV1, ObservabilityRollupRebuildV1,
     ObservabilityRollupRetentionReceiptV1, ensure_observability_rollup_schema,
 };
-pub use git_correlation_adapter::GlobalDbGitCorrelationStore;
 pub use observation_adapter::GlobalDbObservationStore;
-pub use workflow_adapter::GlobalDbWorkflowStore;
 pub use observation_projection::{
     converge_projection_predecessor, project_observation, rebuild_projection,
 };
 #[cfg(test)]
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 pub use tracedecay_domain::CoverageStateV1;
+pub use workflow_adapter::GlobalDbWorkflowStore;
 mod observation_store;
 mod project_registry;
 mod registered;

@@ -1307,7 +1307,13 @@ impl LcmTestRuntime {
 
     pub fn session_temporal_store(
         &self,
-    ) -> Result<tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>, HostAdmissionOutcome> {
+    ) -> Result<
+        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
+            '_,
+            tracedecay_global_db::RegisteredGlobalDb,
+        >,
+        HostAdmissionOutcome,
+    > {
         self.runtime
             .session_temporal_store(HostAdmissionScope::Profile)
     }

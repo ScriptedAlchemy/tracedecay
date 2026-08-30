@@ -7,11 +7,11 @@ use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 
+use crate::tracedecay::queries::graph::VerifiedGraphQuery;
+use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 use tracedecay_mcp::context_headings::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING,
 };
-use crate::tracedecay::queries::graph::VerifiedGraphQuery;
-use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 use tracedecay_mcp::path_tree::format_compact_path_list;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 

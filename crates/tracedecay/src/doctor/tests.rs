@@ -514,7 +514,10 @@ async fn store_layout_resolution_surfaces_split_identity_conflict()
         std::fs::write(&layout.graph_db_path, b"graph")?;
         tracedecay_runtime_core::storage::write_store_manifest(&layout)?;
     }
-    tracedecay_runtime_core::storage::write_repository_identity_marker(&project_root, "proj_doctor_selected")?;
+    tracedecay_runtime_core::storage::write_repository_identity_marker(
+        &project_root,
+        "proj_doctor_selected",
+    )?;
 
     let open_options = crate::tracedecay::TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),

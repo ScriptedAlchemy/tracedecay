@@ -1,18 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tracedecay_runtime_core::errors::Result;
-use tracedecay_usecases::graph::queries::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
-use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_application::RequestContext;
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
     CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
+use tracedecay_runtime_core::errors::Result;
+use tracedecay_usecases::graph::queries::GraphQueryManager;
 use tracedecay_usecases::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
     CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
@@ -350,15 +350,27 @@ fn graph_projection_error(
 }
 
 fn graph_invalid_request(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::project_route("code-graph-invalid-request", false, detail)
+    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+        "code-graph-invalid-request",
+        false,
+        detail,
+    )
 }
 
 fn graph_budget_exhausted(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::project_route("code-graph-budget-exhausted", false, detail)
+    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+        "code-graph-budget-exhausted",
+        false,
+        detail,
+    )
 }
 
 fn graph_corrupt(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::project_route("code-graph-corrupt", false, detail)
+    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+        "code-graph-corrupt",
+        false,
+        detail,
+    )
 }
 
 impl TraceDecay {

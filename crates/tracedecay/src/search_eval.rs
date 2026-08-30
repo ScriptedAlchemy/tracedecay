@@ -74,8 +74,11 @@ mod tests {
         );
 
         assert!(
-            tracedecay_runtime_core::storage::write_repository_identity_marker(&root, "project.search-eval-fixture")
-                .expect("write repository fixture identity")
+            tracedecay_runtime_core::storage::write_repository_identity_marker(
+                &root,
+                "project.search-eval-fixture"
+            )
+            .expect("write repository fixture identity")
         );
         let scope = root_admitted_corpus_scope(&root).expect("admitted identity");
         assert_eq!(scope.project_id.as_str(), "project.search-eval-fixture");

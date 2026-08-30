@@ -10,10 +10,10 @@ use tracedecay_store::StoreShardScopeV1;
 
 use super::map_execution_error;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store::memory::ProjectMemoryDbHandle;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::store::memory::ProjectMemoryDbHandle;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MemoryTargetAccessV1 {
@@ -236,8 +236,10 @@ mod tests {
         let runtime = active.test_runtime_for_test().unwrap();
         let selected_root = tmp.path().join("selected");
         std::fs::create_dir_all(&selected_root).unwrap();
-        let selected_id =
-            ProjectId::new(tracedecay_runtime_core::storage::default_profile_project_id(&selected_root)).unwrap();
+        let selected_id = ProjectId::new(
+            tracedecay_runtime_core::storage::default_profile_project_id(&selected_root),
+        )
+        .unwrap();
         let sibling = Arc::new(
             runtime
                 .sibling_project(&selected_root, selected_id)
@@ -261,24 +263,30 @@ mod tests {
     #[test]
     fn selected_target_infrastructure_failures_remain_typed() {
         assert!(matches!(
-            map_target_infrastructure_error(tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "corrupt registry".to_owned(),
-            }),
+            map_target_infrastructure_error(
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: "corrupt registry".to_owned(),
+                }
+            ),
             RetainedSurfaceExecutionErrorV1::Unavailable
         ));
         assert!(matches!(
-            map_target_infrastructure_error(tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
-                component: "profile-memory",
-                found_version: Some(1),
-                required_version: 2,
-            }),
+            map_target_infrastructure_error(
+                tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+                    component: "profile-memory",
+                    found_version: Some(1),
+                    required_version: 2,
+                }
+            ),
             RetainedSurfaceExecutionErrorV1::ProfileResetRequired
         ));
         assert!(matches!(
-            map_target_infrastructure_error(tracedecay_runtime_core::errors::TraceDecayError::reset_required(
-                "project-memory",
-                "schema mismatch",
-            )),
+            map_target_infrastructure_error(
+                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                    "project-memory",
+                    "schema mismatch",
+                )
+            ),
             RetainedSurfaceExecutionErrorV1::ProjectResetRequired
         ));
     }

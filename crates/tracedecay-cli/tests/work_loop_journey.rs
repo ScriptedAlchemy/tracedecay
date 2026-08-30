@@ -51,7 +51,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_domain::{
     CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProposalId,
     ProviderId, RefId, TaskId, UtcMicros, WorkApprovalPolicy, WorkEffectStateV1, WorkEgressPolicy,
@@ -60,6 +59,7 @@ use tracedecay_domain::{
     WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
     WorkRelationReplanProposalV1, WorkSandboxPolicy, WorkflowOperationRef,
 };
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 /// Pins the global database away from the operator's profile. The production
 /// constant is crate-private, so the name is repeated here for the same reason

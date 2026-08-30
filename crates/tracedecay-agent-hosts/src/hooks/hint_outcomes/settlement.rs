@@ -37,10 +37,7 @@ pub struct RegisteredHintOutcomeCorrelationPort<'a> {
 }
 
 impl<'a> RegisteredHintOutcomeCorrelationPort<'a> {
-    pub const fn new(
-        analytics: &'a RegisteredGlobalDb,
-        sessions: &'a RegisteredGlobalDb,
-    ) -> Self {
+    pub const fn new(analytics: &'a RegisteredGlobalDb, sessions: &'a RegisteredGlobalDb) -> Self {
         Self {
             analytics,
             sessions,

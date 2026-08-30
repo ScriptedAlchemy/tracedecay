@@ -820,7 +820,8 @@ pub(super) async fn handle_dashboard(
                     "retained dashboard project server resolved a different root",
                 ));
             }
-            let retained_cg: Arc<dyn tracedecay_dashboard_api::DashboardProjectRuntime> = retained_graph;
+            let retained_cg: Arc<dyn tracedecay_dashboard_api::DashboardProjectRuntime> =
+                retained_graph;
             let dashboard_project_graph_resolver = retained_project_server_resolver
                 .clone()
                 .zip(daemon_user_profile_id.clone())

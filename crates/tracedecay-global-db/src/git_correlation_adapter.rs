@@ -12,11 +12,11 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tracedecay_graph_db::GraphNamespace;
 use tracedecay_store::StoreShardScopeV1;
 
-use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use crate::{
     RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, VerifiedGraphRuntimePortV1,
     VerifiedGraphRuntimeWeakProxyV1,
 };
+use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BoundedBackfillOutcome, BoundedGitControl,
     CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS,
@@ -116,9 +116,7 @@ where
     }
 
     #[hotpath::measure(label = "global_db.git_correlation.read_snapshot", future = true)]
-    pub async fn read_snapshot(
-        &self,
-    ) -> Result<DatabaseEngineReadSnapshot, GitCorrelationError> {
+    pub async fn read_snapshot(&self) -> Result<DatabaseEngineReadSnapshot, GitCorrelationError> {
         self.db()
             .read_snapshot()
             .await
@@ -206,7 +204,10 @@ where
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::measure(label = "global_db.git_correlation.incremental_backfill", future = true)]
+    #[hotpath::measure(
+        label = "global_db.git_correlation.incremental_backfill",
+        future = true
+    )]
     pub async fn run_incremental_backfill<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,

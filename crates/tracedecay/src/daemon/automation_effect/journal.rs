@@ -969,11 +969,13 @@ pub(super) fn abandon_reservation_blocking(
                 )));
             }
         }
-        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path).map_err(|error| {
-            contract_error(format!(
-                "memory automation reservation rollback failed: {error}"
-            ))
-        })?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path).map_err(
+            |error| {
+                contract_error(format!(
+                    "memory automation reservation rollback failed: {error}"
+                ))
+            },
+        )?;
         sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(|error| {
             contract_error(format!(
                 "memory automation reservation rollback directory sync failed: {error}"
@@ -990,11 +992,13 @@ fn with_journal_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> R
     let parent = path
         .parent()
         .ok_or_else(|| contract_error("automation terminal path has no parent"))?;
-    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(|error| {
-        contract_error(format!(
-            "automation terminal directory creation failed: {error}"
-        ))
-    })?;
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(
+        |error| {
+            contract_error(format!(
+                "automation terminal directory creation failed: {error}"
+            ))
+        },
+    )?;
     let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
     let lock = open_lock_nofollow(&lock_path)
         .map_err(|error| contract_error(format!("automation terminal lock failed: {error}")))?;
@@ -1145,7 +1149,10 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation terminal journal lock")?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        path,
+        "automation terminal journal lock",
+    )?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1377,8 +1384,11 @@ fn read_terminal_sidecar_if_present(
 }
 
 fn open_regular_nofollow(path: &Path) -> Result<Option<std::fs::File>> {
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation terminal journal or sidecar")
-        .map_err(contract_error)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        path,
+        "automation terminal journal or sidecar",
+    )
+    .map_err(contract_error)?;
     let parent = path
         .parent()
         .ok_or_else(|| contract_error("automation terminal sidecar has no parent"))?;

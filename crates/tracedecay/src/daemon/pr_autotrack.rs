@@ -408,7 +408,11 @@ fn save_state(data_root: &Path, state: &PrAutotrackState) -> std::io::Result<()>
     let path = state_path(data_root);
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
     let temp = path.with_extension("json.tmp");
-    tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically(&path, &temp, json.as_bytes())
+    tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically(
+        &path,
+        &temp,
+        json.as_bytes(),
+    )
 }
 
 /// A summary of managed PR branches for status surfaces (dashboard / CLI).

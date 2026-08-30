@@ -5,8 +5,6 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, DomainError, EntityId, EntityKind, EntityRef,
@@ -20,6 +18,8 @@ use tracedecay_domain::{
     SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, UtcMicros,
     VectorWatermark,
 };
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
     FactWriteBatch, FactWriteControl, RetrievalAnchorQuery,

@@ -75,11 +75,7 @@ impl<K: Eq + Hash, V> WeakRegistry<K, V> {
     /// it. The `bool` reports whether the entry was already live (`true`) or
     /// freshly inserted (`false`), so callers can distinguish a hit from a
     /// miss (e.g. leader/follower counters).
-    pub fn get_or_insert_with(
-        &self,
-        key: K,
-        make: impl FnOnce() -> Arc<V>,
-    ) -> (Arc<V>, bool) {
+    pub fn get_or_insert_with(&self, key: K, make: impl FnOnce() -> Arc<V>) -> (Arc<V>, bool) {
         let mut entries = self.lock();
         entries.retain(|_, weak| weak.strong_count() > 0);
         if let Some(value) = entries.get(&key).and_then(Weak::upgrade) {

@@ -44,9 +44,9 @@ use std::process::{Command, Output};
 use std::sync::{Arc, OnceLock};
 
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::IsolatedEnv;
 

@@ -2,15 +2,15 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_application::{CancellationSignal, Deadline, now_micros};
+use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 
 use super::super::ToolResult;
@@ -142,7 +142,9 @@ pub(super) async fn handle_admin_project(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    automation_scheduler_reconciler: Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
+    automation_scheduler_reconciler: Option<
+        tracedecay_dashboard_api::AutomationSchedulerReconciler,
+    >,
     application_deadline: Deadline,
     application_cancellation: CancellationSignal,
 ) -> Result<ToolResult> {
@@ -170,7 +172,9 @@ pub(super) async fn handle_admin_project(
             }
             let outcome = match automation_scheduler_reconciler {
                 Some(reconcile) => reconcile().await,
-                None => tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
+                None => {
+                    tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::OwnerUnavailable
+                }
             };
             json!({ "scope": "project", "outcome": outcome })
         }
@@ -353,7 +357,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let owner_before = tracedecay_runtime_core::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
+        let owner_before =
+            tracedecay_runtime_core::db::probe_writer_owner(&cg.store_layout().graph_db_path)
+                .unwrap();
 
         let apply_id = "automatic-fact.rpc.read-only";
         seed_automatic_fact_receipt(
@@ -437,7 +443,9 @@ mod tests {
             );
         }
 
-        let owner_after = tracedecay_runtime_core::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
+        let owner_after =
+            tracedecay_runtime_core::db::probe_writer_owner(&cg.store_layout().graph_db_path)
+                .unwrap();
         assert_eq!(owner_after, owner_before);
     }
 

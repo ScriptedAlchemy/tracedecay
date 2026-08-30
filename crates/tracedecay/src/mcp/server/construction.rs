@@ -114,7 +114,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
-    pub(crate) dashboard_explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
+    pub(crate) dashboard_explorer_semantic_reader:
+        Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub(crate) dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
@@ -222,7 +223,8 @@ impl McpServerConstructionContext {
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
-            dashboard_automation_writer: tracedecay_dashboard_api::standalone_dashboard_automation_writer(),
+            dashboard_automation_writer:
+                tracedecay_dashboard_api::standalone_dashboard_automation_writer(),
             remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,

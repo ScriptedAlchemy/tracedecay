@@ -25,13 +25,7 @@ pub(crate) async fn handle_test_risk(
         .unwrap_or(false);
 
     let report = hotpath::future!(
-        crate::graph::test_risk::analyze_test_risk(
-            cg,
-            graph,
-            path_prefix,
-            include_tested,
-            limit
-        ),
+        crate::graph::test_risk::analyze_test_risk(cg, graph, path_prefix, include_tested, limit),
         label = "mcp.health.test_risk.graph"
     )
     .await?;
@@ -116,9 +110,7 @@ pub(crate) async fn handle_test_map(
                         continue;
                     }
                     let (caller_metadata, caller_file) =
-                        crate::graph::test_risk::verified_test_symbol_parts(
-                            &caller.summary,
-                        )?;
+                        crate::graph::test_risk::verified_test_symbol_parts(&caller.summary)?;
                     if !crate::tracedecay::is_test_file(caller_file)
                         && !test_evidence
                             .test_annotated

@@ -1124,8 +1124,10 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 storage,
             };
             let report = compose_doctor_report(&context, &inputs).await?;
-            Ok(tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
-                .with_table_growth_evidence(store_telemetry.table_growth_evidence))
+            Ok(
+                tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
+                    .with_table_growth_evidence(store_telemetry.table_growth_evidence),
+            )
         })
     })
 }

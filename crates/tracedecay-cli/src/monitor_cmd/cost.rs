@@ -393,7 +393,9 @@ mod tests {
         let handshake = global_cost_handshake().unwrap();
         assert_eq!(
             handshake.project_path,
-            tracedecay_runtime_core::config::discover_project_root(&std::env::current_dir().unwrap())
+            tracedecay_runtime_core::config::discover_project_root(
+                &std::env::current_dir().unwrap()
+            )
         );
     }
 

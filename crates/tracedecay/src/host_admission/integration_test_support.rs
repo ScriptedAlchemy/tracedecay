@@ -57,8 +57,13 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn session_temporal_store(
         &self,
         scope: HostAdmissionScope,
-    ) -> std::result::Result<tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>, HostAdmissionOutcome>
-    {
+    ) -> std::result::Result<
+        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
+            '_,
+            tracedecay_global_db::RegisteredGlobalDb,
+        >,
+        HostAdmissionOutcome,
+    > {
         self.session_temporal_store_for_test(scope).map_err(|_| {
             HostAdmissionOutcome::retained_unavailable("registered_authority_unavailable")
         })
@@ -118,13 +123,15 @@ impl HostAdmissionTestRuntimeV1 {
         observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64> {
-        tracedecay_global_db::GlobalDbGitCorrelationStore::new(self.session_database_for_test(scope)?)
-            .record_span_observation(observation, merge_gap_secs)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "record registered session span".to_owned(),
-                message: error.to_string(),
-            })
+        tracedecay_global_db::GlobalDbGitCorrelationStore::new(
+            self.session_database_for_test(scope)?,
+        )
+        .record_span_observation(observation, merge_gap_secs)
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            operation: "record registered session span".to_owned(),
+            message: error.to_string(),
+        })
     }
 
     #[doc(hidden)]

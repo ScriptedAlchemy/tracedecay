@@ -1118,9 +1118,8 @@ pub(super) fn write_pending_index_with_publisher(
 }
 
 fn read_index(path: &Path) -> Result<PendingIndex> {
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation pending index").map_err(
-        |error| contract_error(format!("automation pending index path failed: {error}")),
-    )?;
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation pending index")
+        .map_err(|error| contract_error(format!("automation pending index path failed: {error}")))?;
     let parent = path
         .parent()
         .ok_or_else(|| contract_error("automation pending index path has no parent"))?;
@@ -1260,18 +1259,23 @@ fn with_index_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Res
     let parent = path
         .parent()
         .ok_or_else(|| contract_error("automation pending index path has no parent"))?;
-    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(|error| {
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(
+        |error| {
+            contract_error(format!(
+                "automation pending index directory creation failed: {error}"
+            ))
+        },
+    )?;
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &lock_path,
+        "automation pending index lock",
+    )
+    .map_err(|error| {
         contract_error(format!(
-            "automation pending index directory creation failed: {error}"
+            "automation pending index lock path failed: {error}"
         ))
     })?;
-    let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
-    tracedecay_runtime_core::storage::reject_symlink_components(&lock_path, "automation pending index lock")
-        .map_err(|error| {
-            contract_error(format!(
-                "automation pending index lock path failed: {error}"
-            ))
-        })?;
     let lock_parent = lock_path
         .parent()
         .ok_or_else(|| contract_error("automation pending index lock has no parent"))?;
@@ -1365,8 +1369,11 @@ mod tests {
         let path = root.join(INDEX_FILENAME);
         let outside = temp.path().join("outside.lock");
         std::fs::write(&outside, b"outside").expect("outside lock");
-        std::os::unix::fs::symlink(&outside, tracedecay_runtime_core::storage::append_lock_path(&path))
-            .expect("symlink lock");
+        std::os::unix::fs::symlink(
+            &outside,
+            tracedecay_runtime_core::storage::append_lock_path(&path),
+        )
+        .expect("symlink lock");
 
         assert!(with_index_lock(&path, || Ok(())).is_err());
         assert_eq!(

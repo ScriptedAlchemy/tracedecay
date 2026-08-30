@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use tracedecay_sessions::admission::HostAdmission;
 use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngestAuthority};
 
-use tracedecay_global_db::{GlobalDbGitCorrelationStore, GlobalDbWorkflowStore, RegisteredGlobalDb};
+use tracedecay_global_db::{
+    GlobalDbGitCorrelationStore, GlobalDbWorkflowStore, RegisteredGlobalDb,
+};
 use tracedecay_usecases::store::transcript::GlobalDbTranscriptStore;
 
 use crate::{HostAdmissionAuthorities, HostAdmissionFacade};

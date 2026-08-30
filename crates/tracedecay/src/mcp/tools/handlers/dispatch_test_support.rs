@@ -198,7 +198,8 @@ pub(super) async fn init_sibling_registered_fixture(
     TraceDecay,
     Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
 ) {
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().expect("sibling profile root");
+    let profile_root =
+        tracedecay_runtime_core::storage::default_profile_root().expect("sibling profile root");
     let project_id =
         tracedecay_domain::ProjectId::new(project_id).expect("typed sibling project identity");
     let sibling = Arc::new(

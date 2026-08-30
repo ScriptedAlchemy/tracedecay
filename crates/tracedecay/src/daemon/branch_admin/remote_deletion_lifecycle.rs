@@ -673,8 +673,10 @@ impl StoreAdministration {
                     },
                 )
             })?;
-        let data_root = tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
-        let project_sessions_path = data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+        let data_root =
+            tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
+        let project_sessions_path =
+            data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
         let identity = self.profile_identity().map_err(|error| {
             cleanup_error(
                 RemoteDeletionFailureCode::RuntimeRetirementIncomplete,

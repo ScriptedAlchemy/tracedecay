@@ -577,8 +577,11 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             .success()
     );
     assert!(
-        tracedecay_runtime_core::storage::write_repository_identity_marker(&project, project_id.as_str())
-            .unwrap()
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project,
+            project_id.as_str()
+        )
+        .unwrap()
     );
     let runtime = HostAdmissionTestRuntimeV1::project(
         tmp.path().join("profile"),

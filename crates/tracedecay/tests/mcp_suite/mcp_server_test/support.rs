@@ -10,8 +10,8 @@ use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::McpServer;
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
-use tracedecay_runtime_core::storage::resolve_response_handle_root;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
 // ---------------------------------------------------------------------------
 // Shared helpers

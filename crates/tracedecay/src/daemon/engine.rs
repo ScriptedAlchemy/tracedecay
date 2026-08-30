@@ -266,7 +266,12 @@ impl DaemonEngine {
         handshake: &'a DaemonHandshake,
         action: tracedecay_runtime_core::branch::BranchAdminAction,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<tracedecay_runtime_core::branch::BranchAdminReport>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<
+                    Output = Result<tracedecay_runtime_core::branch::BranchAdminReport>,
+                > + Send
+                + 'a,
+        >,
     > {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.

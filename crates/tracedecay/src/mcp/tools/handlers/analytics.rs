@@ -24,13 +24,13 @@ use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 use tracedecay_usecases::memory::MemoryApplication;
 
 use crate::daemon::retained_owner::{MemoryTargetAccessV1, open_project_retained_memory_target};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
-use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
+use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 
 use super::super::{ToolResult, renderers};
 use super::support::tool_json_with_md;
@@ -567,15 +567,16 @@ async fn facts_section(
 }
 
 async fn automation_section(project_root: &Path, since: i64) -> Value {
-    let dashboard_root = match tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root) {
-        Ok(layout) => layout.dashboard_root,
-        Err(err) => {
-            return json!({
-                "available": false,
-                "reason": format!("could not resolve automation dashboard root: {err}"),
-            });
-        }
-    };
+    let dashboard_root =
+        match tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root) {
+            Ok(layout) => layout.dashboard_root,
+            Err(err) => {
+                return json!({
+                    "available": false,
+                    "reason": format!("could not resolve automation dashboard root: {err}"),
+                });
+            }
+        };
     let records = match load_run_records(&dashboard_root, AUTOMATION_RECORD_LIMIT).await {
         Ok(records) => records,
         Err(err) => {

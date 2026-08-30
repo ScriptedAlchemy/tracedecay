@@ -4175,7 +4175,8 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn dashboard_freshness(
         &self,
         project_root: &Path,
-    ) -> Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
+    ) -> Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1>
+    {
         let canonical_root = project_root.canonicalize().ok()?;
         let (
             scheduler,

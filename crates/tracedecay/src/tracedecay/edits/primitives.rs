@@ -11,8 +11,8 @@ use std::path::Path;
 use same_file::Handle;
 use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_application::source_edit::{EditResult, InsertResult, MultiEditResult};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;
 
@@ -333,7 +333,8 @@ impl TraceDecay {
             }
             line_num - 1
         } else {
-            let anchor_prefix = tracedecay_runtime_core::text::utf8_prefix_at_or_before(anchor, 100);
+            let anchor_prefix =
+                tracedecay_runtime_core::text::utf8_prefix_at_or_before(anchor, 100);
             let matching_lines: Vec<usize> = lines
                 .iter()
                 .enumerate()

@@ -41,11 +41,15 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_runtime_core::errors::Result<
-        tracedecay_usecases::store::transcript::GlobalDbTranscriptStore<&'_ tracedecay_global_db::RegisteredGlobalDb>,
+        tracedecay_usecases::store::transcript::GlobalDbTranscriptStore<
+            &'_ tracedecay_global_db::RegisteredGlobalDb,
+        >,
     > {
-        Ok(tracedecay_usecases::store::transcript::GlobalDbTranscriptStore::new(
-            self.session_database_for_test(scope)?,
-        ))
+        Ok(
+            tracedecay_usecases::store::transcript::GlobalDbTranscriptStore::new(
+                self.session_database_for_test(scope)?,
+            ),
+        )
     }
 
     #[doc(hidden)]

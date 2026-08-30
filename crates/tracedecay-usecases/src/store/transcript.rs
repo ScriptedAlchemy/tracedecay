@@ -11,8 +11,8 @@ use tracedecay_store::{
 use tracedecay_global_db::{
     GlobalDbGitCorrelationStore, RegisteredGlobalDb, TranscriptPersistenceError,
 };
-use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
+use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 
 /// Transcript-store adapter over an already-open authoritative
 /// [`RegisteredGlobalDb`].
@@ -185,7 +185,10 @@ where
             .map_err(|error| Self::persistence_error(cursor_path, error))
     }
 
-    #[hotpath::measure(label = "usecases.transcript_store.persist_transcript_batch", future = true)]
+    #[hotpath::measure(
+        label = "usecases.transcript_store.persist_transcript_batch",
+        future = true
+    )]
     async fn persist_transcript_batch(
         &self,
         batch: TranscriptWriteBatch,
@@ -278,7 +281,10 @@ where
             })
     }
 
-    #[hotpath::measure(label = "usecases.transcript_store.persist_transcript_batch_git", future = true)]
+    #[hotpath::measure(
+        label = "usecases.transcript_store.persist_transcript_batch_git",
+        future = true
+    )]
     async fn persist_transcript_batch_with_git_evidence(
         &self,
         batch: TranscriptWriteBatch,

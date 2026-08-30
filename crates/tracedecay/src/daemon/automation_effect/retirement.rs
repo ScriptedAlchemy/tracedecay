@@ -312,11 +312,15 @@ fn complete_after_pending_removal_with(
         return Ok(());
     };
     let lock_path = tracedecay_runtime_core::storage::append_lock_path(&closure.source_path);
-    tracedecay_runtime_core::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
-        .map_err(contract_error)?;
-    let lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
-        contract_error(format!("shipped proposal retirement lock failed: {error}"))
-    })?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &lock_path,
+        "shipped proposal retirement lock",
+    )
+    .map_err(contract_error)?;
+    let lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path)
+        .map_err(|error| {
+            contract_error(format!("shipped proposal retirement lock failed: {error}"))
+        })?;
     let result = (|| {
         let parent_path = closure.source_path.parent().ok_or_else(|| {
             contract_error("shipped proposal retirement source has no parent directory")
@@ -548,11 +552,13 @@ fn publish_archive_bytes_with(
     let parent = path
         .parent()
         .ok_or_else(|| contract_error("shipped proposal archive has no parent directory"))?;
-    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(|error| {
-        contract_error(format!(
-            "shipped proposal archive directory creation failed: {error}"
-        ))
-    })?;
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent).map_err(
+        |error| {
+            contract_error(format!(
+                "shipped proposal archive directory creation failed: {error}"
+            ))
+        },
+    )?;
     with_owned_temp_publish(
         path,
         "shipped-proposal-retirement-archive",
@@ -641,11 +647,15 @@ fn restore_existing_capture(source_path: &Path, captured_path: &Path) -> Result<
         .file_name()
         .ok_or_else(|| contract_error("captured shipped proposal source has no filename"))?;
     let lock_path = tracedecay_runtime_core::storage::append_lock_path(source_path);
-    tracedecay_runtime_core::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
-        .map_err(contract_error)?;
-    let lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
-        contract_error(format!("shipped proposal retirement lock failed: {error}"))
-    })?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &lock_path,
+        "shipped proposal retirement lock",
+    )
+    .map_err(contract_error)?;
+    let lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path)
+        .map_err(|error| {
+            contract_error(format!("shipped proposal retirement lock failed: {error}"))
+        })?;
     let result = (|| {
         let parent = Dir::open_ambient_dir(parent_path, ambient_authority()).map_err(|error| {
             contract_error(format!(
@@ -678,11 +688,15 @@ fn capture_exact_source_with_capture(
         .file_name()
         .ok_or_else(|| contract_error("shipped proposal source has no filename"))?;
     let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
-    tracedecay_runtime_core::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
-        .map_err(contract_error)?;
-    let lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
-        contract_error(format!("shipped proposal retirement lock failed: {error}"))
-    })?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &lock_path,
+        "shipped proposal retirement lock",
+    )
+    .map_err(contract_error)?;
+    let lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path)
+        .map_err(|error| {
+            contract_error(format!("shipped proposal retirement lock failed: {error}"))
+        })?;
     let result = (|| {
         let parent = Dir::open_ambient_dir(parent_path, ambient_authority()).map_err(|error| {
             contract_error(format!(

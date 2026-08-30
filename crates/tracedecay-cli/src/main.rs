@@ -29,8 +29,8 @@ mod global;
 mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
-mod project_cmd;
 mod monitor_cmd;
+mod project_cmd;
 mod remote_command;
 mod serve_cmd;
 mod sessions_cmd;
@@ -42,7 +42,6 @@ mod work_cli;
 mod work_command;
 mod workflow_cli;
 mod workflow_command;
-
 
 use cli::*;
 use tracedecay::daemon::StderrTracingDefault;

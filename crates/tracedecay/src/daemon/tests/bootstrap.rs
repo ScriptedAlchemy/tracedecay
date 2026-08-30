@@ -233,16 +233,23 @@ pub(super) fn enroll_project_on_disk_only(
     project_id: &str,
 ) -> tracedecay_runtime_core::storage::StoreLayout {
     assert!(
-        tracedecay_runtime_core::storage::write_repository_identity_marker(project_root, project_id)
-            .expect("repository identity marker"),
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project_root,
+            project_id
+        )
+        .expect("repository identity marker"),
         "fixture repository must accept an identity marker"
     );
     let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
         project_id: project_id.to_owned(),
         storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
     };
-    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(project_root, profile_root, &marker)
-        .expect("layout");
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        project_root,
+        profile_root,
+        &marker,
+    )
+    .expect("layout");
     std::fs::create_dir_all(&layout.data_root).expect("profile store root");
     tracedecay_runtime_core::storage::write_store_manifest(&layout).expect("store manifest");
     let sessions = rusqlite::Connection::open(&layout.sessions_db_path).expect("sessions database");
@@ -442,8 +449,12 @@ fn enroll_nongit_project_on_disk(
         project_id: project_id.to_owned(),
         storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
     };
-    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(project_root, profile_root, &marker)
-        .expect("nongit layout");
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        project_root,
+        profile_root,
+        &marker,
+    )
+    .expect("nongit layout");
     std::fs::create_dir_all(&layout.data_root).expect("profile store root");
     tracedecay_runtime_core::storage::write_store_manifest(&layout).expect("store manifest");
     let sessions = rusqlite::Connection::open(&layout.sessions_db_path).expect("sessions database");
@@ -515,7 +526,9 @@ async fn moved_nongit_project_is_readopted_only_when_confirmed() {
         .expect("ambient first-touch mints fresh");
     assert_eq!(
         ambient.identity.project_id.as_deref(),
-        Some(tracedecay_runtime_core::storage::default_profile_project_id(&moved_canonical).as_str()),
+        Some(
+            tracedecay_runtime_core::storage::default_profile_project_id(&moved_canonical).as_str()
+        ),
         "ambient first-touch must mint the path-derived identity, never adopt"
     );
 
@@ -633,7 +646,10 @@ async fn ambient_first_touch_never_adopts_a_moved_nongit_store() {
         .expect("ambient first-touch on a fresh directory mints a fresh identity");
     assert_eq!(
         layout.identity.project_id.as_deref(),
-        Some(tracedecay_runtime_core::storage::default_profile_project_id(&scratch_canonical).as_str()),
+        Some(
+            tracedecay_runtime_core::storage::default_profile_project_id(&scratch_canonical)
+                .as_str()
+        ),
         "ambient first-touch must never inherit a stale project identity"
     );
     let stale = registry
@@ -719,7 +735,10 @@ async fn moved_nongit_adoption_is_refused_when_ambiguous() {
     let target_canonical = target.canonicalize().expect("canonical target");
     assert_eq!(
         fresh.identity.project_id.as_deref(),
-        Some(tracedecay_runtime_core::storage::default_profile_project_id(&target_canonical).as_str()),
+        Some(
+            tracedecay_runtime_core::storage::default_profile_project_id(&target_canonical)
+                .as_str()
+        ),
         "opting out of adoption must mint the path-derived identity"
     );
 }
@@ -882,7 +901,8 @@ async fn interrupted_moved_nongit_remap_resumes_on_next_explicit_init() {
         },
     )
     .expect("layout for the interrupted remap");
-    tracedecay_runtime_core::storage::write_store_manifest(&torn_layout).expect("journal manifest write");
+    tracedecay_runtime_core::storage::write_store_manifest(&torn_layout)
+        .expect("journal manifest write");
 
     let resumed =
         crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
@@ -1356,7 +1376,8 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
         project_path: project_root,
         scope_prefix: None,
     };
-    let data_root = tracedecay_runtime_core::storage::profile_sharded_data_root(&profile_root, project_id);
+    let data_root =
+        tracedecay_runtime_core::storage::profile_sharded_data_root(&profile_root, project_id);
     let racing_data_root = data_root.clone();
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -2486,8 +2507,11 @@ async fn project_deletion_retires_rootless_open_by_persisted_project_identity() 
     let project_root = temp.path().join("repository");
     std::fs::create_dir_all(&profile_root).expect("profile root");
     std::fs::create_dir_all(&project_root).expect("project root");
-    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, "proj_rootless_open")
-        .expect("pin fixture repository identity");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        "proj_rootless_open",
+    )
+    .expect("pin fixture repository identity");
     let route = ProjectRouteKey {
         profile_root: profile_root.canonicalize().expect("canonical profile"),
         global_db_path: profile_root.join("global.db"),

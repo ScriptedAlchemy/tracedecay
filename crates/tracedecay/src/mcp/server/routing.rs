@@ -411,8 +411,11 @@ mod tests {
             )
             .await
             .expect("register original project root");
-        tracedecay_runtime_core::storage::write_repository_identity_marker(&old_root, "proj_renamed")
-            .expect("write repository identity");
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &old_root,
+            "proj_renamed",
+        )
+        .expect("write repository identity");
 
         fs::rename(&old_root, &new_root).expect("rename project root");
         symlink(&new_root, &old_root).expect("link old root to renamed root");
@@ -479,8 +482,11 @@ mod tests {
             )
             .await
             .expect("register primary checkout");
-        tracedecay_runtime_core::storage::write_repository_identity_marker(&primary_root, "proj_primary")
-            .expect("write repository identity");
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &primary_root,
+            "proj_primary",
+        )
+        .expect("write repository identity");
 
         let params = initialize_params(&linked_root);
         let resolved = resolve_initialize_roots_project_path(Some(&params), Some(registry)).await;

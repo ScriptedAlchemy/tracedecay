@@ -101,8 +101,11 @@ async fn project_runtime_at(
         );
     }
     assert!(
-        tracedecay_runtime_core::storage::write_repository_identity_marker(project_root, project_id.as_str())
-            .unwrap()
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project_root,
+            project_id.as_str()
+        )
+        .unwrap()
     );
     HostAdmissionTestRuntimeV1::project(
         tmp.path().join(".tracedecay"),

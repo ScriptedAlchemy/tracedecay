@@ -81,9 +81,7 @@ impl PreparedBranchAdminMutation {
     /// CAS-publishes the prepared metadata mutation when no database file was
     /// selected for deletion. Branches served by the single project store
     /// retire this way: the metadata entry is the only state to remove.
-    pub fn finish_without_database_deletion(
-        self,
-    ) -> crate::errors::Result<BranchAdminReport> {
+    pub fn finish_without_database_deletion(self) -> crate::errors::Result<BranchAdminReport> {
         if !self.database_paths.is_empty() {
             return Err(crate::errors::TraceDecayError::Config {
                 message: "branch database deletion requires daemon store administration"

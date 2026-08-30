@@ -73,7 +73,9 @@ impl ProfileRegistryMaintenanceRuntime {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_runtime_core::storage::ProjectStorageLocation> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_runtime_core::storage::ProjectStorageLocation,
+    > {
         let location = tracedecay_runtime_core::storage::classify_project_storage(project_root);
         if location.status != tracedecay_runtime_core::storage::ProjectStorageStatus::Stale {
             return Ok(location);

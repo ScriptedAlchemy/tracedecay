@@ -15,9 +15,9 @@ use super::{
     log_daemon_event, parse_daemon_invocation_request, read_line_handling_wire_oversized,
     write_json_rpc_response,
 };
-use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 use tracedecay_mcp::ErrorCode;
+use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
 pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
 pub(crate) const RESERVED_DAEMON_CONTROL_CLIENTS: usize = 4;

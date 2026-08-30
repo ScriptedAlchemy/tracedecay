@@ -93,8 +93,11 @@ fn remove_fixed_profile_path(
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
     let path = profile_root.join(name);
-    tracedecay_runtime_core::storage::reject_symlink_components(&path, "profile database wipe target")
-        .map_err(|error| wipe_io("validate wipe target", &path, &error))?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &path,
+        "profile database wipe target",
+    )
+    .map_err(|error| wipe_io("validate wipe target", &path, &error))?;
     let removed = match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_dir() => {
             // `remove_dir_all` does not follow directory symlinks. The exact
@@ -180,9 +183,10 @@ fn wipe_complete_profile_database_state(
         for suffix in ["-wal", "-shm", "-journal", ""] {
             let member = sqlite_family_member(&database, suffix);
             removed += usize::from(
-                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&member).map_err(
-                    |error| wipe_io("remove profile SQLite family member", &member, &error),
-                )?,
+                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&member)
+                    .map_err(|error| {
+                        wipe_io("remove profile SQLite family member", &member, &error)
+                    })?,
             );
         }
     }

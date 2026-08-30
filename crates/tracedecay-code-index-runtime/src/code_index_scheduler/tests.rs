@@ -226,7 +226,8 @@ fn progress_snapshot_for_generation(
         producer_incarnation: 1,
         progress_epoch: 0,
         sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
-        phase: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        phase:
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
         committed_pages,
         committed_chunks: committed_pages,
         committed_imports: 0,

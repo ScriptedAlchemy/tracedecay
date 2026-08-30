@@ -41,8 +41,7 @@ pub use store_runtime::{
 /// Async reader for the generation census attached by an exact daemon route.
 pub type GenerationCensusFuture =
     Pin<Box<dyn Future<Output = GenerationCensusSnapshot> + Send + 'static>>;
-pub type GenerationCensusReader =
-    Arc<dyn Fn() -> GenerationCensusFuture + Send + Sync + 'static>;
+pub type GenerationCensusReader = Arc<dyn Fn() -> GenerationCensusFuture + Send + Sync + 'static>;
 
 /// Closed reasons for a generation census that cannot be observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,7 +203,9 @@ impl ReaderPoolOccupancy {
         Self {
             state: match snapshot.state {
                 tracedecay_runtime_core::db::engine::ReaderPoolState::Ready => "ready".to_string(),
-                tracedecay_runtime_core::db::engine::ReaderPoolState::Draining => "draining".to_string(),
+                tracedecay_runtime_core::db::engine::ReaderPoolState::Draining => {
+                    "draining".to_string()
+                }
             },
             snapshot_admissions: snapshot.snapshot_admissions,
             general: ReaderLaneOccupancy {
@@ -504,10 +505,12 @@ impl ProcessSampler {
                 .outcome
                 .as_ref()
                 .is_none_or(|sample| sample.completed.elapsed() >= self.refresh_interval);
-        let telemetry = cache.outcome.as_ref().map_or(
-            ProcessTelemetry::NotYetSampled,
-            |sample| sample.telemetry.clone(),
-        );
+        let telemetry = cache
+            .outcome
+            .as_ref()
+            .map_or(ProcessTelemetry::NotYetSampled, |sample| {
+                sample.telemetry.clone()
+            });
         if needs_refresh {
             cache.sample_in_flight = true;
             drop(cache);
@@ -969,9 +972,7 @@ mod tests {
 
     #[test]
     fn text_report_names_the_pending_and_failed_sample_states() {
-        assert!(
-            process_text_block(&ProcessTelemetry::NotYetSampled).contains("not yet sampled")
-        );
+        assert!(process_text_block(&ProcessTelemetry::NotYetSampled).contains("not yet sampled"));
         assert!(
             process_text_block(&ProcessTelemetry::SampleFailed {
                 error: "sampler unavailable".to_string(),
@@ -1061,20 +1062,22 @@ mod tests {
 
     #[test]
     fn reader_pool_occupancy_projects_both_lanes_onto_the_wire() {
-        let occupancy = ReaderPoolOccupancy::from_pool(&tracedecay_runtime_core::db::engine::ReaderPoolSnapshot {
-            state: tracedecay_runtime_core::db::engine::ReaderPoolState::Draining,
-            general_workers: 8,
-            available_general: 1,
-            health_workers: 1,
-            available_health: 0,
-            leased_general: 5,
-            leased_health: 1,
-            limbo_general: 2,
-            limbo_health: 0,
-            waiting_general: 4,
-            waiting_health: 0,
-            snapshot_admissions: 73,
-        });
+        let occupancy = ReaderPoolOccupancy::from_pool(
+            &tracedecay_runtime_core::db::engine::ReaderPoolSnapshot {
+                state: tracedecay_runtime_core::db::engine::ReaderPoolState::Draining,
+                general_workers: 8,
+                available_general: 1,
+                health_workers: 1,
+                available_health: 0,
+                leased_general: 5,
+                leased_health: 1,
+                limbo_general: 2,
+                limbo_health: 0,
+                waiting_general: 4,
+                waiting_health: 0,
+                snapshot_admissions: 73,
+            },
+        );
         let wire = serde_json::to_value(&occupancy).unwrap();
 
         assert_eq!(wire["state"], "draining");

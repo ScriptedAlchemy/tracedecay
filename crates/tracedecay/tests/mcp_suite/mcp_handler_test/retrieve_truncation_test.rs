@@ -132,7 +132,8 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
             .contains("Re-run the original MCP tool")
     );
 
-    let identity_path = tracedecay_runtime_core::storage::repository_identity_path(cg.project_root()).unwrap();
+    let identity_path =
+        tracedecay_runtime_core::storage::repository_identity_path(cg.project_root()).unwrap();
     fs::write(
         &identity_path,
         r#"{"schema_version":1,"project_id":"../operator-private"}"#,

@@ -6,18 +6,18 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay_runtime_core::branch;
-use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use crate::config::{
     install_usecase_runtime_configuration_authority, materialize_root_runtime_configuration,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tokio::sync::Mutex as AsyncMutex;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::branch;
+use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
-use tokio::sync::Mutex as AsyncMutex;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;
 use tracedecay_usecases::config::{
@@ -56,7 +56,8 @@ static STANDALONE_SESSION_REGISTRIES: LazyLock<
 async fn join_standalone_session_registry(
     identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
 ) -> Result<Arc<DaemonSessionRuntimeRegistryV1>> {
-    let profile_key = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(identity.profile_root());
+    let profile_key =
+        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(identity.profile_root());
     let registries = STANDALONE_SESSION_REGISTRIES.lock().await;
     if let Some(registry) = registries.get_live(&profile_key) {
         return Ok(registry);
@@ -92,18 +93,24 @@ impl TraceDecay {
     ) -> Result<Arc<tracedecay_runtime_core::db::OwnedMaintenanceDatabaseScope>> {
         let profile_root = open_options.resolved_profile_root()?;
         STANDALONE_MAINTENANCE_SCOPES.retain_live();
-        let profile_key = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&profile_root);
+        let profile_key =
+            tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&profile_root);
         if let Some(scope) = STANDALONE_MAINTENANCE_SCOPES.get_live(&profile_key) {
             return Ok(scope);
         }
-        let lifecycle =
-            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(&profile_root, operation)?;
-        let scope = Arc::new(tracedecay_runtime_core::db::enter_owned_maintenance_database_scope(
-            lifecycle,
+        let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile_root,
             operation,
-        )?);
-        let profile_key = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&profile_root);
+        )?;
+        let scope = Arc::new(
+            tracedecay_runtime_core::db::enter_owned_maintenance_database_scope(
+                lifecycle,
+                &profile_root,
+                operation,
+            )?,
+        );
+        let profile_key =
+            tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&profile_root);
         STANDALONE_MAINTENANCE_SCOPES.insert(profile_key, &scope);
         Ok(scope)
     }
@@ -266,7 +273,10 @@ impl TraceDecay {
         // nothing here — its identity is deterministic from the canonical
         // path and durably owned by the profile registry. TraceDecay never
         // creates files inside a project's working tree.
-        tracedecay_runtime_core::storage::write_repository_identity_marker(project_root, project_id.as_str())?;
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project_root,
+            project_id.as_str(),
+        )?;
         let configuration_database = runtime_registry
             .project_sessions(project_id, [project_root.to_path_buf()])
             .await?;
@@ -651,9 +661,9 @@ impl TraceDecay {
         store_layout: &StoreLayout,
         active_branch: &Option<String>,
     ) -> (Option<String>, Option<String>) {
-        let graph_scope = active_branch
-            .clone()
-            .or_else(|| tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root));
+        let graph_scope = active_branch.clone().or_else(|| {
+            tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root)
+        });
         let (_, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
             project_root,
             &store_layout.data_root,

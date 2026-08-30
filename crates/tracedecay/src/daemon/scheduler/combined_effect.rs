@@ -1588,7 +1588,9 @@ mod tests {
         let journal_lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(tracedecay_runtime_core::storage::append_lock_path(&current_skill_journal))
+            .open(tracedecay_runtime_core::storage::append_lock_path(
+                &current_skill_journal,
+            ))
             .expect("open current skill journal lock");
         journal_lock
             .lock_exclusive()

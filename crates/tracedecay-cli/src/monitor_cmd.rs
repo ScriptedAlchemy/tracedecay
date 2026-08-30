@@ -164,7 +164,8 @@ fn monitor_loop(
             .as_ref()
             .filter(|snapshot| snapshot.today_cost >= 0.001 || snapshot.week_cost >= 0.001)
         {
-            let saved_str = tracedecay_runtime_core::text::format_token_count(snapshot.tokens_saved);
+            let saved_str =
+                tracedecay_runtime_core::text::format_token_count(snapshot.tokens_saved);
             cost_panel.push(format!(
                 "  Spent: ${:.2} today | ${:.2} 7d    Saved: {}",
                 snapshot.today_cost, snapshot.week_cost, saved_str

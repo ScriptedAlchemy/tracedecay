@@ -199,9 +199,12 @@ fn refused_store_file_identity(path: &Path) -> Option<RefusedStoreFileIdentityV1
 /// resolves no persisted store, in which case a recorded refusal keeps its
 /// plain time-based backoff.
 fn refused_store_fingerprint(route: &ProjectRouteKey) -> Option<RefusedStoreFingerprintV1> {
-    let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(&route.project_path, &route.profile_root)
-        .ok()
-        .flatten()?;
+    let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(
+        &route.project_path,
+        &route.profile_root,
+    )
+    .ok()
+    .flatten()?;
     let mut graph_dbs = BTreeMap::new();
     if let Some(identity) = refused_store_file_identity(&layout.graph_db_path) {
         graph_dbs.insert(layout.graph_db_path.clone(), identity);
@@ -260,11 +263,14 @@ fn project_route_matches_identity(
 ) -> bool {
     route.profile_root == profile_root
         && (project_roots.contains(&route.project_path)
-            || tracedecay_runtime_core::storage::resolve_persisted_layout(&route.project_path, profile_root)
-                .ok()
-                .flatten()
-                .and_then(|layout| layout.identity.project_id)
-                .as_deref()
+            || tracedecay_runtime_core::storage::resolve_persisted_layout(
+                &route.project_path,
+                profile_root,
+            )
+            .ok()
+            .flatten()
+            .and_then(|layout| layout.identity.project_id)
+            .as_deref()
                 == Some(project_id))
 }
 

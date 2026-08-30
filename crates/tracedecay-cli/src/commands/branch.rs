@@ -343,7 +343,9 @@ fn parse_daemon_branch_add_outcome(
 ) -> tracedecay_runtime_core::errors::Result<tracedecay_runtime_core::branch::BranchAddOutcome> {
     match response.get("outcome").and_then(serde_json::Value::as_str) {
         Some("not_indexed") => Ok(tracedecay_runtime_core::branch::BranchAddOutcome::NotIndexed),
-        Some("already_tracked") => Ok(tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked),
+        Some("already_tracked") => {
+            Ok(tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked)
+        }
         Some("added") => Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added),
         Some("deferred") => Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Deferred),
         Some(outcome) => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -564,8 +566,14 @@ mod tests {
                 "already_tracked",
                 tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked,
             ),
-            ("added", tracedecay_runtime_core::branch::BranchAddOutcome::Added),
-            ("deferred", tracedecay_runtime_core::branch::BranchAddOutcome::Deferred),
+            (
+                "added",
+                tracedecay_runtime_core::branch::BranchAddOutcome::Added,
+            ),
+            (
+                "deferred",
+                tracedecay_runtime_core::branch::BranchAddOutcome::Deferred,
+            ),
         ] {
             assert_eq!(
                 parse_daemon_branch_add_outcome(&serde_json::json!({ "outcome": name }))

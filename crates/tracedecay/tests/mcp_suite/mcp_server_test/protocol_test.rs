@@ -5,8 +5,8 @@ use tempfile::TempDir;
 use tracedecay::mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
-use tracedecay_runtime_core::storage::resolve_response_handle_root;
 use tracedecay::tracedecay::{TraceDecay, current_timestamp};
+use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
 mod initialize_routing;
 

@@ -2,13 +2,13 @@ use std::io::Write;
 
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_domain::{
     ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
     ProviderUsageScopeV1,
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay_global_db::ParseOffset;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::claude::ClaudeSource;

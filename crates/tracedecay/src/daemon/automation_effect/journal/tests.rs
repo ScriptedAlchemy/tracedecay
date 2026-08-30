@@ -4002,7 +4002,9 @@ async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_owne
     let second_journal_lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(tracedecay_runtime_core::storage::append_lock_path(&fixture.journal_paths[1]))
+        .open(tracedecay_runtime_core::storage::append_lock_path(
+            &fixture.journal_paths[1],
+        ))
         .expect("open second request-waiting journal lock");
     second_journal_lock
         .lock_exclusive()

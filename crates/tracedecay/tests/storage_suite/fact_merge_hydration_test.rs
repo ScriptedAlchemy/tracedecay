@@ -12,8 +12,6 @@ use std::fmt::Write as _;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, CoverageUniverseKnowledgeV1, DomainError,
@@ -27,6 +25,8 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     ScopeResolutionId, SensitivityV1, ShardDispositionV1, ShardId, UtcMicros, VectorWatermark,
 };
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
     FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactStore, FactStoreError,

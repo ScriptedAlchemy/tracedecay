@@ -626,7 +626,9 @@ fn read_active_code_generation(
     home: &Path,
     project: &Path,
 ) -> Option<tracedecay_code_index::production::CodeIndexPublishedGenerationV1> {
-    let layout = tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay")).ok()?;
+    let layout =
+        tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay"))
+            .ok()?;
     let scope = scoped_code_index_store_root(&layout.data_root.join("code-index-v1"), project);
     let pointer = serde_json::from_slice::<DurablePublicationPointerV1>(
         &std::fs::read(scope.join("active-code-generation-v1.json")).ok()?,

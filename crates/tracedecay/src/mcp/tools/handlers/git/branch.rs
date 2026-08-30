@@ -28,7 +28,8 @@ where
     F: FnOnce(
             &Path,
             &crate::branch_snapshots::LocalBranchReadControlV1,
-        ) -> std::result::Result<T, crate::branch_snapshots::LocalBranchSnapshotErrorV1>
+        )
+            -> std::result::Result<T, crate::branch_snapshots::LocalBranchSnapshotErrorV1>
         + Send
         + 'static,
 {
@@ -301,7 +302,11 @@ pub(crate) async fn handle_branch_search(
             deadline.clone(),
             cancellation.clone(),
             move |root, control| {
-                crate::branch_snapshots::local_branch_revision_controlled(root, &revision_branch, control)
+                crate::branch_snapshots::local_branch_revision_controlled(
+                    root,
+                    &revision_branch,
+                    control,
+                )
             },
         ),
         label = "mcp.git.branch_search.ref_read"

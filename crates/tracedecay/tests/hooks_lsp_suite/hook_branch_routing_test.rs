@@ -80,7 +80,10 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .await
         .unwrap();
 
-    assert_eq!(outcome, tracedecay_runtime_core::branch::BranchAddOutcome::Added);
+    assert_eq!(
+        outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
     assert!(
         shard_root.join("tracedecay.db").exists(),
         "the single project graph store must serve the branch"
@@ -265,7 +268,10 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .track_worktree_branch(&project, &project, "feature/second")
         .await
         .unwrap();
-    assert_eq!(outcome, tracedecay_runtime_core::branch::BranchAddOutcome::Added);
+    assert_eq!(
+        outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
 
     let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
         .expect("branch metadata must remain published");

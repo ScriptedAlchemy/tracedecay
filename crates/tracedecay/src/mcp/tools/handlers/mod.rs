@@ -251,7 +251,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) daemon_user_profile_id: Option<tracedecay_domain::configuration::UserProfileId>,
     pub profile_root: Option<&'a Path>,
     pub(crate) resolved_project_route: Option<&'a crate::mcp::project_route::ResolvedProjectRoute>,
-    pub automation_scheduler_reconciler: Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
+    pub automation_scheduler_reconciler:
+        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     pub automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     pub(crate) doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) remote_operational_status:
@@ -259,7 +260,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_index_freshness_reader:
         Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub(crate) explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
-    pub feedback_status_reader: Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
+    pub feedback_status_reader:
+        Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
@@ -294,7 +296,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_index_ignored_dependency_admission:
         Option<crate::mcp::server::CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority for runtime telemetry.
-    pub(crate) generation_census_reader: Option<tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
+    pub(crate) generation_census_reader:
+        Option<tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
     /// Retained server authority consumed by the dashboard boundary. Project
     /// selection itself is completed before handler dispatch.
     pub(crate) retained_project_server_resolver:

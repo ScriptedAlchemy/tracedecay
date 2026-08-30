@@ -12,8 +12,8 @@
 //! without the mock, and without a source copy that can silently drift from
 //! the crate it was copied out of.
 
-use tracedecay_domain::code_intelligence::{Edge, EdgeKind, ExtractionResult, Node, NodeKind};
 use tracedecay_code_extraction::{JavaExtractor, KotlinExtractor, LanguageExtractor};
+use tracedecay_domain::code_intelligence::{Edge, EdgeKind, ExtractionResult, Node, NodeKind};
 
 /// 0-based tree-sitter row of the first source line containing `needle`.
 fn row_of(source: &str, needle: &str) -> u32 {

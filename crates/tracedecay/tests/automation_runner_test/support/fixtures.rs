@@ -362,8 +362,8 @@ pub(crate) async fn fact_exists(
     fact_id: &str,
     read_control: &tracedecay_store::FactReadControl,
 ) -> bool {
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactId;
+    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
     use tracedecay_store::{ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1};
     use tracedecay_usecases::memory::MemoryApplication;
 

@@ -1402,10 +1402,10 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn released_automation_tombstone_allows_one_eventual_replacement() {
-    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
     use tracedecay_automation_runtime::automation::scheduler::{
         AutomationSchedulerControl, save_scheduler_control,
     };
+    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
 
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");

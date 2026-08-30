@@ -13,10 +13,12 @@ use crate::daemon::project_open_owners::{
 use crate::mcp::tools::handlers::{
     ToolCallRegistryOptions, handle_tool_call_with_registry_options,
 };
-use tracedecay_usecases::runtime_telemetry::{GenerationCensusSnapshot, GenerationCensusUnavailableReason};
 use crate::tracedecay::TraceDecay;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_runtime_core::config::PinnedUserDataDir;
+use tracedecay_usecases::runtime_telemetry::{
+    GenerationCensusSnapshot, GenerationCensusUnavailableReason,
+};
 
 #[tokio::test]
 async fn runtime_mcp_reports_exact_counts_from_the_mounted_sealed_generation() {

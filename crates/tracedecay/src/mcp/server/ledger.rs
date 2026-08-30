@@ -497,8 +497,9 @@ impl McpServer {
                     hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
                         .ok()?;
                 let worktree = git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
-                let branch =
-                    bounded_identifier(tracedecay_runtime_core::branch::current_branch(&worktree_raw).as_deref());
+                let branch = bounded_identifier(
+                    tracedecay_runtime_core::branch::current_branch(&worktree_raw).as_deref(),
+                );
                 Some((worktree, branch))
             })
             .await;
