@@ -46,7 +46,7 @@ fn publish_queue_gauges() {
 pub(crate) struct RunningGuard;
 
 impl RunningGuard {
-    #[inline(always)]
+    #[inline]
     pub(crate) fn enter() -> Self {
         #[cfg(feature = "hotpath")]
         {
@@ -84,7 +84,7 @@ pub(crate) enum DurationKind {
 }
 
 impl DurationGuard {
-    #[inline(always)]
+    #[inline]
     pub(crate) fn backend_startup() -> Self {
         #[cfg(feature = "hotpath")]
         {
@@ -99,7 +99,7 @@ impl DurationGuard {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     pub(crate) fn run() -> Self {
         #[cfg(feature = "hotpath")]
         {
@@ -133,7 +133,7 @@ impl Drop for DurationGuard {
 /// Counts one constructed run terminal per status. Failed and skipped
 /// terminals are counted alongside successes because a success-only counter
 /// hides exactly the waste an automation stall/skip diagnosis needs.
-#[inline(always)]
+#[inline]
 pub(crate) fn observe_run_terminal(status: AutomationRunStatus) {
     #[cfg(feature = "hotpath")]
     {
@@ -203,7 +203,7 @@ fn count_skip_reason(reason: &str) {
     }
 }
 
-#[inline(always)]
+#[inline]
 pub(crate) fn observe_due() {
     #[cfg(feature = "hotpath")]
     {
@@ -215,7 +215,7 @@ pub(crate) fn observe_due() {
     }
 }
 
-#[inline(always)]
+#[inline]
 pub(crate) fn observe_skip_reason(reason: &str) {
     #[cfg(feature = "hotpath")]
     {
