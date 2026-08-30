@@ -709,11 +709,11 @@ impl GraphDb {
         let label = vector::native_vector_label(&request.namespace, &request.projection);
         let property = vector_property_key(&request.property, request.dimension, request.metric);
         match vector::classify_vector_index(database, &label, &property) {
-            GraphVectorIndexStatus::Available => {
+            status @ GraphVectorIndexStatus::Available { .. } => {
                 if request.cancellation.is_cancelled() {
                     return Err(GraphDbError::Cancelled);
                 }
-                return Ok(GraphVectorIndexStatus::Available);
+                return Ok(status);
             }
             GraphVectorIndexStatus::Stale => {
                 // A registered index covering nothing answers every
@@ -956,8 +956,11 @@ impl GraphDb {
                 // `mutation::apply` has already committed this exact scalar. Grafeo
                 // Session mutations do not maintain HNSW, so this identical direct
                 // write is index refresh only. The outer database write guard keeps
-                // readers excluded; after reopen the non-durable index is Missing
-                // until an explicit retained owner calls `ensure_vector_index`.
+                // readers excluded. The pinned grafeo persists the refreshed index
+                // at checkpoint and restores it on open; a store whose index is
+                // still Missing after reopen (written before index maintenance, or
+                // torn before its first checkpoint) needs an explicit retained
+                // owner to call `ensure_vector_index`.
                 if database.graph_store().has_vector_index(
                     &vector::native_vector_label(&namespace, &stored.projection),
                     &property,
@@ -976,8 +979,10 @@ impl GraphDb {
         Ok(commit)
     }
 
-    /// Commits a persistence-only batch without maintaining an ephemeral
-    /// HNSW index that the next close/reopen would discard.
+    /// Commits a persistence-only batch without creating or refreshing any
+    /// HNSW index. Callers that serve vector search from the written rows
+    /// use [`Self::apply_locked`] instead, which keeps the persisted index
+    /// aligned with every committed vector row.
     pub(crate) fn apply_locked_without_vector_index_maintenance(
         &self,
         database: &GrafeoDB,
