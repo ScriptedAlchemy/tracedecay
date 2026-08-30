@@ -10745,7 +10745,7 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
         .metadata()
         .clone();
     let outcome = reopened
-        .reconcile_retained_text_generation(&metadata)
+        .reconcile_retained_text_generation_with(&metadata, true)
         .expect("graph-off retained reconcile")
         .expect("stale witness must be verified by text-only capture");
     let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome else {
@@ -10813,7 +10813,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
     );
     let tight = Arc::new(ProcessResidentMemoryV1::new(tight_limit));
     scheduler.bind_resident_memory(Arc::clone(&tight));
-    let denied = scheduler.reconcile_retained_text_generation(&metadata_a);
+    let denied = scheduler.reconcile_retained_text_generation_with(&metadata_a, true);
     assert!(
         matches!(
             denied,
@@ -10841,7 +10841,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
     ));
     scheduler.bind_resident_memory(Arc::clone(&adequate));
     let outcome = scheduler
-        .reconcile_retained_text_generation(&metadata_a)
+        .reconcile_retained_text_generation_with(&metadata_a, true)
         .expect("adequately funded graph-off retry")
         .expect("graph-off retry outcome");
     let generation_b = published(outcome);
