@@ -63,8 +63,7 @@ pub(super) async fn ensure_audit_redaction_key(
         return Ok(material);
     }
     let mut material = Zeroizing::new(vec![0_u8; CONFIGURATION_AUDIT_REDACTION_KEY_BYTES]);
-    getrandom::getrandom(material.as_mut_slice())
-        .map_err(|_| ConfigurationStoreError::Unavailable)?;
+    getrandom::getrandom(material.as_mut_slice()).map_err(ConfigurationStoreError::unavailable)?;
     transaction
         .execute(
             "INSERT INTO configuration_audit_redaction_keys (singleton, key_material, created_at)

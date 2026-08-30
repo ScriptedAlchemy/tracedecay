@@ -29,8 +29,11 @@ use super::CodeLexicalArtifactErrorV1;
 // relational base after the private builder connection has admitted it.
 // Revision 9 persists parser-attested symbol display identity with each row so
 // graph-independent result hydration never needs the full sealed generation.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 9;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v9\0";
+// Revision 10 adds a finalized n-gram selectivity projection so phrase reads
+// can choose and page-prune by the rarest predicate without rescanning every
+// source-page shard.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 10;
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v10\0";
 const REQUIRED_ARTIFACT_INDEXES_V8: [(&str, &str, &[&str]); 7] = [
     ("rows", "rows_by_chunk", &["chunk_id"]),
     (
@@ -483,6 +486,56 @@ pub(super) fn verify_artifact_table_layout(
     {
         return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
             "artifact ngram table has columns {columns:?} and without-rowid state {without_rowid:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires source-page bitmap shards"
+        )));
+    }
+    let statistics_without_rowid: Option<i64> = connection
+        .query_row(
+            "SELECT wr FROM pragma_table_list WHERE schema = 'main' AND name = 'ngram_statistics' AND type = 'table'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact ngram statistics schema is unreadable: {error}"
+            ))
+        })?;
+    let statistics_columns = connection
+        .prepare(
+            "SELECT name, type, [notnull], pk FROM pragma_table_xinfo('ngram_statistics') WHERE hidden = 0 ORDER BY cid",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact ngram statistics columns are unreadable: {error}"
+            ))
+        })?;
+    let expected_statistics = [
+        ("kind", "INTEGER", 1, 1),
+        ("ngram", "INTEGER", 1, 2),
+        ("document_frequency", "INTEGER", 1, 0),
+    ];
+    if statistics_without_rowid != Some(1)
+        || !statistics_columns
+            .iter()
+            .map(|(name, column_type, not_null, primary_key)| {
+                (name.as_str(), column_type.as_str(), *not_null, *primary_key)
+            })
+            .eq(expected_statistics)
+    {
+        return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+            "artifact ngram statistics table has columns {statistics_columns:?} and without-rowid state {statistics_without_rowid:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires finalized selectivity statistics"
         )));
     }
     Ok(())

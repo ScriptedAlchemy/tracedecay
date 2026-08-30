@@ -205,6 +205,61 @@ fn central_authority_admits_unprefixed_contextual_error_text() {
     }));
 }
 
+/// Unprefixed classification is the extraction grammar (plus its explicit
+/// bridges): shapes the indexer can never mint are not admitted, and
+/// identifier-shaped lookalikes stay identifiers instead of dead literals.
+#[test]
+fn central_authority_classification_matches_extraction_grammar() {
+    let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
+    let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+        "-v --flag_x a.b e123 ts12345 git e0308 err_x scripts/justfile deadbee",
+        id::<SanitizerRevision>("query-sanitizer.v1"),
+        id::<QueryNormalizationRevision>("query-normalization.v1"),
+    )
+    .expect("query sanitizes");
+
+    let literals = authority.parse_literals(&query_view, &base_request(16));
+    let literal_for = |original: &str| {
+        literals
+            .iter()
+            .find(|literal| literal.original_bytes == original.as_bytes())
+    };
+    let field_for = |original: &str| literal_for(original).map(|literal| literal.field);
+
+    // Shapes the extraction grammar never mints are no longer admitted:
+    // single-dash flags, underscore flags, and two-segment dotted keys.
+    assert_eq!(field_for("-v"), None);
+    assert_eq!(field_for("--flag_x"), None);
+    assert_eq!(field_for("a.b"), None);
+    // Identifier-shaped lookalikes classify as identifiers (matchable
+    // against whole-symbol postings) instead of unmintable diagnostic or
+    // tool literals.
+    assert_eq!(field_for("e123"), Some(ExactFieldV1::Identifier));
+    assert_eq!(field_for("ts12345"), Some(ExactFieldV1::Identifier));
+    assert_eq!(field_for("git"), Some(ExactFieldV1::Identifier));
+    // Case bridges admit lowercase user input and canonicalize into the
+    // uppercase posting form.
+    assert_eq!(field_for("e0308"), Some(ExactFieldV1::DiagnosticCode));
+    assert_eq!(
+        literal_for("e0308")
+            .expect("diagnostic literal")
+            .canonical_bytes,
+        b"E0308"
+    );
+    assert_eq!(field_for("err_x"), Some(ExactFieldV1::DiagnosticCode));
+    assert_eq!(
+        literal_for("err_x")
+            .expect("runtime code literal")
+            .canonical_bytes,
+        b"ERR_X"
+    );
+    // Deliberate divergences stay explicit: extensionless logical paths and
+    // bare commit hashes remain admissible because the projection posts
+    // every chunk's logical path and strips the `commit:` mint prefix.
+    assert_eq!(field_for("scripts/justfile"), Some(ExactFieldV1::Path));
+    assert_eq!(field_for("deadbee"), Some(ExactFieldV1::CommitIdentifier));
+}
+
 #[test]
 fn central_authority_does_not_promote_unprefixed_natural_language() {
     let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
@@ -249,7 +304,7 @@ fn exact_pair(
         evidence_role: EvidenceRole::Primary,
         retriever: RetrieverKind::ExactLiteral,
         retriever_revision: id("retriever.exact.v1"),
-        score_domain: id("score.exact.v1"),
+        score_domain: id(crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1),
         raw_score: FixedPointScore(0),
         ordinal_rank: 0,
         exact_admission_proof: Some(proof.clone()),

@@ -427,7 +427,7 @@ mod tests {
         assert!(!summary.summary_text.is_empty());
         assert_eq!(
             response.relation_projection_status,
-            LcmRelationProjectionStatus::Pending
+            LcmRelationProjectionStatus::Applied
         );
 
         let session_id = SessionId::new("compress-session").unwrap();
@@ -900,7 +900,7 @@ done
                 assert!(!response.fallback_used);
                 assert_eq!(
                     response.relation_projection_status,
-                    LcmRelationProjectionStatus::Pending
+                    LcmRelationProjectionStatus::Applied
                 );
             }
             drop(env);

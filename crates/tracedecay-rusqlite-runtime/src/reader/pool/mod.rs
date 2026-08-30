@@ -463,7 +463,9 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             max_wait,
             interrupted,
         )?;
-        lease.read_store_size()
+        // `max_wait` bounds the lane acquisition above and, separately, the
+        // worker reply below, so one call blocks at most twice that budget.
+        lease.read_store_size(max_wait)
     }
 
     pub fn read_table_sizes<F>(

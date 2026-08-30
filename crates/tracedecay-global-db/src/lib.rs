@@ -108,6 +108,7 @@ pub fn register_test_schema_installer() {
 
 mod session_temporal_handle;
 mod session_temporal_schema;
+mod sqlite_persist;
 mod transcript;
 
 pub use git_index_transactions::{

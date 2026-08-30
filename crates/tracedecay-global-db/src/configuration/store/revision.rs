@@ -118,10 +118,12 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
                         Ok(None) => insert_change_plan(&transaction, &plan).await,
                         Err(error) => Err(error),
                     };
-                    match outcome {
-                        Ok(()) => transaction.commit().await.map_err(unavailable_store),
-                        Err(error) => Err(error),
-                    }
+                    crate::sqlite_persist::commit_outcome(
+                        transaction,
+                        outcome,
+                        ConfigurationStoreError::Unavailable,
+                    )
+                    .await
                 },
                 label = "global_db.configuration.persist.plan"
             )
@@ -160,14 +162,12 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
             .await
             .map_err(unavailable_store)?;
         let outcome = commit_configuration_transaction(&transaction, &commit, false, None).await;
-        match outcome {
-            Ok(receipt) => transaction
-                .commit()
-                .await
-                .map(|()| receipt)
-                .map_err(unavailable_store),
-            Err(error) => Err(error),
-        }
+        crate::sqlite_persist::commit_outcome(
+            transaction,
+            outcome,
+            ConfigurationStoreError::Unavailable,
+        )
+        .await
     }
 
     fn audit(

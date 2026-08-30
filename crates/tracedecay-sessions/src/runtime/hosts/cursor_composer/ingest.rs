@@ -304,8 +304,17 @@ impl CursorComposerSource {
         if !self.state_db_path.is_file() {
             return;
         }
-        let Some(ro) = open_readonly_immutable(&self.state_db_path).await else {
-            return;
+        let ro = match open_readonly_immutable(&self.state_db_path).await {
+            Ok(ro) => ro,
+            Err(error) => {
+                tracing::debug!(
+                    state_db = %self.state_db_path.display(),
+                    error,
+                    "Cursor composer state database open failed closed"
+                );
+                byte_budget.defer();
+                return;
+            }
         };
         let conn = &ro.conn;
         let scope_matcher = context.scope_matcher();
@@ -770,8 +779,17 @@ impl CursorComposerSource {
         if context.cancellation.is_cancelled() {
             return;
         }
-        let Some(ro) = open_readonly_immutable(store_path).await else {
-            return;
+        let ro = match open_readonly_immutable(store_path).await {
+            Ok(ro) => ro,
+            Err(error) => {
+                tracing::debug!(
+                    store_db = %store_path.display(),
+                    error,
+                    "Cursor composer store database open failed closed"
+                );
+                byte_budget.defer();
+                return;
+            }
         };
         let conn = &ro.conn;
         let meta = match read_store_meta_bounded(conn, byte_budget.remaining()).await {

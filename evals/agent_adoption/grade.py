@@ -47,7 +47,7 @@ CONDITIONS = ("full", "no-hints", "no-skills", "bare", "cli-only")
 KNOWN_HOSTS = ("claude", "codex")
 
 # Distinctive fragments of the hook-injected tool hints. These MIRROR the
-# `message`/`context` strings in src/hooks/tool_hints.rs CATEGORY_SPECS: if that
+# `message`/`context` strings in crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs CATEGORY_SPECS: if that
 # table's wording changes, refresh these. They are chosen to be specific enough
 # that they only appear in an injected hint, never in a raw MCP tool
 # *description* or the CLAUDE.md steering block, so matching one in the
@@ -71,7 +71,7 @@ HINT_SIGNATURES = (
     "for subagent handoff, include focused tracedecay context",  # subagent_start_context
     "for build/type-check errors, use tracedecay's diagnostics tools",  # build_diagnostics
     "for reviewing diffs or pr changes, use tracedecay's change-context",  # review_changes
-    "for durable facts, prefer tracedecay_fact_store",  # memory_store
+    "for durable facts, prefer tracedecay_fact_store_add",  # memory_store
     "enriches each hit with its enclosing symbol",  # search context
     "gives a file's table of contents",           # file_read context
     "usage this session —",                        # escalation prefix
@@ -87,14 +87,16 @@ CH_CLI = "cli-only"                     # plugin guidance drove supported CLI fa
 CHANNELS = (CH_HINT, CH_SKILL, CH_STEERING, CH_UNPROMPTED, CH_CLI, CH_NONE)
 
 # The HINT_SIGNATURES above are hand-mirrored fragments of the hook messages in
-# src/hooks/tool_hints.rs. That mirror is load-bearing: if the source wording
+# crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs. That mirror is load-bearing: if the source wording
 # drifts and a signature stops matching, the hint text still fires in live
 # transcripts but grade.py no longer recognizes it, so genuinely hint-driven
 # adoptions get silently misfiled as `steering-or-description` and the whole
 # channel-efficacy table lies. `check_hint_drift()` / `grade.py --check-hints`
 # turn the README's "refresh these if the table changes" footnote into an
 # enforced check; run.sh runs it before spending a single live token.
-HINT_SOURCE_REL = os.path.join("src", "hooks", "tool_hints.rs")
+HINT_SOURCE_REL = os.path.join(
+    "crates", "tracedecay-agent-hosts", "src", "hooks", "tool_hints.rs"
+)
 
 
 def find_hint_source(start: str) -> Optional[str]:
@@ -858,7 +860,7 @@ def main() -> int:
     ap.add_argument(
         "--check-hints",
         action="store_true",
-        help="Only verify HINT_SIGNATURES still match src/hooks/tool_hints.rs; "
+        help="Only verify HINT_SIGNATURES still match crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs; "
         "exit non-zero on drift. Skips (exit 0) if the source tree is absent.",
     )
     args = ap.parse_args()

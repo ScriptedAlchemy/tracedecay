@@ -9,9 +9,9 @@ use tracedecay_sessions::runtime::{
         LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest,
         LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters, LcmGrepOutcome,
         LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest,
-        LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest,
-        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus,
-        LcmSummaryExpansion, compression,
+        LcmPreflightResponse, LcmRecentSession, LcmRelationProjectionStatus,
+        LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
+        LcmSessionReplaySlice, LcmStatus, LcmSummaryExpansion, compression,
         dag::{self, LcmSummaryPublicationPort},
         gc, payload, query, raw,
         types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
@@ -337,7 +337,7 @@ impl RegisteredGlobalDb {
             &transaction,
             relation_projection,
         );
-        let response = compression::compress(
+        let mut response = compression::compress(
             &transaction,
             &publisher,
             storage_root,
@@ -359,6 +359,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| {
                 LcmError::Db(format!("apply native LCM relation projection: {error}"))
             })?;
+            response.relation_projection_status = LcmRelationProjectionStatus::Applied;
             check_execution(control)?;
         }
         Ok(response)

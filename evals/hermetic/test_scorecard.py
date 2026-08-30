@@ -33,7 +33,7 @@ def row(scenario_id: str, category: str, passed: bool, **extra) -> dict:
         "tracedecay_tool_uses": 1 if passed else 0,
         "native_tool_uses": 0,
         "cli_command_uses": 0,
-        "expected_tools_missing": [] if passed else ["tracedecay_fact_store"],
+        "expected_tools_missing": [] if passed else ["tracedecay_fact_store_add"],
         "anti_tools_used": [],
         "verify_pass": None,
         "pass": passed,

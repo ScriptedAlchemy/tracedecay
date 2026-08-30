@@ -183,6 +183,13 @@ pub async fn diff_registry_orphan_relink_report(
     diff
 }
 
+fn encode_registry_identity<T: serde::Serialize>(
+    value: &T,
+    label: impl std::fmt::Display,
+) -> std::result::Result<String, String> {
+    serde_json::to_string(value).map_err(|error| format!("could not encode {label}: {error}"))
+}
+
 async fn registry_orphan_relink_has_missing_rows<Q>(
     conn: &Q,
     plan: &RegistryOrphanRelinkPlan,
@@ -217,14 +224,16 @@ where
         }
     }
 
-    let store_identity = serde_json::to_string(&(
-        &plan.store.project_id,
-        &plan.store.store_kind,
-        &plan.store.storage_mode,
-        &plan.store.store_relpath,
-        &plan.store.manifest_relpath,
-    ))
-    .unwrap_or_default();
+    let store_identity = encode_registry_identity(
+        &(
+            &plan.store.project_id,
+            &plan.store.store_kind,
+            &plan.store.storage_mode,
+            &plan.store.store_relpath,
+            &plan.store.manifest_relpath,
+        ),
+        format!("store '{}'", plan.store.store_id),
+    )?;
     if query_optional_text(
         conn,
         "SELECT json_array(project_id, store_kind, storage_mode, store_relpath, manifest_relpath)
@@ -239,14 +248,16 @@ where
     }
 
     for scope in &plan.graph_scopes {
-        let scope_identity = serde_json::to_string(&(
-            &scope.project_id,
-            &scope.store_id,
-            &scope.branch_name,
-            &scope.db_relpath,
-            &scope.parent_scope_id,
-        ))
-        .unwrap_or_default();
+        let scope_identity = encode_registry_identity(
+            &(
+                &scope.project_id,
+                &scope.store_id,
+                &scope.branch_name,
+                &scope.db_relpath,
+                &scope.parent_scope_id,
+            ),
+            format!("graph scope '{}'", scope.graph_scope_id),
+        )?;
         if query_optional_text(
             conn,
             "SELECT json_array(project_id, store_id, branch_name, db_relpath, parent_scope_id)
@@ -427,14 +438,22 @@ where
             }
         }
 
-        let store_identity = serde_json::to_string(&(
-            &plan.store.project_id,
-            &plan.store.store_kind,
-            &plan.store.storage_mode,
-            &plan.store.store_relpath,
-            &plan.store.manifest_relpath,
-        ))
-        .unwrap_or_default();
+        let store_identity = match encode_registry_identity(
+            &(
+                &plan.store.project_id,
+                &plan.store.store_kind,
+                &plan.store.storage_mode,
+                &plan.store.store_relpath,
+                &plan.store.manifest_relpath,
+            ),
+            format!("store '{}'", plan.store.store_id),
+        ) {
+            Ok(identity) => identity,
+            Err(error) => {
+                issues.push(error);
+                continue;
+            }
+        };
         record_batch_owner(
             &mut stores,
             &plan.store.store_id,
@@ -489,14 +508,22 @@ where
         }
 
         for scope in &plan.graph_scopes {
-            let scope_identity = serde_json::to_string(&(
-                &scope.project_id,
-                &scope.store_id,
-                &scope.branch_name,
-                &scope.db_relpath,
-                &scope.parent_scope_id,
-            ))
-            .unwrap_or_default();
+            let scope_identity = match encode_registry_identity(
+                &(
+                    &scope.project_id,
+                    &scope.store_id,
+                    &scope.branch_name,
+                    &scope.db_relpath,
+                    &scope.parent_scope_id,
+                ),
+                format!("graph scope '{}'", scope.graph_scope_id),
+            ) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    issues.push(error);
+                    continue;
+                }
+            };
             record_batch_owner(
                 &mut scopes,
                 &scope.graph_scope_id,

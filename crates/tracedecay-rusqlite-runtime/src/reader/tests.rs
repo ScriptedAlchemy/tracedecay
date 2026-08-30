@@ -442,6 +442,65 @@ fn reserved_health_reader_reports_exact_store_size_pragmas() {
     assert_eq!(snapshot.available_health, 1);
 }
 
+/// Store-size telemetry is a metadata read serving admitted status requests;
+/// a snapshot worker that cannot answer must yield a typed deadline error
+/// within the caller's bound instead of capturing the caller for as long as
+/// the worker stays busy.
+#[test]
+fn busy_snapshot_worker_bounds_the_store_size_reply() {
+    let store = TestStore::new();
+    let executor = GateExecutor::default();
+    let entered = executor.entered.clone();
+    let release = executor.release.clone();
+    let spawned = super::worker::spawn(
+        store.locator(),
+        executor,
+        Arc::new(crate::telemetry::ReaderAdmissionRecorder::default()),
+    )
+    .expect("spawn reader worker");
+    let client = spawned.client.clone();
+    client.begin().expect("begin read snapshot");
+
+    // Park the worker inside an executor read so the store-size command
+    // queues behind provably in-flight work.
+    let busy = std::thread::spawn({
+        let client = spawned.client.clone();
+        let request = request(&store.binding, OperationPriorityV1::Foreground);
+        move || {
+            let probe = Probe::for_request(&request);
+            // The parked read may finish either way once the gate opens; the
+            // assertion under test is the bounded telemetry reply below.
+            let _ = client.execute(request, &probe);
+        }
+    });
+    assert!(
+        entered.wait(Duration::from_secs(10)),
+        "the busy read must be running before the bounded reply is measured"
+    );
+
+    let started = Instant::now();
+    let result = client.store_size(Duration::from_millis(100));
+    let elapsed = started.elapsed();
+    release.set();
+    assert!(
+        matches!(
+            result,
+            Err(ReaderWorkerError::Interrupted {
+                reason: tracedecay_store::UnavailableReasonV1::DeadlineExceeded,
+            })
+        ),
+        "a busy worker must produce a typed deadline error, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the reply bound must hold while the worker is busy (waited {elapsed:?})"
+    );
+
+    busy.join().expect("join busy reader");
+    client.shutdown();
+    spawned.join.join().expect("join reader worker");
+}
+
 #[test]
 fn exact_sql_health_snapshot_retires_its_reader_after_drop() {
     let store = TestStore::new();

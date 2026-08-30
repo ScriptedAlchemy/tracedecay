@@ -1007,53 +1007,18 @@ fn ngram_bitmap_candidates(
     let mut remaining_encoded_bytes = ARTIFACT_NGRAM_QUERY_ENCODED_BYTES_V1;
     let mut selectivities = Vec::with_capacity(ngrams.len());
     let mut selectivity_statement = connection
-        .prepare(
-            "SELECT cardinality, length(documents) FROM ngram_postings INDEXED BY ngram_postings_by_ngram WHERE kind = ?1 AND ngram = ?2 ORDER BY page_ordinal LIMIT ?3",
-        )
+        .prepare("SELECT document_frequency FROM ngram_statistics WHERE kind = ?1 AND ngram = ?2")
         .map_err(map_query_sql_error)?;
     for ngram in ngrams {
-        let row_limit = remaining_shards
-            .checked_add(1)
-            .ok_or(RetrievalPortError::BudgetExceeded)?;
-        let mut rows = selectivity_statement
-            .query([
-                kind,
-                i64::from(*ngram),
-                i64::try_from(row_limit).map_err(contract_error)?,
-            ])
+        let cardinality = selectivity_statement
+            .query_row([kind, i64::from(*ngram)], |row| row.get::<_, i64>(0))
+            .optional()
             .map_err(map_query_sql_error)?;
-        let mut cardinality = 0u64;
-        let mut observed_shards = 0usize;
-        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-            if observed_shards == remaining_shards {
-                return Err(RetrievalPortError::BudgetExceeded);
-            }
-            let shard_cardinality: i64 = row.get(0).map_err(map_query_sql_error)?;
-            let encoded_bytes: i64 = row.get(1).map_err(map_query_sql_error)?;
-            let shard_cardinality = u64::try_from(shard_cardinality).map_err(contract_error)?;
-            let encoded_bytes = usize::try_from(encoded_bytes).map_err(contract_error)?;
-            if shard_cardinality == 0 {
-                return Err(RetrievalPortError::BudgetExceeded);
-            }
-            charge_ngram_encoded_shard_bytes(
-                &mut remaining_encoded_bytes,
-                encoded_bytes,
-                ARTIFACT_NGRAM_MAX_ENCODED_SHARD_BYTES_V1,
-            )?;
-            cardinality = cardinality
-                .checked_add(shard_cardinality)
-                .ok_or(RetrievalPortError::BudgetExceeded)?;
-            observed_shards = observed_shards
-                .checked_add(1)
-                .ok_or(RetrievalPortError::BudgetExceeded)?;
-        }
-        drop(rows);
-        if cardinality == 0 {
+        let Some(cardinality) = cardinality else {
             return Ok(RoaringBitmap::new());
-        }
-        remaining_shards = remaining_shards
-            .checked_sub(observed_shards)
-            .ok_or(RetrievalPortError::BudgetExceeded)?;
+        };
+        let cardinality = u64::try_from(cardinality).map_err(contract_error)?;
+        ensure_ngram_candidate_cardinality(cardinality)?;
         selectivities.push(NgramSelectivityV1 {
             ngram: *ngram,
             cardinality,
@@ -1065,61 +1030,165 @@ fn ngram_bitmap_candidates(
         ensure_ngram_candidate_cardinality(selectivity.cardinality)?;
     }
 
-    let mut candidates = None::<RoaringBitmap>;
+    let mut candidates = None::<BTreeMap<i64, RoaringBitmap>>;
     #[cfg(feature = "hotpath")]
     let mut observed_shards = 0u64;
     #[cfg(feature = "hotpath")]
     let mut observed_bytes = 0u64;
-    let mut statement = connection
+    let mut all_pages_statement = connection
         .prepare(
-            "SELECT documents, cardinality FROM ngram_postings INDEXED BY ngram_postings_by_ngram WHERE kind = ?1 AND ngram = ?2 ORDER BY page_ordinal",
+            "SELECT page_ordinal, documents, cardinality FROM ngram_postings INDEXED BY ngram_postings_by_ngram WHERE kind = ?1 AND ngram = ?2 ORDER BY page_ordinal",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut candidate_pages_statement = connection
+        .prepare(
+            "SELECT posting.page_ordinal, posting.documents, posting.cardinality \
+             FROM json_each(?3) AS candidate_page \
+             CROSS JOIN ngram_postings AS posting INDEXED BY ngram_postings_by_ngram \
+             WHERE posting.kind = ?1 \
+               AND posting.ngram = ?2 \
+               AND posting.page_ordinal = CAST(candidate_page.value AS INTEGER)",
         )
         .map_err(map_query_sql_error)?;
     for selectivity in selectivities {
-        let mut documents = RoaringBitmap::new();
-        let mut rows = statement
-            .query([kind, i64::from(selectivity.ngram)])
-            .map_err(map_query_sql_error)?;
-        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-            let encoded: Vec<u8> = row.get(0).map_err(map_query_sql_error)?;
-            let cardinality: i64 = row.get(1).map_err(map_query_sql_error)?;
-            let shard = decode_ngram_bitmap(&encoded).map_err(map_query_artifact_error)?;
-            if i64::try_from(shard.len()).map_err(contract_error)? != cardinality {
-                return Err(RetrievalPortError::Contract(
-                    "lexical artifact ngram shard cardinality changed after verification"
-                        .to_owned(),
-                ));
-            }
-            if let Some(candidates) = candidates.as_ref() {
-                documents |= &shard & candidates;
-            } else {
-                documents |= shard;
-            }
-            ensure_ngram_candidate_cardinality(documents.len())?;
-            #[cfg(test)]
-            {
-                _metrics.observe_ngram_shard();
-                _metrics.observe_ngram_candidates(documents.len());
-            }
-            #[cfg(feature = "hotpath")]
-            {
-                observed_shards = observed_shards.saturating_add(1);
-                observed_bytes = observed_bytes.saturating_add(encoded.len() as u64);
-            }
-        }
-        drop(rows);
-        candidates = Some(documents);
-        if candidates.as_ref().is_none_or(RoaringBitmap::is_empty) {
+        let next = if let Some(current) = candidates.as_ref() {
+            let candidate_pages = encode_ngram_candidate_pages(current)?;
+            let mut rows = candidate_pages_statement
+                .query((kind, i64::from(selectivity.ngram), candidate_pages))
+                .map_err(map_query_sql_error)?;
+            let next = intersect_ngram_shards(
+                &mut rows,
+                Some(current),
+                &mut remaining_shards,
+                &mut remaining_encoded_bytes,
+                _metrics,
+                #[cfg(feature = "hotpath")]
+                &mut observed_shards,
+                #[cfg(feature = "hotpath")]
+                &mut observed_bytes,
+            )?;
+            drop(rows);
+            _metrics.observe_statement(&candidate_pages_statement)?;
+            next
+        } else {
+            let mut rows = all_pages_statement
+                .query([kind, i64::from(selectivity.ngram)])
+                .map_err(map_query_sql_error)?;
+            let next = intersect_ngram_shards(
+                &mut rows,
+                None,
+                &mut remaining_shards,
+                &mut remaining_encoded_bytes,
+                _metrics,
+                #[cfg(feature = "hotpath")]
+                &mut observed_shards,
+                #[cfg(feature = "hotpath")]
+                &mut observed_bytes,
+            )?;
+            drop(rows);
+            _metrics.observe_statement(&all_pages_statement)?;
+            next
+        };
+        candidates = Some(next);
+        if candidates.as_ref().is_none_or(BTreeMap::is_empty) {
             break;
         }
     }
-    let candidates = candidates.unwrap_or_default();
+    let candidates = candidates.unwrap_or_default().into_values().fold(
+        RoaringBitmap::new(),
+        |mut all, shard| {
+            all |= shard;
+            all
+        },
+    );
     #[cfg(feature = "hotpath")]
     {
         hotpath::gauge!("query.artifact.ngram.query_shards_total").inc(observed_shards);
         hotpath::gauge!("query.artifact.ngram.query_bytes_total").inc(observed_bytes);
     }
     Ok(candidates)
+}
+
+fn intersect_ngram_shards(
+    rows: &mut rusqlite::Rows<'_>,
+    current: Option<&BTreeMap<i64, RoaringBitmap>>,
+    remaining_shards: &mut usize,
+    remaining_encoded_bytes: &mut usize,
+    _metrics: &ArtifactQueryMetricsV1,
+    #[cfg(feature = "hotpath")] observed_shards: &mut u64,
+    #[cfg(feature = "hotpath")] observed_bytes: &mut u64,
+) -> Result<BTreeMap<i64, RoaringBitmap>, RetrievalPortError> {
+    let mut next = BTreeMap::new();
+    let mut candidate_count = 0u64;
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        if *remaining_shards == 0 {
+            return Err(RetrievalPortError::BudgetExceeded);
+        }
+        let page_ordinal: i64 = row.get(0).map_err(map_query_sql_error)?;
+        let encoded: Vec<u8> = row.get(1).map_err(map_query_sql_error)?;
+        let cardinality: i64 = row.get(2).map_err(map_query_sql_error)?;
+        charge_ngram_encoded_shard_bytes(
+            remaining_encoded_bytes,
+            encoded.len(),
+            ARTIFACT_NGRAM_MAX_ENCODED_SHARD_BYTES_V1,
+        )?;
+        *remaining_shards = remaining_shards
+            .checked_sub(1)
+            .ok_or(RetrievalPortError::BudgetExceeded)?;
+        let mut shard = decode_ngram_bitmap(&encoded).map_err(map_query_artifact_error)?;
+        if i64::try_from(shard.len()).map_err(contract_error)? != cardinality {
+            return Err(RetrievalPortError::Contract(
+                "lexical artifact ngram shard cardinality changed after verification".to_owned(),
+            ));
+        }
+        if let Some(current) = current {
+            let prior = current.get(&page_ordinal).ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "lexical artifact returned an ngram shard outside the candidate pages"
+                        .to_owned(),
+                )
+            })?;
+            shard &= prior;
+        }
+        if !shard.is_empty() {
+            candidate_count = candidate_count
+                .checked_add(shard.len())
+                .ok_or(RetrievalPortError::BudgetExceeded)?;
+            ensure_ngram_candidate_cardinality(candidate_count)?;
+            #[cfg(test)]
+            _metrics.observe_ngram_candidates(candidate_count);
+            next.insert(page_ordinal, shard);
+        }
+        #[cfg(test)]
+        _metrics.observe_ngram_shard();
+        #[cfg(feature = "hotpath")]
+        {
+            *observed_shards = observed_shards.saturating_add(1);
+            *observed_bytes = observed_bytes.saturating_add(encoded.len() as u64);
+        }
+    }
+    Ok(next)
+}
+
+fn encode_ngram_candidate_pages(
+    candidates: &BTreeMap<i64, RoaringBitmap>,
+) -> Result<String, RetrievalPortError> {
+    let mut encoded = String::with_capacity(candidates.len().saturating_mul(8));
+    encoded.push('[');
+    for (ordinal, page_ordinal) in candidates.keys().enumerate() {
+        if ordinal > 0 {
+            encoded.push(',');
+        }
+        write!(&mut encoded, "{page_ordinal}").map_err(|_| RetrievalPortError::BudgetExceeded)?;
+        if encoded.len() > ARTIFACT_NGRAM_CANDIDATE_JSON_BYTES_V1 {
+            return Err(RetrievalPortError::BudgetExceeded);
+        }
+    }
+    encoded.push(']');
+    if encoded.len() > ARTIFACT_NGRAM_CANDIDATE_JSON_BYTES_V1 {
+        return Err(RetrievalPortError::BudgetExceeded);
+    }
+    Ok(encoded)
 }
 
 fn ensure_ngram_candidate_cardinality(cardinality: u64) -> Result<(), RetrievalPortError> {
@@ -2783,7 +2852,13 @@ mod tests {
                     cardinality INTEGER NOT NULL,
                     PRIMARY KEY(page_ordinal, kind, ngram)
                 ) WITHOUT ROWID;
-                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);",
+                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);
+                CREATE TABLE ngram_statistics (
+                    kind INTEGER NOT NULL,
+                    ngram INTEGER NOT NULL,
+                    document_frequency INTEGER NOT NULL,
+                    PRIMARY KEY(kind, ngram)
+                ) WITHOUT ROWID;",
             )
             .expect("ngram fixture schema");
         let phrase = b"abcdefghijklmnopqrstuvw";
@@ -2805,6 +2880,12 @@ mod tests {
                     params![NGRAM_NORMALIZED, i64::from(*ngram), encoded, documents.len() as i64],
                 )
                 .expect("complete phrase posting");
+            connection
+                .execute(
+                    "INSERT INTO ngram_statistics(kind, ngram, document_frequency) VALUES (?1, ?2, ?3)",
+                    params![NGRAM_NORMALIZED, i64::from(*ngram), documents.len() as i64],
+                )
+                .expect("complete phrase statistics");
         }
 
         let metrics = ArtifactQueryMetricsV1::default();
@@ -2828,7 +2909,13 @@ mod tests {
                     cardinality INTEGER NOT NULL,
                     PRIMARY KEY(page_ordinal, kind, ngram)
                 ) WITHOUT ROWID;
-                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);",
+                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);
+                CREATE TABLE ngram_statistics (
+                    kind INTEGER NOT NULL,
+                    ngram INTEGER NOT NULL,
+                    document_frequency INTEGER NOT NULL,
+                    PRIMARY KEY(kind, ngram)
+                ) WITHOUT ROWID;",
             )
             .expect("ngram fixture schema");
         for (page_ordinal, ngram, documents) in [
@@ -2847,6 +2934,14 @@ mod tests {
                 )
                 .expect("seed ngram shard");
         }
+        for (ngram, document_frequency) in [(10i64, 6i64), (20, 1), (30, 1)] {
+            connection
+                .execute(
+                    "INSERT INTO ngram_statistics(kind, ngram, document_frequency) VALUES (?1, ?2, ?3)",
+                    params![NGRAM_NORMALIZED, ngram, document_frequency],
+                )
+                .expect("seed ngram statistics");
+        }
 
         let bounded_metrics = ArtifactQueryMetricsV1::default();
         let matching =
@@ -2854,7 +2949,8 @@ mod tests {
                 .expect("intersect common and rare shards");
         assert_eq!(matching.iter().collect::<Vec<_>>(), [2]);
         assert_eq!(bounded_metrics.ngram_peak_candidates.get(), 1);
-        assert_eq!(bounded_metrics.ngram_decoded_shards.get(), 4);
+        assert_eq!(bounded_metrics.ngram_decoded_shards.get(), 2);
+        assert_eq!(bounded_metrics.observed_fullscan_steps(), 0);
 
         let short_circuit_metrics = ArtifactQueryMetricsV1::default();
         let empty = ngram_bitmap_candidates(
@@ -2868,8 +2964,8 @@ mod tests {
         assert_eq!(short_circuit_metrics.ngram_peak_candidates.get(), 1);
         assert_eq!(
             short_circuit_metrics.ngram_decoded_shards.get(),
-            2,
-            "the three-page common ngram must not be decoded after rare shards empty the candidate set"
+            1,
+            "candidate-page pruning must avoid decoding unrelated ngram shards"
         );
     }
 

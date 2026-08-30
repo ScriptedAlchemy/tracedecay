@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
-    McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
-    install_mcp_server_entry, load_jsonc_file, load_jsonc_file_strict, uninstall_mcp_server_entry,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    McpDoctorLabels, McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
+    install_mcp_server_entry, load_jsonc_file, uninstall_mcp_server_entry,
 };
 
 pub struct KiloIntegration;
@@ -111,7 +111,7 @@ impl AgentIntegration for KiloIntegration {
                     "enabled": true
                 }),
                 "Kilo",
-                load_jsonc_file_strict,
+                JsonConfigDialect::Jsonc,
             )?;
         }
         Ok(())
@@ -126,7 +126,7 @@ impl AgentIntegration for KiloIntegration {
             uninstall_mcp_server_entry(
                 &kilo_config_path(&ctx.home),
                 "mcp",
-                load_jsonc_file,
+                JsonConfigDialect::Jsonc,
                 McpUninstallPolicy::default(),
             )?;
         }
