@@ -162,7 +162,15 @@ fn apply_in_transaction(
             GraphMutation::UpsertEntity(entity) => {
                 let key = stable_key_from_encoded(&encoded_namespace, entity.identity.as_str());
                 let node = if let Some(stored) = existing.entities.get(&key) {
-                    replace_entity(session, stored, entity, batch, check)?;
+                    if stored.namespace == batch.namespace
+                        && stored.projection == batch.projection
+                        && stored.entity == *entity
+                    {
+                        #[cfg(feature = "hotpath")]
+                        hotpath::gauge!("graph_db.mutation.reused_entities_total").inc(1_u64);
+                    } else {
+                        replace_entity(session, stored, entity, batch, check)?;
+                    }
                     stored.node
                 } else {
                     create_entity(session, entity, batch, check)?
@@ -172,9 +180,6 @@ fn apply_in_transaction(
             GraphMutation::UpsertRelation(relation) => {
                 let relation_key =
                     stable_key_from_encoded(&encoded_namespace, relation.identity.as_str());
-                if let Some(stored) = existing.relations.get(&relation_key) {
-                    delete_relation(session, stored, batch, check)?;
-                }
                 let external = external_endpoints.get(&relation.identity);
                 let from = external
                     .and_then(|(from, _)| *from)
@@ -188,6 +193,18 @@ fn apply_in_transaction(
                         entity_node(&entity_nodes, existing, &encoded_namespace, &relation.to)
                     })
                     .ok_or_else(|| GraphDbError::invalid("relation target disappeared"))?;
+                if let Some(stored) = existing.relations.get(&relation_key) {
+                    if stored.projection == batch.projection
+                        && stored.relation == *relation
+                        && stored.source == from
+                        && stored.target == to
+                    {
+                        #[cfg(feature = "hotpath")]
+                        hotpath::gauge!("graph_db.mutation.reused_relations_total").inc(1_u64);
+                        continue;
+                    }
+                    delete_relation(session, stored, batch, check)?;
+                }
                 let edge_properties =
                     edge_properties(&batch.namespace, &batch.projection, relation);
                 let edge = session
