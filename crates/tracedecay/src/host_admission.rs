@@ -1,9 +1,14 @@
 //! Root composition for host-admission test runtimes.
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
+
+use tracedecay_private_fs::background_cpu::{
+    install_process_background_cpu, process_background_cpu,
+};
 
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 #[cfg(test)]
@@ -76,6 +81,28 @@ pub enum SessionTemporalFixtureCountV1 {
 static SHARED_TEST_SESSION_REGISTRIES: LazyLock<
     AsyncMutex<WeakRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>>,
 > = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
+
+/// Installs the process background CPU authority that host-admission capture
+/// requires. Production installs it during daemon worker-plan admission,
+/// which these fixtures never run; without it every observation capture is
+/// refused with `background_cpu_unavailable`. A sibling fixture or benchmark
+/// can win the process-wide installation race at a different width; reuse
+/// that authority rather than making success depend on execution order.
+fn ensure_process_background_cpu_authority() -> Result<()> {
+    if process_background_cpu().is_some() {
+        return Ok(());
+    }
+    if let Err(error) = install_process_background_cpu(NonZeroUsize::MIN)
+        && process_background_cpu().is_none()
+    {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "host-admission test runtime could not install the background CPU authority: {error}"
+            ),
+        });
+    }
+    Ok(())
+}
 
 /// Registered host-admission fixture assembled by the composition root.
 ///
@@ -193,6 +220,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     async fn open(profile_root: PathBuf, project: Option<(PathBuf, ProjectId)>) -> Result<Self> {
+        ensure_process_background_cpu_authority()?;
         prepare_host_admission_test_profile_root(&profile_root)?;
         if let Some((project_root, project_id)) = project.as_ref() {
             prepare_host_admission_test_project_root(project_root, project_id)?;
