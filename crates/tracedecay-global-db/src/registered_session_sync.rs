@@ -1,12 +1,22 @@
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{Value, params};
+use tracedecay_runtime_core::db::{
+    DatabaseEngineReadSnapshot, collect_rowid_pages, collect_rowid_pages_with,
+};
 use tracedecay_runtime_core::errors::TraceDecayError;
 
-use crate::{RegisteredGlobalDb, global_db_operation_error};
+use crate::{RegisteredGlobalDb, global_db_operation_error, global_db_operation_message};
 
 const SESSION_SYNC_RECOVERY_PAGE_ROWS: i64 = 8;
 
 impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.registered.session_sync.frontiers")]
+    /// Reads every committed source cursor through bounded `rowid` keyset
+    /// pages.
+    ///
+    /// A session store keeps one cursor row per observed source, so a
+    /// long-lived profile holds far more rows than the `SQLite` runtime
+    /// materializes for a single exact-SQL query; an unbounded read here
+    /// degraded every project full-upgrade on such profiles.
     pub async fn list_session_sync_source_frontiers(
         &self,
     ) -> Result<Vec<(String, String, String)>, TraceDecayError> {
@@ -14,33 +24,25 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| global_db_operation_error("open session source frontiers", error))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT source_json, scope_json, cursor_json
-                 FROM source_cursors
-                 ORDER BY source_json, scope_json",
-                params![],
-            )
-            .await
-            .map_err(|error| global_db_operation_error("list session source frontiers", error))?;
-        let mut frontiers = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error("step session source frontiers", error))?
-        {
-            frontiers.push((
-                row.get(0).map_err(|error| {
-                    global_db_operation_error("decode session source identity", error)
-                })?,
-                row.get(1).map_err(|error| {
-                    global_db_operation_error("decode session source scope", error)
-                })?,
-                row.get(2).map_err(|error| {
-                    global_db_operation_error("decode session committed cursor", error)
-                })?,
-            ));
-        }
+        let mut frontiers = collect_rowid_pages(
+            &snapshot,
+            "SELECT source_json, scope_json, cursor_json, rowid
+             FROM source_cursors
+             WHERE rowid > ?1
+             ORDER BY rowid
+             LIMIT ?2",
+            3,
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                ))
+            },
+            "list session source frontiers",
+        )
+        .await?;
+        frontiers.sort_unstable();
         Ok(frontiers)
     }
 
@@ -79,31 +81,24 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| global_db_operation_error("open session sync journals", error))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT key, value
-                 FROM session_backfill_meta
-                 WHERE key >= ?1 AND key < ?2
-                 ORDER BY key",
-                params![key_prefix, format!("{key_prefix}\u{10ffff}")],
-            )
-            .await
-            .map_err(|error| global_db_operation_error("list session sync journals", error))?;
-        let mut journals = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error("step session sync journals", error))?
-        {
-            let key = row
-                .get(0)
-                .map_err(|error| global_db_operation_error("decode session sync key", error))?;
-            let value = row
-                .get(1)
-                .map_err(|error| global_db_operation_error("decode session sync value", error))?;
-            journals.push((key, value));
-        }
-        Ok(journals)
+        let mut keys = collect_rowid_pages_with(
+            &snapshot,
+            "SELECT key, rowid
+             FROM session_backfill_meta
+             WHERE key >= ?1 AND key < ?2 AND rowid > ?3
+             ORDER BY rowid
+             LIMIT ?4",
+            &[
+                Value::Text(key_prefix.to_owned()),
+                Value::Text(format!("{key_prefix}\u{10ffff}")),
+            ],
+            1,
+            |row| row.get::<String>(0),
+            "list session sync journals",
+        )
+        .await?;
+        keys.sort_unstable();
+        read_journal_values_for_keys(&snapshot, keys).await
     }
 
     #[hotpath::measure(
@@ -111,9 +106,10 @@ impl RegisteredGlobalDb {
         label = "global_db.registered.session_sync.recovery_page"
     )]
     /// Reads one keyset page of journals that can still require recovery.
-    /// Completed receipts may each retain multi-megabyte source frontiers, so
-    /// startup must neither materialize them nor accumulate every live receipt
-    /// in one exact-SQL response.
+    /// Journals may each retain multi-megabyte source frontiers, so the page
+    /// query returns keys only — a page of values could exceed the exact-SQL
+    /// byte budget together even though each value fits alone — and every
+    /// value then arrives through its own single-row read.
     pub async fn list_incomplete_session_sync_journal_page(
         &self,
         key_prefix: &str,
@@ -124,7 +120,7 @@ impl RegisteredGlobalDb {
         })?;
         let mut rows = snapshot
             .query(
-                "SELECT key, value
+                "SELECT key
                  FROM session_backfill_meta
                  WHERE key >= ?1 AND key < ?2 AND key > ?3
                    AND CASE
@@ -145,19 +141,15 @@ impl RegisteredGlobalDb {
             .map_err(|error| {
                 global_db_operation_error("list incomplete session sync journals", error)
             })?;
-        let mut journals = Vec::new();
+        let mut keys = Vec::new();
         while let Some(row) = rows.next().await.map_err(|error| {
             global_db_operation_error("step incomplete session sync journals", error)
         })? {
-            let key = row.get(0).map_err(|error| {
+            keys.push(row.get(0).map_err(|error| {
                 global_db_operation_error("decode incomplete session sync key", error)
-            })?;
-            let value = row.get(1).map_err(|error| {
-                global_db_operation_error("decode incomplete session sync value", error)
-            })?;
-            journals.push((key, value));
+            })?);
         }
-        Ok(journals)
+        read_journal_values_for_keys(&snapshot, keys).await
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.session_sync.insert")]
@@ -203,4 +195,39 @@ impl RegisteredGlobalDb {
             .map(|changed| changed == 1)
             .map_err(|error| global_db_operation_error("update session sync journal", error))
     }
+}
+
+/// Reads each journal value through its own single-row query within one read
+/// snapshot, so a page stays byte-bounded no matter how large its journals
+/// grow together. A single value past the exact-SQL budget still refuses
+/// typed: that row is genuinely over-limit on its own.
+async fn read_journal_values_for_keys(
+    snapshot: &DatabaseEngineReadSnapshot,
+    keys: Vec<String>,
+) -> Result<Vec<(String, String)>, TraceDecayError> {
+    let mut journals = Vec::with_capacity(keys.len());
+    for key in keys {
+        let mut rows = snapshot
+            .query(
+                "SELECT value FROM session_backfill_meta WHERE key = ?1",
+                params![key.as_str()],
+            )
+            .await
+            .map_err(|error| global_db_operation_error("read session sync journal value", error))?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            global_db_operation_error("step session sync journal value", error)
+        })?
+        else {
+            // The key came from the same snapshot, so its row cannot vanish.
+            return Err(global_db_operation_message(
+                "read session sync journal value",
+                format!("session sync journal '{key}' disappeared within a read snapshot"),
+            ));
+        };
+        let value = row.get(0).map_err(|error| {
+            global_db_operation_error("decode session sync journal value", error)
+        })?;
+        journals.push((key, value));
+    }
+    Ok(journals)
 }
