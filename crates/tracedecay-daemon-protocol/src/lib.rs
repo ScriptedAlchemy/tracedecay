@@ -64,8 +64,9 @@ pub use client::{
     InvocationControls, ResolvedBinding, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
     SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS, ScopeSelector,
     SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
-    application_delivery_route, application_response, deadline_remaining, invocation_now_micros,
-    map_invocation_error, resolve_dispatch, wait_for_cancellation,
+    application_delivery_route, application_response, deadline_remaining,
+    handshake_refusal_error, invocation_now_micros, map_invocation_error, resolve_dispatch,
+    wait_for_cancellation,
 };
 pub use client_identity::{DaemonClientIdentity, current_daemon_client_identity};
 pub use connection::{

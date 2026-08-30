@@ -1308,10 +1308,26 @@ fn semantic_evaluation_application_problem(
 
 /// A daemon that could not serve this client's handshake refused before any
 /// request ran; name the refusal, both versions, and the action.
-pub(crate) fn handshake_refusal_error(
+pub fn handshake_refusal_error(
     refusal: &crate::handshake::DaemonHandshakeRefusal,
     handshake: &crate::handshake::DaemonHandshake,
 ) -> tracedecay_runtime_core::errors::TraceDecayError {
+    if refusal.refusal == crate::handshake::DaemonHandshakeRefusalReason::AuthenticationRejected {
+        // Not version skew: the daemon read the preface and rejected the
+        // token. The token came from the daemon authority record, so a stale
+        // record (daemon restarted after this client resolved it) is the
+        // ordinary cause and a fresh attempt re-resolves it.
+        return tracedecay_runtime_core::errors::TraceDecayError::project_route(
+            DAEMON_AUTHENTICATION_REJECTED,
+            true,
+            format!(
+                "daemon (version {}) rejected this client's authentication token; \
+                 the daemon authority record this client resolved is likely stale — \
+                 retry, or check `tracedecay daemon status`",
+                refusal.daemon_version
+            ),
+        );
+    }
     let action =
         crate::handshake::version_skew_action(&refusal.daemon_version, &handshake.client_version);
     tracedecay_runtime_core::errors::TraceDecayError::project_route(
@@ -1328,6 +1344,9 @@ pub(crate) fn handshake_refusal_error(
 /// Typed reason code for a daemon/client wire-revision mismatch.
 pub const DAEMON_PROTOCOL_REVISION_SKEW: &str = "daemon_protocol_revision_skew";
 
+/// Typed reason code for a daemon that refused the client's auth preface.
+pub const DAEMON_AUTHENTICATION_REJECTED: &str = "daemon_authentication_rejected";
+
 /// Attach version-skew context to a transport-level invocation failure.
 ///
 /// Every error the invocation path produces here is transport-shaped (the
@@ -1339,8 +1358,10 @@ fn with_daemon_version_skew_context(
     connection: &crate::connection::DaemonConnection,
     handshake: &crate::handshake::DaemonHandshake,
 ) -> tracedecay_runtime_core::errors::TraceDecayError {
+    // A refusal the daemon authored is already the definitive answer; naming
+    // version skew over it would misdirect the operator.
     if let Some((code, _, _)) = error.project_route_context()
-        && code == DAEMON_PROTOCOL_REVISION_SKEW
+        && (code == DAEMON_PROTOCOL_REVISION_SKEW || code == DAEMON_AUTHENTICATION_REJECTED)
     {
         return error;
     }
@@ -1800,6 +1821,42 @@ mod tests {
                 && message.contains("0.1.0-beta.37+eeee"),
             "the refusal error must name the reason and both versions: {message}"
         );
+    }
+
+    #[test]
+    fn authentication_refusal_frames_become_typed_auth_errors() {
+        let refusal = crate::handshake::DaemonHandshakeRefusal::for_rejected_authentication(
+            "0.1.0-beta.36+dddd",
+        );
+        let mut handshake = test_skew_handshake();
+        handshake.client_version = "0.1.0-beta.37+eeee".to_owned();
+
+        let error = super::handshake_refusal_error(&refusal, &handshake);
+        let (code, retryable, _) = error
+            .project_route_context()
+            .expect("authentication refusals must be typed");
+        assert_eq!(code, super::DAEMON_AUTHENTICATION_REJECTED);
+        assert!(
+            retryable,
+            "a stale authority record is recoverable by re-resolving it"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("rejected this client's authentication token")
+                && message.contains("0.1.0-beta.36+dddd")
+                && message.contains("tracedecay daemon status"),
+            "the auth error must name the refusal and the next action: {message}"
+        );
+
+        // The skew decorator must not relabel the daemon's definitive answer,
+        // even when the authority record names a different daemon version.
+        let connection = crate::connection::DaemonConnection::new(unused_test_endpoint(), None)
+            .with_daemon_version("0.1.0-beta.36+dddd");
+        let decorated = super::with_daemon_version_skew_context(error, &connection, &handshake);
+        let (code, _, _) = decorated
+            .project_route_context()
+            .expect("decorated auth refusal stays typed");
+        assert_eq!(code, super::DAEMON_AUTHENTICATION_REJECTED);
     }
 
     #[cfg(unix)]
