@@ -208,7 +208,10 @@ async fn work_surfaces_attach_and_recover_through_deferred_graph_activation() {
         .clone();
     assert!(
         matches!(
-            bound.verified_snapshot(&probe_projection(), FactReadControl::new(Arc::new(|| false))),
+            bound.verified_snapshot(
+                &probe_projection(),
+                FactReadControl::new(Arc::new(|| false))
+            ),
             Err(GraphDbError::Unavailable { .. })
         ),
         "graph reads must be typed-unavailable until activation completes"
@@ -224,7 +227,10 @@ async fn work_surfaces_attach_and_recover_through_deferred_graph_activation() {
 
     assert!(
         matches!(
-            bound.verified_snapshot(&probe_projection(), FactReadControl::new(Arc::new(|| false))),
+            bound.verified_snapshot(
+                &probe_projection(),
+                FactReadControl::new(Arc::new(|| false))
+            ),
             Ok(None)
         ),
         "the route bound before activation must resolve once activation completes"

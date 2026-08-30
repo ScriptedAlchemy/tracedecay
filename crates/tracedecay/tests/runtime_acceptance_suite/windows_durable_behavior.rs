@@ -4,20 +4,7 @@
 //! helpers as the ordinary suites. CI selects this binary as a whole instead
 //! of maintaining module-prefix filters or expected test counts.
 
-mod common;
-#[path = "storage_suite/support.rs"]
-mod support;
-
-#[path = "session_suite/lcm_summary_lineage_review.rs"]
-mod lcm_summary_lineage_review;
-#[path = "session_suite/temporal_projection/mod.rs"]
-mod temporal_projection;
-
-#[path = "storage_suite/fact_merge_hydration_test.rs"]
-mod fact_merge_hydration;
-
-#[path = "../../../crates/tracedecay-domain/tests/session_contract.rs"]
-mod domain_session_contract;
+use crate::common;
 
 #[tokio::test]
 async fn sqlite_writer_uses_production_wal_normal_policy() {

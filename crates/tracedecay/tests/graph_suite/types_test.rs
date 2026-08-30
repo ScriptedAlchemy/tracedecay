@@ -1,6 +1,5 @@
-use tracedecay::types::{
-    BuildContextOptions, Edge, EdgeKind, ExtractionResult, Node, NodeKind, OutputFormat,
-    TraversalDirection, TraversalOptions, UnresolvedRef, Visibility, generate_node_id,
+use tracedecay_domain::code_intelligence::{
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
 fn make_node(id: &str, name: &str) -> Node {
@@ -123,30 +122,6 @@ fn generate_node_id_different_inputs_produce_different_ids() {
     assert_ne!(id1, id5, "different kinds should produce different IDs");
 }
 
-#[test]
-fn traversal_options_default() {
-    let opts = TraversalOptions::default();
-    assert_eq!(opts.max_depth, 3);
-    assert_eq!(opts.limit, 100);
-    assert!(opts.include_start);
-    assert_eq!(opts.direction, TraversalDirection::Outgoing);
-    assert!(opts.edge_kinds.is_none());
-    assert!(opts.node_kinds.is_none());
-}
-
-#[test]
-fn build_context_options_default() {
-    let opts = BuildContextOptions::default();
-    assert_eq!(opts.max_nodes, 20);
-    assert_eq!(opts.max_code_blocks, 5);
-    assert_eq!(opts.max_code_block_size, 1500);
-    assert!(opts.include_code);
-    assert_eq!(opts.format, OutputFormat::Markdown);
-    assert_eq!(opts.search_limit, 3);
-    assert_eq!(opts.traversal_depth, 1);
-    assert!((opts.min_score - 0.0).abs() < f64::EPSILON);
-}
-
 /// Same `ALL`-driven contract as the two tests above, plus the two facts that
 /// are not expressible in the table: `"pub"` is an inbound-only alias, and an
 /// unset visibility must fall back to the most restrictive variant rather than
@@ -238,18 +213,4 @@ fn extraction_result_sanitize_noop_when_clean() {
     result.sanitize();
     assert_eq!(result.nodes.len(), 1);
     assert!(result.errors.is_empty());
-}
-
-#[test]
-fn traversal_direction_serde_roundtrip() {
-    let cases = [
-        TraversalDirection::Outgoing,
-        TraversalDirection::Incoming,
-        TraversalDirection::Both,
-    ];
-    for dir in cases {
-        let json = serde_json::to_string(&dir).unwrap();
-        let back: TraversalDirection = serde_json::from_str(&json).unwrap();
-        assert_eq!(dir, back);
-    }
 }

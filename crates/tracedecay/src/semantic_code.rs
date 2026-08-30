@@ -61,7 +61,7 @@ pub(crate) fn resolve_project_semantic_runtime_status(
     )
 }
 
-fn project_or_shared_lifecycle_status(
+pub(crate) fn project_or_shared_lifecycle_status(
     project_path: &Path,
 ) -> Option<SemanticModelLifecycleStatusV1> {
     if let Some(runtime) =

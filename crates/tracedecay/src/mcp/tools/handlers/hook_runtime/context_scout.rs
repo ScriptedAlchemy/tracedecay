@@ -3,12 +3,12 @@ use crate::agents::context_scout_v2::{
 };
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::sync::{Mutex as StdMutex, OnceLock};
 use tracedecay_application::context_scout::{
     ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1, ContextScoutFeedbackV1,
     ContextScoutWorkV1,
 };
-use std::collections::BTreeMap;
-use std::sync::{Mutex as StdMutex, OnceLock};
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -199,9 +199,7 @@ pub(super) async fn admit_native_context_scout_lifecycle(
 const MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS: usize = 256;
 
 type HookV2DeliveryClaimKey = ([u8; 16], [u8; 16]);
-type HookV2DeliveryClaims = StdMutex<
-    BTreeMap<HookV2DeliveryClaimKey, ContextScoutDurableClaimV1>,
->;
+type HookV2DeliveryClaims = StdMutex<BTreeMap<HookV2DeliveryClaimKey, ContextScoutDurableClaimV1>>;
 
 fn retained_hook_v2_delivery_claims() -> &'static HookV2DeliveryClaims {
     static CLAIMS: OnceLock<HookV2DeliveryClaims> = OnceLock::new();
@@ -301,19 +299,15 @@ fn orchestration_response(
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_delivery")]
 pub(super) async fn hook_v2_delivery_receipt(cg: &TraceDecay, args: &Value) -> Result<Value> {
     let receipt = required_value(args, "receipt")?;
-    let receipt = serde_json::from_value::<
-        ContextScoutDeliveryReceiptV1,
-    >(receipt)
-    .map_err(|error| config_error(format!("invalid Context Scout receipt: {error}")))?;
+    let receipt = serde_json::from_value::<ContextScoutDeliveryReceiptV1>(receipt)
+        .map_err(|error| config_error(format!("invalid Context Scout receipt: {error}")))?;
     let Some(owner) = cg.context_scout_owner() else {
         return Ok(json!({ "status": "unavailable" }));
     };
     let mut retained_project_id = None;
     let claim = match args.get("claim").cloned() {
-        Some(claim) => serde_json::from_value::<
-            ContextScoutDurableClaimV1,
-        >(claim)
-        .map_err(|error| config_error(format!("invalid Context Scout claim: {error}")))?,
+        Some(claim) => serde_json::from_value::<ContextScoutDurableClaimV1>(claim)
+            .map_err(|error| config_error(format!("invalid Context Scout claim: {error}")))?,
         None => {
             let Some(project_id) =
                 tracedecay_agent_hosts::hooks::hook_project_id_for_layout(cg.hook_store_layout())
@@ -371,15 +365,12 @@ pub(super) async fn hook_v2_feedback_notice_delivery(
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_feedback")]
 pub(super) async fn hook_v2_feedback(cg: &TraceDecay, args: &Value) -> Result<Value> {
-    let receipt = serde_json::from_value::<
-        ContextScoutDeliveryReceiptV1,
-    >(required_value(args, "receipt")?)
-    .map_err(|error| config_error(format!("invalid Context Scout receipt: {error}")))?;
+    let receipt =
+        serde_json::from_value::<ContextScoutDeliveryReceiptV1>(required_value(args, "receipt")?)
+            .map_err(|error| config_error(format!("invalid Context Scout receipt: {error}")))?;
     let feedback =
-        serde_json::from_value::<ContextScoutFeedbackV1>(
-            required_value(args, "feedback")?,
-        )
-        .map_err(|error| config_error(format!("invalid Context Scout feedback: {error}")))?;
+        serde_json::from_value::<ContextScoutFeedbackV1>(required_value(args, "feedback")?)
+            .map_err(|error| config_error(format!("invalid Context Scout feedback: {error}")))?;
     let Some(owner) = cg.context_scout_owner() else {
         return Ok(json!({ "status": "unavailable" }));
     };
@@ -390,10 +381,8 @@ pub(super) async fn hook_v2_feedback(cg: &TraceDecay, args: &Value) -> Result<Va
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_cancel")]
 pub(super) async fn hook_v2_cancel(cg: &TraceDecay, args: &Value) -> Result<Value> {
-    let work = serde_json::from_value::<ContextScoutWorkV1>(
-        required_value(args, "work")?,
-    )
-    .map_err(|error| config_error(format!("invalid Context Scout work: {error}")))?;
+    let work = serde_json::from_value::<ContextScoutWorkV1>(required_value(args, "work")?)
+        .map_err(|error| config_error(format!("invalid Context Scout work: {error}")))?;
     let Some(owner) = cg.context_scout_owner() else {
         return Ok(json!({ "status": "unavailable" }));
     };
@@ -406,10 +395,8 @@ pub(super) async fn hook_v2_cancel(cg: &TraceDecay, args: &Value) -> Result<Valu
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_status")]
 pub(super) async fn hook_v2_status(cg: &TraceDecay, args: &Value) -> Result<Value> {
-    let control = serde_json::from_value::<ContextScoutControlV1>(
-        required_value(args, "control")?,
-    )
-    .map_err(|error| config_error(format!("invalid Context Scout control: {error}")))?;
+    let control = serde_json::from_value::<ContextScoutControlV1>(required_value(args, "control")?)
+        .map_err(|error| config_error(format!("invalid Context Scout control: {error}")))?;
     let Some(owner) = cg.context_scout_owner() else {
         return Ok(json!({ "status": "unavailable" }));
     };
@@ -486,9 +473,7 @@ pub(super) async fn hook_v2_scout_read(
     let value = match surface {
         ContextScoutReadSurfaceV1::Recent => {
             owner.recent_exact(address, limit).await.and_then(|recent| {
-                serde_json::to_value(recent).map_err(|_| {
-                    ContextScoutErrorV1::InvalidLimits
-                })
+                serde_json::to_value(recent).map_err(|_| ContextScoutErrorV1::InvalidLimits)
             })
         }
         ContextScoutReadSurfaceV1::Explain => {
@@ -496,18 +481,15 @@ pub(super) async fn hook_v2_scout_read(
                 .explain_exact(address, limit)
                 .await
                 .and_then(|explanation| {
-                    serde_json::to_value(explanation).map_err(|_| {
-                        ContextScoutErrorV1::InvalidLimits
-                    })
+                    serde_json::to_value(explanation)
+                        .map_err(|_| ContextScoutErrorV1::InvalidLimits)
                 })
         }
         ContextScoutReadSurfaceV1::Capability => owner.capability().await.and_then(|capability| {
-            serde_json::to_value(capability)
-                .map_err(|_| ContextScoutErrorV1::InvalidLimits)
+            serde_json::to_value(capability).map_err(|_| ContextScoutErrorV1::InvalidLimits)
         }),
         ContextScoutReadSurfaceV1::Budget => owner.budget().await.and_then(|budget| {
-            serde_json::to_value(budget)
-                .map_err(|_| ContextScoutErrorV1::InvalidLimits)
+            serde_json::to_value(budget).map_err(|_| ContextScoutErrorV1::InvalidLimits)
         }),
     };
     match value {

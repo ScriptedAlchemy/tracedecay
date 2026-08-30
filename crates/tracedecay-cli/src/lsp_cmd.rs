@@ -6,12 +6,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, interval};
 use tokio_util::codec::FramedRead;
 use tracedecay_application::{CancellationSignal, Deadline, InvocationError};
-use tracedecay_daemon_protocol::DaemonLspSessionClient;
-use tracedecay_lsp::analyzer::{adapters as lsp_adapters, broker as lsp_broker};
-use tracedecay_lsp::{
-    ContentLengthCodec, DEFAULT_LSP_REQUEST_DEADLINE_MS, FramePoll, FrameSend,
-    ProcessLocalRequestSequence,
+use tracedecay_daemon_protocol::{
+    DaemonLspSessionClient, FramePoll, FrameSend, ProcessLocalRequestSequence,
 };
+use tracedecay_lsp::analyzer::{adapters as lsp_adapters, broker as lsp_broker};
+use tracedecay_lsp::{ContentLengthCodec, DEFAULT_LSP_REQUEST_DEADLINE_MS};
 
 use crate::cli::LspAction;
 

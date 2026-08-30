@@ -10,7 +10,6 @@
 //!
 //! * the disposition values it returns ([`HostAdmissionOutcome`],
 //!   [`HostAdmissionStatus`], [`HostProjectionDrainOutcome`]),
-//! * the bounded-wire helpers shared by every host input reader,
 //! * the record/spool bounds every provider discovery walk charges against,
 //! * and [`HostAdmission`], the dyn-safe port the root facade implements.
 
@@ -31,18 +30,11 @@ use crate::observation::{
 
 pub mod bounds;
 pub mod disposition;
-pub mod wire;
 
 pub use bounds::{DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_SPOOL_BYTES};
 pub use disposition::{
     HostAdmissionDispositionClass, HostAdmissionStatus, HostAdmissionTelemetryDisposition,
     is_bounded_reason_code,
-};
-pub use wire::{
-    BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, MAX_WIRE_MESSAGE_BYTES,
-    MCP_OVERSIZE_ID_INSPECT_BYTES, WIRE_RECORD_TOO_LARGE, WireReadOutcome,
-    is_wire_oversized_io_error, read_bounded_mcp_line, read_bounded_to_string,
-    wire_oversized_inspect_prefix, wire_oversized_io_error, wire_oversized_io_error_with_prefix,
 };
 
 /// Boxed future returned by every [`HostAdmission`] method.
@@ -177,14 +169,15 @@ impl HostAdmissionOutcome {
     }
 
     /// Host-event wire or MCP/daemon JSON-RPC frame exceeded its respective
-    /// bound ([`wire::MAX_WIRE_MESSAGE_BYTES`] or
-    /// [`wire::MAX_MCP_JSONRPC_FRAME_BYTES`]) before durable retention.
+    /// bound ([`tracedecay_daemon_protocol::wire::MAX_WIRE_MESSAGE_BYTES`] or
+    /// [`tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES`])
+    /// before durable retention.
     /// Non-retryable; full payload is not retained.
     pub const fn wire_record_too_large() -> Self {
         Self::new(
             HostAdmissionStatus::Degraded,
             false,
-            Some(wire::WIRE_RECORD_TOO_LARGE),
+            Some(tracedecay_daemon_protocol::wire::WIRE_RECORD_TOO_LARGE),
         )
     }
 
@@ -1168,5 +1161,23 @@ pub(crate) mod test_support {
                     .map(|(_, _, entry)| entry.clone()))
             })
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod wire_disposition_tests {
+    use super::{HostAdmissionOutcome, HostAdmissionStatus};
+    use tracedecay_daemon_protocol::wire::WIRE_RECORD_TOO_LARGE;
+
+    #[test]
+    fn wire_oversized_maps_to_typed_non_durable_outcome_without_payload() {
+        let outcome = HostAdmissionOutcome::wire_record_too_large();
+        assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
+        assert!(!outcome.retryable);
+        assert_eq!(outcome.reason_code, Some(WIRE_RECORD_TOO_LARGE));
+        let encoded = serde_json::to_string(&outcome).unwrap();
+        assert!(!encoded.contains('x'));
+        assert!(encoded.contains(WIRE_RECORD_TOO_LARGE));
     }
 }

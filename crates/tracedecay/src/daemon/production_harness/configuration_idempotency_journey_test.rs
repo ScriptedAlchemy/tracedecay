@@ -192,8 +192,9 @@ async fn configuration_batch_via_surface(
         }
         other => panic!("unsupported configuration batch test surface: {other:?}"),
     };
-    let request_id = tracedecay_application::request_identity::mint_global_request_id(request_surface)
-        .expect("surface request id");
+    let request_id =
+        tracedecay_application::request_identity::mint_global_request_id(request_surface)
+            .expect("surface request id");
     if surface == tracedecay_tool_catalog::BindingSurface::Dashboard {
         return crate::application_surface::resolve_dashboard_application_surface(
             operation,

@@ -462,7 +462,7 @@ pub(super) async fn execute_configuration(
 }
 
 #[hotpath::measure(label = "daemon.service.configuration.apply", future = true)]
-async fn apply_configuration_or_semantic_transition(
+pub(super) async fn apply_configuration_or_semantic_transition(
     registered: &RegisteredConfigurationRuntime,
     authority: ConfigurationMutationAuthority,
     mutation: DirectConfigurationMutation,
@@ -618,7 +618,7 @@ fn issue_configuration_mutation_authority(
         .map_err(|_| ConfigurationError::Unavailable)
 }
 
-fn issue_direct_configuration_mutation_authority(
+pub(super) fn issue_direct_configuration_mutation_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
     idempotency_key: ConfigurationIdempotencyKey,

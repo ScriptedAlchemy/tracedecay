@@ -11,6 +11,7 @@ use tokio::time::{Instant, timeout};
 
 use crate::handshake::DaemonHandshake;
 use crate::transport::{BrokerStream, DaemonAuthPreface, DaemonEndpoint};
+use crate::wire::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -23,9 +24,9 @@ pub const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
 ///
 /// Shared by `tracedecay tool` and every `call_default_tool` / `daemon_tool_json`
 /// path. Override with [`TOOL_REQUEST_DEADLINE_ENV`].
-pub const DEFAULT_TOOL_REQUEST_DEADLINE: Duration = Duration::from_secs(120);
+pub const DEFAULT_TOOL_REQUEST_DEADLINE: Duration = Duration::from_mins(2);
 /// Upper bound matching the CLI's supported monotonic deadline range.
-pub const MAX_TOOL_REQUEST_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
+pub const MAX_TOOL_REQUEST_DEADLINE: Duration = Duration::from_hours(24);
 /// Millisecond override for [`DEFAULT_TOOL_REQUEST_DEADLINE`].
 pub const TOOL_REQUEST_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
 
@@ -45,6 +46,10 @@ pub trait DaemonLivenessProbe: Send + Sync {
 pub struct DaemonConnection {
     pub endpoint: DaemonEndpoint,
     pub auth_token: Option<String>,
+    /// The daemon version advertised by the authority record that named this
+    /// endpoint. Lets transport failures name version skew instead of hiding
+    /// it behind a raw io error.
+    pub daemon_version: Option<String>,
     liveness: Option<Arc<dyn DaemonLivenessProbe>>,
 }
 
@@ -53,12 +58,19 @@ impl DaemonConnection {
         Self {
             endpoint,
             auth_token,
+            daemon_version: None,
             liveness: None,
         }
     }
 
+    #[must_use]
     pub fn with_liveness(mut self, probe: Arc<dyn DaemonLivenessProbe>) -> Self {
         self.liveness = Some(probe);
+        self
+    }
+
+    pub fn with_daemon_version(mut self, daemon_version: impl Into<String>) -> Self {
+        self.daemon_version = Some(daemon_version.into());
         self
     }
 
@@ -89,8 +101,7 @@ fn tool_request_deadline_from(raw: Option<String>) -> Result<Duration> {
     let deadline = raw
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|ms| *ms > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_TOOL_REQUEST_DEADLINE);
+        .map_or(DEFAULT_TOOL_REQUEST_DEADLINE, Duration::from_millis);
     if deadline > MAX_TOOL_REQUEST_DEADLINE {
         return Err(TraceDecayError::Config {
             message: format!(
@@ -134,6 +145,23 @@ pub fn daemon_response_stalled(elapsed: Duration) -> TraceDecayError {
     )
 }
 
+/// [`daemon_response_stalled`] with the in-flight stage and request named, for
+/// deadline runners that know which stage of which request timed out.
+pub fn daemon_response_stalled_during(
+    stage: &'static str,
+    request_label: &str,
+    elapsed: Duration,
+) -> TraceDecayError {
+    TraceDecayError::project_route(
+        DAEMON_RESPONSE_STALLED,
+        true,
+        format!(
+            "daemon did not answer after {}s ({stage} stage of '{request_label}'); stalled or saturated — run `tracedecay daemon status`",
+            elapsed.as_secs()
+        ),
+    )
+}
+
 #[hotpath::measure(label = "daemon_protocol.client.ensure_live", future = true)]
 pub async fn ensure_daemon_connection_live(
     connection: &DaemonConnection,
@@ -172,8 +200,6 @@ pub async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    use tracedecay_sessions::admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
-
     let read = read_bounded_mcp_line(reader);
     tokio::pin!(read);
     loop {
@@ -184,8 +210,7 @@ where
                     Err(error) if is_wire_oversized_io_error(&error) => {
                         Err(TraceDecayError::Config {
                             message: format!(
-                                "daemon {request_label} response exceeded wire message bound ({})",
-                                tracedecay_sessions::admission::WIRE_RECORD_TOO_LARGE
+                                "daemon {request_label} response exceeded wire message bound ({WIRE_RECORD_TOO_LARGE})"
                             ),
                         })
                     }

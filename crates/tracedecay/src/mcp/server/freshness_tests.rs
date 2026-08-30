@@ -1,6 +1,4 @@
-use super::{
-    DatabaseOwnerReconciler, McpServer, McpServerConstructionContext, tool_error_response,
-};
+use super::{DatabaseOwnerReconciler, McpServer, McpServerConstructionContext};
 use crate::config::PinnedUserDataDir;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::TraceDecay;
@@ -9,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_mcp::tool_error_response;
 
 struct FreshnessRuntime {
     registry: DaemonSessionRuntimeRegistryV1,

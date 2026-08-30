@@ -945,15 +945,17 @@ pub(super) fn spans_match(
     Ok(true)
 }
 
+/// Read/seek failures are `File` errors so scanning callers can tell a failed
+/// read apart from a malformed row (`Config`), which stays skippable junk.
 fn ledger_io_error(
     path: &Path,
     operation: &str,
     error: std::io::Error,
 ) -> crate::errors::TraceDecayError {
-    config_error(format!(
-        "failed to {operation} automation run ledger '{}': {error}",
-        path.display()
-    ))
+    crate::errors::TraceDecayError::File {
+        message: format!("failed to {operation} automation run ledger: {error}"),
+        path: path.display().to_string(),
+    }
 }
 
 fn digest_from_hasher(hasher: Sha256) -> std::result::Result<ManifestDigest, String> {

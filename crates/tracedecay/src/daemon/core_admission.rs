@@ -57,8 +57,8 @@ impl DaemonClientDeadline {
 
     pub(crate) async fn run<F, T>(
         &self,
-        _stage: &'static str,
-        _request_label: &str,
+        stage: &'static str,
+        request_label: &str,
         fut: F,
     ) -> Result<T>
     where
@@ -66,7 +66,9 @@ impl DaemonClientDeadline {
     {
         match timeout_at(self.deadline, fut).await {
             Ok(result) => result,
-            Err(_) => Err(tracedecay_daemon_protocol::daemon_response_stalled(
+            Err(_) => Err(tracedecay_daemon_protocol::daemon_response_stalled_during(
+                stage,
+                request_label,
                 self.started.elapsed(),
             )),
         }

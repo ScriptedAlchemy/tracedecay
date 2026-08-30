@@ -291,12 +291,11 @@ fn assemble_mcp_tool_bindings() -> Vec<McpToolBinding> {
     let bindings = MCP_TOOL_BINDING_SPECS
         .iter()
         .map(|spec| {
-            if spec.project == RegisteredProjectAccess::Reader {
-                panic!(
-                    "MCP_TOOL_BINDING_SPECS must not encode Reader for '{}'; list it in tracedecay-mcp::project_access",
-                    spec.name
-                );
-            }
+            assert!(
+                spec.project != RegisteredProjectAccess::Reader,
+                "MCP_TOOL_BINDING_SPECS must not encode Reader for '{}'; list it in tracedecay-mcp::project_access",
+                spec.name
+            );
             let project = if readers.contains(spec.name) {
                 assigned.insert(spec.name);
                 RegisteredProjectAccess::Reader

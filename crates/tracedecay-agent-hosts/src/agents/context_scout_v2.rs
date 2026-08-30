@@ -19,11 +19,11 @@ use tiktoken_rs::o200k_base_singleton;
 use tracedecay_application::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
-    ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1, ContextScoutEvidenceAvailabilityV1,
-    ContextScoutFeedbackKindV1,
-    ContextScoutFeedbackV1, ContextScoutLeaseV1, ContextScoutModelBackendV1,
-    ContextScoutModelOutcomeV1, ContextScoutModelReceiptV1, ContextScoutRouteV1,
-    ContextScoutSuggestionEnvelopeV1, ContextScoutWorkV1,
+    ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
+    ContextScoutEvidenceAvailabilityV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
+    ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
+    ContextScoutModelReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
+    ContextScoutWorkV1,
 };
 use tracedecay_domain::{RetrievalAnchorId, UtcMicros};
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
@@ -1706,6 +1706,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tracedecay_application::context_scout::ContextScoutEvidenceEnvelopeV1;
 
     fn address() -> ContextScoutAddressV1 {
         ContextScoutAddressV1 {

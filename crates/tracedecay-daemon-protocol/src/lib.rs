@@ -12,41 +12,77 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::too_many_lines)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::wildcard_imports)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::trivially_copy_pass_by_ref)]
+#![allow(clippy::unused_self)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::struct_field_names)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::option_option)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::ref_option)]
+#![allow(clippy::zero_sized_map_values)]
+#![allow(clippy::used_underscore_binding)]
+#![allow(clippy::manual_async_fn)]
+#![allow(clippy::unused_async)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::if_not_else)]
+#![allow(clippy::fn_params_excessive_bools)]
+#![allow(clippy::case_sensitive_file_extension_comparisons)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::large_futures)]
+#![allow(unreachable_pub)]
 #![allow(clippy::large_enum_variant)]
+// Pedantic style lints allowed crate-wide, matching the posture this wire
+// contract carried in the composition root before extraction: these are
+// non-correctness stylistic findings whose "fixes" churn moved code.
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::match_same_arms)]
 
 pub mod client;
 pub mod client_identity;
 pub mod connection;
 pub mod contract;
 pub mod handshake;
+pub mod lsp_wire;
 pub mod output_format;
 pub mod surface;
 pub mod transport;
+pub mod wire;
 
 pub use client::{
     AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,
     CatalogBindingResolver, DaemonInvocationClient, DaemonInvocationError,
     DaemonInvocationExecutor, DaemonInvocationExecutorFuture, DaemonLspSessionClient,
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
-    InvocationControls, ResolvedBinding,
-    SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
+    InvocationControls, ResolvedBinding, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
     SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS, ScopeSelector,
     SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
     application_delivery_route, application_response, deadline_remaining, invocation_now_micros,
     map_invocation_error, resolve_dispatch, wait_for_cancellation,
 };
 pub use client_identity::DaemonClientIdentity;
-pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use connection::{
     DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_TOOL_REQUEST_DEADLINE,
     DaemonConnection, DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
     connect_to_daemon_connection, daemon_connect_failure, daemon_response_stalled,
-    daemon_tool_response_bound, next_daemon_response_line, tool_request_deadline,
-    write_daemon_preamble,
+    daemon_response_stalled_during, daemon_tool_response_bound, next_daemon_response_line,
+    tool_request_deadline, write_daemon_preamble,
 };
 pub use contract::{
     CanonicalQualificationBlob, CanonicalQualificationBlobError, DAEMON_INVOCATION_PROTOCOL,
@@ -62,8 +98,15 @@ pub use contract::{
     parse_daemon_invocation_delivery_ack_request, parse_daemon_invocation_request,
 };
 pub use handshake::{
-    DaemonHandshake, MovedStoreAdoption, client_version_skew, version_skew_action,
+    DAEMON_HANDSHAKE_REFUSAL_PROTOCOL, DaemonHandshake, DaemonHandshakeRefusal,
+    DaemonHandshakeRefusalReason, MovedStoreAdoption, client_version_skew, version_skew_action,
 };
+pub use lsp_wire::{
+    ConnectionLocalRequestSequence, FramePoll, FrameSend, LspFrame, LspSessionAccess,
+    LspSessionCredential, LspSessionId, LspSessionIdentityError, MAX_LSP_FRAME_BYTES,
+    MAX_LSP_WORKSPACE_ROOTS, ProcessLocalRequestSequence, SequenceExhausted,
+};
+pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use surface::{
     ApplicationSurfaceOperation, ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
