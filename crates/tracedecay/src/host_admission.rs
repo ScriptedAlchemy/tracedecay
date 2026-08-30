@@ -1,14 +1,14 @@
 //! Root composition for host-admission test runtimes.
 
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use tracedecay_private_fs::background_cpu::{
-    install_process_background_cpu, process_background_cpu,
-};
+use tracedecay_code_index::parallelism::install_worker_plan;
+use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+use tracedecay_private_fs::background_cpu::process_background_cpu;
+use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 #[cfg(test)]
@@ -44,7 +44,7 @@ mod profile_registry_test_support;
 mod session_test_support;
 mod verified_graph_test_support;
 
-#[cfg(feature = "test-transport")]
+#[cfg(any(test, feature = "test-transport"))]
 #[doc(hidden)]
 pub(crate) use verified_graph_test_support::await_bound_graph_runtime;
 
@@ -82,22 +82,26 @@ static SHARED_TEST_SESSION_REGISTRIES: LazyLock<
     AsyncMutex<WeakRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>>,
 > = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
 
-/// Installs the process background CPU authority that host-admission capture
-/// requires. Production installs it during daemon worker-plan admission,
-/// which these fixtures never run; without it every observation capture is
-/// refused with `background_cpu_unavailable`. A sibling fixture or benchmark
-/// can win the process-wide installation race at a different width; reuse
-/// that authority rather than making success depend on execution order.
+/// Installs the process worker plan (and with it the background CPU
+/// authority) that host-admission capture requires. Production installs it
+/// during daemon worker-plan admission, which these fixtures never run;
+/// without it every observation capture is refused with
+/// `background_cpu_unavailable`. Going through `install_worker_plan` — the
+/// same authority production and the scheduler's test fallback use — keeps
+/// the background CPU width consistent with any later worker-plan install in
+/// the same test process instead of poisoning it with an ad-hoc width.
 fn ensure_process_background_cpu_authority() -> Result<()> {
     if process_background_cpu().is_some() {
         return Ok(());
     }
-    if let Err(error) = install_process_background_cpu(NonZeroUsize::MIN)
-        && process_background_cpu().is_none()
+    if let Err(error) = install_worker_plan(
+        CodeIndexWorkerSelectionV1::Automatic {},
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    ) && process_background_cpu().is_none()
     {
         return Err(TraceDecayError::Config {
             message: format!(
-                "host-admission test runtime could not install the background CPU authority: {error}"
+                "host-admission test runtime could not install the worker plan: {error}"
             ),
         });
     }
