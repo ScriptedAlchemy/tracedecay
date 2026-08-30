@@ -13,8 +13,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
-use super::super::ToolResult;
-use super::super::render;
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render;
 use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
@@ -507,7 +507,7 @@ pub(super) fn is_explicit_project_path_selector(selector: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use crate::mcp::tools::render;
+    use tracedecay_mcp::tools::render;
 
     use super::{
         CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result,

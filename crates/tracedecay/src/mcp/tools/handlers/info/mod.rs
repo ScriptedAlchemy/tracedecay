@@ -62,8 +62,8 @@ use self::verified::{
     required_file_path, required_metadata, required_symbol_parts, symbols_in_dir,
 };
 
-use super::super::ToolResult;
-use super::super::render::{self, Md};
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render::{self, Md};
 use super::project_registry::{
     ProjectRegistryContextCommand, ProjectRegistryContextOutcome, ProjectRegistryListingCommand,
     ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryReadPort,

@@ -32,7 +32,8 @@ use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 
-use super::super::{ToolResult, renderers};
+use tracedecay_mcp::tools::renderers;
+use tracedecay_mcp::ToolResult;
 use super::support::tool_json_with_md;
 
 /// Bound on how many automation run-ledger rows a single call will scan.
@@ -466,7 +467,7 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
         })
         .collect();
 
-    let defined: Vec<String> = crate::mcp::tools::get_tool_definitions()
+    let defined: Vec<String> = tracedecay_mcp::get_tool_definitions()
         .map_err(config_error)?
         .into_iter()
         .map(|definition| definition.name)

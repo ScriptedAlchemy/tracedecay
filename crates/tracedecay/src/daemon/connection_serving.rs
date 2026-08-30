@@ -1875,8 +1875,8 @@ mod delivery_ack_tests {
     use super::{
         DaemonDeliveryAckWait, await_daemon_delivery_ack, classify_daemon_delivery_ack_wait,
     };
-    use crate::mcp::transport::ChannelTransport;
     use std::time::Duration;
+    use tracedecay_mcp::transport::ChannelTransport;
 
     #[tokio::test(start_paused = true)]
     async fn delivery_ack_wait_uses_the_exact_deadline_budget() {

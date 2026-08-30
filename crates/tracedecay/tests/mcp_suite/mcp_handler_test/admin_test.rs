@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 #[cfg(feature = "test-transport")]
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::mcp::get_tool_definitions;
+use tracedecay_mcp::get_tool_definitions;
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]

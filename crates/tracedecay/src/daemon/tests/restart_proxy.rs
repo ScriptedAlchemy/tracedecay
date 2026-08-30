@@ -276,7 +276,7 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
         answer_one_authenticated_proxy_request(second_listener, &second_token, 2).await;
     });
 
-    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
         super::super::proxy_transport_to_daemon(
@@ -754,7 +754,7 @@ async fn proxy_retries_bounded_project_warming_responses() {
         }
     });
 
-    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
         super::super::proxy_transport_to_daemon(
@@ -808,7 +808,7 @@ async fn long_lived_proxy_reconnects_after_daemon_socket_rebind() {
         answer_one_proxy_request(second_listener, 2).await;
     });
 
-    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
         super::super::proxy_transport_to_daemon(
@@ -932,7 +932,7 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
         projects
     });
 
-    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     sender
         .send(
             serde_json::to_string(&json!({
@@ -1058,7 +1058,7 @@ async fn disconnected_client_does_not_outlive_a_daemon_that_never_answers() {
         }
     });
 
-    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
         super::super::proxy_transport_to_daemon_with_drain_bound(
@@ -1123,7 +1123,7 @@ async fn batch_client_closing_stdin_immediately_still_receives_its_response() {
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake daemon socket");
     let daemon = tokio::spawn(async move { answer_one_proxy_request(listener, 7).await });
 
-    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
         super::super::proxy_transport_to_daemon(

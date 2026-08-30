@@ -12,13 +12,15 @@ use serde_json::{Value, json};
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
-use crate::mcp::response_handles::{cleanup_expired_response_handles, response_handle_stats_json};
 use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
+use tracedecay_mcp::response_handles::{
+    cleanup_expired_response_handles, response_handle_stats_json,
+};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionStatus, is_wire_oversized_io_error,
@@ -31,10 +33,12 @@ use tracedecay_usecases::request_identity::McpConnectionIdentityAuthority;
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
-    ProjectRegistryReadPort, SessionRefreshServicePort, ToolRegistryMode,
-    default_catalog_discovery_authority, explore_call_budget, project_catalog_discovery_scope,
+    ProjectRegistryReadPort, SessionRefreshServicePort, default_catalog_discovery_authority,
 };
-use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
+use tracedecay_mcp::{
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
+    project_catalog_discovery_scope,
+};
 
 mod connection;
 mod construction;
@@ -54,7 +58,6 @@ mod routing;
 mod session_refresh;
 mod staleness;
 mod status_resource;
-mod tool_errors;
 mod workflow_index;
 
 pub(crate) use project_registry::DaemonProjectRegistryReadService;
@@ -80,7 +83,10 @@ pub(crate) use rmcp::{
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
-pub(crate) use tool_errors::*;
+pub(crate) use tracedecay_mcp::{
+    mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
+    tool_error_response, tool_result_has_semantic_error,
+};
 
 pub struct ServerStats {
     started_at: Instant,
@@ -100,7 +106,7 @@ impl ServerStats {
     }
 }
 
-use super::transport::write_wire_oversized_rejection;
+use tracedecay_mcp::transport::write_wire_oversized_rejection;
 
 /// Future returned by a [`CodeIndexHookSink`] invocation. Resolves to `true`
 /// when a mounted worktree scheduler accepted the touched paths.

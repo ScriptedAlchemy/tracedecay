@@ -7,7 +7,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_usecases::operation_stream::OperationEmitter;
 
-use super::super::ToolResult;
+use tracedecay_mcp::ToolResult;
 use super::test_runner::{TestRunFailure, TestRunOutput};
 use super::{
     TestTarget, emit_observed_test_results, finish_test_run, managed_test_terminal,

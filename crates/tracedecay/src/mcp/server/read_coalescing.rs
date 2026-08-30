@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex, Weak};
 use serde_json::Value;
 use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 
-use crate::mcp::tools::{ToolResult, mcp_dispatch_contract};
+use crate::mcp::tools::mcp_dispatch_contract;
 use crate::support::weak_registry::WeakRegistry;
+use tracedecay_mcp::ToolResult;
 
 #[cfg(feature = "hotpath")]
 type ReadFlightStateMutex<T> = hotpath::mutexes::Mutex<T>;
@@ -271,7 +272,7 @@ mod tests {
         };
 
         let waiter = tokio::spawn(async move { follower.wait().await });
-        leader.complete(crate::mcp::tools::ToolResult::new(
+        leader.complete(tracedecay_mcp::ToolResult::new(
             json!({"content": [{"type": "text", "text": "shared"}]}),
             vec!["src/daemon.rs".to_string()],
         ));

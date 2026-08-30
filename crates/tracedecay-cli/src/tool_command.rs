@@ -54,14 +54,14 @@ use tracedecay::application_surface::{
     resolve_catalog_tool_binding,
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_awaiting_project_open};
-use tracedecay::mcp::tools::internal_daemon_tool_definition;
-use tracedecay::mcp::tools::{
-    LegacyToolCompatibilityOwner, RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,
-    render_tool_cli_help, short_tool_name,
-};
+use tracedecay::mcp::tools::LegacyToolCompatibilityOwner;
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_domain::UtcMicros;
+use tracedecay_mcp::{
+    RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
+    render_tool_cli_help, short_tool_name,
+};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::BindingSurface;
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};

@@ -13,7 +13,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 
-use super::super::ToolResult;
+use tracedecay_mcp::ToolResult;
 use super::json_result;
 
 #[derive(Debug, Deserialize)]

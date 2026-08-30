@@ -24,9 +24,8 @@ use tokio::sync::{Mutex, MutexGuard};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
-use tracedecay::mcp::ToolResult;
 #[cfg(feature = "test-transport")]
-use tracedecay::mcp::{McpServer, McpTransport};
+use tracedecay::mcp::McpServer;
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
@@ -42,6 +41,9 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, SessionProjectionGenerationV1, UtcMicros, derive_exact_observation_anchor_id,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_mcp::McpTransport;
+use tracedecay_mcp::ToolResult;
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::errors::TraceDecayError;
 #[cfg(feature = "test-transport")]
@@ -382,7 +384,7 @@ pub(crate) async fn handle_tool_call(
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
 ) -> tracedecay_runtime_core::errors::Result<ToolResult> {
-    let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
+    let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
             .or_insert_with(|| serde_json::json!("json"));
@@ -455,7 +457,7 @@ pub(crate) async fn handle_tool_call_with_runtime(
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
 ) -> tracedecay_runtime_core::errors::Result<ToolResult> {
-    let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
+    let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
             .or_insert_with(|| serde_json::json!("json"));
@@ -531,7 +533,7 @@ pub(crate) async fn handle_production_source_edit_tool_call(
     _server_stats: Option<Value>,
     _scope_prefix: Option<&str>,
 ) -> tracedecay_runtime_core::errors::Result<ToolResult> {
-    let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
+    let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(object) = args.as_object_mut() {
         object
             .entry("format".to_owned())
@@ -1050,7 +1052,7 @@ pub(crate) async fn seed_project_registry(
 }
 
 pub(crate) fn tool_properties<'a>(
-    tools: &'a [tracedecay::mcp::ToolDefinition],
+    tools: &'a [tracedecay_mcp::ToolDefinition],
     name: &str,
 ) -> &'a serde_json::Map<String, Value> {
     tools

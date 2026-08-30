@@ -157,7 +157,8 @@ use super::binding::{
     McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
     tool_is_selector_bound_effect,
 };
-use super::{LegacyToolCompatibilityOwner, ToolResult};
+use super::LegacyToolCompatibilityOwner;
+use tracedecay_mcp::ToolResult;
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::tracedecay::TraceDecay;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;

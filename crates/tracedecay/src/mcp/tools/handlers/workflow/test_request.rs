@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::super::ToolResult;
+use tracedecay_mcp::ToolResult;
 use super::{MAX_TESTS_HARD_CAP, error_result};
 
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 300;

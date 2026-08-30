@@ -2,11 +2,11 @@ use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
 use tempfile::TempDir;
-use tracedecay::mcp::response_handles::{
-    RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
-};
 use tracedecay::storage::resolve_response_handle_root;
 use tracedecay::tracedecay::{TraceDecay, current_timestamp};
+use tracedecay_mcp::response_handles::{
+    RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
+};
 
 mod initialize_routing;
 
@@ -429,7 +429,7 @@ async fn cancellable_tool_call_is_answered_after_client_half_close() {
         written: Vec<String>,
     }
 
-    impl tracedecay::mcp::transport::McpTransport for HalfClosedTransport {
+    impl tracedecay_mcp::transport::McpTransport for HalfClosedTransport {
         async fn read_line(&mut self) -> std::io::Result<Option<String>> {
             Ok(self.request.take())
         }
@@ -489,7 +489,7 @@ async fn cancellable_tool_call_is_dropped_on_full_peer_close() {
         written: Vec<String>,
     }
 
-    impl tracedecay::mcp::transport::McpTransport for FullClosedTransport {
+    impl tracedecay_mcp::transport::McpTransport for FullClosedTransport {
         async fn read_line(&mut self) -> std::io::Result<Option<String>> {
             Ok(self.requests.pop_front())
         }
@@ -551,7 +551,7 @@ async fn non_cancellable_tool_call_is_dropped_on_full_peer_close() {
         written: Vec<String>,
     }
 
-    impl tracedecay::mcp::transport::McpTransport for FullClosedTransport {
+    impl tracedecay_mcp::transport::McpTransport for FullClosedTransport {
         async fn read_line(&mut self) -> std::io::Result<Option<String>> {
             Ok(self.requests.pop_front())
         }
@@ -604,7 +604,7 @@ async fn cancellable_tool_call_is_cancelled_on_peer_read_failure() {
         written: Vec<String>,
     }
 
-    impl tracedecay::mcp::transport::McpTransport for PeerLossTransport {
+    impl tracedecay_mcp::transport::McpTransport for PeerLossTransport {
         async fn read_line(&mut self) -> std::io::Result<Option<String>> {
             match self.request.take() {
                 Some(line) => Ok(Some(line)),
@@ -664,7 +664,7 @@ async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
         request: Option<String>,
     }
 
-    impl tracedecay::mcp::transport::McpTransport for WriteFailTransport {
+    impl tracedecay_mcp::transport::McpTransport for WriteFailTransport {
         async fn read_line(&mut self) -> std::io::Result<Option<String>> {
             Ok(self.request.take())
         }

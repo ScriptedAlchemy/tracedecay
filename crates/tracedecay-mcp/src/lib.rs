@@ -1,10 +1,12 @@
-//! Portable MCP catalog, rendering, and JSON-RPC transport.
+//! Portable MCP catalog, rendering, JSON-RPC transport, and server-adjacent
+//! protocol helpers.
 //!
 //! This crate owns daemon-free MCP surface: JSON-RPC contracts, concrete
 //! stdio/channel/replay transports, tool definitions, response truncation,
-//! and canonical application-result presentation. Server construction,
-//! connection lifecycle, and handlers that reach daemon internals stay in
-//! the composition root.
+//! canonical application-result presentation, request-deadline decoding, and
+//! tool-error classification. Server construction, connection lifecycle
+//! adapters, and handlers that reach daemon internals stay in the
+//! composition root.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -55,6 +57,8 @@ pub mod output_format;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
+pub mod tool_call_deadline;
+pub mod tool_errors;
 pub mod tools;
 pub mod transport;
 
@@ -71,6 +75,13 @@ pub use lifecycle::{
 };
 pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use project_access::registered_project_reader_tool_names;
+pub use tool_call_deadline::{
+    TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, tool_call_deadline_meta,
+};
+pub use tool_errors::{
+    mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
+    structured_hook_error_data, tool_error_response, tool_result_has_semantic_error,
+};
 pub use tools::render::format_relative_time;
 pub use tools::{
     MAX_RESPONSE_CHARS, RESERVED_FLAGS_FOOTER, ToolDefinition, ToolRegistryMode, ToolResult,

@@ -26,8 +26,8 @@ use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
-use super::super::render::{self, Md};
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render::{self, Md};
 use super::support::{
     effective_path, generic_tool_result, rendered_tool_result, unique_file_paths,
 };

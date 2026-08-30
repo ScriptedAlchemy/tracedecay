@@ -15,7 +15,7 @@
 //! description invariants the host cares about: non-empty and within a sane
 //! length cap.
 
-use tracedecay::mcp::get_tool_definitions;
+use tracedecay_mcp::get_tool_definitions;
 
 /// Old CLI command names that intentionally map to a different MCP suffix.
 /// Kept in lockstep with `NAME_ALIASES` in `src/tool_command.rs`; the alias

@@ -52,8 +52,6 @@ pub mod accounting;
 pub mod agents;
 pub use tracedecay_agent_hosts::cli_fallback_args_invocation_lit;
 pub mod analytics_bridge;
-// Phase 2 removes this composition-root re-export once callers import mcp directly.
-pub use tracedecay_mcp::application_output;
 pub mod application_surface;
 pub(crate) mod hint_outcomes;
 // Fixture surface for integration tests, assembled by the composition root.

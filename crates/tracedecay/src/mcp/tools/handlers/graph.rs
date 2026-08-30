@@ -24,8 +24,8 @@ use crate::tracedecay::TraceDecay;
 use crate::types::{EdgeKind, NodeKind};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
-use super::super::render::{self, Md};
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render::{self, Md};
 use super::dependency_hints;
 use super::support::{
     self, CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, require_node_id,

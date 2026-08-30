@@ -11,8 +11,8 @@ use crate::ast_grep_search::{AstGrepSearchMatch, search_tree_scoped_with_cancel}
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
-use super::super::render::{self, Md};
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render::{self, Md};
 use super::support::{run_bounded_search, unique_file_paths};
 
 /// Hard cap on `max_results` regardless of what the caller requests.

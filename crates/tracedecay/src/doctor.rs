@@ -740,7 +740,7 @@ fn check_user_config(
 #[hotpath::measure(label = "doctor.check.external_tools")]
 fn check_external_tools(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mExternal tools\x1b[0m");
-    let diagnostics = crate::mcp::tools::ast_grep_diagnostics_json();
+    let diagnostics = tracedecay_mcp::ast_grep_diagnostics_json();
     let installed = json_bool(&diagnostics, "installed");
     let rewrite_available = json_bool(&diagnostics, "rewrite_available");
     let outline_available = json_bool(&diagnostics, "outline_available");
