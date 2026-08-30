@@ -4953,11 +4953,10 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
     registry.shutdown().await;
 }
 
-/// The resolution-order defect: asking the ready gate first made every query
-/// queue on the single-flight decode of the generation being activated, so a
-/// query holding a perfectly servable generation still paid an O(store) sweep
-/// before it could reach the stale fallback. Await-new must never preempt
-/// serve-old.
+/// The resolution-order defect: asking the graph-ready gate first made every
+/// query queue on the single-flight decode of the generation being activated,
+/// so a query with a current text owner still paid an O(store) sweep. Optional
+/// graph enrichment must neither block nor mark that text owner stale.
 ///
 /// This occupies the decode barrier exactly as activation of a new generation
 /// does — pinned slot empty, one decode in flight — and deliberately leaves the
@@ -5004,7 +5003,7 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
         "the last complete generation is still held and needs no decode"
     );
 
-    let stale = tokio::time::timeout(
+    let current = tokio::time::timeout(
         Duration::from_secs(30),
         registry.execute_query_search(&scope, core_search_request("main")),
     )
@@ -5012,16 +5011,16 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
     .expect("a servable generation must never queue on the decode barrier")
     .expect("search serves through the activation window");
     assert!(
-        stale.served_stale,
-        "a fallback answer must be reported stale, never as current"
+        !current.served_stale,
+        "a current text authority must stay fresh while optional graph decode is in flight"
     );
     assert_eq!(
-        stale.generation, fresh_generation,
-        "the stale answer names the complete generation that actually answered"
+        current.generation, fresh_generation,
+        "the current answer names the complete generation that actually answered"
     );
     assert_eq!(
-        stale.authorized.fallback.ordered_candidates, fresh_candidates,
-        "serving stale changes only the coverage marker, not ranking identity"
+        current.authorized.fallback.ordered_candidates, fresh_candidates,
+        "optional graph decode cannot change exact and lexical ranking identity"
     );
     assert_eq!(
         scheduler

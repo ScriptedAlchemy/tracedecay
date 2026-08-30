@@ -438,7 +438,37 @@ impl CodeIndexSchedulerRegistryV1 {
             Some(serving) => match self.latest_complete_ready_decoded_for_scope(scope).await {
                 // Warm path: the ready gate admits, byte-identical to before.
                 Some(ready) => (ready, false),
-                None => (serving, true),
+                None => {
+                    // Graph decode/activation is optional enrichment. Its
+                    // readiness gate may abstain while the authenticated text
+                    // owner for the same generation is already current. Keep
+                    // exact and lexical truthful in that window without
+                    // awaiting the decode. If text has advanced beyond the
+                    // seated graph, serve that newer text generation alone;
+                    // the graph lane remains typed unavailable until its own
+                    // generation catches up.
+                    match self.latest_text_serving_freshness_for_scope(scope).await {
+                        Some((text, true))
+                            if text.metadata().manifest().generation_id
+                                == serving.generation().manifest().generation_id =>
+                        {
+                            (serving, false)
+                        }
+                        Some((text, true)) => {
+                            return execute_query_search_on_text(
+                                self,
+                                scope,
+                                input,
+                                text,
+                                None,
+                                false,
+                                graph_control,
+                            )
+                            .await;
+                        }
+                        Some((_, false)) | None => (serving, true),
+                    }
+                }
             },
             None => {
                 if let Some((text, current)) =
