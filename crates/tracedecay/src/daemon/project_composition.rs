@@ -740,7 +740,7 @@ async fn production_project_server_inner(
             .await?;
             if !project_database_is_read_only {
                 Box::pin(bind_verified_project_graph_runtime(
-                    Arc::new(cg.db().clone()),
+                    cg.db(),
                     registered_project_session_db.as_ref(),
                 ))
                 .await?;
