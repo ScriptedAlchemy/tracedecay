@@ -90,7 +90,8 @@ pub use registry::{
     GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryCapacity,
     GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementCommit,
     GraphDbRetirementOutcome, GraphDbRetirementRefusal, GraphDbRetirementReservation,
-    SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
+    GraphPublicationPreparationV1, ProvenGraphPublicationV1, SemanticVectorRetentionAction,
+    SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
     SemanticVectorRetirementReservation, VerifiedGenerationBatchApply,
     VerifiedGenerationBatchCommit,
 };
