@@ -123,7 +123,7 @@ fn clone_scheduler_error(error: &CodeIndexSchedulerErrorV1) -> CodeIndexSchedule
         CodeIndexSchedulerErrorV1::WorkerPlan(error) => {
             CodeIndexSchedulerErrorV1::WorkerPlan(error.clone())
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-helpers")))]
         CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled => {
             CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled
         }
