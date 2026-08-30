@@ -29,7 +29,7 @@ impl HostAdmissionTestRuntimeV1 {
         arguments: serde_json::Value,
         server_stats: Option<serde_json::Value>,
         scope_prefix: Option<&str>,
-    ) -> Result<crate::mcp::ToolResult> {
+    ) -> Result<tracedecay_mcp::ToolResult> {
         let project_registry_reads = crate::mcp::server::DaemonProjectRegistryReadService::new(
             self.profile_database.clone(),
         );

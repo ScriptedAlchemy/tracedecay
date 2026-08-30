@@ -10,7 +10,7 @@ use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
+use tracedecay_mcp::ToolResult;
 
 use super::ToolCallRegistryOptions;
 use super::tool_call_support::handle_retrieve;

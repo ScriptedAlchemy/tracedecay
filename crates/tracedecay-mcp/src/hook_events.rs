@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Shared with hook emitters so the receiver accepts the same agent keys.
-pub(crate) use tracedecay_hooks::core_events::HookAgent;
+pub use tracedecay_hooks::core_events::HookAgent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HookEventKind {
+pub enum HookEventKind {
     FileEdit,
     Shell,
     WorkspaceOpen,
@@ -38,7 +38,7 @@ impl HookEventKind {
         }
     }
 
-    pub(crate) fn as_key(self) -> &'static str {
+    pub fn as_key(self) -> &'static str {
         match self {
             Self::FileEdit => "file_edit",
             Self::Shell => "shell",
@@ -52,18 +52,18 @@ impl HookEventKind {
     }
 }
 
-pub(crate) struct HookEvent {
-    pub(crate) agent: HookAgent,
-    pub(crate) kind: HookEventKind,
-    pub(crate) rel_paths: Vec<String>,
-    pub(crate) had_command: bool,
-    pub(crate) cwd: Option<PathBuf>,
-    pub(crate) route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
-    pub(crate) receipt: Option<tracedecay_hooks::core_events::HookTerminalReceipt>,
+pub struct HookEvent {
+    pub agent: HookAgent,
+    pub kind: HookEventKind,
+    pub rel_paths: Vec<String>,
+    pub had_command: bool,
+    pub cwd: Option<PathBuf>,
+    pub route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
+    pub receipt: Option<tracedecay_hooks::core_events::HookTerminalReceipt>,
 }
 
 impl HookEvent {
-    pub(crate) fn admission_source(&self) -> String {
+    pub fn admission_source(&self) -> String {
         let mut identity = Vec::new();
         if let Some(route) = self.route.as_ref() {
             if let Some(session_id) = route
@@ -138,7 +138,7 @@ fn push_admission_identity_part(buffer: &mut Vec<u8>, label: &str, value: &[u8])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HookEventPlan {
+pub enum HookEventPlan {
     SyncFiles(Vec<String>),
     AddBranch(String),
     AddBranchAt {
@@ -224,7 +224,7 @@ struct DurableHookEventEnvelopeHeader {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DurableHookEventDecodeError {
+pub enum DurableHookEventDecodeError {
     Malformed,
     UnsupportedVersion,
 }
@@ -470,7 +470,7 @@ fn runtime_plan_from_durable(
     }
 }
 
-pub(crate) fn encode_durable_hook_event_plan(plan: &HookEventPlan) -> Result<Vec<u8>, ()> {
+pub fn encode_durable_hook_event_plan(plan: &HookEventPlan) -> Result<Vec<u8>, ()> {
     let plan = durable_plan_from_runtime(plan)?;
     serde_json::to_vec(&DurableHookEventEnvelope {
         version: DURABLE_HOOK_EVENT_ENVELOPE_VERSION,
@@ -479,7 +479,7 @@ pub(crate) fn encode_durable_hook_event_plan(plan: &HookEventPlan) -> Result<Vec
     .map_err(|_| ())
 }
 
-pub(crate) fn decode_durable_hook_event_plan(
+pub fn decode_durable_hook_event_plan(
     payload: &[u8],
 ) -> Result<HookEventPlan, DurableHookEventDecodeError> {
     let header = serde_json::from_slice::<DurableHookEventEnvelopeHeader>(payload)
@@ -493,7 +493,7 @@ pub(crate) fn decode_durable_hook_event_plan(
     runtime_plan_from_durable(durable)
 }
 
-pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
+pub fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
     let mut event = tracedecay_hooks::core_events::DaemonHookEvent::deserialize(params?).ok()?;
     if let Some(route) = &mut event.route {
         protect_hook_route_structural_ids(route).ok()?;
@@ -518,7 +518,7 @@ pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
     })
 }
 
-pub(crate) fn plan_hook_event(
+pub fn plan_hook_event(
     event: &HookEvent,
     project_root: &Path,
     current_branch: Option<&str>,
@@ -570,19 +570,18 @@ pub(crate) fn plan_hook_event(
     }
 }
 
-pub(crate) fn sync_marker_path(data_root: &Path, agent: HookAgent) -> PathBuf {
+pub fn sync_marker_path(data_root: &Path, agent: HookAgent) -> PathBuf {
     data_root.join(agent.sync_marker_file())
 }
 
-pub(crate) fn should_run_sync(marker: &Path, now_secs: i64, debounce_secs: i64) -> bool {
-    tracedecay_agent_hosts::hooks::cursor_should_run_sync(
-        now_secs,
-        read_marker_secs(marker),
-        debounce_secs,
-    )
+pub fn should_run_sync(marker: &Path, now_secs: i64, debounce_secs: i64) -> bool {
+    match read_marker_secs(marker) {
+        Some(last) => now_secs - last >= debounce_secs,
+        None => true,
+    }
 }
 
-pub(crate) fn write_sync_marker(marker: &Path, now_secs: i64) {
+pub fn write_sync_marker(marker: &Path, now_secs: i64) {
     let _ = std::fs::write(marker, now_secs.to_string());
 }
 
@@ -672,7 +671,7 @@ fn plan_linked_worktree_branch_add(
 /// Queued plans keep their encoded root/branch; this error means the effect
 /// must not run until a later replay reauthorizes against live git state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AddBranchAtRootAuthError {
+pub enum AddBranchAtRootAuthError {
     Empty,
     NotAbsolute,
     Unbounded,
@@ -681,7 +680,7 @@ pub(crate) enum AddBranchAtRootAuthError {
 }
 
 impl AddBranchAtRootAuthError {
-    pub(crate) const fn reason_code(self) -> &'static str {
+    pub const fn reason_code(self) -> &'static str {
         match self {
             Self::Empty
             | Self::NotAbsolute
@@ -700,7 +699,7 @@ const MAX_ADD_BRANCH_AT_ROOT_COMPONENTS: usize = 64;
 ///
 /// Admit-time membership is never reused: removal, replacement, symlink/path
 /// swap, or common-dir drift fail closed instead of applying a stale write.
-pub(crate) fn authorize_add_branch_at_root(
+pub fn authorize_add_branch_at_root(
     planned_root: &Path,
     project_root: &Path,
 ) -> Result<PathBuf, AddBranchAtRootAuthError> {
@@ -725,7 +724,7 @@ pub(crate) fn authorize_add_branch_at_root(
 
 /// Revalidate live root identity and current branch immediately before a
 /// durable branch-write effect. Admit-time root/branch are never reused.
-pub(crate) fn authorize_planned_branch_effect(
+pub fn authorize_planned_branch_effect(
     planned_root: &Path,
     project_root: &Path,
     planned_branch: &str,

@@ -2,21 +2,21 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::mcp::response_handles::{
-    ResponseHandleLookup, public_retrieve_error, retrieve_response_handle,
-};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_mcp::response_handles::{
+    ResponseHandleLookup, public_retrieve_error, retrieve_response_handle,
+};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
 use super::super::binding::{
     tool_accepts_registered_project_selector, tool_is_selector_bound_effect,
 };
-use super::super::render;
 use super::support;
 use super::support::registered_project_context;
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render;
 
 pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
     support::text_tool_result(text, Vec::new())

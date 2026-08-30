@@ -5,8 +5,8 @@ use super::dispatch_settlement::{
     ApplicationCancellationRegistration, DispatchControl, PreparedDispatchControl,
 };
 use super::*;
-use crate::mcp::ToolResult;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_mcp::ToolResult;
 
 mod tool_dispatch;
 
@@ -831,9 +831,7 @@ impl McpServer {
             analytics_arguments: analytics_arguments_snapshot(tool_name, &arguments),
             analytics_session_id: mcp_analytics_session_id(&arguments),
             arguments,
-            caller_deadline: crate::mcp::tool_call_deadline::caller_tool_call_deadline(Some(
-                params,
-            )),
+            caller_deadline: tracedecay_mcp::caller_tool_call_deadline(Some(params)),
         })
     }
 

@@ -8,7 +8,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
-use tracedecay::mcp::ToolResult;
+use tracedecay_mcp::ToolResult;
 
 #[tokio::test]
 async fn test_move_symbol_dry_run_reports_impact_and_writes_nothing() {

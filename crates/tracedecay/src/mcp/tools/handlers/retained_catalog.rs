@@ -13,7 +13,8 @@ use crate::catalog_composition::{ApplicationCatalogComposition, compose_applicat
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::{ToolCallRegistryOptions, ToolResult, application_surface};
+use super::{ToolCallRegistryOptions, application_surface};
+use tracedecay_mcp::ToolResult;
 
 static RETAINED_MCP_COMPOSITION: OnceLock<
     std::result::Result<ApplicationCatalogComposition<()>, String>,

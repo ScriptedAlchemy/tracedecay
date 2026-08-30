@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tracedecay::mcp::get_tool_definitions;
+use tracedecay_mcp::get_tool_definitions;
 
 use super::memory_facts_test::{close_test_graph, invoke_production_tool, setup_project};
 
