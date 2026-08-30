@@ -178,6 +178,28 @@ fn saturated_connect_advice_is_distinct_from_restart_advice() {
     assert_ne!(saturated, restarting);
 }
 
+#[test]
+fn read_deadline_classifier_accepts_typed_stalled() {
+    let error =
+        tracedecay_daemon_protocol::daemon_response_stalled(std::time::Duration::from_secs(5));
+    assert!(
+        super::super::error_is_read_deadline(&error),
+        "typed stalled must classify as a read deadline"
+    );
+    assert!(
+        super::super::error_message_is_read_deadline(&error.to_string()),
+        "stalled Display must still match the string classifier"
+    );
+    let down = tracedecay_daemon_protocol::daemon_connect_failure(
+        "/tmp/daemon.sock",
+        &std::io::Error::from(std::io::ErrorKind::NotFound),
+    );
+    assert!(
+        !super::super::error_is_read_deadline(&down),
+        "connect-down must not classify as a read deadline"
+    );
+}
+
 // start_paused: these restart-window tests only wait on tokio timers
 // (sleep/poll intervals); paused time auto-advances them so each test
 // finishes in milliseconds instead of real 200-300 ms waits.
@@ -230,6 +252,12 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     );
 
     let message = err.to_string();
+    assert_eq!(
+        err.project_route_context()
+            .map(|(code, retryable, _)| (code, retryable)),
+        Some((super::super::DAEMON_CONNECT_DOWN, true)),
+        "missing socket after grace must be typed daemon_connect_down, got: {message}"
+    );
     assert!(
         message.contains("tracedecay update"),
         "error should hint that the daemon may be restarting after an update, got: {message}"
@@ -238,6 +266,85 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
         message.contains(&socket.display().to_string()),
         "error should name the socket path, got: {message}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn client_deadline_run_reports_typed_stalled() {
+    let deadline = super::super::DaemonClientDeadline::until(
+        tokio::time::Instant::now() + std::time::Duration::from_millis(20),
+    )
+    .expect("future deadline");
+    let err = deadline
+        .run(
+            "read",
+            "tracedecay_status",
+            std::future::pending::<super::super::Result<()>>(),
+        )
+        .await
+        .expect_err("pending future must stall");
+    assert_eq!(
+        err.project_route_context()
+            .map(|(code, retryable, _)| (code, retryable)),
+        Some((super::super::DAEMON_RESPONSE_STALLED, true)),
+        "read-deadline abort must be typed daemon_response_stalled, got: {err}"
+    );
+}
+
+/// A daemon that accepts and never replies must abort inside the caller
+/// deadline. The request Instant is placed `RESPONSE_GRACE` behind the desired
+/// local bound so the production `call_tool_within` envelope (request + 30s
+/// grace) is what fires, not an outer test timeout.
+#[cfg(unix)]
+#[tokio::test]
+async fn stalled_daemon_response_is_typed_within_deadline() {
+    let dir = TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind silent daemon");
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let (reader, _writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        let _ = lines.next_line().await;
+        let _ = lines.next_line().await;
+        std::future::pending::<()>().await;
+    });
+
+    let local_bound = std::time::Duration::from_millis(80);
+    let request_deadline = tokio::time::Instant::now()
+        .checked_add(local_bound)
+        .and_then(|bound| bound.checked_sub(super::super::DAEMON_TOOL_RESPONSE_GRACE))
+        .expect("monotonic clock must outlive the response grace");
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::super::call_tool_within(
+            &socket,
+            &test_handshake_defaults(),
+            "tracedecay_status",
+            json!({}),
+            request_deadline,
+        ),
+    )
+    .await
+    .expect("stalled read must abort within the client deadline")
+    .expect_err("silent daemon must not succeed");
+
+    let message = err.to_string();
+    assert_eq!(
+        err.project_route_context()
+            .map(|(code, retryable, _)| (code, retryable)),
+        Some((super::super::DAEMON_RESPONSE_STALLED, true)),
+        "connected stall must be typed daemon_response_stalled, got: {message}"
+    );
+    assert!(
+        message.contains("did not answer after"),
+        "stalled detail must name the wait, got: {message}"
+    );
+    assert!(
+        message.contains("tracedecay daemon status"),
+        "stalled detail must point at daemon status, got: {message}"
+    );
+    daemon.abort();
 }
 
 #[cfg(unix)]
