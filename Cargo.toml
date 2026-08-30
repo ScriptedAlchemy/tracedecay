@@ -75,13 +75,18 @@ incremental = false
 # Workspace crates retain line tables and incremental state; dependencies omit
 # debuginfo to reduce compile, cache, and link costs. CI explicitly disables
 # incremental compilation through CARGO_INCREMENTAL.
+# `line-tables-only` (not `1`/limited) is deliberate: backtraces and panic
+# locations keep file:line, while the spine rlibs and per-suite test binaries
+# shrink several-fold — measured 764–966 MiB per root-lib cache entry at
+# debug=1 against 45.7 MiB without debuginfo, which was blowing the shared
+# build-cache budget and turning evictions into repeat 5-minute misses.
 [profile.dev]
-debug = 1
+debug = "line-tables-only"
 incremental = true
 opt-level = 1
 
 [profile.test]
-debug = 1
+debug = "line-tables-only"
 incremental = true
 opt-level = 1
 
