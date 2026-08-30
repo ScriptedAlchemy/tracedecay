@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
 
-use crate::mcp::server::McpProjectServerResolvePort;
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_mcp::hook_events;
 
