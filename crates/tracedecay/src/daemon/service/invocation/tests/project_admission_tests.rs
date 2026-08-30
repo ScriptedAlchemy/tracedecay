@@ -47,6 +47,17 @@ async fn project_quiescence_denies_semantic_and_git_cached_routes() {
             deadline.clone(),
             CancellationContext::active("cancel.quiesced-semantic").expect("cancellation"),
         ),
+        // Activation refuses at the same admission gate before any lifecycle
+        // read, evaluation work, or configuration effect.
+        DaemonInvocationRequest::semantic_activate(
+            "request.quiesced-semantic-activate",
+            "query-fallback".to_owned(),
+            true,
+            now,
+            deadline.clone(),
+            CancellationContext::active("cancel.quiesced-semantic-activate")
+                .expect("cancellation"),
+        ),
         DaemonInvocationRequest {
             protocol: tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
