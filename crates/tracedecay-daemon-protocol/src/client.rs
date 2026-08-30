@@ -1719,15 +1719,18 @@ mod tests {
         }
     }
 
+    fn unused_test_endpoint() -> crate::transport::DaemonEndpoint {
+        crate::transport::DaemonEndpoint::loopback(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        )))
+        .expect("loopback endpoint")
+    }
+
     #[test]
     fn transport_failures_name_version_skew_when_the_authority_daemon_differs() {
-        let connection = crate::connection::DaemonConnection::new(
-            crate::transport::DaemonEndpoint::Unix(std::path::PathBuf::from(
-                "/tmp/daemon-skew-test.sock",
-            )),
-            None,
-        )
-        .with_daemon_version("0.1.0-beta.36+aaaa");
+        let connection = crate::connection::DaemonConnection::new(unused_test_endpoint(), None)
+            .with_daemon_version("0.1.0-beta.36+aaaa");
         let mut handshake = test_skew_handshake();
         handshake.client_version = "0.1.0-beta.37+bbbb".to_owned();
 
@@ -1756,19 +1759,9 @@ mod tests {
 
     #[test]
     fn transport_failures_stay_untouched_without_version_skew() {
-        let matching = crate::connection::DaemonConnection::new(
-            crate::transport::DaemonEndpoint::Unix(std::path::PathBuf::from(
-                "/tmp/daemon-noskew-test.sock",
-            )),
-            None,
-        )
-        .with_daemon_version("0.1.0-beta.37+cccc");
-        let unknown = crate::connection::DaemonConnection::new(
-            crate::transport::DaemonEndpoint::Unix(std::path::PathBuf::from(
-                "/tmp/daemon-unknown-test.sock",
-            )),
-            None,
-        );
+        let matching = crate::connection::DaemonConnection::new(unused_test_endpoint(), None)
+            .with_daemon_version("0.1.0-beta.37+cccc");
+        let unknown = crate::connection::DaemonConnection::new(unused_test_endpoint(), None);
         let mut handshake = test_skew_handshake();
         handshake.client_version = "0.1.0-beta.37+cccc".to_owned();
 
