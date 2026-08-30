@@ -446,21 +446,6 @@ impl DaemonSessionRetrievalService {
         })
     }
 
-    pub(crate) fn new_registered(
-        database: RegisteredGlobalDbLeaseV1,
-        registered_database: RegisteredGlobalDbLeaseV1,
-        root: DaemonSessionRetrievalRoot,
-        refresh_status: Option<SessionTemporalRefreshWake>,
-    ) -> Option<Self> {
-        Self::new_registered_with_serving_port(
-            database,
-            registered_database,
-            root,
-            refresh_status
-                .map(|status| Arc::new(status) as Arc<dyn SessionProjectionServingStatusPort>),
-        )
-    }
-
     pub(crate) fn new_registered_with_serving_port(
         database: RegisteredGlobalDbLeaseV1,
         registered_database: RegisteredGlobalDbLeaseV1,
