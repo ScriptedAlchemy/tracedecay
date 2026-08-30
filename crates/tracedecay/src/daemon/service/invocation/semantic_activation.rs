@@ -341,7 +341,7 @@ pub(super) fn compose_activated_semantic_config(
             auto_download: current.auto_download,
             active_profile: Some(active),
             rollback_profile: rollback,
-            resources: current.resources.clone(),
+            resources: current.resources,
         },
         rollback_profile_id,
     }
