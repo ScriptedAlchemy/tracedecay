@@ -80,5 +80,6 @@ pub use tools::{
     get_maximal_tool_definitions_with_budget, get_tool_definitions,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
     internal_daemon_tool_definition, project_catalog_discovery_scope, render_tool_cli_help,
-    retain_host_available_tool_definitions, short_tool_name, tool_defaults_to_markdown,
+    resolve_property_schema, retain_host_available_tool_definitions, short_tool_name,
+    tool_defaults_to_markdown,
 };
