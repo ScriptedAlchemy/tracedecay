@@ -40,6 +40,8 @@ fn client_handshake(
     )
 }
 
+/// One-shot daemon tool call using the shared `TRACEDECAY_TOOL_DEADLINE_MS`
+/// envelope (default 120s) via `tracedecay::daemon::call_default_tool`.
 pub(crate) async fn daemon_tool_json(
     project_path: Option<&std::path::Path>,
     tool_name: &str,
