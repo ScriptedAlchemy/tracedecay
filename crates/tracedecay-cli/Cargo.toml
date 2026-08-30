@@ -200,6 +200,11 @@ tracing = "0.1"
 ureq = { version = "3", features = ["json"] }
 url = "2"
 
+# Windows release archives are `.zip` (Unix ships `.tar.gz` via flate2/tar);
+# consumed by the self-update extraction in src/upgrade.rs.
+[target.'cfg(windows)'.dependencies]
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
 [dev-dependencies]
 axum = "0.8"
 dirs = "6"
