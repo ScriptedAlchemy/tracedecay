@@ -550,7 +550,7 @@ const fn omission_reason(value: HydrationStateResultV1) -> Option<OmissionReason
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{FactSearchCursorV1, FactSearchGraphCoverageV1};
+    use crate::memory::{FactRetrievalTelemetryV1, FactSearchCursorV1, FactSearchGraphCoverageV1};
     use crate::result::PageCursor;
     use crate::retained_surfaces::{
         FactCommitOwnerV1, FactStoreContradictResultV1, FactStoreListResultV1,
@@ -574,6 +574,7 @@ mod tests {
             hits: Vec::new(),
             next_after,
             graph_coverage: FactSearchGraphCoverageV1::NotMounted,
+            retrieval_telemetry: FactRetrievalTelemetryV1::NotApplicable,
         }
     }
 

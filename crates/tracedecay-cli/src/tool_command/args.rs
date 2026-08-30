@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
-use tracedecay::mcp::tools::{ToolDefinition, short_tool_name};
+use tracedecay::mcp::tools::{ToolDefinition, resolve_property_schema, short_tool_name};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 /// Legacy CLI command names that do not match the MCP tool name. The right-hand
@@ -231,12 +231,15 @@ fn validate_tool_args(def: &ToolDefinition, args: &Map<String, Value>) -> Result
     let required = schema_required_keys(def);
 
     for (key, value) in args {
-        let Some(schema) = props.get(key) else {
+        let Some(declared) = props.get(key) else {
             if DISPATCH_ROUTING_KEYS.contains(&key.as_str()) {
                 continue;
             }
             return Err(unknown_key_error(key, short, props, &required));
         };
+        // Optional typed fields arrive as `anyOf: [$ref, null]`; resolve to
+        // the referenced schema so enum and type checks see the real contract.
+        let schema = resolve_property_schema(&def.input_schema, declared);
 
         if value.is_null() && !required.contains(key) {
             continue;
