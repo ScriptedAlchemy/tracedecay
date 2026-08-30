@@ -4644,12 +4644,11 @@ impl CodeIndexSchedulerRegistryV1 {
         let canonical_root = project_root.canonicalize().ok()?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&canonical_root)?;
-        let parked = worktree
+        worktree
             .convergence_park
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        parked
+            .clone()
     }
 
     /// Query-admission entry point: serve only an already-decoded generation
