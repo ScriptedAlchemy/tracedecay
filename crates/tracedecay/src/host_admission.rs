@@ -5,6 +5,11 @@ use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
 
+use tracedecay_code_index::parallelism::install_worker_plan;
+use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+use tracedecay_private_fs::background_cpu::process_background_cpu;
+use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
+
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 #[cfg(test)]
 use tracedecay_host_admission::{
@@ -76,6 +81,32 @@ pub enum SessionTemporalFixtureCountV1 {
 static SHARED_TEST_SESSION_REGISTRIES: LazyLock<
     AsyncMutex<WeakRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>>,
 > = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
+
+/// Installs the process worker plan (and with it the background CPU
+/// authority) that host-admission capture requires. Production installs it
+/// during daemon worker-plan admission, which these fixtures never run;
+/// without it every observation capture is refused with
+/// `background_cpu_unavailable`. Going through `install_worker_plan` — the
+/// same authority production and the scheduler's test fallback use — keeps
+/// the background CPU width consistent with any later worker-plan install in
+/// the same test process instead of poisoning it with an ad-hoc width.
+fn ensure_process_background_cpu_authority() -> Result<()> {
+    if process_background_cpu().is_some() {
+        return Ok(());
+    }
+    if let Err(error) = install_worker_plan(
+        CodeIndexWorkerSelectionV1::Automatic {},
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    ) && process_background_cpu().is_none()
+    {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "host-admission test runtime could not install the worker plan: {error}"
+            ),
+        });
+    }
+    Ok(())
+}
 
 /// Registered host-admission fixture assembled by the composition root.
 ///
@@ -193,6 +224,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     async fn open(profile_root: PathBuf, project: Option<(PathBuf, ProjectId)>) -> Result<Self> {
+        ensure_process_background_cpu_authority()?;
         prepare_host_admission_test_profile_root(&profile_root)?;
         if let Some((project_root, project_id)) = project.as_ref() {
             prepare_host_admission_test_project_root(project_root, project_id)?;

@@ -112,6 +112,7 @@ impl GraphDbRegistry {
             locator.generation,
             &head.recovered_digest,
             Arc::clone(&registration.authority_lease),
+            &|| check_all(&registration, context, "generation.recover.direct_sealed"),
         )?
         .ok_or_else(|| GraphDbError::unavailable("sealed generation store is absent"))?;
         if identity.dependency_closure_digest(&|| {
@@ -125,6 +126,7 @@ impl GraphDbRegistry {
         }
         check_all(&registration, context, "generation.recover.direct_sealed")?;
         let lease = generation_lease(&identity, head, BTreeMap::new());
+        self.track_direct_sealed_reader(&lease)?;
         Ok(VerifiedGraphSnapshot::new_direct_sealed(database, lease))
     }
 
@@ -303,6 +305,9 @@ impl GraphDbRegistry {
                     retained.insert(locator.clone());
                 }
             }
+            // Direct-sealed readers bypass this database's generation state
+            // entirely; their liveness is tracked on the registry.
+            retained.extend(self.live_direct_sealed_locators()?);
             let selected = candidates
                 .into_iter()
                 .find(|(locator, _, _)| !retained.contains(locator));

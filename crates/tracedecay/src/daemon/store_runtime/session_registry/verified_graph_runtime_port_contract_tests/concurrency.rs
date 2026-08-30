@@ -91,7 +91,7 @@ fn assert_concurrent_replay_and_conflict(
 async fn project_and_profile_ports_serialize_exact_replay_and_changed_input_conflicts() {
     let fixture = ContractFixture::new("concurrent-publication").await;
     let project_id = project_id("concurrent-publication");
-    let (project_database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (project_database, _sessions) = fixture.mount_project(&project_id).await;
     let profile_database = fixture
         .registry
         .profile_memory()

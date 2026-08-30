@@ -416,13 +416,16 @@ fn find_existing_ordinary_run(
     let mut newest_completion = None;
     let mut status_spans: [Option<std::ops::Range<u64>>; 5] = std::array::from_fn(|_| None);
     while let Some(span) = rows.next_span().map_err(run_ledger_scan_io_error)? {
-        let Some(projection) =
-            (match exact_lookup::scan_jsonl_row_projection(file, path, span.clone()) {
-                Ok(projection) => projection,
-                Err(_) => continue,
-            })
-        else {
-            continue;
+        let projection = match exact_lookup::scan_jsonl_row_projection(file, path, span.clone()) {
+            Ok(Some(projection)) => projection,
+            Ok(None) => continue,
+            // A failed read must fail the dedup scan: treating it as "row not
+            // seen" could admit a duplicate append. Malformed junk rows stay
+            // skippable.
+            Err(error @ crate::errors::TraceDecayError::File { .. }) => {
+                return Err(run_ledger_scan_io_error(error));
+            }
+            Err(_) => continue,
         };
         if projection.run_id != candidate.run_id {
             continue;
@@ -1628,6 +1631,9 @@ fn resolve_selected_logical_records(
         let record = match exact_lookup::decode_jsonl_row(file, path, &lifecycle.newest.span) {
             Ok(record) => record,
             Err(error) if fail_on_malformed => return Err(error),
+            // Failed reads are not malformed rows; lenient mode may only skip
+            // the latter.
+            Err(error @ crate::errors::TraceDecayError::File { .. }) => return Err(error),
             Err(_) => continue,
         };
         if let Err(error) = require_projection_identity(&record, &lifecycle.newest) {

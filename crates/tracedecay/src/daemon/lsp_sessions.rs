@@ -113,7 +113,9 @@ async fn authorize_lsp_workspace_for_uris(
     project_path: &Path,
     requested_uris: Vec<String>,
 ) -> Option<AuthorizedLspWorkspace> {
-    if requested_uris.is_empty() || requested_uris.len() > tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS {
+    if requested_uris.is_empty()
+        || requested_uris.len() > tracedecay_daemon_protocol::MAX_LSP_WORKSPACE_ROOTS
+    {
         return None;
     }
     // A single folder is only ever the active project: a lone sibling hint

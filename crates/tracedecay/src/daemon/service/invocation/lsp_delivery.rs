@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn lsp_delivery_attempt(
     frame: &[u8],
-    session_id: &tracedecay_lsp::LspSessionId,
+    session_id: &tracedecay_daemon_protocol::LspSessionId,
     outbound_sequence: u64,
     observed_at: UtcMicros,
 ) -> Option<tracedecay_domain::DeliverySettlementAttemptV1> {
@@ -56,7 +56,7 @@ pub(super) fn retain_lsp_delivery_attempt(
     retained: &mut Option<tracedecay_domain::DeliverySettlementAttemptV1>,
     next_sequence: &mut u64,
     frame: &[u8],
-    session_id: &tracedecay_lsp::LspSessionId,
+    session_id: &tracedecay_daemon_protocol::LspSessionId,
     observed_at: UtcMicros,
 ) -> Option<tracedecay_domain::DeliverySettlementAttemptV1> {
     if retained.is_none() {

@@ -23,4 +23,6 @@ mod git_watch_test;
 mod indexing_lifecycle_test;
 #[cfg(unix)]
 mod pr_autotrack_test;
+#[cfg(unix)]
+mod stale_client_resilience_test;
 mod workflow_handoff_test;

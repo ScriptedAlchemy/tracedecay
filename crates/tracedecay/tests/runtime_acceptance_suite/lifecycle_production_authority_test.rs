@@ -1,8 +1,6 @@
 use crate::common::fixture::{GitFixture, TestProfile};
 use tracedecay::tracedecay::TraceDecay;
 
-mod common;
-
 #[tokio::test]
 async fn direct_lifecycle_entry_points_retain_production_authority() {
     let profile = TestProfile::acquire().await;

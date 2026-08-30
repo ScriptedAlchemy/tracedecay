@@ -50,10 +50,10 @@ pub use codex::{
 };
 pub use cursor::{
     CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_project_root_from_event, cursor_session_start_json,
-    cursor_should_run_sync, evaluate_cursor_subagent_start, hook_cursor_after_file_edit,
-    hook_cursor_after_shell, hook_cursor_post_tool_use, hook_cursor_pre_compact,
-    hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
-    hook_cursor_subagent_start, hook_cursor_workspace_open,
+    evaluate_cursor_subagent_start, hook_cursor_after_file_edit, hook_cursor_after_shell,
+    hook_cursor_post_tool_use, hook_cursor_pre_compact, hook_cursor_session_end,
+    hook_cursor_session_start, hook_cursor_stop, hook_cursor_subagent_start,
+    hook_cursor_workspace_open,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
 pub use kiro::{
@@ -278,7 +278,7 @@ macro_rules! read_hook_event {
             Ok($crate::hooks::HookStdinRead::Oversized) => {
                 eprintln!(
                     "tracedecay hook: stdin exceeds wire message bound ({})",
-                    ::tracedecay_sessions::admission::WIRE_RECORD_TOO_LARGE
+                    ::tracedecay_daemon_protocol::wire::WIRE_RECORD_TOO_LARGE
                 );
                 return 0;
             }
@@ -1103,7 +1103,7 @@ fn append_tool_hint(context: &mut String, hint: &ToolHint) {
 
 pub(crate) enum HookStdinRead {
     Event(String),
-    /// Stdin exceeded [`tracedecay_sessions::admission::MAX_WIRE_MESSAGE_BYTES`].
+    /// Stdin exceeded [`tracedecay_daemon_protocol::wire::MAX_WIRE_MESSAGE_BYTES`].
     /// No payload bytes are retained.
     Oversized,
 }
@@ -1115,11 +1115,11 @@ pub(crate) fn read_stdin_bounded() -> std::io::Result<HookStdinRead> {
 }
 
 /// Testable stdin reader: streams until EOF while retaining at most
-/// [`tracedecay_sessions::admission::MAX_WIRE_MESSAGE_BYTES`].
+/// [`tracedecay_daemon_protocol::wire::MAX_WIRE_MESSAGE_BYTES`].
 pub(crate) fn read_stdin_bounded_from(
     reader: &mut impl std::io::Read,
 ) -> std::io::Result<HookStdinRead> {
-    use tracedecay_sessions::admission::{
+    use tracedecay_daemon_protocol::wire::{
         MAX_WIRE_MESSAGE_BYTES, WireReadOutcome, read_bounded_to_string,
     };
     match read_bounded_to_string(reader, MAX_WIRE_MESSAGE_BYTES)? {

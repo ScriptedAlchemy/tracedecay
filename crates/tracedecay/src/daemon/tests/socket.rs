@@ -3,7 +3,7 @@ use std::process::Command;
 
 use super::*;
 #[cfg(unix)]
-use tracedecay_lsp::{FramePoll, FrameSend};
+use tracedecay_daemon_protocol::{FramePoll, FrameSend};
 
 #[cfg(unix)]
 fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_application::Deadline {

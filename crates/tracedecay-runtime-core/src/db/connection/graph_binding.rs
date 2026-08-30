@@ -77,7 +77,10 @@ impl Database {
     ///
     /// The proxy retains no database client, Store lease, Graph lease, or
     /// graph map owner. It carries the identity validated at binding time and
-    /// upgrades the weak graph port privately for each operation.
+    /// upgrades the weak graph port privately for each operation. `None`
+    /// proves graph activation has not completed yet; callers that must not
+    /// wait for activation bind [`Self::deferred_memory_graph_runtime`]
+    /// instead.
     #[must_use]
     pub fn memory_graph_runtime(&self) -> Option<VerifiedGraphRuntimeWeakProxyV1> {
         Some(VerifiedGraphRuntimeWeakProxyV1::new(
@@ -85,6 +88,26 @@ impl Database {
             self.registered_verified_locator().clone(),
             self.inner.memory_graph_runtime.get()?.clone(),
         ))
+    }
+
+    /// Returns the deferred-activation route to this exact database's graph
+    /// runtime, available before [`Self::bind_memory_graph_runtime`] runs.
+    ///
+    /// The proxy shares the activation cell instead of a resolved weak
+    /// pointer: every operation resolves the cell at use time, so a proxy
+    /// bound while deferred graph activation is still warming starts
+    /// answering the moment activation publishes the runtime and stays a
+    /// typed unavailable state until then. Like the resolved route, it
+    /// retains no database client, Store lease, Graph lease, or graph map
+    /// owner. This is the production composition route: binding it cannot
+    /// silently miss an activation that has not happened yet.
+    #[must_use]
+    pub fn deferred_memory_graph_runtime(&self) -> VerifiedGraphRuntimeWeakProxyV1 {
+        VerifiedGraphRuntimeWeakProxyV1::new_deferred(
+            self.registered_binding().clone(),
+            self.registered_verified_locator().clone(),
+            Arc::clone(&self.inner.memory_graph_runtime),
+        )
     }
 
     /// Issues graph work through the exact weak map binding.
@@ -294,6 +317,126 @@ mod tests {
         drop(database);
 
         assert!(weak_runtime.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn deferred_graph_proxy_resolves_once_activation_completes() {
+        let directory = tempfile::tempdir().expect("deferred graph proxy directory");
+        let database_path = directory.path().join("memory.db");
+        let authority = DatabaseAuthority::acquire_test(&database_path, "deferred graph proxy")
+            .expect("database authority");
+        let (database, _) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("database runtime");
+        let deferred = database.deferred_memory_graph_runtime();
+        assert_eq!(deferred.relational_binding(), database.registered_binding());
+        assert_eq!(
+            deferred.relational_verified_locator(),
+            database.registered_verified_locator()
+        );
+        let projection = GraphProjectionIdentity::new(
+            tracedecay_graph_db::GraphNamespace::new("deferred-proxy")
+                .expect("valid deferred proxy namespace"),
+            tracedecay_graph_db::GraphProjectionId::new("activation")
+                .expect("valid deferred proxy projection"),
+        );
+        // Before activation the deferred route is a typed unavailable state,
+        // and two deferred routes over one database share the eventual
+        // runtime.
+        assert!(matches!(
+            deferred.verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false))),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+        assert!(deferred.shares_runtime_with(&database.deferred_memory_graph_runtime()));
+
+        let snapshot_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(TestGraphRuntime {
+            binding: database.registered_binding().clone(),
+            locator: database.registered_verified_locator().clone(),
+            snapshot_calls: Arc::clone(&snapshot_calls),
+            _retained_database: None,
+        });
+        database
+            .bind_memory_graph_runtime(Arc::clone(&runtime))
+            .expect("bind exact graph runtime");
+
+        // The proxy minted before activation resolves without a rebind.
+        assert!(matches!(
+            deferred.verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false))),
+            Ok(None)
+        ));
+        assert_eq!(snapshot_calls.load(Ordering::Acquire), 1);
+        let resolved = database
+            .memory_graph_runtime()
+            .expect("activation publishes the resolved proxy");
+        assert!(deferred.shares_runtime_with(&resolved));
+        assert!(resolved.shares_runtime_with(&deferred));
+    }
+
+    #[tokio::test]
+    async fn deferred_graph_proxy_stays_typed_without_activation_and_across_owner_drop() {
+        let directory = tempfile::tempdir().expect("never-activated graph proxy directory");
+        let database_path = directory.path().join("memory.db");
+        let sibling_path = directory.path().join("sibling.db");
+        let authority =
+            DatabaseAuthority::acquire_test(&database_path, "never-activated graph proxy")
+                .expect("database authority");
+        let (database, _) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("database runtime");
+        let sibling_authority =
+            DatabaseAuthority::acquire_test(&sibling_path, "never-activated graph sibling")
+                .expect("sibling authority");
+        let (sibling, _) = Database::publish_test_runtime(
+            &sibling_path,
+            &sibling_authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("sibling runtime");
+        let deferred = database.deferred_memory_graph_runtime();
+        let projection = GraphProjectionIdentity::new(
+            tracedecay_graph_db::GraphNamespace::new("never-activated")
+                .expect("valid never-activated namespace"),
+            tracedecay_graph_db::GraphProjectionId::new("refusal")
+                .expect("valid never-activated projection"),
+        );
+        // A runtime that never becomes available stays a typed refusal at
+        // every read — never a panic, silent success, or empty result.
+        assert!(matches!(
+            deferred.verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false))),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+        deferred.cancel_reconciliation();
+        // Unresolved routes never claim another database's eventual runtime.
+        assert!(!deferred.shares_runtime_with(&sibling.deferred_memory_graph_runtime()));
+
+        let snapshot_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(TestGraphRuntime {
+            binding: database.registered_binding().clone(),
+            locator: database.registered_verified_locator().clone(),
+            snapshot_calls: Arc::clone(&snapshot_calls),
+            _retained_database: None,
+        });
+        database
+            .bind_memory_graph_runtime(Arc::clone(&runtime))
+            .expect("bind exact graph runtime");
+        drop(runtime);
+        // Activation resolved but the owner dropped: the deferred route
+        // reports the same typed unavailability as the resolved proxy.
+        assert!(matches!(
+            deferred.verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false))),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+        assert_eq!(snapshot_calls.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]

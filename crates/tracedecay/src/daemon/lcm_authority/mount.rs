@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{
     CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, RequestId,
@@ -16,7 +17,6 @@ use tracedecay_usecases::context::{
     CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
     ResolvedSessionIdentity, application_observed_at, session_application_grant_digest,
 };
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_usecases::session::SessionRequestBinding;
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityInvocation, LcmAuthorityPort, LcmAuthorityRequest, LcmAuthorityResponse,

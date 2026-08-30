@@ -12,8 +12,8 @@
 //! `/api/capabilities` advertises which current TraceDecay authorities are
 //! mounted for the selected project.
 
-pub use tracedecay_usecases as application;
 pub use tracedecay_application::request_identity;
+pub use tracedecay_usecases as application;
 pub use tracedecay_usecases::{git_query, graph, user_config};
 pub mod tracedecay;
 // Crate-root re-exports the composition root reaches through its

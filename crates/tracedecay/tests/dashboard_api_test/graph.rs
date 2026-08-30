@@ -26,7 +26,6 @@ fn assert_ready_verified_generation(body: &Value) {
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::tracedecay::TraceDecay;
-use tracedecay::types::FileRecord;
 use tracedecay_application::{
     CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestAdmission, RequestContext,
     ResolvedScope,
@@ -65,7 +64,9 @@ struct DashboardFixture {
 struct GraphFixtureSeedV1 {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
-    files: Vec<FileRecord>,
+    /// Logical paths of the seeded files; the snapshot derives per-file
+    /// occurrence ids, digests, and languages from the path alone.
+    files: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -226,14 +227,7 @@ fn seed_orphan_node(seed: &mut GraphFixtureSeedV1) {
         "src/dashboard/orphan.rs",
         1,
     ));
-    seed.files.push(FileRecord {
-        path: "src/dashboard/orphan.rs".to_owned(),
-        content_hash: "hash-orphan".to_owned(),
-        size: 32,
-        modified_at: 1_700_000_000,
-        indexed_at: 1_700_000_010,
-        node_count: 1,
-    });
+    seed.files.push("src/dashboard/orphan.rs".to_owned());
 }
 
 fn seed_graph_fixture() -> GraphFixtureSeedV1 {
@@ -290,22 +284,8 @@ fn seed_graph_fixture() -> GraphFixtureSeedV1 {
     ];
 
     let files = vec![
-        FileRecord {
-            path: "src/dashboard/mod.rs".to_string(),
-            content_hash: "hash-rust".to_string(),
-            size: 128,
-            modified_at: 1_700_000_000,
-            indexed_at: 1_700_000_010,
-            node_count: 3,
-        },
-        FileRecord {
-            path: "src/dashboard/view.tsx".to_string(),
-            content_hash: "hash-tsx".to_string(),
-            size: 96,
-            modified_at: 1_700_000_000,
-            indexed_at: 1_700_000_010,
-            node_count: 1,
-        },
+        "src/dashboard/mod.rs".to_string(),
+        "src/dashboard/view.tsx".to_string(),
     ];
     GraphFixtureSeedV1 {
         nodes,
@@ -345,14 +325,7 @@ fn seed_neighbor_symmetry_fixture(seed: &mut GraphFixtureSeedV1) {
             60,
         ),
     ]);
-    seed.files.push(FileRecord {
-        path: "src/dashboard/symmetry.rs".to_owned(),
-        content_hash: "hash-symmetry".to_owned(),
-        size: 128,
-        modified_at: 1_700_000_000,
-        indexed_at: 1_700_000_010,
-        node_count: 4,
-    });
+    seed.files.push("src/dashboard/symmetry.rs".to_owned());
 
     seed.edges.extend(
         [
@@ -387,14 +360,7 @@ fn seed_structure_fixture(seed: &mut GraphFixtureSeedV1) {
         line: Some(13),
     });
     seed.nodes.push(test_node);
-    seed.files.push(FileRecord {
-        path: "tests/dashboard_graph.rs".to_string(),
-        content_hash: "hash-test".to_string(),
-        size: 64,
-        modified_at: 1_700_000_000,
-        indexed_at: 1_700_000_010,
-        node_count: 1,
-    });
+    seed.files.push("tests/dashboard_graph.rs".to_string());
 }
 
 fn fixture_digest(domain: &str, value: &str) -> String {
@@ -449,12 +415,12 @@ fn compose_graph_authority(
     let files: Vec<_> = seed
         .files
         .iter()
-        .map(|file| SanitizedCodeFileV1 {
-            file_occurrence_id: FileOccurrenceId::new(format!("file:dashboard:{}", file.path))
+        .map(|path| SanitizedCodeFileV1 {
+            file_occurrence_id: FileOccurrenceId::new(format!("file:dashboard:{path}"))
                 .unwrap_or_else(|error| panic!("fixture file occurrence: {error}")),
-            logical_path: file.path.clone(),
-            language: Some(fixture_language(&file.path)),
-            content_digest: ContentDigest::new(fixture_digest("dashboard-file", &file.path))
+            logical_path: path.clone(),
+            language: Some(fixture_language(path)),
+            content_digest: ContentDigest::new(fixture_digest("dashboard-file", path))
                 .unwrap_or_else(|error| panic!("fixture file digest: {error}")),
             disposition: SnapshotFileDispositionV1::Present,
         })
