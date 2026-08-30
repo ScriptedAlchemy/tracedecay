@@ -356,8 +356,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
+        // Boxed store-open composition: keeps this mount machine (and the
+        // measured wrapper embedding it by value) pointer-sized per await.
         let runtime = hotpath::future!(
-            open_runtime(
+            Box::pin(open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
                 shard_id,
@@ -366,12 +368,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                 None,
                 true,
                 "mount profile authority store",
-            ),
+            )),
             label = "daemon.store.profile_authority.open"
         )
         .await?;
-        let database = self
-            .attach_registered(runtime, "attach profile authority store")
+        let database = Box::pin(self.attach_registered(runtime, "attach profile authority store"))
             .await?;
         let lease = database.issue_lease().map_err(|error| {
             session_registry_error(
@@ -428,11 +429,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
-        let pin = self
-            .profile_authority_pin("mount profile session store")
-            .await?;
+        let pin = Box::pin(self.profile_authority_pin("mount profile session store")).await?;
         let runtime = hotpath::future!(
-            open_runtime(
+            Box::pin(open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
                 shard_id.clone(),
@@ -441,12 +440,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                 None,
                 true,
                 "mount profile session store",
-            ),
+            )),
             label = "daemon.store.profile_sessions.open"
         )
         .await?;
-        let database = self
-            .attach_registered(runtime, "mount profile session store")
+        let database = Box::pin(self.attach_registered(runtime, "mount profile session store"))
             .await?;
         let (database, lease) = self.publish_session_owner(
             database,
