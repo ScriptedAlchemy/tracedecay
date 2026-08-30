@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::errors::{Result, TraceDecayError};
+use crate::git_discovery::{
+    GitDiscoveryUnknown, GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
+};
 use crate::worktree;
 
 use super::{
@@ -24,7 +27,7 @@ pub fn matching_legacy_profile_layouts(
         profile_root,
         excluded_project_id,
         worktree::is_detached_linked_worktree,
-        worktree::git_repo_identity_outcome,
+        discover_repository_identity_cli_first,
     )
 }
 
@@ -37,7 +40,7 @@ fn matching_legacy_profile_layouts_with_git_identity_resolver<D, G>(
 ) -> Result<(Vec<StoreLayout>, bool, bool)>
 where
     D: FnMut(&Path) -> bool,
-    G: FnMut(&Path) -> worktree::GitRepoIdentityOutcome,
+    G: FnMut(&Path) -> GitRepositoryIdentityOutcome,
 {
     let projects_root = profile_root.join("projects");
     let Ok(entries) = fs::read_dir(&projects_root) else {
@@ -71,13 +74,17 @@ where
 
     let candidates_match_exact_root = !exact_manifests.is_empty();
     let matching_manifests = if exact_manifests.is_empty() {
-        let project_git_common_dir = (!is_detached_linked_worktree(project_root))
-            .then(|| match git_identity(project_root) {
-                worktree::GitRepoIdentityOutcome::Resolved(identity) => Some(identity.common_dir),
-                worktree::GitRepoIdentityOutcome::Unknown
-                | worktree::GitRepoIdentityOutcome::NotFound => None,
-            })
-            .flatten();
+        let project_git_common_dir = if is_detached_linked_worktree(project_root) {
+            None
+        } else {
+            match git_identity(project_root) {
+                GitRepositoryIdentityOutcome::Resolved(identity) => Some(identity.common_dir),
+                GitRepositoryIdentityOutcome::NotRepository => None,
+                GitRepositoryIdentityOutcome::Unknown(reason) => {
+                    return Err(unknown_git_identity(project_root, reason));
+                }
+            }
+        };
         let mut legacy_git_common_dirs = HashMap::<PathBuf, Option<PathBuf>>::new();
         non_exact_manifests
             .into_iter()
@@ -90,11 +97,14 @@ where
                                 .project_root
                                 .is_dir()
                                 .then(|| match git_identity(&manifest.project_root) {
-                                    worktree::GitRepoIdentityOutcome::Resolved(identity) => {
+                                    GitRepositoryIdentityOutcome::Resolved(identity) => {
                                         Some(identity.common_dir)
                                     }
-                                    worktree::GitRepoIdentityOutcome::Unknown
-                                    | worktree::GitRepoIdentityOutcome::NotFound => None,
+                                    GitRepositoryIdentityOutcome::NotRepository => None,
+                                    // Skip an unreadable sibling rather than
+                                    // adopting it. The current checkout's
+                                    // Unknown already failed closed above.
+                                    GitRepositoryIdentityOutcome::Unknown(_) => None,
                                 })
                                 .flatten()
                         })
@@ -167,6 +177,15 @@ fn same_local_path(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
+    }
+}
+
+fn unknown_git_identity(path: &Path, reason: GitDiscoveryUnknown) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "cannot adopt a legacy profile store for '{}': git repository identity is unknown ({reason})",
+            path.display()
+        ),
     }
 }
 

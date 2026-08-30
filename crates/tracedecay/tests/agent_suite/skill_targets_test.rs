@@ -10,6 +10,16 @@ use tracedecay_automation_runtime::automation::skill_targets::{
     install_managed_skills, remove_prompt_skill_index, remove_prompt_skill_index_for_target,
 };
 
+/// Temp root for a test. Also installs the production agent-hosts adapters
+/// into the automation-runtime host-config write surface — the same wiring
+/// the composition root performs at process start — because skill exports and
+/// prompt-index writes fail closed when the surface is unregistered.
+/// Idempotent, so every test entry point calls it.
+fn tempdir() -> tempfile::TempDir {
+    tracedecay_agent_hosts::register_automation_host_io();
+    tempfile::tempdir().unwrap()
+}
+
 fn draft(id: &str, title: &str) -> ManagedSkillDraft {
     ManagedSkillDraft {
         id: id.to_string(),
@@ -57,7 +67,7 @@ fn managed_skill_defaults_target_supported_hosts() {
 
 #[tokio::test]
 async fn native_overlay_exports_automatically_active_skills_and_prunes_generated_namespace() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("cursor-plugin");
 
@@ -156,7 +166,7 @@ async fn native_overlay_exports_automatically_active_skills_and_prunes_generated
 
 #[tokio::test]
 async fn codex_native_overlay_uses_agent_managed_namespace() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("codex-plugin");
 
@@ -184,7 +194,7 @@ async fn codex_native_overlay_uses_agent_managed_namespace() {
 
 #[tokio::test]
 async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("codex-plugin");
 
@@ -250,7 +260,7 @@ async fn native_overlay_sanitizes_legacy_native_frontmatter_without_blocking_pee
             "repo-hygiene-with-an-excessively-long-name-that-used-to-be-valid",
         ),
     ] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempdir();
         let profile_root = temp.path().join("profile");
         let plugin_root = temp.path().join("cursor-plugin");
 
@@ -303,7 +313,7 @@ async fn native_overlay_sanitizes_legacy_native_frontmatter_without_blocking_pee
 
 #[tokio::test]
 async fn exports_only_skills_targeted_to_requested_host() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let profile_root = temp.path().join("profile");
     let cursor_plugin = temp.path().join("cursor-plugin");
     let codex_plugin = temp.path().join("codex-plugin");
@@ -365,7 +375,7 @@ async fn exports_only_skills_targeted_to_requested_host() {
 
 #[tokio::test]
 async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let profile_root = temp.path().join("profile");
     let prompt_path = temp.path().join("AGENTS.md");
 
@@ -411,7 +421,7 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
 
 #[tokio::test]
 async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let profile_root = temp.path().join("profile");
     let prompt_path = temp.path().join("AGENTS.md");
 
@@ -450,7 +460,7 @@ async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
 
 #[test]
 fn uninstall_repairs_legacy_orphan_end_without_claiming_user_text() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let prompt_path = temp.path().join("AGENTS.md");
     let contents = concat!(
         "# User rules\n\nKeep before.\n\n",
@@ -476,7 +486,7 @@ fn uninstall_repairs_legacy_orphan_end_without_claiming_user_text() {
 
 #[test]
 fn prompt_index_start_only_remains_ambiguous_and_fails_closed() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let prompt_path = temp.path().join("AGENTS.md");
     let contents = concat!(
         "# User rules\n\n",
@@ -494,7 +504,7 @@ fn prompt_index_start_only_remains_ambiguous_and_fails_closed() {
 
 #[test]
 fn uninstall_all_removes_legacy_orphan_alongside_slugged_block() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let prompt_path = temp.path().join("AGENTS.md");
     let contents = concat!(
         "# User rules\n\nKeep before.\n\n",
@@ -523,7 +533,7 @@ fn uninstall_all_removes_legacy_orphan_alongside_slugged_block() {
 
 #[test]
 fn uninstall_all_removes_inverse_order_legacy_orphan_and_slugged_block() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let prompt_path = temp.path().join("AGENTS.md");
     let contents = concat!(
         "# User rules\n\nKeep before.\n\n",
@@ -550,7 +560,7 @@ fn uninstall_all_removes_inverse_order_legacy_orphan_and_slugged_block() {
 
 #[test]
 fn prompt_index_duplicate_balanced_blocks_fail_closed() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let prompt_path = temp.path().join("AGENTS.md");
     let block = concat!(
         "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
@@ -571,7 +581,7 @@ fn prompt_index_duplicate_balanced_blocks_fail_closed() {
 
 #[tokio::test]
 async fn prompt_index_keeps_separate_sections_for_shared_agents_md_hosts() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let profile_root = temp.path().join("profile");
     let agents_md = temp.path().join("AGENTS.md");
 
@@ -611,7 +621,7 @@ async fn uninstall_preserves_legacy_block_on_shared_file_mid_migration() {
     // third target (`agents`, which has no slugged block here) must NOT fall
     // back to deleting the legacy block, since another host's slugged block is
     // present the legacy block cannot be assumed to be ours.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let agents_md = temp.path().join("AGENTS.md");
     let contents = concat!(
         "# Shared prompt\n\n",
@@ -645,7 +655,7 @@ async fn uninstall_preserves_legacy_block_on_shared_file_mid_migration() {
 async fn uninstall_removes_own_slugged_block_on_shared_file() {
     // Uninstalling a target with its own slugged block removes only that block
     // and leaves the legacy block for a still-migrating host untouched.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let agents_md = temp.path().join("AGENTS.md");
     let contents = concat!(
         "# Shared prompt\n\n",
@@ -675,7 +685,7 @@ async fn uninstall_removes_own_slugged_block_on_shared_file() {
 async fn uninstall_removes_legacy_block_when_no_slugged_blocks_remain() {
     // When only a legacy unslugged block exists (no other host has migrated),
     // per-target uninstall may safely reclaim it.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let agents_md = temp.path().join("AGENTS.md");
     let contents = concat!(
         "# Shared prompt\n\n",
@@ -696,7 +706,7 @@ async fn uninstall_removes_legacy_block_when_no_slugged_blocks_remain() {
 
 #[tokio::test]
 async fn native_overlay_keeps_previous_export_when_rebuild_fails() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("cursor-plugin");
 
@@ -776,7 +786,7 @@ fn install_fake_cursor_plugin(home: &std::path::Path) -> std::path::PathBuf {
 
 #[tokio::test]
 async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let home = temp.path().join("home");
     let profile_root = home.join(".tracedecay");
     let claude_md = install_fake_claude(&home);
@@ -831,7 +841,7 @@ async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
 
 #[tokio::test]
 async fn lifecycle_export_sweep_isolates_per_agent_failures() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let home = temp.path().join("home");
     let profile_root = home.join(".tracedecay");
     let claude_md = install_fake_claude(&home);
@@ -874,7 +884,7 @@ async fn lifecycle_export_sweep_isolates_per_agent_failures() {
 
 #[tokio::test]
 async fn lifecycle_export_sweep_skips_agents_without_installs() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let home = temp.path().join("home");
     let profile_root = home.join(".tracedecay");
     std::fs::create_dir_all(&home).unwrap();
@@ -892,7 +902,7 @@ async fn lifecycle_export_sweep_skips_agents_without_installs() {
 
 #[tokio::test]
 async fn lifecycle_export_sweep_skips_non_default_profiles() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let home = temp.path().join("home");
     let profile_root = temp.path().join("test-profile/.tracedecay");
     let claude_md = install_fake_claude(&home);
@@ -908,7 +918,7 @@ async fn lifecycle_export_sweep_skips_non_default_profiles() {
 
 #[tokio::test]
 async fn local_lifecycle_export_skips_unrelated_project_configs() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let home = temp.path().join("home");
     let project_root = temp.path().join("project");
     let profile_root = home.join(".tracedecay");
@@ -996,7 +1006,7 @@ command = "other"
 
 #[tokio::test]
 async fn hermes_target_uses_native_plugin_overlay() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let profile_root = temp.path().join("profile");
     let prompt_path = temp.path().join("HERMES.md");
     let plugin_root = temp.path().join("plugin");

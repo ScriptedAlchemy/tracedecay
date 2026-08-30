@@ -102,7 +102,7 @@ impl TraceDecay {
                 // happens to touch the project last pin its canonical_root /
                 // display_root to a transient worktree path. Redirect registration
                 // to the primary checkout when one is detected and still exists.
-                let primary_root = tracedecay_runtime_core::project_registry::primary_checkout_root(
+                let primary_root = tracedecay_runtime_core::worktree::primary_checkout_root(
                     &self.project_root,
                     git_common_dir.as_deref(),
                 );

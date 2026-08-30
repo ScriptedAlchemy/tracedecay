@@ -25,7 +25,14 @@ const INSTALL_B: &str = "install-test-b";
 
 /// A canonicalized temp root: on macOS `/tmp` is a symlink to `/private/tmp`,
 /// so canonicalizing keeps materialized paths comparable to the profile paths.
+///
+/// Also installs the production agent-hosts adapters into the
+/// automation-runtime host-config write surface — the same wiring the
+/// composition root performs at process start — because materialization
+/// fails closed when the surface is unregistered. Idempotent, so every test
+/// entry point calls it.
 fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
+    tracedecay_agent_hosts::register_automation_host_io();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     (temp, root)

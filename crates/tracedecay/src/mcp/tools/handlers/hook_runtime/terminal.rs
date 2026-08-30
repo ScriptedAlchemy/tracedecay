@@ -30,7 +30,7 @@ pub(super) fn retain_codex_stop(
         .ok_or_else(|| config_error("daemon user session database is unavailable"))?;
     let profile_identity = session_authorities
         .profile_identity
-        .cloned()
+        .clone()
         .ok_or_else(|| config_error("daemon profile identity is unavailable"))?;
     let profile_registered = session_authorities
         .profile_registered
@@ -59,7 +59,7 @@ pub(super) fn retain_codex_stop(
                         "session_id": task_session_id,
                     });
                     let authorities = SessionAuthorities::new(None, Some(&user_sessions))
-                        .with_profile_identity(Some(&profile_identity))
+                        .with_profile_identity(Some(std::sync::Arc::clone(&profile_identity)))
                         .with_registered_databases(None, Some(&profile_registered));
                     let ingested = ingest_transcript_with_cancellation(
                         None,
