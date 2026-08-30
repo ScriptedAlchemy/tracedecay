@@ -37,7 +37,9 @@ impl NativeIntegrationStore for StatusStore {
         &self,
         _preview: tracedecay_domain::NativeIntegrationPreviewV1,
     ) -> NativeIntegrationStoreResult<()> {
-        Err(NativeIntegrationStoreError::Unavailable)
+        Err(NativeIntegrationStoreError::Unavailable(
+            "fixture store is unavailable".to_owned(),
+        ))
     }
 
     fn read_preview(
@@ -51,7 +53,9 @@ impl NativeIntegrationStore for StatusStore {
         &self,
         _record: NativeIntegrationRecordV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationBeginResultV1> {
-        Err(NativeIntegrationStoreError::Unavailable)
+        Err(NativeIntegrationStoreError::Unavailable(
+            "fixture store is unavailable".to_owned(),
+        ))
     }
 
     fn read_status(
@@ -102,7 +106,9 @@ impl NativeIntegrationStore for StatusStore {
         _expected_phase_revision: u64,
         _receipt: tracedecay_domain::NativeIntegrationReceiptV1,
     ) -> NativeIntegrationStoreResult<tracedecay_domain::NativeIntegrationReceiptV1> {
-        Err(NativeIntegrationStoreError::Unavailable)
+        Err(NativeIntegrationStoreError::Unavailable(
+            "fixture store is unavailable".to_owned(),
+        ))
     }
 
     fn pending_transactions(
@@ -124,14 +130,18 @@ impl NativeIntegrationStore for StatusStore {
         _repository_id: &RepositoryId,
         _transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<()> {
-        Err(NativeIntegrationStoreError::Unavailable)
+        Err(NativeIntegrationStoreError::Unavailable(
+            "fixture store is unavailable".to_owned(),
+        ))
     }
 
     fn begin_worktree_cleanup(
         &self,
         _transaction: tracedecay_domain::NativeWorktreeCleanupTransactionV1,
     ) -> NativeIntegrationStoreResult<tracedecay_store::NativeWorktreeCleanupBeginResultV1> {
-        Err(NativeIntegrationStoreError::Unavailable)
+        Err(NativeIntegrationStoreError::Unavailable(
+            "fixture store is unavailable".to_owned(),
+        ))
     }
 
     fn read_worktree_cleanup(
@@ -148,7 +158,9 @@ impl NativeIntegrationStore for StatusStore {
         _expected_phase_revision: u64,
         _replacement: tracedecay_domain::NativeWorktreeCleanupTransactionV1,
     ) -> NativeIntegrationStoreResult<tracedecay_domain::NativeWorktreeCleanupTransactionV1> {
-        Err(NativeIntegrationStoreError::Unavailable)
+        Err(NativeIntegrationStoreError::Unavailable(
+            "fixture store is unavailable".to_owned(),
+        ))
     }
 
     fn write_worktree_cleanup_terminal(
@@ -157,7 +169,9 @@ impl NativeIntegrationStore for StatusStore {
         _expected_phase_revision: u64,
         _receipt: tracedecay_domain::NativeWorktreeCleanupReceiptV1,
     ) -> NativeIntegrationStoreResult<tracedecay_domain::NativeWorktreeCleanupReceiptV1> {
-        Err(NativeIntegrationStoreError::Unavailable)
+        Err(NativeIntegrationStoreError::Unavailable(
+            "fixture store is unavailable".to_owned(),
+        ))
     }
 }
 

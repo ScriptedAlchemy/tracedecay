@@ -55,7 +55,7 @@ impl SessionScopeAuthorizer for DaemonSessionRefreshAuthorizer<'_> {
 
 #[derive(Clone)]
 struct DaemonSessionRefreshWake(
-    crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+    std::sync::Arc<dyn tracedecay_application::SessionTemporalRefreshWakePort>,
 );
 
 impl SessionRefreshSchedulerPort for DaemonSessionRefreshWake {
@@ -83,7 +83,7 @@ enum SessionRefreshHandleLookup {
 impl DaemonSessionRefreshService {
     pub(crate) fn new(
         database: RegisteredGlobalDbLeaseV1,
-        wake: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+        wake: std::sync::Arc<dyn tracedecay_application::SessionTemporalRefreshWakePort>,
         expected_project_id: Option<String>,
     ) -> Self {
         Self {

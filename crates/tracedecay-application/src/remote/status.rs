@@ -123,6 +123,23 @@ pub enum RemoteOperationalStatusReadV1 {
     Unavailable,
 }
 
+/// Named read of the mounted Remote Brain operational plane.
+///
+/// Absence of an implementor is [`RemoteOperationalStatusReadV1::Unavailable`],
+/// never an empty success.
+pub trait RemoteOperationalStatusReadPort: Send + Sync {
+    fn read(&self) -> RemoteOperationalStatusReadV1;
+}
+
+impl<F> RemoteOperationalStatusReadPort for F
+where
+    F: Fn() -> RemoteOperationalStatusReadV1 + Send + Sync,
+{
+    fn read(&self) -> RemoteOperationalStatusReadV1 {
+        self()
+    }
+}
+
 impl RemoteOperationalStatusReadV1 {
     /// Projects the Doctor operational read from the same observation, so the
     /// Doctor plane and the richer operator surfaces cannot disagree.

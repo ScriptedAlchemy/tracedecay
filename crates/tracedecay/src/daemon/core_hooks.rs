@@ -79,7 +79,7 @@ async fn notify_hook_event_to_connection(
     let Ok(stream) = BrokerStream::connect(&connection.endpoint).await else {
         return HookEventNotifyOutcomeV1::Unavailable;
     };
-    let (_reader, mut writer) = stream.into_split();
+    let (_reader, mut writer) = stream.into_owned_split();
     if write_daemon_preamble(&mut writer, &connection, &handshake)
         .await
         .is_err()

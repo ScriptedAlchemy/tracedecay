@@ -39,6 +39,10 @@ mod profile_registry_test_support;
 mod session_test_support;
 mod verified_graph_test_support;
 
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub(crate) use verified_graph_test_support::await_bound_graph_runtime;
+
 #[doc(hidden)]
 pub use lcm_fixture_test_support::{
     LcmExternalPayloadManifestTestRecord, LcmLineageCountsForTest, LcmLineageFaultForTest,
@@ -858,7 +862,7 @@ impl HostAdmissionTestRuntimeV1 {
                     Some(profile_sessions),
                 );
         context.profile_root = Some(profile_root);
-        context.profile_identity = Some(profile_identity);
+        context.profile_identity = Some(std::sync::Arc::new(profile_identity));
         context.host_admission_test_runtime = Some(self);
         Ok(context)
     }

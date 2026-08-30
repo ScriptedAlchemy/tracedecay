@@ -683,8 +683,10 @@ mod tests {
         envelopes: &[HookEventEnvelopeV2],
         now: UtcMicros,
     ) {
+        // Do not pre-create the spool root: `HookSpoolV1::open` creates it
+        // owner-private itself, while a fixture-made directory would carry
+        // umask-default permissions and trip the fail-closed validation.
         let root = hook_v2_spool_root(data_root, HOST);
-        std::fs::create_dir_all(&root).unwrap();
         let (mut spool, _) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(HOST), now).unwrap();
         for envelope in envelopes {
             spool.append(envelope.clone(), binding, now).unwrap();
@@ -841,8 +843,10 @@ mod tests {
         let current = UtcMicros(10);
         let binding = binding(7);
         publish_binding(data_root.path(), &binding, current);
+        // `HookSpoolV1::open` creates the spool root owner-private itself;
+        // pre-creating it here would leave umask-default permissions that the
+        // fail-closed private-directory validation rejects.
         let spool_root = hook_v2_spool_root(data_root.path(), HOST);
-        std::fs::create_dir_all(&spool_root).unwrap();
         {
             let (mut spool, _) =
                 HookSpoolV1::open(&spool_root, HookSpoolConfigV1::stock(HOST), current).unwrap();

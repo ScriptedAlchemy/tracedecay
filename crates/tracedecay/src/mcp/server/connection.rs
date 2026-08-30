@@ -659,7 +659,7 @@ impl McpServer {
         self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
         timings_enabled: bool,
-        lifecycle: &crate::daemon::DaemonLifecycle,
+        lifecycle: &dyn tracedecay_mcp::McpConnectionLifecyclePort,
     ) -> Result<()> {
         self.run_with_shutdown_policy(
             transport,
@@ -678,7 +678,7 @@ impl McpServer {
         shutdown_on_exit: bool,
         listen_for_process_signals: bool,
         timings_override: Option<bool>,
-        request_lifecycle: Option<&crate::daemon::DaemonLifecycle>,
+        request_lifecycle: Option<&dyn tracedecay_mcp::McpConnectionLifecyclePort>,
     ) -> Result<()> {
         // Register the SIGTERM listener once before entering the loop so
         // there is no window between iterations where a SIGTERM is delivered
@@ -761,7 +761,7 @@ impl McpServer {
                 Some((id, tool_name))
             });
             let request_activity =
-                request_lifecycle.and_then(crate::daemon::DaemonLifecycle::try_enter);
+                request_lifecycle.and_then(tracedecay_mcp::McpConnectionLifecyclePort::try_enter);
             let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
             let mut peer_closed = false;
 
