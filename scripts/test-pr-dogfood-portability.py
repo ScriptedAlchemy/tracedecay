@@ -171,6 +171,69 @@ class PortableProcessTests(unittest.TestCase):
         self.assertEqual(resolved.returncode, 0)
         self.assertEqual(Path(resolved.stdout.strip()), HELPER.resolve())
 
+    def test_group_probes_ignore_an_unreaped_zombie_leader(self) -> None:
+        holder_source = textwrap.dedent(
+            """
+            import subprocess, sys, time
+            from pathlib import Path
+
+            leader = subprocess.Popen(
+                [sys.executable, "-S", "-c", "raise SystemExit(0)"],
+                start_new_session=True,
+            )
+            stat = Path(f"/proc/{leader.pid}/stat")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if stat.is_file():
+                    try:
+                        state = stat.read_text().rsplit(")", 1)[1].split()[0]
+                    except (OSError, IndexError):
+                        state = ""
+                    if state == "Z":
+                        break
+                    time.sleep(0.01)
+                else:
+                    # Non-Linux: give the leader a moment to finish exiting.
+                    time.sleep(0.5)
+                    break
+            print(leader.pid, flush=True)
+            # Hold the zombie: this parent never reaps; it exits when killed.
+            time.sleep(30)
+            """
+        )
+        holder = subprocess.Popen(
+            [sys.executable, "-S", "-c", holder_source],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert holder.stdout is not None
+            leader_pid = int(holder.stdout.readline())
+            alive = helper("group-alive", "--pid", str(leader_pid))
+            self.assertEqual(
+                alive.returncode,
+                1,
+                "an unreaped zombie leader must not count as a live group",
+            )
+            started = time.monotonic()
+            stopped = helper(
+                "stop-group", "--pid", str(leader_pid), "--grace", "5"
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(
+                stopped.returncode,
+                0,
+                "a fully exited group must stop gracefully, not forced",
+            )
+            self.assertLess(
+                elapsed,
+                4,
+                "stopping a fully exited group must not consume the grace period",
+            )
+        finally:
+            holder.kill()
+            holder.wait()
+
     def test_missing_command_has_bounded_error_output(self) -> None:
         completed = helper(
             "run",
@@ -550,8 +613,13 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
             )
             self.assertNotEqual(completed.returncode, 0)
             self.assertLess(time.monotonic() - started, 3)
+            # Probe cadence inside a wall-clock deadline depends on runner
+            # speed, so this test owns only the bounded failure and the
+            # surfaced last reason; the retry-until-ready cadence is proven
+            # deterministically by
+            # test_run_mode_polls_until_strict_readiness_then_validates_journey.
             self.assertGreaterEqual(
-                int(status_counter.read_text(encoding="utf-8").strip()), 2
+                int(status_counter.read_text(encoding="utf-8").strip()), 1
             )
             self.assertIn("exact_scope_generation_not_ready", completed.stderr)
             self.assertNotIn("Traceback", completed.stderr)
