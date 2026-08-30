@@ -335,10 +335,12 @@ fn fold_availability(
 #[cfg(test)]
 pub(super) fn fixture_context_scout_evidence() -> ContextScoutEvidenceEnvelopeV1 {
     use tracedecay_application::{
-        CoverageDomainState, EvidenceDomain, FreshnessState, PolicyDecisionRef,
+        CoverageDomainState, DisclosureClass, EvidenceCoverage, EvidenceDomain, FreshnessState,
+        PolicyDecisionRef, TemporalState,
     };
     use tracedecay_domain::{
-        CommitId, ComponentVersion, ProjectId, RefId, RepositoryId, TemporalModeV1, WorktreeId,
+        CommitId, ComponentVersion, ManifestDigest, ProjectId, RefId, RepositoryId, TemporalModeV1,
+        WorktreeId,
     };
 
     fn id<T>(value: &str) -> T
