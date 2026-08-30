@@ -206,16 +206,17 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
 
 #[test]
 fn daemon_project_route_rejects_the_user_profile_root() {
-    let _env_lock = crate::config::lock_user_data_dir_test_env();
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
-        return;
-    };
+    // Portable production path: `project_route_for_handshake` is the Windows
+    // and Unix authority. `DaemonEngine::project_route` is only a unix wrapper
+    // around it and must not be referenced from this un-gated contract test.
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
     let handshake = DaemonHandshake {
         project_path: Some(home),
         ..test_handshake_defaults()
     };
 
-    let error = DaemonEngine::project_route(&handshake)
+    let error = super::super::project_route_for_handshake(&handshake)
         .expect_err("ambient home route must fail before project open");
 
     assert!(error.to_string().contains("ambient user/filesystem root"));
