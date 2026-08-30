@@ -4981,13 +4981,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
-    fn reconcile_retained_text_generation(
-        &mut self,
-        metadata: &VerifiedSealedTextGenerationMetadataV1,
-    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        self.reconcile_retained_text_generation_with(metadata, true)
-    }
-
     fn reconcile_retained_text_generation_with(
         &mut self,
         metadata: &VerifiedSealedTextGenerationMetadataV1,
