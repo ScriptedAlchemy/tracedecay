@@ -61,7 +61,11 @@ impl ContractFixture {
         ]
     }
 
-    async fn mount_unbound(
+    /// Mounts the project memory database (waiting for its graph runtime to
+    /// activate) and then the project sessions database. The registry binds
+    /// the activated memory graph to the live session lease during this
+    /// mount; no caller-side bind choreography is required.
+    async fn mount_project(
         &self,
         project_id: &ProjectId,
     ) -> (
@@ -91,23 +95,6 @@ impl ContractFixture {
         (project_database, sessions)
     }
 
-    async fn bind(
-        &self,
-        project_id: &ProjectId,
-    ) -> (
-        Arc<tracedecay_runtime_core::db::Database>,
-        RegisteredGlobalDbLeaseV1,
-    ) {
-        let (project_database, sessions) = self.mount_unbound(project_id).await;
-        let runtime = project_database
-            .memory_graph_runtime()
-            .expect("database-issued weak graph proxy");
-        assert!(
-            sessions.bind_project_graph_runtime(runtime).is_ok(),
-            "bind project graph proxy once"
-        );
-        (project_database, sessions)
-    }
 }
 
 fn project_id(label: &str) -> ProjectId {
@@ -226,23 +213,52 @@ fn snapshot_through_database(
     snapshot_through_trait(operation.runtime(), projection)
 }
 
+/// Mounting installs the project graph binding: the registry binds the
+/// activated memory graph to the live session lease during mount and on late
+/// attachment, and daemon composition unconditionally binds the
+/// deferred-activation route. Whichever route arrives first wins the single
+/// binding cell, so every later rebind of the same runtime — resolved or
+/// deferred — must stay an idempotent no-op instead of a conflict, and the
+/// installed route must actually resolve to the mounted runtime rather than
+/// merely exist.
 #[tokio::test]
-async fn runtime_binding_is_absent_before_bind_and_rebinds_idempotently() {
+async fn mount_installs_the_project_graph_binding_and_rebinds_stay_idempotent() {
     let fixture = ContractFixture::new("binding").await;
     let project_id = project_id("binding");
-    let (project_database, sessions) = fixture.mount_unbound(&project_id).await;
-    assert!(sessions.project_graph_runtime().is_none());
+    let (project_database, sessions) = fixture.mount_project(&project_id).await;
 
-    let runtime = project_database
+    let resolved = project_database
         .memory_graph_runtime()
         .expect("database-issued weak graph proxy");
+    let bound = sessions
+        .project_graph_runtime()
+        .expect("mount binds the project graph to the live session lease");
+    assert_eq!(
+        bound.relational_binding(),
+        project_database.registered_binding()
+    );
+    assert_eq!(
+        bound.relational_verified_locator(),
+        project_database.registered_verified_locator()
+    );
+    assert!(bound.shares_runtime_with(&resolved));
+    // The installed route reaches the activated runtime: a never-published
+    // projection answers the typed empty start, not the deferred route's
+    // pre-activation unavailability.
+    assert!(matches!(
+        snapshot_through_trait(bound, &projection("binding")),
+        Ok(None)
+    ));
+
     assert!(
-        sessions.bind_project_graph_runtime(runtime.clone()).is_ok(),
-        "first graph proxy binding"
+        sessions.bind_project_graph_runtime(resolved.clone()).is_ok(),
+        "rebinding the resolved route of the bound runtime is idempotent"
     );
     assert!(
-        sessions.bind_project_graph_runtime(runtime.clone()).is_ok(),
-        "binding the exact same graph proxy is idempotent"
+        sessions
+            .bind_project_graph_runtime(project_database.deferred_memory_graph_runtime())
+            .is_ok(),
+        "rebinding the deferred-activation route of the bound runtime is idempotent"
     );
 
     let first = mounted_graph_operation(&project_database);
@@ -257,13 +273,14 @@ async fn runtime_binding_is_absent_before_bind_and_rebinds_idempotently() {
             project_database.registered_verified_locator()
         );
     }
-    let bound = sessions
+    let retained = sessions
         .project_graph_runtime()
         .expect("bound graph proxy remains available");
-    assert_eq!(bound.relational_binding(), runtime.relational_binding());
+    assert!(retained.shares_runtime_with(&resolved));
+    assert_eq!(retained.relational_binding(), resolved.relational_binding());
     assert_eq!(
-        bound.relational_verified_locator(),
-        runtime.relational_verified_locator()
+        retained.relational_verified_locator(),
+        resolved.relational_verified_locator()
     );
 }
 
@@ -272,8 +289,8 @@ async fn memory_graph_operations_remain_isolated_by_exact_relational_identity() 
     let fixture = ContractFixture::new("memory-binding").await;
     let first_id = project_id("memory-binding-first");
     let second_id = project_id("memory-binding-second");
-    let (first_database, first_sessions) = fixture.mount_unbound(&first_id).await;
-    let (second_database, _) = fixture.mount_unbound(&second_id).await;
+    let (first_database, first_sessions) = fixture.mount_project(&first_id).await;
+    let (second_database, _) = fixture.mount_project(&second_id).await;
     let first = mounted_graph_operation(&first_database);
     let second = mounted_graph_operation(&second_database);
     assert_ne!(
@@ -328,7 +345,7 @@ async fn memory_graph_operations_remain_isolated_by_exact_relational_identity() 
 async fn read_only_memory_database_rejects_a_writer_graph_runtime() {
     let fixture = ContractFixture::new("read-only-binding").await;
     let project_id = project_id("read-only-binding");
-    let (database, _sessions) = fixture.bind(&project_id).await;
+    let (database, _sessions) = fixture.mount_project(&project_id).await;
     let projection = projection("read-only-binding");
     let manifest = manifest(&projection, "read-only-binding", "1");
     let initial = publish_through_database(&database, &manifest, key("read-only-binding"), false)
@@ -354,7 +371,7 @@ async fn read_only_memory_database_rejects_a_writer_graph_runtime() {
 async fn bound_verified_port_does_not_retain_the_database_facade() {
     let fixture = ContractFixture::new("no-database-cycle").await;
     let project_id = project_id("no-database-cycle");
-    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (database, _sessions) = fixture.mount_project(&project_id).await;
     let weak_database = Arc::downgrade(&database);
     {
         let operation = mounted_graph_operation(&database);
@@ -381,7 +398,7 @@ async fn bound_verified_port_does_not_retain_the_database_facade() {
 async fn publish_denies_pre_cancel_without_consuming_the_publication() {
     let fixture = ContractFixture::new("pre-cancel").await;
     let project_id = project_id("pre-cancel");
-    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (database, _sessions) = fixture.mount_project(&project_id).await;
     let projection = projection("pre-cancel");
     let manifest = manifest(&projection, "pre-cancel", "1");
     assert!(matches!(
@@ -397,7 +414,7 @@ async fn publish_denies_pre_cancel_without_consuming_the_publication() {
 async fn exact_publication_replay_returns_the_same_verified_head() {
     let fixture = ContractFixture::new("exact-replay").await;
     let project_id = project_id("exact-replay");
-    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (database, _sessions) = fixture.mount_project(&project_id).await;
     let projection = projection("exact-replay");
     let initial_manifest = manifest(&projection, "exact-replay", "1");
     let first = reconcile_through_database(&database, &initial_manifest, key("exact-replay"))
@@ -423,7 +440,7 @@ async fn exact_publication_replay_returns_the_same_verified_head() {
 async fn stale_republication_conflicts_after_a_new_head_wins() {
     let fixture = ContractFixture::new("stale-republication").await;
     let project_id = project_id("stale-republication");
-    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (database, _sessions) = fixture.mount_project(&project_id).await;
     let projection = projection("stale-republication");
     let first = manifest(&projection, "stale-first", "1");
     let second = manifest(&projection, "stale-second", "2");
@@ -448,7 +465,7 @@ async fn stale_republication_conflicts_after_a_new_head_wins() {
 async fn first_publish_of_a_fresh_projection_installs_the_verified_head() {
     let fixture = ContractFixture::new("first-publish").await;
     let project_id = project_id("first-publish");
-    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (database, _sessions) = fixture.mount_project(&project_id).await;
     let projection = projection("first-publish");
     let manifest = manifest(&projection, "first-publish", "1");
     let published = publish_through_database(&database, &manifest, key("first-publish"), false)
@@ -469,7 +486,7 @@ async fn first_publish_of_a_fresh_projection_installs_the_verified_head() {
 async fn never_published_projection_is_a_typed_empty_snapshot() {
     let fixture = ContractFixture::new("missing-projection").await;
     let project_id = project_id("missing-projection");
-    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (database, _sessions) = fixture.mount_project(&project_id).await;
 
     assert!(matches!(
         snapshot_through_database(&database, &projection("never-published")),
@@ -482,8 +499,8 @@ async fn project_graph_publications_are_isolated_by_project_shard() {
     let fixture = ContractFixture::new("project-isolation").await;
     let first_id = project_id("isolation-first");
     let second_id = project_id("isolation-second");
-    let (first_database, _first_sessions) = fixture.mount_unbound(&first_id).await;
-    let (second_database, _second_sessions) = fixture.mount_unbound(&second_id).await;
+    let (first_database, _first_sessions) = fixture.mount_project(&first_id).await;
+    let (second_database, _second_sessions) = fixture.mount_project(&second_id).await;
     let projection = projection("project-isolation");
     let manifest = manifest(&projection, "project-isolation", "1");
 
@@ -503,8 +520,8 @@ async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
     let fixture = ContractFixture::new("exact-shard-retirement").await;
     let first_id = project_id("retire-first");
     let second_id = project_id("retire-second");
-    let (first_database, first_sessions) = fixture.mount_unbound(&first_id).await;
-    let (second_database, _second_sessions) = fixture.mount_unbound(&second_id).await;
+    let (first_database, first_sessions) = fixture.mount_project(&first_id).await;
+    let (second_database, _second_sessions) = fixture.mount_project(&second_id).await;
     let first_projection = projection("retire-first");
     let second_projection = projection("retire-second");
     let first_manifest = manifest(&first_projection, "retire-first", "1");
@@ -552,7 +569,7 @@ async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
 async fn exact_shard_retirement_closes_retained_graph_after_root_is_absent() {
     let fixture = ContractFixture::new("absent-root-retirement").await;
     let project_id = project_id("absent-root-retirement");
-    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (database, _sessions) = fixture.mount_project(&project_id).await;
     let shard = database.registered_binding().shard_id.clone();
     let graph_manifest = manifest(
         &projection("absent-root-retirement"),
@@ -582,7 +599,7 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
         .install_session_sync_service(&session_sync)
         .expect("install session sync lifecycle authority");
     let project_id = project_id("session-relation-close-retry");
-    let (_project_database, external_old_sessions) = fixture.mount_unbound(&project_id).await;
+    let (_project_database, external_old_sessions) = fixture.mount_project(&project_id).await;
     let old_binding = external_old_sessions.binding().clone();
 
     let refusal = fixture
@@ -647,7 +664,7 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
 async fn linked_worktree_roots_share_the_project_graph_runtime_authority() {
     let fixture = ContractFixture::new("linked-worktrees").await;
     let project_id = project_id("linked-worktrees");
-    let (project_database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (project_database, _sessions) = fixture.mount_project(&project_id).await;
     let projection = projection("linked-worktrees");
     let manifest = manifest(&projection, "linked-worktrees", "1");
 
@@ -781,7 +798,7 @@ impl RuntimeRequestProbeV1 for NeverInterruptedProbe {
 async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
     let fixture = ContractFixture::new("resume-journaled").await;
     let project_id = project_id("resume-journaled");
-    let (project_database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (project_database, _sessions) = fixture.mount_project(&project_id).await;
     let projection = projection("resume-journaled");
     let initial_manifest = manifest(&projection, "resume-journaled", "1");
 
@@ -875,7 +892,7 @@ async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
 async fn orphaned_pending_replay_is_completed_by_the_next_generations_publication() {
     let fixture = ContractFixture::new("complete-orphan").await;
     let project_id = project_id("complete-orphan");
-    let (project_database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (project_database, _sessions) = fixture.mount_project(&project_id).await;
     let projection = projection("complete-orphan");
     let orphan_manifest = manifest(&projection, "orphan", "1");
 
@@ -956,7 +973,7 @@ async fn orphaned_pending_replay_is_completed_by_the_next_generations_publicatio
 async fn registry_drop_cancels_retained_trait_runtime_operations() {
     let fixture = ContractFixture::new("lifecycle-cancellation").await;
     let project_id = project_id("lifecycle-cancellation");
-    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let (database, _sessions) = fixture.mount_project(&project_id).await;
     let projection = projection("lifecycle-cancellation");
     let manifest = manifest(&projection, "lifecycle-cancellation", "1");
     let operation = mounted_graph_operation(&database);

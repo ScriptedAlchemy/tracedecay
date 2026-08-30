@@ -42,7 +42,7 @@ async fn publish_foreign_memory_owner(
 async fn writable_project_and_profile_mounts_bind_exact_relational_authority() {
     let fixture = ContractFixture::new("exact-mount-identity").await;
     let project_id = project_id("exact-mount-identity");
-    let (project_database, _) = fixture.mount_unbound(&project_id).await;
+    let (project_database, _) = fixture.mount_project(&project_id).await;
     let project_operation = project_database
         .issue_memory_graph_runtime_operation()
         .expect("project memory graph operation");
@@ -84,7 +84,7 @@ async fn writable_project_and_profile_mounts_bind_exact_relational_authority() {
 async fn unbound_profile_memory_denies_graph_operations() {
     let fixture = ContractFixture::new("reverse-scope-binding").await;
     let project_id = project_id("reverse-scope-binding");
-    let (_project_database, _) = fixture.mount_unbound(&project_id).await;
+    let (_project_database, _) = fixture.mount_project(&project_id).await;
     let profile_shard = StoreShardIdV1::profile_memory(
         fixture.registry.identity.brain_id().clone(),
         fixture.registry.identity.profile_id().clone(),
@@ -129,7 +129,7 @@ async fn unbound_profile_memory_denies_graph_operations() {
 async fn retained_memory_runtime_rejects_foreign_brain_and_profile_scopes() {
     let fixture = ContractFixture::new("foreign-profile-scope").await;
     let project_id = project_id("foreign-profile-scope");
-    let (database, _) = fixture.mount_unbound(&project_id).await;
+    let (database, _) = fixture.mount_project(&project_id).await;
     let shard = &database.registered_binding().shard_id;
     let foreign_brain = StoreShardIdV1::project(
         BrainId::new("brain.foreign-graph-scope").expect("foreign brain"),
