@@ -5949,7 +5949,6 @@ dependencies = [
  "walkdir",
  "windows 0.62.2",
  "zeroize",
- "zip",
 ]
 
 [[package]]
@@ -6156,6 +6155,7 @@ dependencies = [
  "ureq",
  "url",
  "xattr",
+ "zip",
 ]
 
 [[package]]
@@ -6277,6 +6277,7 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "hotpath",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

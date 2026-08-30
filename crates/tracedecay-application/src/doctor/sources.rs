@@ -68,6 +68,35 @@ fn source_finding(
     )
 }
 
+/// Fit a source-provided statement into the coverage-statement contract:
+/// bounded at 512 bytes on a character boundary, control characters replaced,
+/// surrounding whitespace trimmed. Truncation is marked so a shortened reason
+/// is never mistaken for the complete one.
+fn bounded_statement(statement: &str) -> String {
+    const STATEMENT_LIMIT_BYTES: usize = 512;
+    const TRUNCATION_MARK: &str = "…";
+    let sanitized = statement
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim();
+    if sanitized.len() <= STATEMENT_LIMIT_BYTES {
+        return sanitized.to_owned();
+    }
+    let budget = STATEMENT_LIMIT_BYTES - TRUNCATION_MARK.len();
+    let mut cut = budget;
+    while cut > 0 && !sanitized.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}{TRUNCATION_MARK}", sanitized[..cut].trim_end())
+}
+
 /// Build an honest non-healthy finding for an unobservable source read.
 fn unobservable_finding(
     family: DoctorFindingFamilyV1,
@@ -1013,6 +1042,14 @@ pub enum CodeIndexMountReadV1 {
         state: CodeIndexMountStateV1,
         coverage: DoctorCoverageCompletenessV1,
     },
+    /// Background convergence is parked on a deterministic contract violation
+    /// that unchanged input reproduces (for example a store path that is not
+    /// owner-private). The reason names the exact violation and remediation;
+    /// convergence re-checks on every wake once the violation is removed.
+    Parked {
+        reason: String,
+        coverage: DoctorCoverageCompletenessV1,
+    },
     /// Index mount inspection is unsupported on this build/platform.
     Unsupported,
     /// No index is present to inspect.
@@ -1066,6 +1103,15 @@ pub fn code_index_finding(
                 "mounted code index is incompatible with the current schema",
             ),
         },
+        CodeIndexMountReadV1::Parked { reason, coverage } => source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "code-index.mount.parked",
+            *coverage,
+            &bounded_statement(&format!(
+                "code index background convergence is parked: {reason}"
+            )),
+        ),
         CodeIndexMountReadV1::Unsupported => unobservable_finding(
             family,
             DoctorEvidenceStateV1::Unsupported,
@@ -1601,6 +1647,37 @@ mod tests {
         })
         .expect("finding");
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+    }
+
+    #[test]
+    fn code_index_parked_names_the_violation_typed() {
+        let finding = code_index_finding(&CodeIndexMountReadV1::Parked {
+            reason: "code text artifacts root is not owner-private (mode 775, need 700)".to_owned(),
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "code-index.mount.parked"
+        );
+        assert!(
+            finding
+                .coverage()
+                .statement()
+                .contains("not owner-private (mode 775, need 700)")
+        );
+    }
+
+    #[test]
+    fn code_index_parked_statement_is_bounded_for_oversized_reasons() {
+        let finding = code_index_finding(&CodeIndexMountReadV1::Parked {
+            reason: "x".repeat(1000),
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert!(finding.coverage().statement().len() <= 512);
+        assert!(finding.coverage().statement().ends_with('…'));
     }
 
     #[test]

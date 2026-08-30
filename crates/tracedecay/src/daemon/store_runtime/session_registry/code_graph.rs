@@ -4,15 +4,13 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use tracedecay_domain::{
-    CodeGenerationId, RefId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
-};
+use tracedecay_domain::{CodeGenerationId, RefId, RepositoryId, WorktreeId, canonical_sha256};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1,
     GraphDbRegistration, GraphGenerationDependency, GraphGenerationManifest, GraphIdempotencyKey,
-    GraphProjectionIdentity, GraphProjectorRevision, GraphReplayCollectionOutcome, GraphWriteBatch,
-    SealedCodeGenerationReplay, VerifiedGenerationBatchCommit, VerifiedGraphCommit,
-    VerifiedGraphSnapshot,
+    GraphProjectionIdentity, GraphProjectorRevision, GraphPublicationPreparationV1,
+    GraphReplayCollectionOutcome, GraphWriteBatch, SealedCodeGenerationReplay,
+    VerifiedGenerationBatchCommit, VerifiedGraphCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey,
@@ -245,6 +243,106 @@ fn graph_lifecycle_cancellation(
     })
 }
 
+/// Per-shard table of publication keys with a sealed publish in flight.
+///
+/// The seat pass and the background reconcile publish the same sealed
+/// generation; without this, both would run the corpus-sized prepare —
+/// native staging, the sealed-store build, the digest proof — and interleave
+/// staging pages in one physical namespace. A publisher that finds its key in
+/// flight waits for the winner and then resumes through the idempotent
+/// historical arm inside prepare. Publishers of different keys proceed
+/// independently, and no read or serving path ever touches this table.
+pub(crate) struct CodeGraphPublicationFlightV1 {
+    in_flight: Mutex<std::collections::BTreeSet<GraphPublicationKeyV1>>,
+    settled: std::sync::Condvar,
+}
+
+impl Default for CodeGraphPublicationFlightV1 {
+    fn default() -> Self {
+        Self {
+            in_flight: Mutex::new(std::collections::BTreeSet::new()),
+            settled: std::sync::Condvar::new(),
+        }
+    }
+}
+
+/// RAII flight claim for one publication key; dropping it wakes every waiter.
+pub(crate) struct CodeGraphPublicationFlightClaimV1<'a> {
+    flight: &'a CodeGraphPublicationFlightV1,
+    key: GraphPublicationKeyV1,
+}
+
+impl Drop for CodeGraphPublicationFlightClaimV1<'_> {
+    fn drop(&mut self) {
+        let mut in_flight = self
+            .flight
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        in_flight.remove(&self.key);
+        drop(in_flight);
+        self.flight.settled.notify_all();
+    }
+}
+
+/// How long one flight-table wait sleeps between interruption polls. The
+/// condvar wakes waiters the moment the winner settles; the timeout exists
+/// only so a cancelled or expired request answers its typed interruption
+/// instead of sleeping out a corpus-sized peer publish.
+const PUBLICATION_FLIGHT_INTERRUPTION_POLL: Duration = Duration::from_millis(250);
+
+impl CodeGraphPublicationFlightV1 {
+    /// Claims `key`, waiting out a same-key publish already in flight.
+    ///
+    /// The wait is where a twin publisher parks instead of duplicating the
+    /// prepare; it observes `interruption` so cancellation and deadlines stay
+    /// typed. Waiting happens with no other publication lock held.
+    fn claim<'a>(
+        &'a self,
+        key: &GraphPublicationKeyV1,
+        interruption: &dyn Fn() -> std::result::Result<(), GraphDbError>,
+    ) -> std::result::Result<CodeGraphPublicationFlightClaimV1<'a>, GraphDbError> {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while in_flight.contains(key) {
+            interruption()?;
+            let (guard, _timed_out) = hotpath::measure_block!(
+                "daemon.session_registry.publish_snapshot.peer_wait",
+                self.settled
+                    .wait_timeout(in_flight, PUBLICATION_FLIGHT_INTERRUPTION_POLL)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            );
+            in_flight = guard;
+        }
+        interruption()?;
+        in_flight.insert(key.clone());
+        Ok(CodeGraphPublicationFlightClaimV1 {
+            flight: self,
+            key: key.clone(),
+        })
+    }
+}
+
+/// The registry-owned per-code-shard publication locks.
+///
+/// `gate` is the serving gate: a leaf lock held only across the short
+/// storage-ordered slices of a publication — manifest-provider bind plus
+/// journal classification, each replay append, and the verified-head
+/// CAS-plus-install swap. The corpus-sized work (native staging, the
+/// sealed-store build, digest proofs, boot-from-sealed recovery) runs with no
+/// gate held. `flight` dedupes same-key publishers; see
+/// [`CodeGraphPublicationFlightV1`].
+///
+/// Lock order is `replay-pool file lock -> flight -> gate`; the gate acquires
+/// nothing while held.
+#[derive(Default)]
+pub(crate) struct CodeGraphShardPublicationLocksV1 {
+    gate: Mutex<()>,
+    flight: CodeGraphPublicationFlightV1,
+}
+
 pub(crate) struct RetainedCodeGraphRuntimeV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     graph_manifest_provider: Arc<super::code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
@@ -259,9 +357,9 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     replay_root: std::path::PathBuf,
     sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest,
     lifecycle_cancelled: Arc<AtomicBool>,
-    /// Registry-owned per-shard gate; see
+    /// Registry-owned per-shard publication locks; see
     /// `DaemonSessionRuntimeRegistryV1::code_graph_publication_gates`.
-    publication_gate: Arc<std::sync::Mutex<()>>,
+    publication_locks: Arc<CodeGraphShardPublicationLocksV1>,
 }
 
 /// Retirement releases the decoded-generation offer this runtime commissioned.
@@ -454,7 +552,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            requested_at: tracedecay_application::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -524,7 +622,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let publish_control = RuntimeRequestControlV1 {
-                requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+                requested_at: tracedecay_application::clock::now_micros(),
                 deadline: publish_deadline_identity.clone(),
                 cancellation: publish_cancellation_identity.clone(),
             };
@@ -689,7 +787,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            requested_at: tracedecay_application::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -749,11 +847,24 @@ impl Drop for MemoryGraphOperationRetirementReservationV1<'_> {
     }
 }
 
+/// The arm one sealed publication takes, decided under the classification
+/// gate slice from the journaled replay and the verified head.
+enum SealedPublicationClassificationV1 {
+    /// This publication already owns the verified head; recover it for reads.
+    RecoverPublished,
+    /// An active journaled replay whose head has not advanced; resume it.
+    ResumeJournaled,
+    /// The journaled replay was retired; publication is a typed conflict.
+    RetiredConflict,
+    /// No journal entry yet; append the replay and publish it.
+    AppendAndPublish,
+}
+
 /// Pre-gate outputs of one sealed code-generation publication: everything
 /// that is a pure function of the immutable published generation and this
-/// runtime's identity. Computed before the cross-instance publication gate is
-/// taken so racing publishers project concurrently and the gate serializes
-/// only the storage-ordered phase.
+/// runtime's identity. Computed before any publication lock is taken so
+/// racing publishers project concurrently and the gate serializes only the
+/// storage-ordered slices.
 struct PreparedSealedPublicationV1 {
     projection_deadline: Duration,
     deadline_at: Instant,
@@ -897,7 +1008,7 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            requested_at: tracedecay_application::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -962,38 +1073,94 @@ impl RetainedCodeGraphRuntimeV1 {
             durable_stage_boundary,
             request_cancelled,
         };
-        // One publisher per code shard at a time, across every retained
-        // runtime instance. The seat pass and the background reconcile both
-        // reach this path for the same sealed generation; the loser waits
-        // here (this runs inside spawn_blocking), then finds the verified
-        // head already advanced and takes the idempotent recovery arm inside
-        // the gated phase instead of racing the graph database into a
-        // Conflict. The wait and hold spans below are what future profiles
-        // key on to attribute gate contention.
-        let _publication = hotpath::measure_block!(
-            "daemon.session_registry.publish_snapshot.gate_wait",
-            self.publication_gate
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        );
         self.publish_prepared_sealed_generation(&prepared, &probe, &context)
     }
 
-    /// The gate-held phase of one sealed publication: manifest-provider
-    /// binding, replay lookup, the journaled resume/recovery arms, pending
-    /// predecessor completion, and the final publish. The caller holds the
-    /// cross-instance per-shard publication gate across exactly this call, so
-    /// the `hotpath` label measures the gate's hold time and complements the
-    /// `gate_wait` span at the single call site.
-    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.gate_hold")]
+    /// Acquires the per-shard serving gate for one short storage-ordered
+    /// slice. The wait and hold spans at every slice are what profiles key on
+    /// to attribute gate contention; with the corpus-sized prepare running
+    /// gateless, both must stay milliseconds-scale.
+    fn hold_publication_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        hotpath::measure_block!(
+            "daemon.session_registry.publish_snapshot.gate_wait",
+            self.publication_locks
+                .gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        )
+    }
+
+    /// The classification gate slice: observe the typed interruption first
+    /// (a publisher may have blocked on the gate), bind the shared manifest
+    /// provider, then read the journaled replay and verified head to decide
+    /// the publication arm. No journal write and no corpus-sized work happens
+    /// here.
+    fn classify_sealed_publication(
+        &self,
+        prepared: &PreparedSealedPublicationV1,
+        probe: &GraphPublicationProbeV1,
+        storage: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> std::result::Result<SealedPublicationClassificationV1, GraphDbError> {
+        match probe.interruption() {
+            Some(RuntimeInterruptionV1::Cancelled) => return Err(GraphDbError::Cancelled),
+            Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                return Err(GraphDbError::DeadlineExceeded);
+            }
+            None => {}
+        }
+        self.graph_manifest_provider.bind(
+            self.authority.binding().shard_id.clone(),
+            self.project_id.clone(),
+            self.repository_id.clone(),
+            self.generations_root.clone(),
+            self.replay_root.clone(),
+        )?;
+        match storage
+            .replay(&prepared.publication_key, context)
+            .map_err(map_publication_error)?
+        {
+            GraphPublicationReplayLookupV1::Active(_) => {
+                let head = storage
+                    .verified_head(&prepared.relational_projection, context)
+                    .map_err(map_publication_error)?;
+                if head
+                    .as_ref()
+                    .is_some_and(|head| head.key == prepared.publication_key)
+                {
+                    Ok(SealedPublicationClassificationV1::RecoverPublished)
+                } else {
+                    Ok(SealedPublicationClassificationV1::ResumeJournaled)
+                }
+            }
+            GraphPublicationReplayLookupV1::Retired(_) => {
+                Ok(SealedPublicationClassificationV1::RetiredConflict)
+            }
+            GraphPublicationReplayLookupV1::Missing => {
+                Ok(SealedPublicationClassificationV1::AppendAndPublish)
+            }
+        }
+    }
+
+    /// One sealed publication: journal classification, the resume/recovery
+    /// arms, pending predecessor completion, and the final publish.
+    ///
+    /// The per-shard serving gate is held only across the storage-ordered
+    /// slices — manifest-provider bind plus journal classification, each
+    /// replay append, and the CAS-plus-install swap inside the publish
+    /// closure. Native staging, the sealed-store build, the digest proofs,
+    /// and the boot-from-sealed recovery arms all run with no gate held, so
+    /// a corpus-sized build can no longer sit inside a gate hold. Same-key
+    /// publishers dedupe on the flight table instead of serializing behind a
+    /// build-length gate wait.
+    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.execute")]
     fn publish_prepared_sealed_generation(
         &self,
         prepared: &PreparedSealedPublicationV1,
         probe: &GraphPublicationProbeV1,
         context: &GraphPublicationOperationContextV1<'_>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
-        // The loser of the gate may have waited out the winner's entire
-        // publication; a request cancelled or expired during that wait must
+        // A request cancelled or expired before publication starts must
         // answer its typed interruption before touching the publication
         // authority.
         match probe.interruption() {
@@ -1003,16 +1170,6 @@ impl RetainedCodeGraphRuntimeV1 {
             }
             None => {}
         }
-        // Binding stays under the gate: it mutates the shared manifest
-        // provider, and the gate is what orders this write before the
-        // publish/recover reads that resolve sealed sources through it.
-        self.graph_manifest_provider.bind(
-            self.authority.binding().shard_id.clone(),
-            self.project_id.clone(),
-            self.repository_id.clone(),
-            self.generations_root.clone(),
-            self.replay_root.clone(),
-        )?;
         let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
         let registration = || GraphDbRegistration {
             authority_lease: Arc::clone(&authority_lease),
@@ -1089,78 +1246,115 @@ impl RetainedCodeGraphRuntimeV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
-                requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+                requested_at: tracedecay_application::clock::now_micros(),
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };
             let context = GraphPublicationOperationContextV1::new(&control, &probe)
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-            let registration = GraphDbRegistration {
+            let publish_registration = || GraphDbRegistration {
                 authority_lease: Arc::clone(&authority_lease),
-                cancellation: request_cancellation,
+                cancellation: Arc::clone(&request_cancellation),
                 lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
                     &self.lifecycle_cancelled,
                 ))),
                 deadline: deadline_at,
             };
+            // Same-key dedupe: a twin publisher (the seat pass against the
+            // background reconcile) parks here while the winner runs the
+            // corpus-sized prepare, then resumes through prepare's idempotent
+            // historical arm on the winner's instance-cached proof instead of
+            // duplicating staging and the sealed-store build.
+            let _flight =
+                self.publication_locks
+                    .flight
+                    .claim(key, &|| match probe.interruption() {
+                        Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                        Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                            Err(GraphDbError::DeadlineExceeded)
+                        }
+                        None => Ok(()),
+                    })?;
             // The already-built projection manifest rides along so first
             // publication does not re-read and re-project the sealed artifact
             // through the replay manifest provider; a pending predecessor
             // journaled by an interrupted publisher carries no in-hand
             // manifest, so publication reconstructs it from the journaled
             // canonical replay source.
-            if prepared.durable_stage_boundary {
+            //
+            // Prepare — native staging, the sealed-store build, and the
+            // durable digest proof — runs with no gate held; only the
+            // CAS-plus-install swap below takes the serving gate.
+            let preparation = self.graph_registry.prepare_verified_publication(
+                publish_registration(),
+                storage,
+                &context,
+                key,
+                manifest,
+                prepared.durable_stage_boundary,
+            )?;
+            let proven = match preparation {
+                GraphPublicationPreparationV1::Settled(commit) => return Ok(commit),
+                GraphPublicationPreparationV1::Proven(proven) => proven,
+            };
+            let completion = publish_registration();
+            let _gate = self.hold_publication_gate();
+            hotpath::measure_block!(
+                "daemon.session_registry.publish_snapshot.gate_hold",
                 self.graph_registry
-                    .publish_verified_with_durable_stage_boundary(
-                        registration,
-                        storage,
-                        &context,
-                        key,
-                        manifest,
-                    )
-            } else {
-                self.graph_registry
-                    .publish_verified(registration, storage, &context, key, manifest)
-            }
+                    .complete_verified_publication(completion, storage, &context, *proven,)
+            )
         };
-        match storage
-            .replay(&prepared.publication_key, context)
-            .map_err(map_publication_error)?
-        {
-            GraphPublicationReplayLookupV1::Active(_) => {
-                let head = storage
-                    .verified_head(&prepared.relational_projection, context)
-                    .map_err(map_publication_error)?;
-                if head
-                    .as_ref()
-                    .is_some_and(|head| head.key == prepared.publication_key)
-                {
-                    // The idempotent recovery arm: this publication already
-                    // owns the verified head (the gate loser after the winner
-                    // published, or a re-activation before replay retirement).
-                    // Prefer the immutable sealed artifact so a cold daemon
-                    // does not mount and reopen the corpus-sized shared staging
-                    // database merely to recover an already-active generation.
-                    // Dependency-bearing or absent sealed artifacts explicitly
-                    // fall back to the ordinary staging recovery path; every
-                    // integrity or control failure remains terminal.
-                    match self.graph_registry.recover_verified_sealed_snapshot(
-                        registration(),
-                        &mut storage,
-                        context,
-                        &prepared.relational_projection,
-                    ) {
-                        Ok(snapshot) => return Ok(snapshot),
-                        Err(GraphDbError::Unavailable { .. }) => {}
-                        Err(error) => return Err(error),
-                    }
-                    return self.graph_registry.recover_verified_snapshot(
-                        registration(),
-                        &mut storage,
-                        context,
-                        &prepared.relational_projection,
-                    );
+        // Classification slice: the manifest-provider bind (a shared-map
+        // write the gate orders before the publish/recover reads that resolve
+        // sealed sources through it) plus the journal lookup that decides the
+        // arm. Everything the decision leads to — recovery, staging, the
+        // sealed-store build — runs after the gate is released.
+        let classification = {
+            let _gate = self.hold_publication_gate();
+            hotpath::measure_block!(
+                "daemon.session_registry.publish_snapshot.gate_hold",
+                self.classify_sealed_publication(prepared, probe, &mut storage, context)
+            )
+        }?;
+        match classification {
+            SealedPublicationClassificationV1::RecoverPublished => {
+                // The idempotent recovery arm: this publication already owns
+                // the verified head (a flight loser after the winner
+                // published, or a re-activation before replay retirement).
+                // Runs gateless — it reads durable state and installs an
+                // idempotent lease, so a boot-from-sealed recovery no longer
+                // sits inside a gate hold. Prefer the immutable sealed
+                // artifact so a cold daemon does not mount and reopen the
+                // corpus-sized shared staging database merely to recover an
+                // already-active generation. Dependency-bearing or absent
+                // sealed artifacts explicitly fall back to the ordinary
+                // staging recovery path; every integrity or control failure
+                // remains terminal.
+                match self.graph_registry.recover_verified_sealed_snapshot(
+                    registration(),
+                    &mut storage,
+                    context,
+                    &prepared.relational_projection,
+                ) {
+                    Ok(snapshot) => return Ok(snapshot),
+                    Err(GraphDbError::Unavailable { .. }) => {}
+                    Err(error) => return Err(error),
                 }
+                return self.graph_registry.recover_verified_snapshot(
+                    registration(),
+                    &mut storage,
+                    context,
+                    &prepared.relational_projection,
+                );
+            }
+            SealedPublicationClassificationV1::RetiredConflict => {
+                return observe_code_graph_publication(
+                    CodeGraphPublicationConflictStageV1::RetiredReplay,
+                    Err(GraphDbError::Conflict),
+                );
+            }
+            SealedPublicationClassificationV1::ResumeJournaled => {
                 let _replay_pool_lock = verify_durable_source()?;
                 // Seal-time bundle: stage from the in-hand rows before the
                 // publish consumes them, commit only after it succeeds.
@@ -1178,13 +1372,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
                 return Ok(publication.snapshot);
             }
-            GraphPublicationReplayLookupV1::Retired(_) => {
-                return observe_code_graph_publication(
-                    CodeGraphPublicationConflictStageV1::RetiredReplay,
-                    Err(GraphDbError::Conflict),
-                );
-            }
-            GraphPublicationReplayLookupV1::Missing => {}
+            SealedPublicationClassificationV1::AppendAndPublish => {}
         }
         let replay_pool_lock = verify_durable_source()?;
         let input = canonical_sha256(&(
@@ -1230,10 +1418,25 @@ impl RetainedCodeGraphRuntimeV1 {
         // as that predecessor's own typed error.
         let mut completed_predecessors = 0usize;
         loop {
-            match storage
-                .append_replay(&replay, context)
-                .map_err(map_publication_error)?
-            {
+            // Append slice: one journal write per gate hold, with the typed
+            // interruption observed after the wait so a request cancelled
+            // while blocked never touches the journal.
+            let outcome = {
+                let _gate = self.hold_publication_gate();
+                hotpath::measure_block!(
+                    "daemon.session_registry.publish_snapshot.gate_hold",
+                    match probe.interruption() {
+                        Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                        Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                            Err(GraphDbError::DeadlineExceeded)
+                        }
+                        None => storage
+                            .append_replay(&replay, context)
+                            .map_err(map_publication_error),
+                    }
+                )
+            }?;
+            match outcome {
                 GraphReplayAppendOutcomeV1::Appended(_)
                 | GraphReplayAppendOutcomeV1::ExactReplay(_)
                 | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => break,
@@ -1576,7 +1779,7 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            requested_at: tracedecay_application::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -1756,7 +1959,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let replay_root = project_database
             .database_path()
             .with_extension("graph-replay");
-        let publication_gate = {
+        let publication_locks = {
             let mut gates = self
                 .code_graph_publication_gates
                 .lock()
@@ -1777,7 +1980,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             replay_root,
             sealed_state_digest: replay_binding.sealed_state_digest,
             lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
-            publication_gate,
+            publication_locks,
         })
     }
 
@@ -1881,7 +2084,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
-                requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+                requested_at: tracedecay_application::clock::now_micros(),
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };
@@ -1971,7 +2174,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
-                requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+                requested_at: tracedecay_application::clock::now_micros(),
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };

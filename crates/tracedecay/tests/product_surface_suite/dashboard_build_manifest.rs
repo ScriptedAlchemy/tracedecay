@@ -1,7 +1,4 @@
-#[path = "../build-support/dashboard_manifest.rs"]
-mod dashboard_manifest;
-
-use dashboard_manifest::{DASHBOARD_ASSET_MANIFEST, dashboard_asset_paths};
+use crate::dashboard_manifest::{DASHBOARD_ASSET_MANIFEST, dashboard_asset_paths};
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::{

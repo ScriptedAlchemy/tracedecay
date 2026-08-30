@@ -174,6 +174,49 @@ fn is_mcp_initialize_request(line: &str) -> bool {
         .is_ok_and(|request| request.method == "initialize")
 }
 
+/// Answer an unparseable handshake with one typed refusal frame and drain
+/// the input the client already pipelined, then let the connection close.
+///
+/// Propagating the parse failure with `?` here drops the socket while the
+/// client's first request is still unread, which the kernel reports to the
+/// client as `Connection reset by peer` — a raw transport error that hides
+/// wire-revision skew. The refusal frame plus a drained receive buffer turns
+/// that into a readable typed refusal followed by a clean EOF.
+async fn refuse_unparseable_handshake(
+    transport: &mut (impl tracedecay_mcp::McpTransport + Send),
+    handshake_line: &str,
+) {
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_unparseable_handshake(
+        handshake_line,
+        binary_version(),
+    );
+    hotpath::gauge!("daemon.engine.handshake.refused").inc(1_u64);
+    log_daemon_event(
+        "daemon_handshake_refused",
+        &[
+            ("refusal", format!("{:?}", refusal.refusal)),
+            ("daemon_version", refusal.daemon_version.clone()),
+        ],
+    );
+    // Best effort: a peer that already vanished cannot read a refusal.
+    if let Ok(line) = refusal.to_line() {
+        let _ = transport.write_line(&line).await;
+        let _ = transport.write_line("\n").await;
+        let _ = transport.flush().await;
+    }
+    for _ in 0..4 {
+        match tokio::time::timeout(
+            Duration::from_millis(100),
+            read_line_handling_wire_oversized(transport),
+        )
+        .await
+        {
+            Ok(Ok(Some(_))) => {}
+            _ => break,
+        }
+    }
+}
+
 const MAX_PENDING_PROJECT_OPEN_LINES: usize = 64;
 const PROJECT_OWNER_HALF_CLOSE_GRACE: Duration = Duration::from_millis(750);
 
@@ -659,7 +702,14 @@ fn serve_broker_socket_client_inner(
         let Some(setup_activity) = engine.lifecycle.try_enter() else {
             return Ok(None);
         };
-        let mut handshake = DaemonHandshake::from_line(&line)?;
+        let mut handshake = match DaemonHandshake::from_line(&line) {
+            Ok(handshake) => handshake,
+            Err(_) => {
+                drop(setup_activity);
+                refuse_unparseable_handshake(&mut transport, &line).await;
+                return Ok(None);
+            }
+        };
         let peer_full_close = transport.peer_fully_closed_after_eof();
         tokio::pin!(peer_full_close);
         let store_administration = tokio::select! {
@@ -1352,7 +1402,14 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let Some(setup_activity) = lifecycle.try_enter() else {
         return Ok(());
     };
-    let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
+    let mut handshake = match DaemonHandshake::from_line(&handshake_line) {
+        Ok(handshake) => handshake,
+        Err(_) => {
+            drop(setup_activity);
+            refuse_unparseable_handshake(&mut transport, &handshake_line).await;
+            return Ok(());
+        }
+    };
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
@@ -1365,7 +1422,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let peer_full_close = transport.peer_fully_closed_after_eof();
     tokio::pin!(peer_full_close);
     let store_administration = tokio::select! {
-        result = bind_authenticated_profile_identity(&mut handshake, &store_administration) => result?,
+        result = Box::pin(bind_authenticated_profile_identity(&mut handshake, &store_administration)) => result?,
         () = &mut peer_full_close => return Ok(()),
     };
     let reserved_control_request = is_reserved_control_request(&first_request_line);
@@ -1402,7 +1459,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         drop(setup_activity);
         return Ok(());
     }
-    let Some(setup_activity) = serve_core_doctor_runtime_request(
+    let Some(setup_activity) = Box::pin(serve_core_doctor_runtime_request(
         &mut transport,
         &handshake,
         &store_administration,
@@ -1411,34 +1468,34 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         None,
         || async {
             let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
-            Ok(portable_cached_project_server(
+            Ok(Box::pin(portable_cached_project_server(
                 &store_administration,
                 &canonical_project_path,
                 &handshake,
                 ProjectServerRequirement::Core,
-            )
+            ))
             .await?
             .is_some_and(|server| server.doctor_report_ready()))
         },
-    )
+    ))
     .await?
     else {
         return Ok(());
     };
     report_profile_host_admission_bootstrap_status(
-        schedule_user_profile_host_admission_replay_for_identity(
+        Box::pin(schedule_user_profile_host_admission_replay_for_identity(
             &store_administration,
             &handshake.client_identity,
-        )
+        ))
         .await,
     );
     // Same contract as the Unix broker path: a route-resolution failure is a
     // typed response, never a dropped connection.
-    let initialize_route = match apply_daemon_initialize_route(
+    let initialize_route = match Box::pin(apply_daemon_initialize_route(
         &mut handshake,
         &first_request_line,
         &store_administration,
-    )
+    ))
     .await
     {
         Ok(route) => route,
@@ -1457,13 +1514,12 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     if let Some(request) = parse_branch_admin_request(&first_request_line) {
         let result = match request.action.clone() {
             Ok(action) => {
-                store_administration
-                    .execute_branch_admin_for_handshake(
-                        &invocation.code_index_schedulers,
-                        &handshake,
-                        action,
-                    )
-                    .await
+                Box::pin(store_administration.execute_branch_admin_for_handshake(
+                    &invocation.code_index_schedulers,
+                    &handshake,
+                    action,
+                ))
+                .await
             }
             Err(message) => Err(TraceDecayError::Config { message }),
         };
@@ -1474,7 +1530,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     if let Some(request) = parse_branch_add_request(&first_request_line) {
         let response = match await_project_owner_or_disconnect(
             &mut transport,
-            portable_project_server_for_request(
+            Box::pin(portable_project_server_for_request(
                 lifecycle.clone(),
                 store_administration.clone(),
                 Arc::clone(&project_open_gates),
@@ -1484,17 +1540,17 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 ProjectServerRequirement::Core,
                 #[cfg(test)]
                 project_open_attempts.clone(),
-            ),
+            )),
         )
         .await
         {
             Ok(Some(_)) => {
-                branch_add_response(
+                Box::pin(branch_add_response(
                     &store_administration,
                     Some(&invocation.code_index_schedulers),
                     &handshake,
                     &request,
-                )
+                ))
                 .await
             }
             Ok(None) => return Ok(()),
@@ -1532,7 +1588,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                     .and_then(invocation_lsp_session_transition);
                 let response = match invocation_request {
                     Ok(request) => {
-                        execute_portable_daemon_invocation(
+                        Box::pin(execute_portable_daemon_invocation(
                             lifecycle.clone(),
                             store_administration.clone(),
                             Arc::clone(&project_open_gates),
@@ -1542,7 +1598,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                             request,
                             #[cfg(test)]
                             project_open_attempts.clone(),
-                        )
+                        ))
                         .await
                     }
                     Err(response) => response,
@@ -1727,12 +1783,12 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 && handshake.project_path.is_some()
             {
                 let (project_path, _) = project_route_for_handshake(&handshake)?;
-                portable_cached_project_server(
+                Box::pin(portable_cached_project_server(
                     &store_administration,
                     &project_path,
                     &handshake,
                     ProjectServerRequirement::Core,
-                )
+                ))
                 .await?
                 .is_some()
             } else {
@@ -1804,7 +1860,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     if handshake.project_path.is_some() && !user_session_request {
         let server = match await_project_owner_or_disconnect(
             &mut transport,
-            portable_project_server_for_request(
+            Box::pin(portable_project_server_for_request(
                 lifecycle.clone(),
                 store_administration.clone(),
                 Arc::clone(&project_open_gates),
@@ -1814,7 +1870,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 project_server_requirement(&first_request_line),
                 #[cfg(test)]
                 project_open_attempts.clone(),
-            ),
+            )),
         )
         .await
         {
@@ -1840,7 +1896,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         if is_mcp_initialize_request(&first_request_line) {
             #[cfg(test)]
             tests::record_mcp_route(&handshake.client_instance_id, tests::ObservedMcpRoute::Rmcp);
-            serve_routed_rmcp_connection(
+            Box::pin(serve_routed_rmcp_connection(
                 server,
                 transport,
                 first_request_line,
@@ -1848,7 +1904,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 initialize_route,
                 handshake.timings,
                 lifecycle,
-            )
+            ))
             .await?;
         } else {
             #[cfg(test)]

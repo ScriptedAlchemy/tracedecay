@@ -207,10 +207,10 @@ fn push_fixture_symbol(
     qualified_name: &str,
     kind: &str,
     ordinal: u32,
-    symbols: &mut Vec<LineageSymbolRecordV1>,
-    chunks: &mut Vec<CodeSearchChunkV1>,
+    symbols: &mut Vec<Arc<LineageSymbolRecordV1>>,
+    chunks: &mut Vec<Arc<CodeSearchChunkV1>>,
 ) {
-    symbols.push(LineageSymbolRecordV1 {
+    symbols.push(Arc::new(LineageSymbolRecordV1 {
         occurrence: occurrence.clone(),
         identity: fixture_digest("symbol-identity", occurrence.as_str()),
         qualified_name: qualified_name.to_owned(),
@@ -230,8 +230,8 @@ fn push_fixture_symbol(
         skip_test_coverage: false,
         file_identity: fixture_digest("file-identity", path),
         content_digest: fixture_digest("symbol-content", occurrence.as_str()),
-    });
-    chunks.push(CodeSearchChunkV1 {
+    }));
+    chunks.push(Arc::new(CodeSearchChunkV1 {
         id: fixture_id(format!("chunk.{ordinal}")),
         anchor: CodeSearchChunkAnchorV1 {
             generation_id: generation.clone(),
@@ -258,7 +258,7 @@ fn push_fixture_symbol(
         exact_terms: Vec::new(),
         subtokens: Vec::new(),
         sanitized_text: BoundedSanitizedText::new("fixture symbol").expect("bounded fixture text"),
-    });
+    }));
 }
 
 #[tokio::test]

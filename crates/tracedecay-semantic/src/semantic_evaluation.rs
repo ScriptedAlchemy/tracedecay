@@ -415,7 +415,7 @@ pub struct SemanticEvaluationProjectionResourcesV1 {
 pub fn prepare_semantic_evaluation_projection(
     artifact: LoadedSemanticArtifactV1,
     request: ProjectionBatchRequestV1,
-    canonical_chunks: &[CodeSearchChunkV1],
+    canonical_chunks: &[Arc<CodeSearchChunkV1>],
     resources: SemanticEvaluationProjectionResourcesV1,
     cache: &SemanticEvaluationProjectionBatchCacheV1,
     cache_policy: SemanticEvaluationProjectionBatchCachePolicyV1,
@@ -478,7 +478,7 @@ pub fn prepare_semantic_evaluation_projection(
 pub fn measure_semantic_evaluation_projection_cancellation(
     artifact: LoadedSemanticArtifactV1,
     request: ProjectionBatchRequestV1,
-    canonical_chunks: &[CodeSearchChunkV1],
+    canonical_chunks: &[Arc<CodeSearchChunkV1>],
     max_sessions: usize,
     memory_ceiling_bytes: u64,
     cache: &SemanticEvaluationProjectionBatchCacheV1,
@@ -897,11 +897,11 @@ mod tests {
         generation: &CodeGenerationId,
         case: &str,
         count: usize,
-    ) -> Vec<CodeSearchChunkV1> {
+    ) -> Vec<Arc<CodeSearchChunkV1>> {
         (0..count)
             .map(|ordinal| {
                 let label = format!("{case}.{ordinal:05}");
-                CodeSearchChunkV1 {
+                Arc::new(CodeSearchChunkV1 {
                     id: CodeSearchChunkId::new(format!("evaluation-cache.chunk.{label}"))
                         .expect("chunk fixture"),
                     anchor: CodeSearchChunkAnchorV1 {
@@ -935,7 +935,7 @@ mod tests {
                         "identical canonical FastEmbed group input",
                     )
                     .expect("sanitized fixture"),
-                }
+                })
             })
             .collect()
     }
@@ -943,7 +943,7 @@ mod tests {
     fn projection_case_request(
         generation: &CodeGenerationId,
         from_generation: Option<CodeGenerationId>,
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
         projection: &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
         replay_reason: ProjectionReplayReasonV1,
     ) -> ProjectionBatchRequestV1 {

@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
 use serde::de::DeserializeOwned;
-use serde::de::{self, SeqAccess, Visitor};
+use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
@@ -118,11 +118,13 @@ impl<'de> Deserialize<'de> for CompatibleSealedFormatRevisionV1 {
     }
 }
 
-/// One file page restored from the sealed `files` array. The persist page is
-/// moved into the published artifact; the next page is not read until this
-/// one has been dropped from the deserializer.
+/// The sealed `files` array, decoded page by page. The visitor is pure
+/// decode: each persist page accumulates exactly once (the pages are the
+/// restored corpus), and the CPU-bound authority reconstruction is deferred
+/// to [`assemble_published_generation`]'s pool fan-out so the deserializer
+/// thread never serializes corpus-scale digest work.
 struct StreamingRestoredFilesV1 {
-    files: Vec<Arc<FileGenerationArtifactsV1>>,
+    files: Vec<PersistedFileGenerationArtifactsV1>,
 }
 
 impl<'de> Deserialize<'de> for StreamingRestoredFilesV1 {
@@ -148,7 +150,7 @@ impl<'de> Deserialize<'de> for StreamingRestoredFilesV1 {
                     files.reserve(hint);
                 }
                 while let Some(file) = seq.next_element::<PersistedFileGenerationArtifactsV1>()? {
-                    files.push(restore_one_file_page(file).map_err(de::Error::custom)?);
+                    files.push(file);
                 }
                 Ok(StreamingRestoredFilesV1 { files })
             }
@@ -187,19 +189,34 @@ enum CompatibleSealedMaterializationV1 {
     Legacy(SealedPublishedGenerationEnvelopeV1),
 }
 
-fn restore_one_file_page(
-    file: PersistedFileGenerationArtifactsV1,
-) -> Result<Arc<FileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
-    hotpath::measure_block!("code_index.sealed_decode.file_page", {
-        let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        Ok(Arc::new(FileGenerationArtifactsV1 {
-            authority: file.authority,
-            extraction: file.extraction,
-            artifacts: file.artifacts,
-            exact_authority,
-        }))
-    })
+/// Rebuild every file's parser-backed exact authority on the indexing pool,
+/// then move each persist page into its published artifact.
+///
+/// The digest remints are by-ref and independent per file, so the fan-out
+/// keeps the sequential failure semantics (lowest-index error) while the
+/// pages themselves move — the persist corpus is never copied.
+fn restore_file_pages(
+    pages: Vec<PersistedFileGenerationArtifactsV1>,
+) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
+    let authorities = collect_bounded_ordered(&pages, |page, _worker| {
+        hotpath::measure_block!(
+            "code_index.sealed_decode.file_page",
+            ExactExtractionAuthorityV1::restore(&page.artifacts.chunks)
+                .map_err(CodeIndexProductionErrorV1::Chunk)
+        )
+    })?;
+    Ok(pages
+        .into_iter()
+        .zip(authorities)
+        .map(|(page, exact_authority)| {
+            Arc::new(FileGenerationArtifactsV1 {
+                authority: page.authority,
+                extraction: page.extraction,
+                artifacts: page.artifacts,
+                exact_authority,
+            })
+        })
+        .collect())
 }
 
 fn assemble_published_generation(
@@ -219,6 +236,10 @@ fn assemble_published_generation(
         projection_request,
         projection_receipt,
     } = generation;
+    let files = hotpath::measure_block!(
+        "code_index.sealed_decode.page_restore",
+        restore_file_pages(files)
+    )?;
     let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
         hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
             let ignored_source_roster = IgnoredSourceRosterV1::restore(
@@ -227,10 +248,10 @@ fn assemble_published_generation(
                 ignored_source_admissions,
                 ignored_source_admissions_digest,
             )?;
-            // Persist pages are already gone: each file was restored and dropped
-            // before the next `files` element was decoded. Project the generation
-            // aggregates from those restored pages so the seating path never holds
-            // a second owned copy of the whole persist corpus.
+            // Persist pages moved into `files` exactly once, and chunk/symbol
+            // rows are `Arc`-shared between those pages and the generation
+            // aggregates: this flatten clones row pointers and per-file
+            // document manifests, never a second owned copy of the corpus.
             let chunk_rows = files
                 .iter()
                 .map(|file| file.artifacts.chunks.clone())
@@ -877,12 +898,7 @@ impl CodeIndexPublishedGenerationV1 {
             ignored_source_admissions: envelope.generation.ignored_source_admissions,
             ignored_source_admissions_digest: envelope.generation.ignored_source_admissions_digest,
             files: StreamingRestoredFilesV1 {
-                files: envelope
-                    .generation
-                    .files
-                    .into_iter()
-                    .map(restore_one_file_page)
-                    .collect::<Result<Vec<_>, _>>()?,
+                files: envelope.generation.files,
             },
             lineage: envelope.generation.lineage,
             coverage: envelope.generation.coverage,

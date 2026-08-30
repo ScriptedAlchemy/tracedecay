@@ -70,6 +70,60 @@ impl DaemonHandshake {
     }
 }
 
+/// Stable discriminator for the pre-handshake refusal frame.
+pub const DAEMON_HANDSHAKE_REFUSAL_PROTOCOL: &str = "tracedecay.daemon.handshake-refusal";
+
+/// Why a daemon refused a connection before serving any request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonHandshakeRefusalReason {
+    /// The handshake line was valid JSON but not this daemon's handshake
+    /// shape — the signature of wire drift between build revisions.
+    UnsupportedRevision,
+    /// The handshake line was not even JSON.
+    InvalidHandshake,
+}
+
+/// One JSON line the daemon writes before closing a connection whose
+/// handshake it cannot serve.
+///
+/// Without this frame the client's pending read ends in a raw
+/// `Connection reset by peer`, which hides version skew behind a transport
+/// error. Old daemons never send it; new clients treat an unparseable
+/// response line that parses as this frame as a typed refusal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonHandshakeRefusal {
+    pub protocol: String,
+    pub refusal: DaemonHandshakeRefusalReason,
+    pub daemon_version: String,
+}
+
+impl DaemonHandshakeRefusal {
+    /// Classify one unparseable handshake line into its refusal frame.
+    pub fn for_unparseable_handshake(line: &str, daemon_version: &str) -> Self {
+        let refusal = if serde_json::from_str::<serde_json::Value>(line.trim()).is_ok() {
+            DaemonHandshakeRefusalReason::UnsupportedRevision
+        } else {
+            DaemonHandshakeRefusalReason::InvalidHandshake
+        };
+        Self {
+            protocol: DAEMON_HANDSHAKE_REFUSAL_PROTOCOL.to_owned(),
+            refusal,
+            daemon_version: daemon_version.to_owned(),
+        }
+    }
+
+    pub fn to_line(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    /// Parse a refusal frame; `None` when the line is any other shape.
+    pub fn from_line(line: &str) -> Option<Self> {
+        let refusal = serde_json::from_str::<Self>(line.trim()).ok()?;
+        (refusal.protocol == DAEMON_HANDSHAKE_REFUSAL_PROTOCOL).then_some(refusal)
+    }
+}
+
 /// The client version to report as skewed, or `None` when the versions match.
 ///
 /// Old clients send no version (empty string); that is indistinguishable from
@@ -81,25 +135,17 @@ pub fn client_version_skew(client_version: &str, daemon_version: &str) -> Option
     Some(client_version.to_string())
 }
 
-fn release_version(version: &str) -> Option<(u64, u64, u64)> {
-    let core = version
-        .strip_prefix('v')
-        .unwrap_or(version)
-        .split(['-', '+'])
-        .next()?;
-    let mut parts = core.split('.');
-    let version = (
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-    );
-    parts.next().is_none().then_some(version)
+fn release_version(version: &str) -> Option<semver::Version> {
+    semver::Version::parse(version.strip_prefix('v').unwrap_or(version)).ok()
 }
 
 pub fn version_skew_action(daemon_version: &str, client_version: &str) -> &'static str {
+    // Precedence ordering (semver: prerelease identifiers ordered, build
+    // metadata ignored) so a `0.1.0-beta.36` daemon under a `0.1.0-beta.37`
+    // client is correctly named the stale side.
     match release_version(daemon_version)
         .zip(release_version(client_version))
-        .map(|(daemon, client)| daemon.cmp(&client))
+        .map(|(daemon, client)| daemon.cmp_precedence(&client))
     {
         Some(std::cmp::Ordering::Greater) => {
             "restart or reconnect the MCP host so it loads the current TraceDecay client and tool catalog"
@@ -108,5 +154,67 @@ pub fn version_skew_action(daemon_version: &str, client_version: &str) -> &'stat
             "run `tracedecay daemon restart` to load the current daemon binary"
         }
         _ => "restart or reconnect whichever TraceDecay component is stale",
+    }
+}
+
+#[cfg(test)]
+mod handshake_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn version_skew_action_orders_prerelease_builds() {
+        assert_eq!(
+            version_skew_action("0.1.0-beta.36+aaaa", "0.1.0-beta.37+bbbb"),
+            "run `tracedecay daemon restart` to load the current daemon binary"
+        );
+        assert_eq!(
+            version_skew_action("0.1.0-beta.37+aaaa", "0.1.0-beta.36+bbbb"),
+            "restart or reconnect the MCP host so it loads the current TraceDecay client and tool catalog"
+        );
+        assert_eq!(
+            version_skew_action("0.1.0-beta.37+aaaa", "0.1.0-beta.37+bbbb"),
+            "restart or reconnect whichever TraceDecay component is stale"
+        );
+    }
+
+    #[test]
+    fn wire_drifted_handshakes_classify_as_unsupported_revision() {
+        let refusal = DaemonHandshakeRefusal::for_unparseable_handshake(
+            r#"{"future_handshake_shape": true}"#,
+            "0.1.0-beta.99+cafe",
+        );
+        assert_eq!(
+            refusal.refusal,
+            DaemonHandshakeRefusalReason::UnsupportedRevision
+        );
+        assert_eq!(refusal.daemon_version, "0.1.0-beta.99+cafe");
+        let line = refusal.to_line().expect("refusal wire line");
+        assert_eq!(
+            DaemonHandshakeRefusal::from_line(&line),
+            Some(refusal),
+            "the refusal frame must round-trip through its one wire line"
+        );
+    }
+
+    #[test]
+    fn non_json_handshakes_classify_as_invalid_handshake() {
+        let refusal =
+            DaemonHandshakeRefusal::for_unparseable_handshake("GET / HTTP/1.1", "0.1.0-beta.99");
+        assert_eq!(
+            refusal.refusal,
+            DaemonHandshakeRefusalReason::InvalidHandshake
+        );
+    }
+
+    #[test]
+    fn foreign_lines_never_parse_as_refusal_frames() {
+        assert_eq!(DaemonHandshakeRefusal::from_line("{}"), None);
+        assert_eq!(
+            DaemonHandshakeRefusal::from_line(
+                r#"{"protocol":"tracedecay.daemon.invocation","revision":1}"#
+            ),
+            None
+        );
+        assert_eq!(DaemonHandshakeRefusal::from_line("not json"), None);
     }
 }

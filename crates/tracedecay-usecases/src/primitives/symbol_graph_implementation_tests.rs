@@ -147,7 +147,7 @@ fn store(with_scope_pressure: bool) -> CodeGraphProjectionStore {
     let chunks = symbols
         .iter()
         .enumerate()
-        .map(|(ordinal, symbol)| chunk(&symbol.occurrence, ordinal as u32))
+        .map(|(ordinal, symbol)| Arc::new(chunk(&symbol.occurrence, ordinal as u32)))
         .collect::<Vec<_>>();
     let mut manifest = build_code_graph_manifest(
         projection,

@@ -210,8 +210,12 @@ fn graph_pair(
     (candidate, evidence)
 }
 
-fn projection_chunk(request: &GraphLaneRequest, id_value: &str, symbol: &str) -> CodeSearchChunkV1 {
-    CodeSearchChunkV1 {
+fn projection_chunk(
+    request: &GraphLaneRequest,
+    id_value: &str,
+    symbol: &str,
+) -> Arc<CodeSearchChunkV1> {
+    Arc::new(CodeSearchChunkV1 {
         id: id(id_value),
         anchor: CodeSearchChunkAnchorV1 {
             generation_id: request.generation.clone(),
@@ -236,7 +240,7 @@ fn projection_chunk(request: &GraphLaneRequest, id_value: &str, symbol: &str) ->
         exact_terms: Vec::new(),
         subtokens: Vec::new(),
         sanitized_text: BoundedSanitizedText::new("code").expect("bounded fixture text"),
-    }
+    })
 }
 
 fn projection_batch(
@@ -275,7 +279,7 @@ fn read_projection(
     )
 }
 
-fn projection_chunks(request: &GraphLaneRequest, symbols: &[&str]) -> Vec<CodeSearchChunkV1> {
+fn projection_chunks(request: &GraphLaneRequest, symbols: &[&str]) -> Vec<Arc<CodeSearchChunkV1>> {
     let chunks: Vec<_> = symbols
         .iter()
         .map(|symbol| projection_chunk(request, &format!("chunk.{symbol}"), symbol))
@@ -492,7 +496,7 @@ fn graph_projection_deduplicates_identical_edges_byte_for_byte_including_coverag
 fn graph_projection_rejects_foreign_generation_chunks() {
     let request = graph_request(8, 1);
     let mut foreign = projection_chunk(&request, "chunk.foreign", "symbol.foreign");
-    foreign.anchor.generation_id = id("generation.foreign");
+    Arc::make_mut(&mut foreign).anchor.generation_id = id("generation.foreign");
     let cancellation =
         CancellationSignal::active("cancellation.code-graph.foreign").expect("valid token");
     let store = HermeticCodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
@@ -510,7 +514,7 @@ fn graph_projection_rejects_conflicting_symbol_bindings() {
     let request = graph_request(8, 1);
     let primary = projection_chunk(&request, "chunk.target.a", "symbol.target");
     let mut conflicting = projection_chunk(&request, "chunk.target.b", "symbol.target");
-    conflicting.anchor.file_occurrence_id = id("file.symbol.other");
+    Arc::make_mut(&mut conflicting).anchor.file_occurrence_id = id("file.symbol.other");
     let cancellation =
         CancellationSignal::active("cancellation.code-graph.conflict").expect("valid token");
     let store = HermeticCodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
@@ -711,7 +715,7 @@ fn graph_projection_selects_symbol_chunk_binding_canonically() {
         projection_chunk(&request, "chunk.target.z", "symbol.target"),
         projection_chunk(&request, "chunk.target.a", "symbol.target"),
     ];
-    let read = |chunks: &[CodeSearchChunkV1]| {
+    let read = |chunks: &[Arc<CodeSearchChunkV1>]| {
         let cancellation =
             CancellationSignal::active("cancellation.code-graph.binding").expect("valid token");
         let publisher =

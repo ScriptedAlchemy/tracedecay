@@ -422,6 +422,36 @@ fn code_source_parse_ambiguity_stays_a_structured_quarantine() {
 }
 
 #[test]
+fn lcm_prose_with_benign_mapping_lines_is_raw_scanned_not_quarantined() {
+    let raw = "Current goal for this thread\nobjective: ensure all provider session messages are ingested\nremaining token budget: 12000\n";
+
+    let sanitized = sanitize_lcm_payload_text(raw).expect("prose stays raw-scannable");
+    assert_eq!(sanitized.sanitized_text(), raw);
+}
+
+#[test]
+fn lcm_colon_led_tool_logs_are_raw_scanned_not_quarantined() {
+    for raw in [
+        "Wall time: 2.5000 seconds\nProcess exited with code 0\nOutput:\ntest result: ok\n",
+        "Codex reasoning summary:\nReasoned that compact tool telemetry is useful.",
+        "Success. Updated the following files:\nM src/quarkonium.rs\n",
+    ] {
+        let sanitized =
+            sanitize_lcm_payload_text(raw).expect("log-shaped text stays raw-scannable");
+        assert_eq!(sanitized.sanitized_text(), raw);
+    }
+}
+
+#[test]
+fn lcm_prose_with_sensitive_mapping_lines_still_quarantines() {
+    let raw =
+        format!("Rotation notes from standup\nvault_passphrase: {PLACEHOLDER}\nregion: us-east\n");
+
+    let error = sanitize_lcm_payload_text(&raw).expect_err("sensitive mapping intent quarantine");
+    assert_eq!(error, DetectionError::StructuredQuarantine);
+}
+
+#[test]
 fn lcm_unlocatable_sensitive_fields_are_not_reported_as_credential_keys() {
     let raw = "# rotate the vault_passphrase monthly\nvault_passphrase: >\n  line-one-of-secret\n  line-two-of-secret\nregion: us-east\n";
 

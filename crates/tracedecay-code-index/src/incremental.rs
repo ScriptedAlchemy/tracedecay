@@ -9,6 +9,7 @@
 //! before a change manifest can cross the projection boundary.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use thiserror::Error;
 use tracedecay_domain::{
@@ -63,10 +64,12 @@ pub struct GenerationIncrementMaterializationV1 {
 /// Construction validates every per-file document/chunk binding, rejects
 /// mixed-generation rows, flattens files, and orders chunks by typed identity.
 /// The fields stay private so downstream diffing can rely on those invariants.
+/// Rows are `Arc`-shared with the per-file artifacts they were flattened
+/// from, so the aggregate orders pointers instead of copying the corpus.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenerationChunkManifestV1 {
     generation_id: CodeGenerationId,
-    chunks: Vec<CodeSearchChunkV1>,
+    chunks: Vec<Arc<CodeSearchChunkV1>>,
 }
 
 impl GenerationChunkManifestV1 {
@@ -115,7 +118,7 @@ impl GenerationChunkManifestV1 {
     }
 
     /// Chunks in canonical typed-identity order.
-    pub fn chunks(&self) -> &[CodeSearchChunkV1] {
+    pub fn chunks(&self) -> &[Arc<CodeSearchChunkV1>] {
         &self.chunks
     }
 
@@ -124,7 +127,7 @@ impl GenerationChunkManifestV1 {
         self.chunks
             .binary_search_by(|chunk| chunk.id.cmp(chunk_id))
             .ok()
-            .map(|index| &self.chunks[index])
+            .map(|index| self.chunks[index].as_ref())
     }
 }
 
@@ -139,7 +142,7 @@ pub fn materialize_generation_increment(
     prior_files: &[CodeFileChunksV1],
     reextracted_files: Vec<CodeFileChunksV1>,
     prior_symbols: &GenerationSymbolIndexV1,
-    reextracted_symbols: Vec<LineageSymbolRecordV1>,
+    reextracted_symbols: Vec<Arc<LineageSymbolRecordV1>>,
 ) -> Result<GenerationIncrementMaterializationV1, ChunkIncrementErrorV1> {
     if prior_symbols.generation_id != plan.prior_generation
         || prior_files
@@ -232,9 +235,11 @@ pub fn materialize_generation_increment(
                         .ok_or_else(|| {
                             ChunkIncrementErrorV1::MissingPriorSymbol(prior_occurrence.clone())
                         })?;
-                    let mut current_symbol = (*prior_symbol).clone();
+                    // The occurrence is rewritten for the new generation, so
+                    // this record genuinely diverges from the shared prior row.
+                    let mut current_symbol = LineageSymbolRecordV1::clone(prior_symbol);
                     current_symbol.occurrence = current_occurrence;
-                    symbols.push(current_symbol);
+                    symbols.push(Arc::new(current_symbol));
                 }
                 files.push(current);
             }
@@ -305,12 +310,12 @@ pub fn plan_chunk_increment(
     let prior_by_id: BTreeMap<CodeSearchChunkId, &CodeSearchChunkV1> = prior
         .into_iter()
         .flat_map(|manifest| manifest.chunks.iter())
-        .map(|chunk| (chunk.id.clone(), chunk))
+        .map(|chunk| (chunk.id.clone(), chunk.as_ref()))
         .collect();
     let current_by_id: BTreeMap<CodeSearchChunkId, &CodeSearchChunkV1> = current
         .chunks
         .iter()
-        .map(|chunk| (chunk.id.clone(), chunk))
+        .map(|chunk| (chunk.id.clone(), chunk.as_ref()))
         .collect();
 
     let mut added_or_changed = Vec::new();

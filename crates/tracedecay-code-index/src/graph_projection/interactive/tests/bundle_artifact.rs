@@ -55,18 +55,18 @@ fn measure_catalog_seal_vs_open_at_scale() {
                     'a',
                 );
                 record.identity = id(&format!("sha256:{index:064x}"));
-                record
+                Arc::new(record)
             })
             .collect(),
     )
     .expect("bench symbol index");
-    let bench_chunks: Vec<CodeSearchChunkV1> = (0..symbols)
+    let bench_chunks: Vec<Arc<CodeSearchChunkV1>> = (0..symbols)
         .map(|index| {
-            chunk(
+            Arc::new(chunk(
                 &format!("sym.{index}"),
                 &format!("file.{}", index / 20),
                 (index % 20) as u32,
-            )
+            ))
         })
         .collect();
     let bench_edges: Vec<CanonicalRelationEdgeV1> = (1..symbols)

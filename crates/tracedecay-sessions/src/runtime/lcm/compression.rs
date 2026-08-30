@@ -1857,7 +1857,13 @@ async fn ingest_active_messages(
                             original_content,
                             storage_text,
                             message_id,
-                        } => (source_index, role, original_content, storage_text, message_id),
+                        } => (
+                            source_index,
+                            role,
+                            original_content,
+                            storage_text,
+                            message_id,
+                        ),
                     };
                 let message = &messages[source_index];
                 let Some(message_id) = message_id else {
@@ -2061,8 +2067,7 @@ async fn prepare_active_messages(
                 let message_id = (!replay_as_is).then(|| {
                     explicit_message_id
                         .or_else(|| {
-                            store_id
-                                .and_then(|store_id| stored_message_ids.get(&store_id).cloned())
+                            store_id.and_then(|store_id| stored_message_ids.get(&store_id).cloned())
                         })
                         .unwrap_or_else(|| {
                             deterministic_message_id(

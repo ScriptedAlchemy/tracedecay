@@ -5,11 +5,11 @@ use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-pub(super) fn digest(value: &impl Serialize) -> Result<ManifestDigest> {
+pub fn digest(value: &impl Serialize) -> Result<ManifestDigest> {
     canonical_sha256(value).map_err(contract_error)
 }
 
-pub(super) fn contract_error(error: impl std::fmt::Display) -> TraceDecayError {
+pub fn contract_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("automation application contract is invalid: {error}"),
     }

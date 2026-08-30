@@ -1568,6 +1568,62 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
     restarted.shutdown().await;
 }
 
+/// Dirty remount seating must not park on the publication decode barrier
+/// while holding the scheduler lock. Activation may already own that cache;
+/// joining it left remount warming with no seated generation.
+#[tokio::test]
+async fn dirty_retained_seat_does_not_join_the_publication_decode_cache() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let held_decode = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hold_active_decode();
+    let seating = scheduler.clone();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            seating
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .seat_retained_generation_on_empty_serving_for_test()
+        }),
+    )
+    .await
+    .expect("dirty retained seat must not wait for the decode cache")
+    .expect("seat task")
+    .expect("seat result");
+    assert!(
+        matches!(outcome, Some(CodeIndexReconcileOutcomeV1::Noop(_))),
+        "dirty remount must still emit a retained-seat Noop without decoding"
+    );
+    assert_eq!(
+        held_decode.waiter_count(),
+        0,
+        "retained seating must not join the publication decode flight"
+    );
+
+    drop(held_decode);
+    registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -5156,6 +5212,24 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
         "root graph readiness must not join the publication decode flight"
     );
 
+    let scope_ready = tokio::time::timeout(
+        Duration::from_secs(30),
+        registry.latest_complete_ready_decoded_for_scope(&scope),
+    )
+    .await
+    .expect("scope query readiness must not wait for the decode cache")
+    .expect("the seated graph generation remains ready for scoped queries");
+    assert_eq!(
+        scope_ready.generation().manifest().generation_id,
+        generation_id,
+        "scoped query admission must trust the exact seated generation"
+    );
+    assert_eq!(
+        held_decode.waiter_count(),
+        0,
+        "scope query readiness must not join the publication decode flight"
+    );
+
     drop(held_decode);
     registry.shutdown().await;
 }
@@ -6053,22 +6127,21 @@ fn exact_source_readiness_abstains_when_a_file_is_added_inside_freshness_window(
     published(scheduler.reconcile_now().expect("initial publish"));
     assert!(
         scheduler
-            .latest_complete_ready_for_exact_source_with(
-                GenerationDecodeAdmissionV1::AlreadyDecoded,
-            )
+            .exact_source_is_ready()
             .expect("exact source readiness")
+    );
+    assert!(
+        scheduler
+            .latest_complete_with(GenerationDecodeAdmissionV1::AlreadyDecoded)
             .is_some()
     );
 
     fixture.edit("src/added.rs", "pub fn added() {}\n");
 
     assert!(
-        scheduler
-            .latest_complete_ready_for_exact_source_with(
-                GenerationDecodeAdmissionV1::AlreadyDecoded,
-            )
-            .expect("exact source readiness after file add")
-            .is_none(),
+        !scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness after file add"),
         "workspace completeness must abstain before the added file is published"
     );
 }
@@ -10746,7 +10819,7 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
         .metadata()
         .clone();
     let outcome = reopened
-        .reconcile_retained_text_generation(&metadata)
+        .reconcile_retained_text_generation_with(&metadata, true)
         .expect("graph-off retained reconcile")
         .expect("stale witness must be verified by text-only capture");
     let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome else {
@@ -10814,7 +10887,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
     );
     let tight = Arc::new(ProcessResidentMemoryV1::new(tight_limit));
     scheduler.bind_resident_memory(Arc::clone(&tight));
-    let denied = scheduler.reconcile_retained_text_generation(&metadata_a);
+    let denied = scheduler.reconcile_retained_text_generation_with(&metadata_a, true);
     assert!(
         matches!(
             denied,
@@ -10842,7 +10915,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
     ));
     scheduler.bind_resident_memory(Arc::clone(&adequate));
     let outcome = scheduler
-        .reconcile_retained_text_generation(&metadata_a)
+        .reconcile_retained_text_generation_with(&metadata_a, true)
         .expect("adequately funded graph-off retry")
         .expect("graph-off retry outcome");
     let generation_b = published(outcome);

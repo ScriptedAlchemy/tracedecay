@@ -684,12 +684,23 @@ async fn production_project_server_inner(
             ],
         );
         let semantic_startup_project = canonical_project_path.to_path_buf();
-        tokio::task::spawn_blocking(move || {
+        let semantic_startup_schedulers = invocation.code_index_schedulers.clone();
+        tokio::spawn(async move {
             let started = Instant::now();
-            let _ = crate::semantic_code::apply_config_selection(
-                semantic_startup_selection.as_deref(),
-                semantic_auto_download_enabled,
-            );
+            let selected = tokio::task::spawn_blocking(move || {
+                crate::semantic_code::apply_config_selection(
+                    semantic_startup_selection.as_deref(),
+                    semantic_auto_download_enabled,
+                )
+            })
+            .await
+            .ok()
+            .flatten();
+            if selected.is_some() {
+                let _ = semantic_startup_schedulers
+                    .reschedule_semantic_generation(&semantic_startup_project)
+                    .await;
+            }
             log_daemon_event(
                 "project_open_phase",
                 &[

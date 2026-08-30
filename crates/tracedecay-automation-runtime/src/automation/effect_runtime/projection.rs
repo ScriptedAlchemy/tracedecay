@@ -1,5 +1,6 @@
 //! Projection from automation/store authority receipts into the application terminal.
 
+use crate::automation::AutomationCommittedReceipt;
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationExternalEffectReceiptV1, AutomationRunRequestV1,
     AutomationRunSummaryV1, AutomationSkipReasonV1, AutomationTaskRequestV1, AutomationTaskV1,
@@ -14,7 +15,6 @@ use tracedecay_application::retained_surfaces::{
     MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
     MemoryAutomationFactTargetV1,
 };
-use tracedecay_automation_runtime::automation::AutomationCommittedReceipt;
 use tracedecay_domain::{FactOwnerV1, FactRelationKindV1, RunId, canonical_sha256};
 use tracedecay_store::{
     ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
@@ -24,10 +24,10 @@ use tracedecay_store::{
     ProjectMemoryFactCurationRemoveDispositionV1,
 };
 
-use super::contract_error;
+use super::contract::contract_error;
 use tracedecay_runtime_core::errors::Result;
 
-pub(super) fn project_run_summary(
+pub fn project_run_summary(
     task: AutomationTaskV1,
     receipts: &[AutomationCommittedReceiptV1],
 ) -> Result<AutomationRunSummaryV1> {
@@ -112,7 +112,7 @@ pub(super) fn project_run_summary(
     })
 }
 
-pub(super) fn project_skip_reason(reason: &str) -> Result<AutomationSkipReasonV1> {
+pub fn project_skip_reason(reason: &str) -> Result<AutomationSkipReasonV1> {
     AutomationSkipReasonV1::from_ledger_reason(reason).ok_or_else(|| {
         contract_error(format!(
             "automation skip reason is not registered: {reason}"
@@ -120,7 +120,7 @@ pub(super) fn project_skip_reason(reason: &str) -> Result<AutomationSkipReasonV1
     })
 }
 
-pub(super) fn project_committed_receipts(
+pub fn project_committed_receipts(
     request: &AutomationRunRequestV1,
     committed: &AutomationCommittedReceipt,
 ) -> Result<Vec<AutomationCommittedReceiptV1>> {
@@ -174,7 +174,7 @@ pub(super) fn project_committed_receipts(
     }
 }
 
-pub(super) fn project_recovered_committed_receipts(
+pub fn project_recovered_committed_receipts(
     request: &AutomationRunRequestV1,
     recovered: &ProjectMemoryAutomationRunReceiptsV1,
 ) -> Result<Vec<AutomationCommittedReceiptV1>> {
@@ -209,10 +209,7 @@ pub(super) fn project_recovered_committed_receipts(
         }
         (None, false) => {
             let results = recovered.automatic_fact_results().map_err(contract_error)?;
-            let receipts =
-                tracedecay_automation_runtime::automation::NonEmptyAutomaticFactReceipts::from_vec(
-                    results,
-                )
+            let receipts = crate::automation::NonEmptyAutomaticFactReceipts::from_vec(results)
                 .ok_or_else(|| contract_error("recovered automatic-fact receipt set is empty"))?;
             project_committed_receipts(
                 request,
@@ -228,7 +225,7 @@ pub(super) fn project_recovered_committed_receipts(
 
 fn project_external_receipt(
     request: &AutomationRunRequestV1,
-    receipt: &tracedecay_automation_runtime::automation::ExternalAutomationEffectReceipt,
+    receipt: &crate::automation::ExternalAutomationEffectReceipt,
 ) -> Result<AutomationExternalEffectReceiptV1> {
     let (expected_run_id, task_key) = match &request.task {
         AutomationTaskRequestV1::SkillWriter(_) => (

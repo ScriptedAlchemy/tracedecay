@@ -288,13 +288,18 @@ async fn initialize_test_project(
         &client_identity.profile_root,
         "daemon test fixture initialization",
     );
-    let project = crate::tracedecay::TraceDecay::init_with_exclusive_maintenance(
-        project_root,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-        &lifecycle,
+    // Heap-allocate the graph-init composition so every test awaiting this
+    // fixture keeps a bounded resident frame (perf-profile layouts overflow
+    // the test stack when the mega-future is inlined).
+    let project = Box::pin(
+        crate::tracedecay::TraceDecay::init_with_exclusive_maintenance(
+            project_root,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(client_identity.profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+            &lifecycle,
+        ),
     )
     .await
     .expect("initialize project");
@@ -610,11 +615,15 @@ async fn apply_project_automation_patch_via_surface(
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
-    crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
-        .await
-        .expect("configuration batch application invocation")
-        .result
-        .expect("automation configuration effect");
+    Box::pin(crate::application_surface::execute_application_surface(
+        operation,
+        dispatched,
+        Some(&executor),
+    ))
+    .await
+    .expect("configuration batch application invocation")
+    .result
+    .expect("automation configuration effect");
     server
 }
 

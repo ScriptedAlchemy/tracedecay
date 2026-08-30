@@ -34,7 +34,7 @@ use tracedecay_mcp::get_tool_definitions;
 use tracedecay_tool_catalog::{BindingSurface, ProfileId, SchemaId, SurfaceOperationName};
 
 const PARITY_FIXTURE: &str = include_str!(
-    "../../../benchmark_data/transport-boundary/goldens/application-surface-parity.json"
+    "../../../../benchmark_data/transport-boundary/goldens/application-surface-parity.json"
 );
 
 /// The operations whose decoded surface request carries a

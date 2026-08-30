@@ -35,7 +35,9 @@ pub(crate) async fn setup_server() -> (Arc<McpServer>, TempDir) {
     let cg = crate::fixture::init_project_from_template(project)
         .await
         .unwrap();
-    let server = McpServer::new(cg, None).await;
+    // Boxed server-construction future: the production composition layout
+    // overflows the perf-profile test stack when inlined into each test.
+    let server = Box::pin(McpServer::new(cg, None)).await;
     (server, dir)
 }
 
@@ -63,15 +65,17 @@ pub(crate) fn project_id_of(cg: &TraceDecay) -> tracedecay_domain::ProjectId {
 /// isolated profile (see [`crate::common::IsolatedEnv`]) because the runtime
 /// mounts the ambient profile root.
 pub(crate) async fn server_with_session_authority(project: &std::path::Path) -> Arc<McpServer> {
-    let cg = TraceDecay::open(project).await.unwrap();
+    let cg = Box::pin(TraceDecay::open(project)).await.unwrap();
     let project_id = project_id_of(&cg);
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::project_scoped(&profile_root, project, project_id)
         .await
         .expect("registered project runtime opens for the isolated profile");
-    McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime)
-        .await
-        .expect("registered test server")
+    Box::pin(McpServer::new_with_host_admission_test_runtime_for_test(
+        cg, None, runtime,
+    ))
+    .await
+    .expect("registered test server")
 }
 
 /// As [`setup_server`], but the returned server retains the project's
@@ -129,9 +133,11 @@ async fn drive_messages(
 
     let handle = tokio::spawn(async move {
         if shutdown_on_exit {
-            server.run(&mut transport).await.unwrap();
+            Box::pin(server.run(&mut transport)).await.unwrap();
         } else {
-            server.run_connection(&mut transport).await.unwrap();
+            Box::pin(server.run_connection(&mut transport))
+                .await
+                .unwrap();
         }
     });
 
@@ -332,9 +338,11 @@ async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
     let runtime = HostAdmissionTestRuntimeV1::project_scoped(&profile_root, project, project_id)
         .await
         .expect("registered project runtime opens for the savings profile");
-    let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime)
-        .await
-        .expect("registered test server");
+    let server = Box::pin(McpServer::new_with_host_admission_test_runtime_for_test(
+        cg, None, runtime,
+    ))
+    .await
+    .expect("registered test server");
     AccountedServer {
         server,
         project: dir,

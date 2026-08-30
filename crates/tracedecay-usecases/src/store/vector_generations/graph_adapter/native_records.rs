@@ -121,10 +121,16 @@ pub(super) struct NativeGenerationMetadataV1 {
 /// before batch zero; no staged row namespace or terminal corpus rename exists.
 /// Ordinary reuse is receipt-only: reused chunks name lineage on the batch
 /// receipt, and the base generation's vector rows serve them.
+///
+/// The machine still carries the *pre-batch* state: row payloads come from
+/// the prepared batch itself and the post-batch census comes from the
+/// validated commit decision, so the durable append happens before the
+/// in-memory apply and a failed append leaves the machine untouched.
 pub(crate) fn encode_generation_batch_delta(
     state: &VectorGenerationStateMachineV1,
     build_id: &VectorGenerationBuildIdV1,
     prepared: &PreparedVectorGenerationV1,
+    staged_commit: &super::super::PreparedBatchCommitV1,
     revision: u64,
 ) -> Result<NativeGraphStateV1, VectorGenerationStoreErrorV1> {
     let build = state
@@ -145,20 +151,12 @@ pub(crate) fn encode_generation_batch_delta(
     )?;
 
     let owner = generation_entity_id(&generation_id)?;
-    let vector_bytes = build.vectors.values().try_fold(0_u64, |total, vector| {
-        total
-            .checked_add(
-                u64::try_from(vector.values.len())
-                    .map_err(storage_error)?
-                    .checked_mul(4)
-                    .ok_or_else(|| corrupt("semantic vector byte count overflowed"))?,
-            )
-            .ok_or_else(|| corrupt("semantic vector byte count overflowed"))
-    })?;
-    let embedding = build
-        .embedding_key
-        .as_ref()
-        .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?;
+    let embedding = staged_commit.embedding_key();
+    let prepared_vectors = prepared
+        .vectors
+        .iter()
+        .map(|vector| (&vector.chunk_id, vector))
+        .collect::<BTreeMap<_, _>>();
     insert_entity(
         &mut entities,
         entity(
@@ -188,12 +186,21 @@ pub(crate) fn encode_generation_batch_delta(
                     ),
                 ),
                 (EMBEDDING_KEY, bytes_property(embedding)?),
-                (CHECKPOINT, bytes_property(&build.checkpoint)?),
+                (CHECKPOINT, bytes_property(staged_commit.checkpoint())?),
                 (MANIFEST_DIGEST, string_property(manifest_digest.as_str())),
-                (ROW_COUNT, i64_property(build.vectors.len())?),
-                (VECTOR_BYTES, i64_property(vector_bytes)?),
-                (TOMBSTONE_COUNT, i64_property(build.tombstones.len())?),
-                (RECEIPT_COUNT, i64_property(build.batches.len())?),
+                (ROW_COUNT, i64_property(staged_commit.row_count_after())?),
+                (
+                    VECTOR_BYTES,
+                    i64_property(staged_commit.vector_bytes_after())?,
+                ),
+                (
+                    TOMBSTONE_COUNT,
+                    i64_property(staged_commit.tombstone_count_after())?,
+                ),
+                (
+                    RECEIPT_COUNT,
+                    i64_property(staged_commit.receipt_count_after())?,
+                ),
             ],
         )?,
     )?;
@@ -209,7 +216,7 @@ pub(crate) fn encode_generation_batch_delta(
     for receipt in &prepared.receipt.receipts {
         match receipt.operation {
             ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
-                let vector = build.vectors.get(&receipt.chunk_id).ok_or_else(|| {
+                let vector = prepared_vectors.get(&receipt.chunk_id).ok_or_else(|| {
                     VectorGenerationStoreErrorV1::Corrupt(
                         "committed semantic vector receipt has no staged vector".to_owned(),
                     )
@@ -238,18 +245,21 @@ pub(crate) fn encode_generation_batch_delta(
                 )?;
             }
             ProjectionOperationV1::Reused => {
-                if !build.vectors.contains_key(&receipt.chunk_id) {
+                if !staged_commit.has_vector_effect(&receipt.chunk_id) {
                     return Err(VectorGenerationStoreErrorV1::Corrupt(
                         "committed semantic reused receipt has no staged vector".to_owned(),
                     ));
                 }
             }
             ProjectionOperationV1::Deleted => {
-                let prior_digest = build.tombstones.get(&receipt.chunk_id).ok_or_else(|| {
-                    VectorGenerationStoreErrorV1::Corrupt(
-                        "committed semantic tombstone receipt has no staged tombstone".to_owned(),
-                    )
-                })?;
+                let prior_digest = staged_commit
+                    .tombstone_prior_digest(&receipt.chunk_id)
+                    .ok_or_else(|| {
+                        VectorGenerationStoreErrorV1::Corrupt(
+                            "committed semantic tombstone receipt has no staged tombstone"
+                                .to_owned(),
+                        )
+                    })?;
                 let child = scoped_entity_id(
                     "generation-tombstone",
                     generation_id.as_digest().as_str(),
@@ -278,20 +288,10 @@ pub(crate) fn encode_generation_batch_delta(
         }
     }
 
-    let (ordinal, committed) = build
-        .batches
-        .iter()
-        .enumerate()
-        .find(|(_, batch)| batch.request_digest == prepared.request.request_digest)
-        .ok_or_else(|| {
-            VectorGenerationStoreErrorV1::Corrupt(
-                "committed semantic vector batch has no native receipt row".to_owned(),
-            )
-        })?;
     let batch_row = scoped_entity_id(
         "generation-receipt",
         generation_id.as_digest().as_str(),
-        &ordinal.to_string(),
+        &staged_commit.batch_ordinal().to_string(),
     )?;
     insert_entity(
         &mut entities,
@@ -303,8 +303,11 @@ pub(crate) fn encode_generation_batch_delta(
                     GENERATION_ID,
                     string_property(generation_id.as_digest().as_str()),
                 ),
-                (RECEIPT, generation_receipt_property(&committed.receipt)?),
-                (ORDINAL, i64_property(ordinal)?),
+                (
+                    RECEIPT,
+                    generation_receipt_property(staged_commit.receipt())?,
+                ),
+                (ORDINAL, i64_property(staged_commit.batch_ordinal())?),
             ],
         )?,
     )?;

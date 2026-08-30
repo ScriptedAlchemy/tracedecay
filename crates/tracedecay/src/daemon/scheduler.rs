@@ -85,7 +85,7 @@ fn log_scheduler_task_error(
 fn log_scheduler_automation_replay(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
-    terminal: &crate::daemon::automation_effect::AutomationSettledTerminal,
+    terminal: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal,
 ) {
     log_daemon_event(
         "scheduler_task_application_replay",
@@ -113,7 +113,7 @@ fn log_scheduler_automation_replay(
 pub(super) fn scheduler_application_problem_log_fields(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
-    problem: &crate::daemon::automation_effect::AutomationSettledProblem,
+    problem: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
@@ -1991,7 +1991,11 @@ async fn run_user_jobs_scheduler_pass(
             &dashboard_root,
             Some(&requested_run_id),
             configuration_digest.clone(),
-            |run_id| crate::daemon::automation_effect::user_job_run_request(run_id, &job.id),
+            |run_id| {
+                tracedecay_automation_runtime::automation::effect_runtime::user_job_run_request(
+                    run_id, &job.id,
+                )
+            },
         )
         .await
         {

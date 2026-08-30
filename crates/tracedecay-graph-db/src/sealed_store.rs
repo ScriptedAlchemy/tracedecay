@@ -128,12 +128,10 @@ pub(crate) fn open_direct_sealed_generation(
             Vec::new(),
         )
     };
-    let verification = {
-        let guard = database.read_guard()?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        verify_sealed_copy_generation(native, &identity, expected, check)
-    };
-    if let Err(error) = verification {
+    // Same marker-aware proof as registry adoption: a boot that reopens the
+    // exact bytes an earlier open already proved resolves by stat, and a
+    // fresh or moved container pays the full row proof and files the marker.
+    if let Err(error) = sealed_copy_proof(&database, &identity, expected, check) {
         let _ = database.close();
         return Err(sealed_store_failure(
             "post-reopen verification failed",
@@ -150,6 +148,12 @@ pub(crate) fn open_direct_sealed_generation(
 /// batch budget the staging path already proves out.
 const MAX_SEALED_COPY_MUTATIONS: usize = crate::limits::MAX_NATIVE_GENERATION_STAGE_MUTATIONS;
 const MAX_SEALED_COPY_LIVE_BYTES: usize = 96 * 1024 * 1024;
+/// Rows loaded from the shared staging database per read-guard hold while a
+/// sealed copy streams. Small enough that a queued writer (and the readers
+/// that pile up behind it under `std::sync::RwLock`'s writer preference)
+/// waits milliseconds, large enough that lock churn stays negligible against
+/// row decode cost.
+const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
 const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
@@ -769,7 +773,9 @@ fn copy_compact_and_close(
     let namespace_projection = physical_namespace_projection_map(identity)?;
 
     // Enumerate exactly the digest's row sets from the staging database.
-    let (entity_nodes, relation_rows, dependency_endpoints) = {
+    // Index scans only under this guard; the row loads below reacquire it in
+    // bounded chunks.
+    let (entity_nodes, relation_locators) = {
         let guard = source.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let entity_nodes = projection_entity_nodes_sorted_checked(
@@ -784,21 +790,33 @@ fn copy_compact_and_close(
             &identity.projection.projection,
             check,
         )?;
+        (entity_nodes, relation_locators)
+    };
+    // The staged generation is immutable, so its node handles stay valid
+    // across guard reacquisitions (the per-entity copy below has always
+    // relied on this). Bounding each hold matters because the staging
+    // database is shared: `std::sync::RwLock` blocks new readers once a
+    // writer queues, so one corpus-length read guard here turned every
+    // concurrent write *and every reader arriving behind it* — memory-graph
+    // publication, fact and journey reads — into a build-length stall.
+    let mut endpoint_cache = EndpointIdentityCache::default();
+    let mut relation_rows = Vec::new();
+    relation_rows
+        .try_reserve_exact(relation_locators.len())
+        .map_err(|_| GraphDbError::unavailable("sealed relation copy set is too large"))?;
+    // Endpoint entities living in dependency generations, keyed by the
+    // dependency projection so each copy batch stays namespace-exact.
+    let mut dependency_endpoints: BTreeMap<
+        GraphProjectionIdentity,
+        BTreeMap<GraphEntityId, GraphEntity>,
+    > = BTreeMap::new();
+    for chunk in relation_locators.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
+        let guard = source.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let store = database.graph_store();
-        let mut endpoint_cache = EndpointIdentityCache::default();
-        let mut relation_rows = Vec::new();
-        relation_rows
-            .try_reserve_exact(relation_locators.len())
-            .map_err(|_| GraphDbError::unavailable("sealed relation copy set is too large"))?;
-        // Endpoint entities living in dependency generations, keyed by the
-        // dependency projection so each copy batch stays namespace-exact.
-        let mut dependency_endpoints: BTreeMap<
-            GraphProjectionIdentity,
-            BTreeMap<GraphEntityId, GraphEntity>,
-        > = BTreeMap::new();
-        for (_, locator) in relation_locators {
+        for (_, locator) in chunk {
             check()?;
-            let stored = load_relation_by_locator_cached(database, locator, &mut endpoint_cache)?;
+            let stored = load_relation_by_locator_cached(database, *locator, &mut endpoint_cache)?;
             let from = recovered_entity_ref(store.as_ref(), stored.source, &namespace_projection)?;
             let to = recovered_entity_ref(store.as_ref(), stored.target, &namespace_projection)?;
             for endpoint in [&from, &to] {
@@ -830,8 +848,8 @@ fn copy_compact_and_close(
             )?;
             relation_rows.push(relation);
         }
-        (entity_nodes, relation_rows, dependency_endpoints)
-    };
+    }
+    drop(endpoint_cache);
     let entity_count = entity_nodes.len();
     let relation_count = relation_rows.len();
     let mut saw_bytes_property = relation_rows
@@ -868,22 +886,27 @@ fn copy_compact_and_close(
         identity.projection.projection.clone(),
         identity,
     );
-    for (_, node) in entity_nodes {
-        check()?;
-        let entity = {
+    for chunk in entity_nodes.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
+        let mut loaded = Vec::with_capacity(chunk.len());
+        {
             let guard = source.read_guard()?;
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            load_entity_by_node(database, node)?.entity
-        };
-        saw_bytes_property |= properties_carry_bytes(&entity.properties);
-        let live_bytes = entity_copy_live_bytes(&entity);
-        pager.push(
-            &sealed,
-            GraphMutation::UpsertEntity(entity),
-            None,
-            live_bytes,
-            check,
-        )?;
+            for (_, node) in chunk {
+                check()?;
+                loaded.push(load_entity_by_node(database, *node)?.entity);
+            }
+        }
+        for entity in loaded {
+            saw_bytes_property |= properties_carry_bytes(&entity.properties);
+            let live_bytes = entity_copy_live_bytes(&entity);
+            pager.push(
+                &sealed,
+                GraphMutation::UpsertEntity(entity),
+                None,
+                live_bytes,
+                check,
+            )?;
+        }
     }
     pager.flush(&sealed, check)?;
 
@@ -1002,22 +1025,22 @@ fn open_sealed_store(
         Some(PersistentGraphStoreState::Existing),
     )
     .map_err(|error| sealed_store_failure("reopen failed", error))?;
-    // Prove the compacted, reopened store serves exactly the sealed rows.
-    // This runs once per install (build or recovery adoption), so a corrupt
-    // or truncated artifact is discarded before it answers a single read.
-    let canonical_bytes = {
-        let guard = database.read_guard()?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        match verify_sealed_copy_generation(native, identity, expected, &|| Ok(())) {
-            Ok((_, canonical_bytes)) => canonical_bytes,
-            Err(error) => {
-                drop(guard);
-                let _ = database.close();
-                return Err(sealed_store_failure(
-                    "post-reopen verification failed",
-                    error,
-                ));
-            }
+    // Prove the compacted, reopened store serves exactly the sealed rows
+    // before it answers a single read. The artifact is immutable after its
+    // build, so a proof established by an earlier open of these exact
+    // container bytes stands: the marker beside the artifact resolves it by
+    // stat, and anything else — a missing or foreign marker, or a container
+    // whose file identity moved — falls back to the full row proof and files
+    // the marker for the next open. `expected` still comes from the
+    // relational authority, exactly as on the staging container.
+    let canonical_bytes = match sealed_copy_proof(&database, identity, expected, &|| Ok(())) {
+        Ok(canonical_bytes) => canonical_bytes,
+        Err(error) => {
+            let _ = database.close();
+            return Err(sealed_store_failure(
+                "post-reopen verification failed",
+                error,
+            ));
         }
     };
     database.mark_sealed_read_only();
@@ -1028,4 +1051,56 @@ fn open_sealed_store(
         directory: directory.to_path_buf(),
         database,
     })))
+}
+
+/// Resolves the recovered-digest proof for a reopened sealed copy: by the
+/// artifact's own verify-once marker when the container bytes are the ones an
+/// earlier proof ran over, by the full row-streaming proof otherwise. A full
+/// proof files the marker so the next open of unchanged bytes resolves by
+/// stat. Returns the canonical byte count the proof covers.
+fn sealed_copy_proof(
+    database: &GraphDb,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<u64, GraphDbError> {
+    let locator = GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+    if let Some(canonical_bytes) = database.inner.markers.lookup(&locator, expected.as_str()) {
+        database.inner.markers.record_fresh(&locator);
+        #[cfg(test)]
+        crate::generation::record_sealed_copy_marker_hit();
+        crate::hotpath_observe::record_sealed_copy_verification(
+            crate::verified_marker::GenerationVerification::VerifiedFresh,
+            canonical_bytes,
+        );
+        return Ok(canonical_bytes);
+    }
+    let canonical_bytes = {
+        let guard = database.read_guard()?;
+        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let (_, canonical_bytes) =
+            verify_sealed_copy_generation(native, identity, expected, check)?;
+        canonical_bytes
+    };
+    database
+        .inner
+        .markers
+        .record_proven(&locator, expected.as_str(), canonical_bytes);
+    // Published now as well as at close, because both identities matter. An
+    // open session writes only the sidecar WAL (index catalog entries), so
+    // the container bytes stay exactly the ones this proof ran over for as
+    // long as this process serves them: publishing here lets every further
+    // open of the artifact in the same boot — the direct-sealed recover and
+    // the registry adoption were each paying this proof — resolve by stat.
+    // The close-time publish then re-records the checkpointed container for
+    // the next boot. A marker is a cache of completed proofs; failing to
+    // write one costs the next open a re-proof and nothing else.
+    if let Err(error) = database.inner.markers.publish() {
+        let _ = error;
+    }
+    crate::hotpath_observe::record_sealed_copy_verification(
+        crate::verified_marker::GenerationVerification::Reverified,
+        canonical_bytes,
+    );
+    Ok(canonical_bytes)
 }

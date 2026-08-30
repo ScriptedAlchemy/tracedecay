@@ -676,7 +676,11 @@ impl<'a> DoctorReportComposerV1<'a> {
         };
         let read = port.code_index_mount(context).await;
         let consultation = match read {
-            CodeIndexMountReadV1::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+            // A parked convergence is a consulted answer: the source observed
+            // the exact violation, not an unavailable family.
+            CodeIndexMountReadV1::Observed { .. } | CodeIndexMountReadV1::Parked { .. } => {
+                DoctorFamilyConsultationV1::Consulted
+            }
             CodeIndexMountReadV1::Unsupported => {
                 unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
             }

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
-use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{ProjectId, canonical_sha256};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphProjectorRevision, SealedCodeGenerationReplay,
 };
@@ -82,10 +82,17 @@ fn with_publication_context<T>(
         deadline_warned: AtomicBool::new(false),
     };
     let control = RuntimeRequestControlV1 {
-        requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+        requested_at: tracedecay_application::clock::now_micros(),
         deadline,
         cancellation,
     };
+    // 2020-01-01T00:00:00Z in micros. A seconds-scale stamp (~1.8e9) fails
+    // this bound — the 1970-era seconds-as-micros regression this pins.
+    assert!(
+        control.requested_at.0 > 1_577_836_800_000_000,
+        "requested_at must be micros-scale, got {}",
+        control.requested_at.0
+    );
     let context = GraphPublicationOperationContextV1::new(&control, &probe)
         .expect("test publication context");
     operation(&context)
@@ -1202,21 +1209,23 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         )
         .await
         .expect("retain the reconcile code graph runtime");
-    // Cross-instance exclusivity is one registry-owned gate cell per code
-    // shard; a per-instance gate would silently reintroduce the publication
-    // race this gate exists to prevent.
+    // Cross-instance exclusivity is one registry-owned lock cell per code
+    // shard; per-instance locks would silently reintroduce the publication
+    // race the flight table and gate exist to prevent.
     assert!(Arc::ptr_eq(
-        &seat.publication_gate,
-        &reconcile.publication_gate
+        &seat.publication_locks,
+        &reconcile.publication_locks
     ));
 
-    // A publisher cancelled while another instance holds the gate answers
-    // typed cancellation and leaves the publication journal untouched,
-    // whether the cancellation lands during the pre-gate projection or in the
-    // post-wait interruption check.
+    // A publisher cancelled while another instance holds the serving gate
+    // answers typed cancellation and leaves the publication journal
+    // untouched: the classification slice blocks on the gate before any
+    // journal read or write, and observes the typed interruption first thing
+    // after acquiring it.
     let cancelled = Arc::new(AtomicBool::new(false));
     let held = seat
-        .publication_gate
+        .publication_locks
+        .gate
         .lock()
         .expect("hold the publication gate");
     let outcome = std::thread::scope(|scope| {

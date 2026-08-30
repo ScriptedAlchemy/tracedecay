@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use tracedecay_code_index::chunks::{CodeFileChunksV1, content_digest};
 use tracedecay_code_index::chunks::{CodeSearchDocumentV1, CodeSearchEligibilityV1};
@@ -39,8 +40,8 @@ fn chunk(
     grain: CodeSearchChunkGrainV1,
     text: &str,
     start_byte: u64,
-) -> CodeSearchChunkV1 {
-    CodeSearchChunkV1 {
+) -> Arc<CodeSearchChunkV1> {
+    Arc::new(CodeSearchChunkV1 {
         id: id::<CodeSearchChunkId>(chunk_id),
         anchor: CodeSearchChunkAnchorV1 {
             generation_id: generation_id.clone(),
@@ -65,7 +66,7 @@ fn chunk(
         exact_terms: vec![],
         subtokens: vec![],
         sanitized_text: BoundedSanitizedText::new(text).expect("bounded fixture text"),
-    }
+    })
 }
 
 fn file_chunks(
@@ -239,39 +240,44 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                 .anchor
                 .symbol_occurrence_id
                 .as_ref()
-                .map(|occurrence| LineageSymbolRecordV1 {
-                    occurrence: occurrence.clone(),
-                    identity: id::<SymbolIdentityDigest>(&format!(
-                        "sha256:{}",
-                        if chunk.sanitized_text.as_str().contains("alpha") {
-                            "a".repeat(64)
+                .map(|occurrence| {
+                    Arc::new(LineageSymbolRecordV1 {
+                        occurrence: occurrence.clone(),
+                        identity: id::<SymbolIdentityDigest>(&format!(
+                            "sha256:{}",
+                            if chunk.sanitized_text.as_str().contains("alpha") {
+                                "a".repeat(64)
+                            } else {
+                                "b".repeat(64)
+                            }
+                        )),
+                        qualified_name: if chunk.sanitized_text.as_str().contains("alpha") {
+                            "crate::alpha"
                         } else {
-                            "b".repeat(64)
+                            "crate::beta"
                         }
-                    )),
-                    qualified_name: if chunk.sanitized_text.as_str().contains("alpha") {
-                        "crate::alpha"
-                    } else {
-                        "crate::beta"
-                    }
-                    .to_owned(),
-                    kind: "function".to_owned(),
-                    simple_name: if chunk.sanitized_text.as_str().contains("alpha") {
-                        "alpha"
-                    } else {
-                        "beta"
-                    }
-                    .to_owned(),
-                    visibility: "private".to_owned(),
-                    branches: 0,
-                    loops: 0,
-                    max_nesting: 0,
-                    line_span: 1,
-                    start_line: 0,
-                    signature: None,
-                    skip_test_coverage: false,
-                    file_identity: id::<FileIdentityDigest>(&format!("sha256:{}", "f".repeat(64))),
-                    content_digest: chunk.content_digest.clone(),
+                        .to_owned(),
+                        kind: "function".to_owned(),
+                        simple_name: if chunk.sanitized_text.as_str().contains("alpha") {
+                            "alpha"
+                        } else {
+                            "beta"
+                        }
+                        .to_owned(),
+                        visibility: "private".to_owned(),
+                        branches: 0,
+                        loops: 0,
+                        max_nesting: 0,
+                        line_span: 1,
+                        start_line: 0,
+                        signature: None,
+                        skip_test_coverage: false,
+                        file_identity: id::<FileIdentityDigest>(&format!(
+                            "sha256:{}",
+                            "f".repeat(64)
+                        )),
+                        content_digest: chunk.content_digest.clone(),
+                    })
                 })
         })
         .collect();

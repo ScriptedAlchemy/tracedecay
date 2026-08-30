@@ -813,6 +813,23 @@ impl GraphDb {
         if !was_uncertain && let Err(error) = self.inner.markers.publish() {
             let _ = error;
         }
+        // Sealed per-generation readers are separate databases with their own
+        // verify-once markers; closing them through the typed close is what
+        // re-publishes each marker against the checkpointed container the
+        // next open will stat. Left to `Drop`, the engine still checkpoints
+        // but the marker goes stale and the next boot pays a full sealed
+        // proof. Failures are swallowed for the same reason as the marker
+        // publish above: a derived reader that failed to close costs a
+        // re-proof, never a durability fault on this staging close.
+        let sealed = self
+            .inner
+            .sealed_generations
+            .write()
+            .map(|mut sealed| std::mem::take(&mut *sealed))
+            .unwrap_or_default();
+        for store in sealed.into_values() {
+            let _ = store.database().close();
+        }
         if was_uncertain {
             Err(durability_uncertain())
         } else {

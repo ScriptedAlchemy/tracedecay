@@ -189,3 +189,7 @@ harness = false
 name = "work_readiness"
 harness = false
 required-features = ["test-helpers"]
+
+[[bench]]
+name = "semantic_vector_commit_scale"
+harness = false

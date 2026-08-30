@@ -409,8 +409,10 @@ async fn execute_dashboard_automation_run(
                 request_control.cancellation(),
                 request_control.observed_at(),
                 configuration_digest,
-                crate::daemon::automation_effect::user_job_run_request(&run_id, &job_id)
-                    .map_err(automation_failed)?,
+                tracedecay_automation_runtime::automation::effect_runtime::user_job_run_request(
+                    &run_id, &job_id,
+                )
+                .map_err(automation_failed)?,
             )
             .await
             .map_err(automation_failed)?;
@@ -609,7 +611,7 @@ fn automation_admission_conflict() -> DashboardAutomationAuthorityErrorV1 {
 }
 
 fn automation_terminal_run(
-    terminal: &crate::daemon::automation_effect::AutomationSettledTerminal,
+    terminal: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal,
 ) -> DashboardAutomationResult<tracedecay_application::retained_surfaces::AutomationRunResultV1> {
     if let Some(run) = terminal.run_result() {
         return Ok(run.clone());
@@ -623,7 +625,9 @@ fn automation_terminal_run(
 }
 
 fn automation_problem(
-    problem: Box<crate::daemon::automation_effect::AutomationSettledProblem>,
+    problem: Box<
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
+    >,
 ) -> DashboardAutomationAuthorityErrorV1 {
     DashboardAutomationAuthorityErrorV1::AutomationProblem(problem)
 }

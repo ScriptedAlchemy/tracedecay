@@ -4,14 +4,14 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::automation::automatic_facts::{
+    MAX_SHIPPED_FACT_PROPOSAL_BYTES, ShippedFactProposalDisposition,
+    read_shipped_fact_proposal_bytes,
+};
 use cap_std::{ambient_authority, fs::Dir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::retained_surfaces::AutomationTaskV1;
-use tracedecay_automation_runtime::automation::automatic_facts::{
-    MAX_SHIPPED_FACT_PROPOSAL_BYTES, ShippedFactProposalDisposition,
-    read_shipped_fact_proposal_bytes,
-};
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_tagged_lowercase_hex};
 use tracedecay_private_fs::capability_dir::rename_noreplace;
 use tracedecay_private_fs::framed_log::{
@@ -22,37 +22,35 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RetirementBinding {
-    pub(super) source_digest: String,
-    pub(super) archive_name: String,
+pub struct RetirementBinding {
+    pub source_digest: String,
+    pub archive_name: String,
 }
 
-pub(super) struct RetirementPlan {
-    pub(super) binding: RetirementBinding,
+pub struct RetirementPlan {
+    pub binding: RetirementBinding,
     source_path: PathBuf,
     source_bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
-pub(super) struct RetirementClosure {
+pub struct RetirementClosure {
     source_path: PathBuf,
     source_digest: String,
     capture_path: Option<PathBuf>,
 }
 
 impl RetirementClosure {
-    pub(super) fn source_digest(&self) -> &str {
+    pub fn source_digest(&self) -> &str {
         &self.source_digest
     }
 
-    pub(super) fn capture_expected(&self) -> bool {
+    pub fn capture_expected(&self) -> bool {
         self.capture_path.is_some()
     }
 }
 
-pub(super) fn classify(
-    disposition: ShippedFactProposalDisposition,
-) -> Result<RetirementClassification> {
+pub fn classify(disposition: ShippedFactProposalDisposition) -> Result<RetirementClassification> {
     match disposition {
         ShippedFactProposalDisposition::Absent => Ok(RetirementClassification::Absent),
         ShippedFactProposalDisposition::ResetRequired {
@@ -97,7 +95,7 @@ pub(super) fn classify(
 }
 
 #[hotpath::measure(label = "daemon.automation_retirement.classify", future = true)]
-pub(super) async fn classify_for_task(
+pub async fn classify_for_task(
     task: AutomationTaskV1,
     dashboard_root: &Path,
 ) -> Result<RetirementClassification> {
@@ -105,14 +103,11 @@ pub(super) async fn classify_for_task(
         return Ok(RetirementClassification::Absent);
     }
     classify(
-        tracedecay_automation_runtime::automation::automatic_facts::inspect_shipped_fact_proposals(
-            dashboard_root,
-        )
-        .await?,
+        crate::automation::automatic_facts::inspect_shipped_fact_proposals(dashboard_root).await?,
     )
 }
 
-pub(super) enum RetirementClassification {
+pub enum RetirementClassification {
     Absent,
     ResetRequired {
         source_digest: String,
@@ -121,7 +116,7 @@ pub(super) enum RetirementClassification {
     Terminal(RetirementPlan),
 }
 
-pub(super) fn verify_plan_matches_binding(
+pub fn verify_plan_matches_binding(
     plan: &RetirementPlan,
     binding: &RetirementBinding,
 ) -> Result<()> {
@@ -138,7 +133,7 @@ pub(super) fn verify_plan_matches_binding(
 /// zero-effect `AutomationRun` terminal that contains this binding in
 /// its admitted input digest.
 #[hotpath::measure(label = "daemon.automation_retirement.finalize")]
-pub(super) fn finalize_after_terminal(
+pub fn finalize_after_terminal(
     dashboard_root: &Path,
     binding: &RetirementBinding,
     live_plan: Option<&RetirementPlan>,
@@ -256,11 +251,11 @@ fn finalize_after_terminal_impl(
 }
 
 #[hotpath::measure(label = "daemon.automation_retirement.complete")]
-pub(super) fn complete_after_pending_removal(closure: &RetirementClosure) -> Result<()> {
+pub fn complete_after_pending_removal(closure: &RetirementClosure) -> Result<()> {
     complete_after_pending_removal_with(closure, |_| Ok(()))
 }
 
-pub(super) fn closure_for_durable_transition(
+pub fn closure_for_durable_transition(
     dashboard_root: &Path,
     binding: &RetirementBinding,
     capture_expected: bool,
@@ -389,7 +384,7 @@ fn complete_after_pending_removal_with(
     }
 }
 
-pub(super) fn reject_unbound_retirement_witness(dashboard_root: &Path) -> Result<()> {
+pub fn reject_unbound_retirement_witness(dashboard_root: &Path) -> Result<()> {
     if let Some((witness_path, _)) = orphaned_retirement_witness(dashboard_root)? {
         return Err(contract_error(format!(
             "retirement witness '{}' has no durable journal transition authority",

@@ -4041,6 +4041,7 @@ function codeIndexFreshnessEnvelope(progress: Record<string, unknown> | null): R
         hook_hint_count: 0,
         coverage: 'complete',
         progress,
+        parked: null,
       },
     ],
     note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',

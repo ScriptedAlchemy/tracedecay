@@ -988,6 +988,8 @@ thread_local! {
         const { std::cell::Cell::new(0) };
     static SEALED_COPY_PROOFS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static SEALED_COPY_MARKER_HITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
     static MANIFEST_CANONICALIZATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     static CANONICAL_BUFFER_ALLOCATION_GROWTHS: std::cell::Cell<usize> =
@@ -1016,6 +1018,24 @@ pub(crate) fn reset_sealed_copy_proofs() {
 #[cfg(test)]
 pub(crate) fn sealed_copy_proofs() -> usize {
     SEALED_COPY_PROOFS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_sealed_copy_marker_hits() {
+    SEALED_COPY_MARKER_HITS.with(|count| count.set(0));
+}
+
+/// Sealed-copy opens on this thread that resolved their recovered-digest
+/// proof from a verified-generation marker over byte-identical container
+/// bytes instead of re-streaming the rows.
+#[cfg(test)]
+pub(crate) fn sealed_copy_marker_hits() -> usize {
+    SEALED_COPY_MARKER_HITS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn record_sealed_copy_marker_hit() {
+    SEALED_COPY_MARKER_HITS.with(|count| count.set(count.get() + 1));
 }
 
 #[cfg(test)]

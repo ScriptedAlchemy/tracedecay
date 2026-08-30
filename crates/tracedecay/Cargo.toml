@@ -454,8 +454,6 @@ rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
-[target.'cfg(not(windows))'.dependencies]
-
 # `statfs(2)` for daemon store-locality detection (src/daemon/store_runtime/
 # resolver.rs). Linux reads `/proc/self/mountinfo` instead; macOS has no such
 # file, and `MNT_LOCAL` is the kernel's direct answer to "is this volume local".
@@ -463,7 +461,6 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-zip = { version = "8", default-features = false, features = ["deflate"] }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_System_Com",
@@ -510,6 +507,9 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0", features = ["test-helpers"] }
+# Journal tests in the composition root call effect_runtime journal internals
+# that stay crate-private in production and compile only under test-helpers.
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
@@ -601,3 +601,8 @@ required-features = ["test-helpers"]
 name = "transcript_ingest_suite"
 path = "tests/transcript_ingest_suite/main.rs"
 required-features = ["test-helpers"]
+
+# Former standalone default-feature singles, compiled as modules of one binary.
+[[test]]
+name = "product_surface_suite"
+path = "tests/product_surface_suite/main.rs"

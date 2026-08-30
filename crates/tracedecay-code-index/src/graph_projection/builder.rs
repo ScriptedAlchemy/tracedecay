@@ -103,7 +103,7 @@ pub(super) fn build_projection(
     projection: &GraphProjectionIdentity,
     generation: &CodeGenerationId,
     edges: &[CanonicalRelationEdgeV1],
-    chunks: &[CodeSearchChunkV1],
+    chunks: &[Arc<CodeSearchChunkV1>],
     production: Option<ProductionCodeGraphInputs<'_>>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<BuiltProjection, CodeGraphProjectionError> {
@@ -305,7 +305,7 @@ pub(super) fn build_projection(
                 binding: bindings.get(&occurrence).cloned(),
                 metadata: symbol_metadata
                     .get(&occurrence)
-                    .map(|record| (*record).clone()),
+                    .map(|record| LineageSymbolRecordV1::clone(record)),
                 occurrence,
             };
             entities.push(symbol_entity(identity, record)?);

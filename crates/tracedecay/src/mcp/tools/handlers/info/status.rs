@@ -176,16 +176,12 @@ pub(crate) async fn handle_status(
         .await
         {
             Some(freshness) => {
-                let authoritative = freshness.latest_generation_id.is_some()
-                    && freshness.coverage == "complete"
-                    && freshness.staleness_state.as_deref() == Some("fresh");
-                if !authoritative {
-                    output["code_index_freshness_warning"] = json!(
-                        "graph counts are not authoritative until the scheduler seals a complete fresh generation"
-                    );
+                let (status, warning) = code_index_freshness_projection(&freshness);
+                if let Some(warning) = warning {
+                    output["code_index_freshness_warning"] = json!(warning);
                 }
                 json!({
-                    "status": if authoritative { "current" } else { "warming" },
+                    "status": status,
                     "worktree": freshness,
                 })
             }
@@ -300,6 +296,47 @@ pub(crate) async fn handle_status(
         vec![],
         || render_status_md(&output),
     ))
+}
+
+/// Project one freshness reading into the operator-facing status label and
+/// optional warning.
+///
+/// Only the first is retryable-by-waiting: a `warming` read converges on its
+/// own, while a `parked` read names a deterministic contract violation the
+/// background worker re-checks every wake but can never fix by waiting — so
+/// the warning carries the exact reason and remediation instead of a
+/// wait-longer message.
+fn code_index_freshness_projection(
+    freshness: &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1,
+) -> (&'static str, Option<String>) {
+    let authoritative = freshness.latest_generation_id.is_some()
+        && freshness.coverage == "complete"
+        && freshness.staleness_state.as_deref() == Some("fresh");
+    if let Some(parked) = freshness.parked.as_ref() {
+        let warning = format!(
+            "code-index background convergence is parked: {}; {}",
+            parked.reason, parked.remediation
+        );
+        let status = if freshness.staleness_state.as_deref() == Some("parked") {
+            "parked"
+        } else if authoritative {
+            "current"
+        } else {
+            "warming"
+        };
+        return (status, Some(warning));
+    }
+    if authoritative {
+        ("current", None)
+    } else {
+        (
+            "warming",
+            Some(
+                "graph counts are not authoritative until the scheduler seals a complete fresh generation"
+                    .to_owned(),
+            ),
+        )
+    }
 }
 
 /// Reports daemon-owned historical warming when any provider's backlog exceeds
@@ -517,7 +554,9 @@ mod tests {
         GenerationCensusReader, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
     };
 
-    use super::{graph_statistics_value, historical_session_catch_up_state};
+    use super::{
+        code_index_freshness_projection, graph_statistics_value, historical_session_catch_up_state,
+    };
 
     /// The daemon serializes `graph_statistics` and `tracedecay status`
     /// deserializes it as the same Rust type. This round-trip is the wire
@@ -555,6 +594,80 @@ mod tests {
         let decoded: GenerationCensusSnapshot =
             serde_json::from_value(value).expect("CLI decodes observed census");
         assert_eq!(decoded, observed);
+    }
+
+    #[test]
+    fn a_parked_deterministic_violation_reports_parked_not_warming() {
+        let freshness =
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/project".to_owned(),
+                staleness_state: Some("parked".to_owned()),
+                coverage: "complete".to_owned(),
+                parked: Some(
+                    tracedecay_dashboard_api::code_index_freshness_api::CodeIndexConvergenceParkedV1 {
+                        reason: "code text artifacts root is not owner-private (mode 775, need 700)"
+                            .to_owned(),
+                        remediation: "restore owner-only access".to_owned(),
+                        parked_at_micros: 42,
+                        observed_passes: 3,
+                        retries_on_wake: true,
+                    },
+                ),
+                ..Default::default()
+            };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(status, "parked");
+        let warning = warning.expect("a parked read carries the reason");
+        assert!(warning.contains("not owner-private (mode 775, need 700)"));
+        assert!(warning.contains("restore owner-only access"));
+    }
+
+    #[test]
+    fn a_serving_worktree_with_a_parked_newer_build_stays_current_but_warns() {
+        let freshness =
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/project".to_owned(),
+                latest_generation_id: Some("generation.fixture".to_owned()),
+                staleness_state: Some("fresh".to_owned()),
+                coverage: "complete".to_owned(),
+                parked: Some(
+                    tracedecay_dashboard_api::code_index_freshness_api::CodeIndexConvergenceParkedV1 {
+                        reason: "code text artifacts root is not owner-private".to_owned(),
+                        remediation: "restore owner-only access".to_owned(),
+                        parked_at_micros: 42,
+                        observed_passes: 1,
+                        retries_on_wake: true,
+                    },
+                ),
+                ..Default::default()
+            };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(status, "current");
+        assert!(warning.expect("the park stays visible").contains("parked"));
+    }
+
+    #[test]
+    fn an_unparked_incomplete_read_stays_warming() {
+        let freshness =
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/project".to_owned(),
+                staleness_state: Some("indexing".to_owned()),
+                coverage: "complete".to_owned(),
+                ..Default::default()
+            };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(status, "warming");
+        assert!(
+            warning
+                .expect("warming names itself")
+                .contains("not authoritative")
+        );
     }
 
     #[test]

@@ -89,6 +89,45 @@ fn reusable_sink_preserves_canonical_digest_across_repeated_hashes() {
     }
 }
 
+/// A `Serialize` impl may itself digest (identity fields derive from nested
+/// canonical hashes), re-entering the serializer while the thread's pooled
+/// object buffers are checked out. The inner digest and the outer document
+/// must both stay byte-exact, warm and cold.
+#[test]
+fn reentrant_digests_inside_serialize_stay_canonical() {
+    struct DigestingRecord;
+
+    impl Serialize for DigestingRecord {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap as _;
+            let inner = json!({"z": [1, 2, 3], "a": {"nested": "value"}});
+            let inner_digest = canonical_sha256(&inner).map_err(serde::ser::Error::custom)?;
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("zeta", &json!({"deep": {"z": 1, "a": 2}}))?;
+            map.serialize_entry("inner_digest", inner_digest.as_str())?;
+            map.end()
+        }
+    }
+
+    let inner = json!({"z": [1, 2, 3], "a": {"nested": "value"}});
+    let inner_digest = canonical_sha256(&inner).unwrap();
+    let expected = format!(
+        r#"{{"inner_digest":"{}","zeta":{{"deep":{{"a":2,"z":1}}}}}}"#,
+        inner_digest.as_str()
+    );
+
+    let cold = canonical_json_bytes(&DigestingRecord).unwrap();
+    assert_eq!(String::from_utf8_lossy(&cold), expected);
+    let first = canonical_sha256(&DigestingRecord).unwrap();
+    for _ in 0..8 {
+        assert_eq!(
+            canonical_sha256(&DigestingRecord).unwrap().as_str(),
+            first.as_str(),
+            "re-entrant digests must not disturb the pooled buffers"
+        );
+    }
+}
+
 /// The streamed string writer must stay byte-identical to the allocating
 /// `serde_json::to_string` rendering it replaced, for every escape class.
 #[test]

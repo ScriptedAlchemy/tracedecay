@@ -34,7 +34,8 @@ use tracedecay_domain::{
     WorktreeId, canonical_sha256,
 };
 use tracedecay_private_fs::{
-    framed_log::DirectorySyncPolicy, open_private_file, validate_private_directory,
+    framed_log::DirectorySyncPolicy, make_private_directory, open_private_file,
+    validate_private_directory,
 };
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
@@ -3046,7 +3047,7 @@ impl LatestCompleteCodeIndexV1 {
     }
 
     #[cfg(test)]
-    pub fn lexical(&self) -> &[tracedecay_domain::CodeSearchChunkV1] {
+    pub fn lexical(&self) -> &[Arc<tracedecay_domain::CodeSearchChunkV1>] {
         self.generation.chunks().chunks()
     }
 
@@ -4783,9 +4784,24 @@ impl CodeIndexWorktreeSchedulerV1 {
                 return Ok(None);
             }
         }
+        // Cheap witness/stat checks run before any decode. A dirty remount
+        // (cancelled mid-batch, uncommitted files) used to join
+        // `load_active_shared` under the scheduler lock; when activation
+        // already owned that barrier the worker parked until the 45s
+        // remount wait expired with `last_reconcile_micros` unset.
+        let Some(pointer) = self
+            .publication
+            .read_publication_pointer()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+        else {
+            return Ok(None);
+        };
+        if !self.retained_frontier_is_quietly_current(&pointer) {
+            return Ok(None);
+        }
         let Some(generation) = self
             .publication
-            .load_active_shared()
+            .active_already_decoded()
             .map_err(CodeIndexProductionErrorV1::Publication)?
         else {
             return Ok(None);
@@ -4866,24 +4882,69 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        let Some(generation) = self
+        let Some(pointer) = self
             .publication
-            .load_active_shared()
+            .read_publication_pointer()
             .map_err(CodeIndexProductionErrorV1::Publication)?
         else {
             return Ok(None);
         };
-        self.validate_generation_identity(&generation)?;
-        self.adopt_ignored_source_roster(&generation);
-        let snapshot_content_identity = generation.snapshot().content_identity.clone();
+        let dirty = {
+            let hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            hints.overflow || !hints.paths.is_empty()
+        } || !self.retained_frontier_is_quietly_current(&pointer);
+        if dirty {
+            self.request_background_reconcile();
+        }
+        // Graph prepare decodes without the scheduler mutex. Joining
+        // `load_active_shared` here parked remount on the publication
+        // barrier while activation owned it, so the seated event never
+        // published and the dirty successor extract never started.
+        let snapshot_content_identity = if let Some(generation) = self
+            .publication
+            .active_already_decoded()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+        {
+            self.validate_generation_identity(&generation)?;
+            self.adopt_ignored_source_roster(&generation);
+            generation.snapshot().content_identity.clone()
+        } else {
+            ContentDigest::new(pointer.snapshot_content_identity.clone())
+                .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?
+        };
         self.latest_content_identity = Some(snapshot_content_identity.clone());
-        self.request_background_reconcile();
         Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
             CodeIndexNoopEvidenceV1 {
                 snapshot_content_identity,
                 overflow_reconciled: false,
             },
         )))
+    }
+
+    /// Witness + git/stat fence that does not read sealed generation bytes.
+    fn retained_frontier_is_quietly_current(&self, pointer: &DurablePublicationPointerV1) -> bool {
+        let Some(witness) = RestoreFreshnessWitnessV1::load(&self.store_root) else {
+            return false;
+        };
+        if witness.generation_id != pointer.generation_id {
+            return false;
+        }
+        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        if witness.git_metadata_signature != metadata.stable_signature() {
+            return false;
+        }
+        self.worktree_stat_signature()
+            .is_ok_and(|signature| witness.stat_signature == signature)
+    }
+
+    #[cfg(test)]
+    pub fn seat_retained_generation_on_empty_serving_for_test(
+        &mut self,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        self.seat_retained_generation_on_empty_serving()
     }
 
     /// Verify an unchanged retained text generation without decoding the full
@@ -4979,14 +5040,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 overflow_reconciled: false,
             },
         )))
-    }
-
-    #[cfg(test)]
-    fn reconcile_retained_text_generation(
-        &mut self,
-        metadata: &VerifiedSealedTextGenerationMetadataV1,
-    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        self.reconcile_retained_text_generation_with(metadata, true)
     }
 
     fn reconcile_retained_text_generation_with(
@@ -5734,21 +5787,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             || self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
         {
             self.request_background_reconcile();
-            return Ok(None);
-        }
-        Ok(self.latest_complete_with(admission))
-    }
-
-    /// Admit a generation only when the current worktree stat signature still
-    /// matches the signature sealed by the last reconcile. Workspace-wide
-    /// completeness needs this stronger fence because a file can be added
-    /// inside the ordinary bounded-staleness window.
-    #[cfg(test)]
-    fn latest_complete_ready_for_exact_source_with(
-        &mut self,
-        admission: GenerationDecodeAdmissionV1,
-    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
-        if !self.exact_source_is_ready()? {
             return Ok(None);
         }
         Ok(self.latest_complete_with(admission))
@@ -6617,14 +6655,56 @@ fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortEr
     match tracedecay_private_fs::create_private_directory(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            validate_private_directory(path).map_err(|error| {
-                RetrievalPortError::Contract(format!(
-                    "code text artifacts root is not owner-private: {error}"
-                ))
-            })
+            let validation_error = match validate_private_directory(path) {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            // A pre-existing root that fails owner-privacy validation is most
+            // often a legacy directory an older binary created under a
+            // permissive umask. Ownership is the proof this process may
+            // tighten it in place; a root it does not own — or that is not a
+            // directory at all — stays a typed deterministic contract
+            // violation for the operator instead of an endless silent retry.
+            match make_private_directory(path) {
+                Ok(receipt) => {
+                    let previous_mode = receipt
+                        .previous_unix_mode
+                        .map(|mode| format!("{mode:o}"))
+                        .unwrap_or_else(|| "platform-acl".to_owned());
+                    tracing::info!(
+                        event = "code_index_text_artifacts_root_privacy_healed",
+                        previous_mode = %previous_mode,
+                        "legacy code text artifacts root was re-permissioned to owner-private"
+                    );
+                    Ok(())
+                }
+                Err(heal_error) => Err(RetrievalPortError::Contract(format!(
+                    "code text artifacts root '{}' is not owner-private{}: {validation_error}; \
+                     self-heal refused: {heal_error}; restore owner-only access (chmod 700 and \
+                     chown to the daemon user) or re-enroll the store",
+                    path.display(),
+                    observed_unix_mode(path)
+                        .map(|mode| format!(" (mode {mode:o}, need 700)"))
+                        .unwrap_or_default(),
+                ))),
+            }
         }
         Err(error) => Err(text_artifact_unavailable(error)),
     }
+}
+
+/// Unix permission bits currently on `path`, for typed contract messages.
+#[cfg(unix)]
+fn observed_unix_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    path.symlink_metadata()
+        .ok()
+        .map(|metadata| metadata.permissions().mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn observed_unix_mode(_path: &Path) -> Option<u32> {
+    None
 }
 
 fn checkpoint_text_artifact_control(

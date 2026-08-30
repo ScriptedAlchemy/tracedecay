@@ -325,6 +325,26 @@ async fn handle_status_command_within(
         }
     });
 
+    // A parked deterministic contract violation must be visible on the plain
+    // status journey, not only inside the JSON payload: name the exact reason
+    // and the operator remediation beside the "parked" staleness row.
+    if let Some(parked) = freshness
+        .as_ref()
+        .and_then(|freshness| freshness.parked.as_ref())
+    {
+        if stderr_is_terminal {
+            eprintln!(
+                "\n\x1b[33mWarning: code-index background convergence is parked: {}\n{}\x1b[0m",
+                parked.reason, parked.remediation
+            );
+        } else {
+            eprintln!(
+                "\nWarning: code-index background convergence is parked: {}\n{}",
+                parked.reason, parked.remediation
+            );
+        }
+    }
+
     if !tracedecay::config::is_in_gitignore(&project_path) {
         let dir_name = tracedecay::config::active_data_dir_name(&project_path);
         if stderr_is_terminal {

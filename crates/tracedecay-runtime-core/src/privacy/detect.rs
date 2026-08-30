@@ -464,7 +464,7 @@ impl SensitiveKeyPolicy for ConfiguredSensitiveKeyPolicy<'_> {
     }
 }
 
-fn is_semantically_sensitive_key(key: &NormalizedSensitiveKey) -> bool {
+pub(super) fn is_semantically_sensitive_key(key: &NormalizedSensitiveKey) -> bool {
     const SAFE_METADATA_KEYS: &[&str] = &[
         "api_key_hint",
         "credential_type",

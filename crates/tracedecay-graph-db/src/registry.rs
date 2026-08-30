@@ -41,6 +41,7 @@ mod staging;
 mod support;
 #[path = "registry/vector_retirement.rs"]
 mod vector_retirement;
+pub use publication::{GraphPublicationPreparationV1, ProvenGraphPublicationV1};
 pub use staging::{VerifiedGenerationBatchApply, VerifiedGenerationBatchCommit};
 pub use vector_retirement::{
     SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
@@ -640,10 +641,7 @@ impl GraphDbRegistry {
             GraphDbError::unavailable("direct-sealed reader table lock is poisoned")
         })?;
         readers.retain(|(_, weak)| weak.strong_count() > 0);
-        Ok(readers
-            .iter()
-            .map(|(locator, _)| locator.clone())
-            .collect())
+        Ok(readers.iter().map(|(locator, _)| locator.clone()).collect())
     }
 
     #[cfg(test)]

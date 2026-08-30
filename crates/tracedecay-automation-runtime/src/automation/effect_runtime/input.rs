@@ -4,15 +4,15 @@ use tracedecay_application::retained_surfaces::{
     AutomationRunRequestV1, AutomationTaskRequestV1, LcmGrepSortV1, LcmRoleV1, LcmSearchScopeV1,
     MemoryCuratorRunInputV1, SessionReflectorRunInputV1, SkillWriterRunInputV1, UserJobRunInputV1,
 };
-use tracedecay_automation_runtime::automation::runner::{
-    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-};
 use tracedecay_domain::{RunId, UtcMicros};
 
-use super::contract_error;
+use crate::automation::runner::{SessionReflectorAutomationOptions, SkillWriterAutomationOptions};
+use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
+
+use super::contract::contract_error;
 use tracedecay_runtime_core::errors::Result;
 
-pub(crate) fn memory_curator_run_request(
+pub fn memory_curator_run_request(
     run_id: &str,
     fact_review_limit: usize,
     min_confidence: f64,
@@ -31,7 +31,7 @@ pub(crate) fn memory_curator_run_request(
     )
 }
 
-pub(crate) fn session_reflector_run_request(
+pub fn session_reflector_run_request(
     run_id: &str,
     options: &SessionReflectorAutomationOptions,
 ) -> Result<AutomationRunRequestV1> {
@@ -41,7 +41,7 @@ pub(crate) fn session_reflector_run_request(
     )
 }
 
-pub(crate) fn skill_writer_run_request(
+pub fn skill_writer_run_request(
     run_id: &str,
     options: &SkillWriterAutomationOptions,
 ) -> Result<AutomationRunRequestV1> {
@@ -51,7 +51,7 @@ pub(crate) fn skill_writer_run_request(
     )
 }
 
-pub(crate) fn user_job_run_request(run_id: &str, job_id: &str) -> Result<AutomationRunRequestV1> {
+pub fn user_job_run_request(run_id: &str, job_id: &str) -> Result<AutomationRunRequestV1> {
     automation_run_request(
         run_id,
         AutomationTaskRequestV1::UserJob(UserJobRunInputV1 {
@@ -63,8 +63,6 @@ pub(crate) fn user_job_run_request(run_id: &str, job_id: &str) -> Result<Automat
 fn project_reflector_input(
     options: &SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorRunInputV1> {
-    use tracedecay_automation_runtime::ports::session_evidence::{LcmGrepSort, LcmScope};
-
     Ok(SessionReflectorRunInputV1 {
         provider: options.provider.clone(),
         query: options.query.clone(),

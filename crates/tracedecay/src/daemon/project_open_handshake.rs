@@ -15,11 +15,11 @@ pub(super) async fn open_project_for_handshake(
     let open_options = crate::daemon::handshake_open_options(handshake);
     let registry_database = store_administration.registered_profile_database().await?;
     let (store_layout, first_touch) =
-        match crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+        match Box::pin(crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
             project_path,
             &open_options,
             registry_database.as_ref(),
-        )
+        ))
         .await
         {
             Ok(layout) => (layout, false),
@@ -29,11 +29,13 @@ pub(super) async fn open_project_for_handshake(
             // mint a fresh path-derived identity and let the missing-index
             // fallback below bootstrap it.
             Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
-                crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-                    project_path,
-                    &open_options,
-                    registry_database.as_ref(),
-                    &handshake.moved_store_adoption,
+                Box::pin(
+                    crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+                        project_path,
+                        &open_options,
+                        registry_database.as_ref(),
+                        &handshake.moved_store_adoption,
+                    ),
                 )
                 .await?,
                 true,
@@ -69,33 +71,38 @@ pub(super) async fn open_project_for_handshake(
             project_id,
         )?;
     }
-    let configuration_database = store_administration
-        .registered_project_session_database(project_path, &store_layout)
-        .await?;
+    let configuration_database = Box::pin(
+        store_administration.registered_project_session_database(project_path, &store_layout),
+    )
+    .await?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
     // The retired relational graph health/index lane is never spent on the
     // admission path. Opening establishes the exact registered configuration
     // and durable store authority; project composition schedules the maintained
     // bounded code-index owner after publication.
-    let open_result = crate::tracedecay::TraceDecay::open_with_registered_configuration(
-        project_path,
-        open_options.clone(),
-        store_layout.clone(),
-        configuration_database.clone(),
-        registry_database.clone(),
-        Arc::clone(&runtime_registry),
+    let open_result = Box::pin(
+        crate::tracedecay::TraceDecay::open_with_registered_configuration(
+            project_path,
+            open_options.clone(),
+            store_layout.clone(),
+            configuration_database.clone(),
+            registry_database.clone(),
+            Arc::clone(&runtime_registry),
+        ),
     )
     .await;
     match open_result {
         Ok(cg) => Ok(cg),
         Err(open_err) if is_readonly_database_error(&open_err) => {
-            match crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
-                project_path,
-                open_options,
-                store_layout,
-                configuration_database,
-                registry_database,
-                runtime_registry,
+            match Box::pin(
+                crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
+                    project_path,
+                    open_options,
+                    store_layout,
+                    configuration_database,
+                    registry_database,
+                    runtime_registry,
+                ),
             )
             .await
             {
@@ -111,13 +118,15 @@ pub(super) async fn open_project_for_handshake(
             // exact configuration authority only. The bounded code-index
             // activation owner performs indexing after admission, so opening a
             // project never waits for a repository scan or rebuild.
-            crate::tracedecay::TraceDecay::init_with_registered_configuration(
-                project_path,
-                open_options,
-                store_layout,
-                configuration_database,
-                registry_database,
-                runtime_registry,
+            Box::pin(
+                crate::tracedecay::TraceDecay::init_with_registered_configuration(
+                    project_path,
+                    open_options,
+                    store_layout,
+                    configuration_database,
+                    registry_database,
+                    runtime_registry,
+                ),
             )
             .await
         }

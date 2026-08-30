@@ -144,6 +144,41 @@ pub(crate) fn record_generation_verification(
     }
 }
 
+/// Records how one sealed per-generation copy's recovered digest was
+/// established at open: a full post-reopen row proof, or a
+/// verified-generation marker over byte-identical container bytes.
+///
+/// Kept apart from [`record_generation_verification`] so the staging
+/// container's proof counters — which the publication contract tests pin —
+/// stay a statement about the authority's rows.
+#[inline(always)]
+pub(crate) fn record_sealed_copy_verification(
+    outcome: crate::verified_marker::GenerationVerification,
+    canonical_bytes: u64,
+) {
+    #[cfg(feature = "hotpath")]
+    {
+        use crate::verified_marker::GenerationVerification;
+        match outcome {
+            GenerationVerification::VerifiedFresh => {
+                hotpath::gauge!("graph_db.sealed_store.verify.marker_hit").inc(1);
+                hotpath::gauge!("graph_db.sealed_store.verify.marker_hit_bytes")
+                    .set(canonical_bytes as f64);
+            }
+            GenerationVerification::Reverified => {
+                hotpath::gauge!("graph_db.sealed_store.verify.full").inc(1);
+                hotpath::gauge!("graph_db.sealed_store.verify.full_bytes")
+                    .set(canonical_bytes as f64);
+            }
+        }
+        hotpath::val!("graph_db.sealed_store.verify.outcome").set(&outcome.as_str());
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let _ = (outcome, canonical_bytes);
+    }
+}
+
 /// Records the size of one vector index, in vectors and in heap bytes.
 ///
 /// Emitted wherever an index's coverage is inspected, so a build that

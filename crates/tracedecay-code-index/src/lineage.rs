@@ -18,6 +18,7 @@
 //! [`ABSTAIN_CANDIDATE_COUNT_MISMATCH`] rather than guessing one.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -159,12 +160,15 @@ impl LineageSymbolRecordV1 {
 }
 
 /// The canonically ordered symbol records of one sealed generation.
+///
+/// Records are `Arc`-shared with the per-file artifacts they were flattened
+/// from; the wire form is the plain record.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationSymbolIndexV1 {
     pub generation_id: CodeGenerationId,
     /// Canonically ordered by occurrence identity; duplicates are rejected.
-    pub symbols: Vec<LineageSymbolRecordV1>,
+    pub symbols: Vec<Arc<LineageSymbolRecordV1>>,
 }
 
 impl GenerationSymbolIndexV1 {
@@ -172,7 +176,7 @@ impl GenerationSymbolIndexV1 {
     /// rejecting duplicate occurrences.
     pub fn new(
         generation_id: CodeGenerationId,
-        mut symbols: Vec<LineageSymbolRecordV1>,
+        mut symbols: Vec<Arc<LineageSymbolRecordV1>>,
     ) -> Result<Self, LineageResolutionErrorV1> {
         generation_id
             .validate()
@@ -631,7 +635,8 @@ mod tests {
         generation: CodeGenerationId,
         symbols: Vec<LineageSymbolRecordV1>,
     ) -> GenerationSymbolIndexV1 {
-        GenerationSymbolIndexV1::new(generation, symbols).expect("canonical index")
+        GenerationSymbolIndexV1::new(generation, symbols.into_iter().map(Arc::new).collect())
+            .expect("canonical index")
     }
 
     fn resolver() -> SymbolLineageResolver {
@@ -954,8 +959,8 @@ mod tests {
         let duplicate = GenerationSymbolIndexV1::new(
             generation(3),
             vec![
-                record("sym.d1", 'a', "crate::alpha", "function", 'f', '0'),
-                record("sym.d1", 'b', "crate::beta", "function", 'f', '1'),
+                Arc::new(record("sym.d1", 'a', "crate::alpha", "function", 'f', '0')),
+                Arc::new(record("sym.d1", 'b', "crate::beta", "function", 'f', '1')),
             ],
         );
         assert_eq!(
@@ -969,8 +974,8 @@ mod tests {
         let duplicate_identity = GenerationSymbolIndexV1::new(
             generation(3),
             vec![
-                record("sym.d1", 'a', "crate::alpha", "function", 'f', '0'),
-                record("sym.d2", 'a', "crate::alpha", "function", 'f', '0'),
+                Arc::new(record("sym.d1", 'a', "crate::alpha", "function", 'f', '0')),
+                Arc::new(record("sym.d2", 'a', "crate::alpha", "function", 'f', '0')),
             ],
         );
         assert_eq!(
