@@ -229,6 +229,19 @@ pub enum DurableHookEventDecodeError {
     UnsupportedVersion,
 }
 
+/// The runtime plan violated durable-envelope bounds (oversized or
+/// control-character identifiers) and cannot be persisted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DurableHookEventEncodeError;
+
+impl std::fmt::Display for DurableHookEventEncodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("hook event plan exceeds durable envelope bounds")
+    }
+}
+
+impl std::error::Error for DurableHookEventEncodeError {}
+
 fn durable_bound_optional_str(value: Option<&str>, max_bytes: usize) -> Result<Option<String>, ()> {
     match value {
         None | Some("") => Ok(None),
@@ -470,13 +483,15 @@ fn runtime_plan_from_durable(
     }
 }
 
-pub fn encode_durable_hook_event_plan(plan: &HookEventPlan) -> Result<Vec<u8>, ()> {
-    let plan = durable_plan_from_runtime(plan)?;
+pub fn encode_durable_hook_event_plan(
+    plan: &HookEventPlan,
+) -> Result<Vec<u8>, DurableHookEventEncodeError> {
+    let plan = durable_plan_from_runtime(plan).map_err(|()| DurableHookEventEncodeError)?;
     serde_json::to_vec(&DurableHookEventEnvelope {
         version: DURABLE_HOOK_EVENT_ENVELOPE_VERSION,
         plan,
     })
-    .map_err(|_| ())
+    .map_err(|_| DurableHookEventEncodeError)
 }
 
 pub fn decode_durable_hook_event_plan(

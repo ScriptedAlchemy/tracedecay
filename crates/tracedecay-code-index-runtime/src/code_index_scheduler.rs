@@ -5684,6 +5684,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// matches the signature sealed by the last reconcile. Workspace-wide
     /// completeness needs this stronger fence because a file can be added
     /// inside the ordinary bounded-staleness window.
+    #[cfg(test)]
     fn latest_complete_ready_for_exact_source_with(
         &mut self,
         admission: GenerationDecodeAdmissionV1,

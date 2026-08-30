@@ -830,10 +830,14 @@ mod tests {
 
     use tracedecay_application::feedback::FeedbackObservationPort;
     use tracedecay_application::feedback::observations::{
-        FeedbackDeliveryRouteV1, FeedbackLspMethodClassV1, FeedbackLspStateV1, FeedbackOperationV1,
+        FeedbackAdvisoryProviderV1, FeedbackArgumentRejectionClassV1, FeedbackCiProviderV1,
+        FeedbackDeliveryRouteV1, FeedbackGitHubLifecycleV1, FeedbackLspMethodClassV1,
+        FeedbackLspStateV1, FeedbackOperationV1, FeedbackRejectedArgumentV1,
+        FeedbackSseLifecycleV1, FeedbackStackTransitionV1,
     };
     use tracedecay_domain::feedback::{
-        FeedbackActorContextV1, FeedbackBudgetV1, FeedbackContentIdentityV1, FeedbackCycleId,
+        CiFailureSourceDegradationV1, FeedbackActorContextV1, FeedbackBudgetV1,
+        FeedbackContentIdentityV1, FeedbackCycleId,
         FeedbackCycleObservationV1, FeedbackCycleRequestV1, FeedbackEvaluationInputV1,
         FeedbackObservationKindV1, FeedbackScopeV1, FeedbackTargetV1, FeedbackTriggerV1,
     };
