@@ -59,12 +59,12 @@ const TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1: usize = 64;
 /// floor stays above the query staleness threshold and the ceiling keeps a
 /// persistently failing artifact from being retried more than a few times an
 /// hour while never resealing it. Tests shrink the clock, not the shape.
-const ACTIVATION_RETRY_BACKOFF_FLOOR: Duration = if cfg!(test) {
+const ACTIVATION_RETRY_BACKOFF_FLOOR: Duration = if cfg!(any(test, feature = "test-helpers")) {
     Duration::from_millis(50)
 } else {
     Duration::from_secs(30)
 };
-const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(test) {
+const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(any(test, feature = "test-helpers")) {
     Duration::from_millis(400)
 } else {
     Duration::from_mins(10)
@@ -4610,32 +4610,29 @@ impl CodeIndexSchedulerRegistryV1 {
         // before entering the exact freshness probe: probing an unseated slot
         // cannot produce a decoded owner, and on an initial lightweight mount
         // it would turn `freshness_unknown` into a fabricated overflow wake.
-        if serving_generation
+        let serving = serving_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_none()
-        {
-            return None;
-        }
+            .clone()?;
         let mut scheduler = match scheduler.try_lock() {
             Ok(scheduler) => scheduler,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
         };
-        let latest = scheduler
-            .latest_complete_ready_for_exact_source_with(
-                GenerationDecodeAdmissionV1::AlreadyDecoded,
-            )
-            .ok()
-            .flatten()?;
+        if !scheduler
+            .serving_generation_ready_for_exact_source(&serving)
+            .ok()?
+        {
+            return None;
+        }
         // Checkout-identity gate: the ready probe above already proved the
         // generation current against the live worktree, and the sealed
         // reference label is attribution, not identity (see
         // [`latest_matches_scope_identity`]).
-        if !latest_matches_scope_identity(&latest, scope) {
+        if !latest_matches_scope_identity(&serving, scope) {
             return None;
         }
-        exact_activated_serving_generation(&serving_generation, &latest)
+        Some(serving)
     }
 
     /// Report an already-decoded current generation for one exact mounted root

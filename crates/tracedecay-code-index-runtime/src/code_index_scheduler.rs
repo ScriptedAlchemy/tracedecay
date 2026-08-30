@@ -1211,6 +1211,25 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(self.cache.lock_state()?.active.as_ref().map(Arc::clone))
     }
 
+    /// Prove that an already-decoded serving handle still names the durable
+    /// active publication without reading or decoding its sealed payload.
+    fn active_pointer_matches_generation(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
+        let Some(pointer) = self.read_publication_pointer()? else {
+            return Ok(false);
+        };
+        Ok(
+            pointer.generation_id == generation.manifest().generation_id.as_str()
+                && pointer.snapshot_content_identity
+                    == generation.snapshot().content_identity.as_str()
+                && pointer.publication_digest
+                    == generation.projection().publication_digest().as_str()
+                && pointer.sealed_at_micros == generation.manifest().seal.sealed_at.0,
+        )
+    }
+
     /// Occupy the active-generation decode barrier exactly as a cold activation
     /// does: the pinned slot is empty and one decode is in flight. Restores both
     /// on drop, so a parked reader is never stranded.
@@ -4071,7 +4090,7 @@ pub enum CodeIndexSchedulerErrorV1 {
     SnapshotMemoryCapacityUnavailable,
     #[error("code-index worker plan refused: {0}")]
     WorkerPlan(#[from] tracedecay_code_index::parallelism::CodeIndexWorkerPlanInstallErrorV1),
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-helpers")))]
     #[error("code-index worker plan is not installed")]
     WorkerPlanNotInstalled,
 }
@@ -4116,7 +4135,7 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::SnapshotMemoryAdmission(_)
             | Self::SnapshotMemoryCapacityUnavailable
             | Self::WorkerPlan(_) => false,
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-helpers")))]
             Self::WorkerPlanNotInstalled => false,
         }
     }
@@ -4634,7 +4653,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
             return Ok(());
         }
-        #[cfg(test)]
+        // The shared scheduler test sources also compile into the composition
+        // root's test binary, where this crate is a dependency built with
+        // `test-helpers` instead of `cfg(test)`; both spellings are the same
+        // fixture surface, so the auto-install fallback must cover both.
+        #[cfg(any(test, feature = "test-helpers"))]
         {
             let snapshot = self.resident_memory.snapshot();
             tracedecay_code_index::parallelism::install_worker_plan(
@@ -4643,7 +4666,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             )?;
             Ok(())
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-helpers")))]
         {
             Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
         }
@@ -5665,6 +5688,16 @@ impl CodeIndexWorktreeSchedulerV1 {
         &mut self,
         admission: GenerationDecodeAdmissionV1,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
+        if !self.exact_source_is_ready()? {
+            return Ok(None);
+        }
+        Ok(self.latest_complete_with(admission))
+    }
+
+    /// Run the exact-source freshness fence without resolving a generation.
+    /// Callers that already own the immutable serving handle must not consult
+    /// the publication decoder cache merely to prove that handle is current.
+    fn exact_source_is_ready(&mut self) -> Result<bool, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
@@ -5673,7 +5706,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .differs_from(&self.git_metadata)
         {
             self.request_background_reconcile();
-            return Ok(None);
+            return Ok(false);
         }
         match self.worktree_stat_signature() {
             Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
@@ -5682,13 +5715,30 @@ impl CodeIndexWorktreeSchedulerV1 {
                 // reconcile receipt or wall timestamp is fabricated, and a
                 // clean status census cannot turn into a full capture loop.
                 self.last_reconciled_at = Instant::now();
-                Ok(self.latest_complete_with(admission))
+                Ok(true)
             }
             _ => {
                 self.request_background_reconcile();
-                Ok(None)
+                Ok(false)
             }
         }
+    }
+
+    /// Admit the already-decoded serving generation under the exact source
+    /// and durable-publication fences. This is intentionally independent of
+    /// the publication decoder cache: the serving slot itself owns the
+    /// decoded generation and its activated graph authority.
+    fn serving_generation_ready_for_exact_source(
+        &mut self,
+        serving: &LatestCompleteCodeIndexV1,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        if !self.exact_source_is_ready()? {
+            return Ok(false);
+        }
+        self.publication
+            .active_pointer_matches_generation(serving.generation())
+            .map_err(CodeIndexProductionErrorV1::Publication)
+            .map_err(Into::into)
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
