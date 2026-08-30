@@ -1085,8 +1085,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut groups = Vec::<FuzzyQueryGroupV1>::new();
         for (query_ordinal, query) in request.whole_terms.iter().enumerate() {
             let normalized_query = normalize_lexical(query);
-            let query_character_count = normalized_query.chars().count();
-            let bound = fuzzy_distance_bound(query_character_count);
+            let bound = fuzzy_distance_bound(&normalized_query);
             if bound == 0 {
                 continue;
             }
@@ -1693,11 +1692,77 @@ fn fixed_ln_ratio_micros(numerator: u64, denominator: u64) -> u64 {
     (scaled.saturating_mul(1_000_000) / SCALE).min(u128::from(u64::MAX)) as u64
 }
 
-fn fuzzy_distance_bound(character_count: usize) -> usize {
-    match character_count {
-        0..=4 => 0,
-        5..=8 => 1,
-        _ => 2,
+/// Upper byte-length caps that keep the fst Levenshtein automaton inside its
+/// fixed 10_000-state capacity. The DFA size is content-dependent — repeated
+/// characters collapse states, so uniform strings are the automaton's best
+/// case — and the caps are anchored to the measured worst case on fst 0.4
+/// (all-distinct bytes: distance 1 builds up to 416 bytes, distance 2 only up
+/// to 49) with headroom below those ceilings. Queries beyond a cap skip fuzzy
+/// expansion the same way sub-5-character queries do; the exact and phrase
+/// lanes still serve them.
+const FUZZY_DISTANCE_ONE_MAX_BYTES: usize = 320;
+const FUZZY_DISTANCE_TWO_MAX_BYTES: usize = 32;
+
+fn fuzzy_distance_bound(normalized_query: &str) -> usize {
+    let character_count = normalized_query.chars().count();
+    let byte_count = normalized_query.len();
+    if character_count <= 4 || byte_count > FUZZY_DISTANCE_ONE_MAX_BYTES {
+        0
+    } else if character_count <= 8 || byte_count > FUZZY_DISTANCE_TWO_MAX_BYTES {
+        1
+    } else {
+        2
+    }
+}
+
+#[cfg(test)]
+mod fuzzy_distance_bound_tests {
+    use super::*;
+
+    /// Worst-case automaton input: all-distinct bytes defeat the DFA state
+    /// collapsing that repeated characters allow.
+    fn distinct_byte_query(length: usize) -> String {
+        (0u32..length as u32)
+            .map(|i| char::from_u32(33 + (i * 7) % 94).expect("printable ascii"))
+            .collect()
+    }
+
+    #[test]
+    fn caps_stay_inside_the_fst_automaton_capacity() {
+        // Anchors the byte caps to the automaton implementation: if fst ever
+        // tightens its state limit these constructions fail and the caps must
+        // shrink with them.
+        fst::automaton::Levenshtein::new(&distinct_byte_query(FUZZY_DISTANCE_ONE_MAX_BYTES), 1)
+            .expect("distance-1 automaton must fit at the distance-1 byte cap");
+        fst::automaton::Levenshtein::new(&distinct_byte_query(FUZZY_DISTANCE_TWO_MAX_BYTES), 2)
+            .expect("distance-2 automaton must fit at the distance-2 byte cap");
+    }
+
+    #[test]
+    fn long_queries_skip_fuzzy_expansion_like_short_ones() {
+        assert_eq!(fuzzy_distance_bound("abcd"), 0);
+        assert_eq!(fuzzy_distance_bound("abcdef"), 1);
+        assert_eq!(fuzzy_distance_bound("abcdefghi"), 2);
+        assert_eq!(
+            fuzzy_distance_bound(&"a".repeat(FUZZY_DISTANCE_TWO_MAX_BYTES)),
+            2
+        );
+        assert_eq!(
+            fuzzy_distance_bound(&"a".repeat(FUZZY_DISTANCE_TWO_MAX_BYTES + 1)),
+            1
+        );
+        assert_eq!(
+            fuzzy_distance_bound(&"a".repeat(FUZZY_DISTANCE_ONE_MAX_BYTES)),
+            1
+        );
+        assert_eq!(
+            fuzzy_distance_bound(&"a".repeat(FUZZY_DISTANCE_ONE_MAX_BYTES + 1)),
+            0
+        );
+        // Multibyte queries are capped by their UTF-8 byte length, not their
+        // character count.
+        let multibyte = "\u{3042}".repeat(FUZZY_DISTANCE_ONE_MAX_BYTES / 3 + 1);
+        assert_eq!(fuzzy_distance_bound(&multibyte), 0);
     }
 }
 

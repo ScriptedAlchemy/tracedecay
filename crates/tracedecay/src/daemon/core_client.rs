@@ -484,6 +484,17 @@ pub(crate) async fn call_tool_with_liveness_poll(
                     .to_string(),
             });
         };
+        // A daemon that refused this connection's preamble answers with one
+        // refusal frame (no JSON-RPC id) before EOF; skipping it as a
+        // non-matching response line reported the definitive refusal as a
+        // closed-connection mystery.
+        if let Some(refusal) =
+            tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&line)
+        {
+            return Err(tracedecay_daemon_protocol::handshake_refusal_error(
+                &refusal, handshake,
+            ));
+        }
         let response = if let Some(deadline) = client_deadline {
             deadline
                 .run("decode", tool_name, async {
