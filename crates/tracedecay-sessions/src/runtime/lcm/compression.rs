@@ -36,14 +36,20 @@ struct IngestedActiveMessages {
 
 /// Per-message state resolved before the ingest loop so the loop does not
 /// issue one round trip per message.
-struct PreparedActiveMessage {
-    source_index: usize,
-    role: String,
-    original_content: Value,
-    storage_text: String,
-    /// `None` for messages replayed as-is (already summarized, or ignored by
-    /// the configured message patterns).
-    message_id: Option<String>,
+enum PreparedActiveMessage {
+    /// Message without a real role: never stored (a fabricated role would
+    /// enter identity hashes) but still carried verbatim into the replay
+    /// output — dropping it would silently lose conversation content.
+    ReplayVerbatim { source_index: usize },
+    Ingest {
+        source_index: usize,
+        role: String,
+        original_content: Value,
+        storage_text: String,
+        /// `None` for messages replayed as-is (already summarized, or ignored
+        /// by the configured message patterns).
+        message_id: Option<String>,
+    },
 }
 
 struct ExistingActiveMessageState {
@@ -1820,7 +1826,10 @@ async fn ingest_active_messages(
             .await?;
             let prefetched_message_ids = prepared
                 .iter()
-                .filter_map(|prepared| prepared.message_id.clone())
+                .filter_map(|prepared| match prepared {
+                    PreparedActiveMessage::ReplayVerbatim { .. } => None,
+                    PreparedActiveMessage::Ingest { message_id, .. } => message_id.clone(),
+                })
                 .collect::<Vec<_>>();
             let prefetched_states =
                 existing_active_message_states(conn, provider, &prefetched_message_ids).await?;
@@ -1836,13 +1845,20 @@ async fn ingest_active_messages(
             let mut replay_messages = Vec::with_capacity(messages.len());
             let mut rewritten_message_ids = HashSet::new();
             for prepared in prepared {
-                let PreparedActiveMessage {
-                    source_index,
-                    role,
-                    original_content,
-                    storage_text,
-                    message_id,
-                } = prepared;
+                let (source_index, role, original_content, storage_text, message_id) =
+                    match prepared {
+                        PreparedActiveMessage::ReplayVerbatim { source_index } => {
+                            replay_messages.push(messages[source_index].clone());
+                            continue;
+                        }
+                        PreparedActiveMessage::Ingest {
+                            source_index,
+                            role,
+                            original_content,
+                            storage_text,
+                            message_id,
+                        } => (source_index, role, original_content, storage_text, message_id),
+                    };
                 let message = &messages[source_index];
                 let Some(message_id) = message_id else {
                     let mut replay = message.clone();
@@ -1963,20 +1979,26 @@ async fn prepare_active_messages(
     messages: &[Value],
     compiled_ignore_patterns: &security::CompiledPatternSet,
 ) -> Result<Vec<PreparedActiveMessage>, LcmError> {
-    struct DraftActiveMessage {
-        source_index: usize,
-        role: String,
-        original_content: Value,
-        storage_text: String,
-        replay_as_is: bool,
-        explicit_message_id: Option<String>,
-        store_id: Option<i64>,
+    enum DraftActiveMessage {
+        ReplayVerbatim {
+            source_index: usize,
+        },
+        Ingest {
+            source_index: usize,
+            role: String,
+            original_content: Value,
+            storage_text: String,
+            replay_as_is: bool,
+            explicit_message_id: Option<String>,
+            store_id: Option<i64>,
+        },
     }
 
     let mut drafts = Vec::with_capacity(messages.len());
     let mut lookup_store_ids = Vec::new();
     for (source_index, message) in messages.iter().enumerate() {
         let Some(role) = active_message_role(message) else {
+            drafts.push(DraftActiveMessage::ReplayVerbatim { source_index });
             continue;
         };
         let role = role.to_string();
@@ -2008,7 +2030,7 @@ async fn prepare_active_messages(
         if let Some(store_id) = store_id {
             lookup_store_ids.push(store_id);
         }
-        drafts.push(DraftActiveMessage {
+        drafts.push(DraftActiveMessage::Ingest {
             source_index,
             role,
             original_content,
@@ -2023,31 +2045,44 @@ async fn prepare_active_messages(
         message_ids_for_store_ids(conn, provider, session_id, &lookup_store_ids).await?;
     let mut prepared = Vec::with_capacity(drafts.len());
     for draft in drafts {
-        let message_id = (!draft.replay_as_is).then(|| {
-            draft
-                .explicit_message_id
-                .or_else(|| {
-                    draft
-                        .store_id
-                        .and_then(|store_id| stored_message_ids.get(&store_id).cloned())
-                })
-                .unwrap_or_else(|| {
-                    deterministic_message_id(
-                        provider,
-                        session_id,
-                        draft.source_index,
-                        &draft.role,
-                        &draft.storage_text,
-                    )
-                })
-        });
-        prepared.push(PreparedActiveMessage {
-            source_index: draft.source_index,
-            role: draft.role,
-            original_content: draft.original_content,
-            storage_text: draft.storage_text,
-            message_id,
-        });
+        match draft {
+            DraftActiveMessage::ReplayVerbatim { source_index } => {
+                prepared.push(PreparedActiveMessage::ReplayVerbatim { source_index });
+            }
+            DraftActiveMessage::Ingest {
+                source_index,
+                role,
+                original_content,
+                storage_text,
+                replay_as_is,
+                explicit_message_id,
+                store_id,
+            } => {
+                let message_id = (!replay_as_is).then(|| {
+                    explicit_message_id
+                        .or_else(|| {
+                            store_id
+                                .and_then(|store_id| stored_message_ids.get(&store_id).cloned())
+                        })
+                        .unwrap_or_else(|| {
+                            deterministic_message_id(
+                                provider,
+                                session_id,
+                                source_index,
+                                &role,
+                                &storage_text,
+                            )
+                        })
+                });
+                prepared.push(PreparedActiveMessage::Ingest {
+                    source_index,
+                    role,
+                    original_content,
+                    storage_text,
+                    message_id,
+                });
+            }
+        }
     }
     Ok(prepared)
 }
@@ -2391,7 +2426,7 @@ fn debt_from_db(
 #[cfg(test)]
 mod authority_tests {
     use super::*;
-    use crate::runtime::lcm::LcmSummarizerMode;
+    use crate::runtime::lcm::{LcmSummarizerMode, schema};
 
     #[test]
     fn missing_or_empty_role_is_a_typed_skip() {
@@ -2404,6 +2439,78 @@ mod authority_tests {
             active_message_role(&json!({"role": "assistant", "content": "hi"})),
             Some("assistant")
         );
+    }
+
+    /// A message without a real role is never stored (a fabricated role would
+    /// enter identity hashes) but must not vanish from the replay output.
+    #[tokio::test]
+    async fn role_less_message_replays_verbatim_without_storage() {
+        let temp = tempfile::TempDir::new().expect("create lcm tempdir");
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &temp.path().join("sessions.db"),
+        );
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                title TEXT,
+                started_at INTEGER,
+                PRIMARY KEY(provider, session_id)
+            );",
+        )
+        .await
+        .expect("create session table");
+        schema::ensure_lcm_schema(&conn)
+            .await
+            .expect("ensure lcm schema");
+        conn.execute_batch(
+            "INSERT INTO sessions (provider, session_id, project_key, project_path, title, started_at)
+             VALUES ('cursor', 'session-role-skip', 'fixture', 'fixture', 'fixture', 1);",
+        )
+        .await
+        .expect("insert fixture session");
+        let messages = vec![
+            json!({"role": "user", "content": "first"}),
+            json!({"content": "attachment notice without a role"}),
+            json!({"role": "assistant", "content": "second"}),
+        ];
+        let mut rollback = payload::PayloadFileRollback::begin_cancellation_safe(temp.path());
+        let ingested = ingest_active_messages(
+            &conn,
+            temp.path(),
+            "cursor",
+            "session-role-skip",
+            &messages,
+            &[],
+            &mut rollback,
+        )
+        .await
+        .expect("ingest active messages");
+        assert_eq!(
+            ingested.replay_messages.len(),
+            3,
+            "role-less message must stay in the replay output"
+        );
+        assert_eq!(
+            ingested.replay_messages[1], messages[1],
+            "role-less message must replay verbatim"
+        );
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages WHERE provider = ? AND session_id = ?",
+                params!["cursor", "session-role-skip"],
+            )
+            .await
+            .expect("count stored raw rows");
+        let row = rows
+            .next()
+            .await
+            .expect("read count row")
+            .expect("count row present");
+        let stored: i64 = row.get(0).expect("count value");
+        assert_eq!(stored, 2, "role-less message must not be stored");
     }
 
     #[test]
