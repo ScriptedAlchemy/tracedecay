@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
+use tracedecay_application::SessionTemporalRefreshWakePort;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const LIVE_TRANSCRIPT_REFRESH_DEADLINE: Duration = Duration::from_secs(5);
@@ -66,8 +66,8 @@ pub(crate) async fn join_required_live_transcript_refresh(
     tool_name: &str,
     arguments: &Value,
     selected_project_owner: bool,
-    project_wake: Option<&SessionTemporalRefreshWake>,
-    user_wake: Option<&SessionTemporalRefreshWake>,
+    project_wake: Option<&dyn SessionTemporalRefreshWakePort>,
+    user_wake: Option<&dyn SessionTemporalRefreshWakePort>,
 ) -> Result<LiveTranscriptRefreshJoin> {
     let Some(scope) = required_refresh_scope(tool_name, arguments) else {
         return Ok(LiveTranscriptRefreshJoin::NotRequired);
@@ -92,7 +92,7 @@ pub(crate) async fn join_required_live_transcript_refresh(
 mod tests {
     use serde_json::json;
 
-    use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
+    use tracedecay_application::UnavailableSessionTemporalRefreshWake;
 
     #[tokio::test]
     async fn completed_hook_ingest_fails_when_its_refresh_owner_is_unavailable() {
@@ -100,7 +100,7 @@ mod tests {
             "tracedecay_hook_runtime",
             &json!({"action": "ingest_transcript"}),
             false,
-            Some(&SessionTemporalRefreshWake::unavailable()),
+            Some(&UnavailableSessionTemporalRefreshWake),
             None,
         )
         .await
@@ -125,7 +125,7 @@ mod tests {
             "tracedecay_hook_runtime",
             &json!({"action": "ingest_transcript", "user_scope": true}),
             false,
-            Some(&SessionTemporalRefreshWake::unavailable()),
+            Some(&UnavailableSessionTemporalRefreshWake),
             None,
         )
         .await
@@ -139,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn selected_project_never_uses_the_active_projects_refresh_owner() {
-        let active_project_wake = SessionTemporalRefreshWake::unavailable();
+        let active_project_wake = UnavailableSessionTemporalRefreshWake;
         let error = super::join_required_live_transcript_refresh(
             "tracedecay_hook_runtime",
             &json!({"action": "ingest_transcript"}),

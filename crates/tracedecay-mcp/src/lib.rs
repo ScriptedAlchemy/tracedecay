@@ -50,6 +50,7 @@ mod catalog_error;
 pub mod context_headings;
 pub mod host_cli;
 pub mod jsonrpc;
+pub mod lifecycle;
 pub mod output_format;
 pub mod path_tree;
 pub mod project_access;
@@ -65,6 +66,9 @@ pub use context_headings::{
     CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
 };
 pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport};
+pub use lifecycle::{
+    McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity, McpShutdownStatus,
+};
 pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use project_access::registered_project_reader_tool_names;
 pub use tools::render::format_relative_time;

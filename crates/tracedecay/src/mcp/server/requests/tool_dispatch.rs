@@ -309,7 +309,7 @@ impl McpServer {
                     self.session_db.as_ref(),
                     self.user_session_db.as_ref(),
                 )
-                .with_profile_identity(self.profile_identity.as_ref())
+                .with_profile_identity(self.profile_identity.clone())
                 .with_profile_retained_authority(self.profile_retained_authority.as_ref())
                 .with_registered_databases(
                     self.registered_session_db.as_ref(),

@@ -306,7 +306,6 @@ async fn proxy_host_input_to_daemon(
             continue;
         }
 
-        let request_drain_bound = drain_bound.unwrap_or_else(|| disconnect_drain_bound(&line));
         let result = {
             let daemon_request = send_daemon_request_line_with_project_open_retry(
                 socket_path,
@@ -314,11 +313,16 @@ async fn proxy_host_input_to_daemon(
                 &line,
             );
             tokio::pin!(daemon_request);
+            // The catalog-backed drain ceiling is only meaningful after the
+            // owning client is gone. Computing it eagerly would stall every
+            // live `tools/call` on catalog load before the daemon is even
+            // contacted.
+            let disconnect_bound = || drain_bound.unwrap_or_else(|| disconnect_drain_bound(&line));
             loop {
                 if *eof.borrow() {
                     break drain_daemon_request_after_disconnect(
                         &mut daemon_request,
-                        request_drain_bound,
+                        disconnect_bound(),
                     )
                     .await;
                 }
@@ -340,7 +344,7 @@ async fn proxy_host_input_to_daemon(
                             // for the same reason stdin EOF says it is.
                             break drain_daemon_request_after_disconnect(
                                 &mut daemon_request,
-                                request_drain_bound,
+                                disconnect_bound(),
                             )
                             .await;
                         };
@@ -627,7 +631,7 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
         }
         None => connect_to_current_daemon_within(socket_path, None).await?,
     };
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = stream.into_owned_split();
 
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;

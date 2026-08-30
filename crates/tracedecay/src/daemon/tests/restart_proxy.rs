@@ -88,6 +88,65 @@ async fn answer_one_authenticated_proxy_request(
     writer.shutdown().await.expect("shutdown fake daemon");
 }
 
+/// One proxied connection for [`proxy_uses_daemon_initialize_route_without_registry_access`].
+#[cfg(unix)]
+async fn answer_initialize_route_proxy_request(
+    stream: tokio::net::UnixStream,
+    daemon_target: &std::path::Path,
+) -> Option<String> {
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let handshake_line = lines
+        .next_line()
+        .await
+        .expect("read handshake")
+        .expect("handshake line");
+    let handshake = DaemonHandshake::from_line(&handshake_line).expect("daemon handshake json");
+    let request_line = lines
+        .next_line()
+        .await
+        .expect("read request")
+        .expect("request line");
+    let request: Value = serde_json::from_str(&request_line).expect("request json");
+    let mut project = handshake
+        .project_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let mut result = json!({ "project": project });
+    if request["method"] == json!("initialize")
+        && request
+            .pointer("/params/roots")
+            .and_then(Value::as_array)
+            .is_some_and(|roots| !roots.is_empty())
+    {
+        project = Some(daemon_target.display().to_string());
+        result["project"] = json!(project);
+        result["_meta"]["tracedecayInitializeRoute"] = json!({
+            "projectPath": daemon_target,
+            "allowInit": false,
+        });
+    }
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": request["id"].clone(),
+        "result": result
+    });
+    writer
+        .write_all(
+            serde_json::to_string(&response)
+                .expect("response json")
+                .as_bytes(),
+        )
+        .await
+        .expect("write response");
+    writer.write_all(b"\n").await.expect("write newline");
+    writer.shutdown().await.expect("shutdown fake daemon");
+    handshake
+        .project_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+}
+
 /// A slow or contended first Git probe defers the route; it must never be a
 /// terminal failure. Both retry classifiers — the CLI's message check and the
 /// proxy's JSON-RPC response check — have to accept the deferral, or a cold
@@ -978,63 +1037,17 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
     let listener = tokio::net::UnixListener::bind(&socket).expect("daemon socket");
     let daemon_target = target.clone();
     let accept_task = tokio::spawn(async move {
-        let mut projects = Vec::new();
+        let mut joins = Vec::new();
         for _ in 0..4 {
             let (stream, _addr) = listener.accept().await.expect("accept daemon client");
-            let (reader, mut writer) = stream.into_split();
-            let mut lines = tokio::io::BufReader::new(reader).lines();
-            let handshake_line = lines
-                .next_line()
-                .await
-                .expect("read handshake")
-                .expect("handshake line");
-            let handshake =
-                DaemonHandshake::from_line(&handshake_line).expect("daemon handshake json");
-            let request_line = lines
-                .next_line()
-                .await
-                .expect("read request")
-                .expect("request line");
-            let request: Value = serde_json::from_str(&request_line).expect("request json");
-            let mut project = handshake
-                .project_path
-                .as_ref()
-                .map(|path| path.display().to_string());
-            let mut result = json!({ "project": project });
-            if request["method"] == json!("initialize")
-                && request
-                    .pointer("/params/roots")
-                    .and_then(Value::as_array)
-                    .is_some_and(|roots| !roots.is_empty())
-            {
-                project = Some(daemon_target.display().to_string());
-                result["project"] = json!(project);
-                result["_meta"]["tracedecayInitializeRoute"] = json!({
-                    "projectPath": daemon_target,
-                    "allowInit": false,
-                });
-            }
-            let response = json!({
-                "jsonrpc": "2.0",
-                "id": request["id"].clone(),
-                "result": result
-            });
-            writer
-                .write_all(
-                    serde_json::to_string(&response)
-                        .expect("response json")
-                        .as_bytes(),
-                )
-                .await
-                .expect("write response");
-            writer.write_all(b"\n").await.expect("write newline");
-            writer.shutdown().await.expect("shutdown fake daemon");
-            projects.push(
-                handshake
-                    .project_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-            );
+            let daemon_target = daemon_target.clone();
+            joins.push(tokio::spawn(async move {
+                answer_initialize_route_proxy_request(stream, &daemon_target).await
+            }));
+        }
+        let mut projects = Vec::new();
+        for join in joins {
+            projects.push(join.await.expect("initialize-route handler"));
         }
         projects
     });
@@ -1095,7 +1108,6 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
             .expect("post-reinitialize tools/call json"),
         )
         .expect("send post-reinitialize tools/call");
-    drop(sender);
 
     let handshake = DaemonHandshake {
         project_path: Some(active.clone()),
@@ -1103,20 +1115,26 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
         client_identity,
         ..test_handshake_defaults()
     };
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        super::super::proxy_transport_to_daemon(&socket, &handshake, None, &mut transport),
-    )
+    let proxy_socket = socket.clone();
+    let proxy = tokio::spawn(async move {
+        super::super::proxy_transport_to_daemon(&proxy_socket, &handshake, None, &mut transport)
+            .await
+    });
+    let responses = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut responses = Vec::new();
+        while responses.len() < 4 {
+            responses.push(receiver.recv().await.expect("proxy response"));
+        }
+        responses
+    })
     .await
-    .expect("proxy transport timed out")
-    .expect("proxy transport");
-
-    let mut responses = Vec::new();
-    while let Ok(Some(line)) =
-        tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv()).await
-    {
-        responses.push(line);
-    }
+    .expect("proxy transport timed out");
+    drop(sender);
+    tokio::time::timeout(std::time::Duration::from_secs(2), proxy)
+        .await
+        .expect("proxy exit timed out")
+        .expect("proxy task")
+        .expect("proxy transport");
     let response_project = |id| {
         responses
             .iter()
