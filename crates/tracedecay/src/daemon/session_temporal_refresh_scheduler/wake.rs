@@ -845,6 +845,25 @@ impl SessionTemporalRefreshWake {
     }
 }
 
+impl tracedecay_application::SessionTemporalRefreshWakePort for SessionTemporalRefreshWake {
+    fn wake(&self) -> bool {
+        SessionTemporalRefreshWake::wake(self)
+    }
+
+    fn is_unavailable(&self) -> bool {
+        self.status().unavailable_reason.is_some()
+    }
+
+    fn wake_and_wait_until_idle(
+        &self,
+        timeout: std::time::Duration,
+    ) -> tracedecay_application::SessionTemporalRefreshWakeFuture<'_> {
+        Box::pin(SessionTemporalRefreshWake::wake_and_wait_until_idle(
+            self, timeout,
+        ))
+    }
+}
+
 impl SessionProjectionServingStatusPort for SessionTemporalRefreshWake {
     fn serving_status(&self) -> SessionProjectionServingStatus {
         self.target().map_or_else(
