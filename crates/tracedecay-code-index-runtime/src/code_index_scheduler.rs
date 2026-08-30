@@ -2128,13 +2128,17 @@ pub struct LatestCompleteCodeIndexV1 {
     generation: Arc<CodeIndexPublishedGenerationV1>,
     text: LatestCodeTextGenerationV1,
     record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
-    graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
 }
 
 #[derive(Clone)]
 pub struct LatestCodeTextGenerationV1 {
     metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
     query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
+    /// Native-graph readiness for this exact sealed text generation. Status
+    /// reads this authority even while an older generation still owns the
+    /// graph-serving slot, so old Ready state cannot mask current Pending or
+    /// terminal Unavailable state.
+    graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
     /// Generation-owned singleflight state for the durable text projection:
     /// the resumable partial build plus the head-open claim. Only the
     /// background scheduler advances it; foreground queries observe typed
@@ -2859,6 +2863,7 @@ struct ProductionCodeGraphServingV1 {
 enum CodeGraphActivationStateV1 {
     Pending,
     Refused(&'static str),
+    Unavailable(String),
     Ready(Arc<ProductionCodeGraphServingV1>),
 }
 
@@ -3111,6 +3116,7 @@ impl LatestCompleteCodeIndexV1 {
         &self,
     ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
         match &*self
+            .text
             .graph_activation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3118,6 +3124,9 @@ impl LatestCompleteCodeIndexV1 {
             CodeGraphActivationStateV1::Ready(serving) => Ok(Arc::clone(serving)),
             CodeGraphActivationStateV1::Refused(reason) => {
                 Err(RetrievalPortError::Contract((*reason).to_owned()))
+            }
+            CodeGraphActivationStateV1::Unavailable(reason) => {
+                Err(RetrievalPortError::AuthorityUnavailable(reason.clone()))
             }
             CodeGraphActivationStateV1::Pending => Err(RetrievalPortError::Contract(
                 "code graph projection has not completed activation".to_owned(),
@@ -3131,11 +3140,12 @@ impl LatestCompleteCodeIndexV1 {
     /// The activation state is shared by every handle bound to one sealed
     /// generation, so this answers for the handle already seated in the serving
     /// slot as much as for this one: a generation that reached serving through
-    /// the exact route, or whose activation failed earlier, reports pending
-    /// here while it serves text under the same generation id.
+    /// the exact route but has not attempted graph activation yet reports
+    /// pending here while it serves text under the same generation id.
     pub fn graph_activation_is_pending(&self) -> bool {
         matches!(
             &*self
+                .text
                 .graph_activation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
@@ -3148,33 +3158,15 @@ impl LatestCompleteCodeIndexV1 {
     pub fn code_graph_serving_readiness(
         &self,
     ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1 {
-        match &*self
-            .graph_activation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
-            CodeGraphActivationStateV1::Pending => {
-                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
-            }
-            CodeGraphActivationStateV1::Refused(reason) => {
-                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Refused {
-                    reason: (*reason).to_owned(),
-                }
-            }
-            CodeGraphActivationStateV1::Ready(_) => {
-                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
-            }
-        }
+        self.text.code_graph_serving_readiness()
     }
 
     fn refuse_graph_activation(&self, reason: &'static str) {
-        let mut state = self
-            .graph_activation
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
-            *state = CodeGraphActivationStateV1::Refused(reason);
-        }
+        self.text.refuse_graph_activation(reason);
+    }
+
+    fn mark_graph_activation_unavailable(&self, reason: String) {
+        self.text.mark_graph_activation_unavailable(reason);
     }
 
     /// The retained verified-snapshot projection store for graph reads,
@@ -3199,6 +3191,55 @@ impl LatestCompleteCodeIndexV1 {
                 )
             })?;
         Ok(store)
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    pub fn code_graph_serving_readiness(
+        &self,
+    ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1 {
+        match &*self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Pending => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
+            }
+            CodeGraphActivationStateV1::Refused(reason) => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Refused {
+                    reason: (*reason).to_owned(),
+                }
+            }
+            CodeGraphActivationStateV1::Unavailable(reason) => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Unavailable {
+                    reason: reason.clone(),
+                }
+            }
+            CodeGraphActivationStateV1::Ready(_) => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+            }
+        }
+    }
+
+    fn refuse_graph_activation(&self, reason: &'static str) {
+        let mut state = self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+            *state = CodeGraphActivationStateV1::Refused(reason);
+        }
+    }
+
+    fn mark_graph_activation_unavailable(&self, reason: String) {
+        let mut state = self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+            *state = CodeGraphActivationStateV1::Unavailable(reason);
+        }
     }
 }
 
@@ -4073,6 +4114,7 @@ impl LatestCompleteCodeIndexV1 {
             _graph_authority: graph_authority,
         });
         *self
+            .text
             .graph_activation
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -4343,6 +4385,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             text: LatestCodeTextGenerationV1 {
                 metadata,
                 query_owners: Arc::new(OnceLock::new()),
+                graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
                 text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
                 text_projection_failed: Arc::new(AtomicBool::new(false)),
                 text_control: GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
@@ -4368,7 +4411,6 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 publication_binding: None,
             },
             record_index: Arc::new(OnceLock::new()),
-            graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
         };
         if latest
             .text
@@ -5476,6 +5518,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         Some(LatestCodeTextGenerationV1 {
             metadata,
             query_owners: Arc::new(OnceLock::new()),
+            graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
             text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
             text_projection_failed: Arc::new(AtomicBool::new(false)),
             text_control,
@@ -6099,8 +6142,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 progress_epoch,
                 interactive,
             )) if cached_id == &generation_id
-                && retained_text
-                    .is_none_or(|text| Arc::ptr_eq(build, &text.text_projection_build)) =>
+                && retained_text.is_none_or(|text| {
+                    Arc::ptr_eq(build, &text.text_projection_build)
+                        && Arc::ptr_eq(interactive, &text.graph_activation)
+                }) =>
             {
                 (
                     Arc::clone(owners),
@@ -6124,9 +6169,16 @@ impl CodeIndexWorktreeSchedulerV1 {
                     || Arc::new(OnceLock::new()),
                     |(_, _, index, ..)| Arc::clone(index),
                 );
-                let graph_activation = same_generation_cache.map_or_else(
-                    || Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
-                    |(_, _, _, _, _, _, _, _, graph_activation)| Arc::clone(graph_activation),
+                let graph_activation = retained_text.map_or_else(
+                    || {
+                        same_generation_cache.map_or_else(
+                            || Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
+                            |(_, _, _, _, _, _, _, _, graph_activation)| {
+                                Arc::clone(graph_activation)
+                            },
+                        )
+                    },
+                    |text| Arc::clone(&text.graph_activation),
                 );
                 let (owners, build, failed, control, progress, progress_epoch) =
                     if let Some(text) = retained_text {
@@ -6189,6 +6241,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .unwrap_or_else(|| LatestCodeTextGenerationV1 {
                 metadata,
                 query_owners,
+                graph_activation: Arc::clone(&graph_activation),
                 text_projection_build,
                 text_projection_failed,
                 text_control,
@@ -6214,7 +6267,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             generation,
             text,
             record_index,
-            graph_activation,
         }
     }
 

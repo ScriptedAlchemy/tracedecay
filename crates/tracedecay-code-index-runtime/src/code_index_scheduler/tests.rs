@@ -51,7 +51,7 @@ use tracedecay_usecases::semantic_runtime::{
 
 use super::registry::{
     ColdMountOpenEventV1, ServingGenerationInstallationOutcomeV1,
-    ServingGenerationRollbackOutcomeV1,
+    ServingGenerationRollbackOutcomeV1, dashboard_code_graph_serving,
 };
 use super::{
     CodeIndexBuildProgressStateV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1,
@@ -11813,31 +11813,58 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
     registry.shutdown().await;
 }
 
-/// A graph projection can remain busy for minutes on a large retained
-/// generation. Source reconciliation and the replacement text projection must
-/// finish before that optional graph work starts, so exact and lexical serving
-/// never inherit graph activation latency.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() {
-    let sources = (0..64)
-        .map(|index| {
-            (
-                format!("src/file_{index:04}.rs"),
-                format!("pub fn alpha_{index:04}() -> usize {{ {index} }}\n"),
-            )
-        })
-        .collect::<Vec<_>>();
-    let source_refs = sources
-        .iter()
-        .map(|(path, source)| (path.as_str(), source.as_str()))
-        .collect::<Vec<_>>();
-    let fixture = GitFixture::new(&source_refs);
+/// Dashboard graph readiness belongs to the current sealed text generation,
+/// even while an older generation still owns a fully ready graph seat.
+#[test]
+fn dashboard_graph_readiness_follows_the_current_text_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let scoped_store = super::scoped_code_index_store_root(
         store.path(),
         &fixture.path().canonicalize().expect("canonical fixture"),
     );
-    let (scope, sealed_worktree_id, sealed_generation_id) = {
+    let mut scheduler = scheduler(
+        &fixture,
+        scoped_store,
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed generation"));
+    let old_ready = scheduler.latest_complete().expect("seeded generation");
+    old_ready.warm_serving_caches();
+    assert_eq!(
+        old_ready.code_graph_serving_readiness(),
+        tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+    );
+
+    fixture.edit("src/current.rs", "pub fn current() -> u32 { 2 }\n");
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish changed generation"),
+    );
+    let current = scheduler.latest_complete().expect("changed generation");
+    assert_eq!(
+        dashboard_code_graph_serving(
+            Some(&old_ready),
+            Some(&current.text_generation_handle()),
+            true,
+        ),
+        Some(
+            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
+        ),
+        "an older Ready graph must not mask the current text generation's Pending state"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_graph_activation_failure_is_typed_for_current_text_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, worktree_id) = {
         let mut scheduler = scheduler(
             &fixture,
             scoped_store,
@@ -11846,7 +11873,7 @@ async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() 
         published(scheduler.reconcile_now().expect("seed generation"));
         let latest = scheduler.latest_complete().expect("seeded generation");
         let snapshot = latest.generation.snapshot();
-        let worktree_id = snapshot.worktree.clone().expect("seeded worktree id");
+        let worktree_id = snapshot.worktree.clone().expect("worktree id");
         (
             ResolvedScope::new(
                 test_project_id(),
@@ -11856,13 +11883,10 @@ async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() 
             )
             .expect("resolved scope"),
             worktree_id,
-            latest.generation.manifest().generation_id.clone(),
         )
     };
-    fixture.edit("src/current.rs", "pub fn current() -> u32 { 2 }\n");
+    let activation_gate = super::graph_activation::install_injected_activation_gate(&worktree_id);
 
-    let activation_gate =
-        super::graph_activation::install_injected_activation_gate(&sealed_worktree_id);
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
         .mount_worktree(
@@ -11873,58 +11897,47 @@ async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() 
         )
         .await
         .expect("mount retained generation");
-
     tokio::time::timeout(
         Duration::from_secs(10),
         activation_gate.wait_until_started(),
     )
     .await
-    .expect("graph activation did not reach the deterministic hold point");
-    assert!(
-        !registry
-            .reconcile_in_progress_for_test(fixture.path())
-            .await,
-        "optional graph activation must not keep source reconciliation in progress"
-    );
-    let (_, text_is_current) = registry
-        .latest_text_serving_freshness_for_scope(&scope)
-        .await
-        .expect("ready text generation remains queryable during graph activation");
-    assert!(
-        text_is_current,
-        "slow graph activation must not mark reconciled exact and lexical serving stale"
-    );
-    let observed_generation_id = registry.latest_generation_id(fixture.path()).await;
-    let text_ready = registry
-        .latest_text_serving_for_scope(&scope)
-        .await
-        .is_some_and(|text| text.query_owners_are_warm());
-    let freshness = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("dashboard freshness during held graph activation");
-    assert_ne!(
-        freshness.staleness_state.as_deref(),
-        Some("fresh"),
-        "dashboard must not claim a terminal generation while native graph activation is still held: {freshness:?}"
-    );
-    assert_eq!(
-        freshness.code_graph_serving,
-        Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
-        ),
-        "a sealed text generation must not imply graph-serving readiness while activation is held"
-    );
+    .expect("graph activation did not reach the terminal-failure boundary");
+    super::graph_activation::set_injected_terminal_activation_failure(&worktree_id, true);
     activation_gate.release();
 
-    assert_ne!(
-        observed_generation_id,
-        Some(sealed_generation_id),
-        "slow graph activation started before the changed text generation replaced the retained seal"
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let reason = loop {
+        let freshness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted dashboard freshness");
+        if let Some(
+            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Unavailable {
+                ref reason,
+            },
+        ) = freshness.code_graph_serving
+        {
+            if reason != "generation_unavailable" {
+                break reason.clone();
+            }
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "terminal graph activation failure remained pending: {freshness:?}"
+        );
+        tokio::task::yield_now().await;
+    };
+    assert!(
+        reason.contains("injected terminal graph activation failure"),
+        "typed failure must retain its terminal cause: {reason}"
     );
     assert!(
-        text_ready,
-        "slow graph activation started before the changed generation became exact/lexical ready"
+        registry
+            .latest_text_serving_for_scope(&scope)
+            .await
+            .is_some_and(|text| text.query_owners_are_warm()),
+        "terminal native graph failure must not withdraw exact/lexical serving"
     );
     registry.shutdown().await;
 }

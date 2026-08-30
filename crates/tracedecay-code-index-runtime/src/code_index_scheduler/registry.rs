@@ -698,9 +698,9 @@ fn dashboard_freshness_identity(
 }
 
 /// Project the graph-serving state without warming any serving derivation.
-fn dashboard_code_graph_serving(
+pub(super) fn dashboard_code_graph_serving(
     latest: Option<&LatestCompleteCodeIndexV1>,
-    text_generation_present: bool,
+    text: Option<&LatestCodeTextGenerationV1>,
     graph_activation_enabled: bool,
 ) -> Option<CodeGraphServingReadinessV1> {
     if !graph_activation_enabled {
@@ -708,16 +708,15 @@ fn dashboard_code_graph_serving(
             reason: "graph_activation_disabled".to_owned(),
         });
     }
-    let Some(latest) = latest else {
-        return Some(if text_generation_present {
-            CodeGraphServingReadinessV1::Pending
-        } else {
-            CodeGraphServingReadinessV1::Unavailable {
-                reason: "generation_unavailable".to_owned(),
-            }
-        });
-    };
-    Some(latest.code_graph_serving_readiness())
+    if let Some(text) = text {
+        return Some(text.code_graph_serving_readiness());
+    }
+    Some(latest.map_or_else(
+        || CodeGraphServingReadinessV1::Unavailable {
+            reason: "generation_unavailable".to_owned(),
+        },
+        LatestCompleteCodeIndexV1::code_graph_serving_readiness,
+    ))
 }
 
 /// Whether status may report this worktree as terminal (`fresh` / `current`).
@@ -732,12 +731,13 @@ fn dashboard_generation_is_ready(
     code_graph_serving: &Option<CodeGraphServingReadinessV1>,
 ) -> bool {
     if graph_activation_enabled {
-        latest.is_some()
+        text_ready
             && matches!(
                 code_graph_serving,
                 Some(
                     CodeGraphServingReadinessV1::Ready
                         | CodeGraphServingReadinessV1::Refused { .. }
+                        | CodeGraphServingReadinessV1::Unavailable { .. }
                 )
             )
     } else {
@@ -3500,17 +3500,18 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // The scheduled retry is the seat attempt, so it
                                 // must not be turned away as already attempted.
                                 graph_seat_attempted = None;
+                                result = Ok((Err(error), None, None));
                             } else {
                                 next_seat_attempt_at = None;
                                 seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                                latest.mark_graph_activation_unavailable(error.to_string());
                                 tracing::warn!(
                                     event = "code_index_graph_activation_failed",
                                     error = %error,
-                                    "graph activation failed; the sealed generation stays \
-                                     unseated until a new generation publishes"
+                                    "graph activation failed terminally; exact and lexical \
+                                     serving remain available with typed graph unavailability"
                                 );
                             }
-                            result = Ok((Err(error), None, None));
                         }
                     }
                 }
@@ -4572,10 +4573,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_ready = text
                         .as_ref()
                         .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
-                    let identity = if latest.is_some() {
-                        dashboard_freshness_identity(latest.as_ref())
-                    } else {
+                    let identity = if text.is_some() {
                         dashboard_text_freshness_identity(text.as_ref())
+                    } else {
+                        dashboard_freshness_identity(latest.as_ref())
                     };
                     let hook_hint_count = hints
                         .lock()
@@ -4583,7 +4584,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .count();
                     let code_graph_serving = dashboard_code_graph_serving(
                         latest.as_ref(),
-                        text.is_some(),
+                        text.as_ref(),
                         graph_activation_enabled,
                     );
                     let ready = dashboard_generation_is_ready(
@@ -4650,8 +4651,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 .as_ref()
                 .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
             let hook_hint_count = scheduler.pending_hint_count();
-            let code_graph_serving =
-                dashboard_code_graph_serving(latest.as_ref(), text.is_some(), graph_activation_enabled);
+            let code_graph_serving = dashboard_code_graph_serving(
+                latest.as_ref(),
+                text.as_ref(),
+                graph_activation_enabled,
+            );
             let ready = dashboard_generation_is_ready(
                 latest.as_ref(),
                 text_ready,
@@ -4677,10 +4681,10 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 "indexing"
             };
-            let identity = if latest.is_some() {
-                dashboard_freshness_identity(latest.as_ref())
-            } else {
+            let identity = if text.is_some() {
                 dashboard_text_freshness_identity(text.as_ref())
+            } else {
+                dashboard_freshness_identity(latest.as_ref())
             };
             tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
