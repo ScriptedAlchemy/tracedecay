@@ -240,8 +240,7 @@ fn read_pending_receipts(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     context: &RequestContext,
 ) -> Result<Vec<WorkBlockedIntervalReceiptV1>, RecoveryFailureV1> {
-    let work = database
-        .work_application_services()
+    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(database)
         .map_err(RecoveryFailureV1::Database)?;
     work.run_control()
         .next_settled_blocked_intervals_for_observation(context, RECOVERY_PAGE_LIMIT)
@@ -253,8 +252,7 @@ fn mark_receipt_durable(
     context: &RequestContext,
     receipt: &WorkBlockedIntervalReceiptV1,
 ) -> Result<(), RecoveryFailureV1> {
-    let work = database
-        .work_application_services()
+    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(database)
         .map_err(RecoveryFailureV1::Database)?;
     work.run_control()
         .mark_settled_blocked_interval_durable(context, receipt)

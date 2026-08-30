@@ -5,11 +5,12 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tracedecay_application::retained_surfaces::{
-    FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
-    FactStoreGetRequestV1, FactStoreListRequestV1, FactStoreProbeRequestV1,
-    FactStoreReasonRequestV1, FactStoreRelatedRequestV1, FactStoreRemoveRequestV1,
-    FactStoreSearchRequestV1, FactStoreUpdateRequestV1, MemoryScopeV1, MemoryStatusRequestV1,
-    RetainedProjectSelectorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+    FactFeedbackRequestV1, FactRetrievalTelemetryV1, FactStoreAddRequestV1,
+    FactStoreContradictRequestV1, FactStoreGetRequestV1, FactStoreListRequestV1,
+    FactStoreProbeRequestV1, FactStoreReasonRequestV1, FactStoreRelatedRequestV1,
+    FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreUpdateRequestV1, MemoryScopeV1,
+    MemoryStatusRequestV1, RetainedProjectSelectorV1, RetainedSurfaceOperation,
+    RetainedSurfaceResultV1,
 };
 use tracedecay_application::{
     ApplicationOutcome, RequestAdmission, RetainedMemoryExecutionPortV1, RetainedMemoryRequestV1,
@@ -613,17 +614,42 @@ async fn search_on_db(
             operation_context.operation_id().as_str(),
         )?)
     };
-    let tracked = if database.is_writable() {
-        track_explicit_search(
+    // Retrieval telemetry is recall bookkeeping for the returned hits, not
+    // part of the evidence itself. When only its write lane is unavailable,
+    // the search degrades to delivering the evidence with a typed telemetry
+    // state instead of refusing a read the store already served.
+    let (tracked, retrieval_telemetry) = if page.hits().is_empty() {
+        (
+            TrackedExplicitSearch::default(),
+            FactRetrievalTelemetryV1::NotApplicable,
+        )
+    } else if database.is_writable() {
+        match track_explicit_search(
             context,
             &memory,
             &owner,
             operation_context.operation_id().clone(),
             &page,
         )
-        .await?
+        .await
+        {
+            Ok(tracked) => {
+                let fact_count = page.hits().len();
+                (tracked, FactRetrievalTelemetryV1::Recorded { fact_count })
+            }
+            Err(error) => match memory_mapping::retrieval_telemetry_degradation(&error) {
+                Some(reason) => (
+                    TrackedExplicitSearch::default(),
+                    FactRetrievalTelemetryV1::Degraded { reason },
+                ),
+                None => return Err(error),
+            },
+        }
     } else {
-        TrackedExplicitSearch::default()
+        (
+            TrackedExplicitSearch::default(),
+            FactRetrievalTelemetryV1::ReadOnly,
+        )
     };
     if tracked.authority_result_invalid {
         let committed_state = tracked
@@ -684,7 +710,7 @@ async fn search_on_db(
             "Retrieval telemetry committed after the request or capability grant expired.",
         );
     }
-    let result = memory_mapping::exact_search_result(mapped);
+    let result = memory_mapping::exact_search_result(mapped, retrieval_telemetry);
     match evidence_outcome(context, RetainedSurfaceOperation::FactStoreSearch, result) {
         Ok(outcome) => Ok(outcome),
         Err(RetainedSurfaceExecutionErrorV1::TimedOut(

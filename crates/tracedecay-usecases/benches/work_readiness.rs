@@ -112,7 +112,7 @@ async fn fixture() -> WorkReadinessFixture {
             .await
             .expect("production registered Work store opens");
     // This is the exact concrete service/storage pairing constructed by
-    // `RegisteredGlobalDb::work_application_services`; mounting that larger
+    // `RegisteredWorkApplicationServicesV1::attach`; mounting that larger
     // bundle would additionally require the unrelated project-graph runtime.
     let service = WorkService::new(
         runtime

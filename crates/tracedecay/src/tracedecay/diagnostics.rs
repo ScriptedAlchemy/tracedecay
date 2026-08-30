@@ -2,7 +2,6 @@
 //! store.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta;
@@ -80,7 +79,7 @@ impl TraceDecay {
             self.store_layout.clone(),
             self.configuration_runtime.registered_database(),
             self.profile_database.clone(),
-            Arc::clone(&self.store_runtime_registry),
+            self.store_runtime_registry.clone(),
         )
         .await
     }
@@ -110,14 +109,6 @@ impl TraceDecay {
 
     pub fn store_layout(&self) -> &StoreLayout {
         &self.store_layout
-    }
-
-    pub(crate) fn retained_store_runtime_registry(
-        &self,
-    ) -> std::sync::Arc<
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-    > {
-        std::sync::Arc::clone(&self.store_runtime_registry)
     }
 
     pub(crate) fn retained_project_store_db(&self) -> Result<Database> {

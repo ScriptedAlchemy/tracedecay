@@ -16,7 +16,8 @@ use std::sync::LazyLock;
 // Phase 2 removes these composition-root re-exports once callers import mcp directly.
 pub use tracedecay_mcp::tools::{render, renderers};
 pub use tracedecay_mcp::{
-    RESERVED_FLAGS_FOOTER, ToolDefinition, ToolResult, render_tool_cli_help, short_tool_name,
+    RESERVED_FLAGS_FOOTER, ToolDefinition, ToolResult, render_tool_cli_help,
+    resolve_property_schema, short_tool_name,
 };
 
 pub(crate) use binding::{

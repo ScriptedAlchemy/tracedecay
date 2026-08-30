@@ -40,7 +40,7 @@ impl ProjectRuntime for TraceDecay {
     }
 
     fn profile_id(&self) -> &UserProfileId {
-        self.store_runtime_registry().profile_id()
+        self.project_store_runtime().profile_id()
     }
 
     fn profile_database(&self) -> &RegisteredGlobalDbLeaseV1 {
@@ -53,7 +53,7 @@ impl ProjectRuntime for TraceDecay {
         roots: Vec<PathBuf>,
     ) -> RuntimeFuture<'_, RegisteredGlobalDbLeaseV1> {
         Box::pin(async move {
-            TraceDecay::store_runtime_registry(self)
+            TraceDecay::project_store_runtime(self)
                 .project_sessions(project_id, roots)
                 .await
         })

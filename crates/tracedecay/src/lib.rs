@@ -79,6 +79,7 @@ mod hooks;
 mod host_admission_test;
 pub mod mcp;
 pub mod profile_registry_maintenance;
+mod project_store_runtime;
 mod runtime_ports;
 pub use runtime_ports::register_runtime_ports;
 #[cfg(test)]
