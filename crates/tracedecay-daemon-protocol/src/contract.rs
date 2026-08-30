@@ -59,12 +59,12 @@ use tracedecay_domain::{
     ScopeSetId, UtcMicros, WorkAttemptV1, WorkDuplicateAdjudicationCommandV1,
     WorkPlacementPreflightV1, WorkPlacementV1, WorkRunControlV1,
 };
-use tracedecay_lsp::{
+use tracedecay_tool_catalog::{EffectClass, UseCaseId};
+
+use crate::lsp_wire::{
     LspSessionAccess, LspSessionCredential, LspSessionId, MAX_LSP_FRAME_BYTES,
     MAX_LSP_WORKSPACE_ROOTS,
 };
-use tracedecay_tool_catalog::{EffectClass, UseCaseId};
-
 use crate::surface::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
 use tracedecay_application::ConfigurationWireRequestV1;
 use tracedecay_application::feedback::observations::{

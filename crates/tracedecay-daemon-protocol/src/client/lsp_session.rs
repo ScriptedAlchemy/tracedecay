@@ -3,8 +3,8 @@
 //! Relocated verbatim from `daemon_client.rs` as a pure structural split; no
 //! logic, naming, or visibility changes beyond the imports this file needs.
 
+use crate::lsp_wire::{FramePoll, FrameSend};
 use tracedecay_application::{CancellationSignal, Deadline};
-use tracedecay_lsp::{FramePoll, FrameSend};
 
 use super::{
     ConnectionLocalRequestSequence, DaemonInvocationClient, InvocationCancellationPolicy,

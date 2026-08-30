@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
 use crate::hooks::daemon_ports::daemon_admission_response;
 use std::sync::Mutex;
 use tracedecay_application::context_scout::{
