@@ -1,5 +1,9 @@
 //! Narrow root-owned source authorities used by transport-neutral use cases.
 
+mod runtime_port;
+
+pub use runtime_port::{ProjectStoreRuntimeV1, RuntimeFuture};
+
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};

@@ -141,20 +141,24 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(Some(session_ids))
     }
 
+    #[hotpath::measure(future = true, label = "session_temporal.txn.ensure_cursor_key")]
     pub async fn ensure_active_session_cursor_key_result(
         &self,
     ) -> tracedecay_store::SessionStoreResult<SignedCursorKeyRefV1> {
         const OPERATION: &str = "provision registered session cursor authentication key";
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| query::storage(OPERATION, error))?;
+        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| query::storage(OPERATION, error))?
+        });
         let key =
             cursor_keys::ensure_active_session_cursor_key_in_transaction(&transaction).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| query::storage(OPERATION, error))?;
+        hotpath::measure_block!("session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| query::storage(OPERATION, error))?
+        });
         Ok(key)
     }
 

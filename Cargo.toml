@@ -97,8 +97,17 @@ codegen-units = 1
 [profile.dev.package."*"]
 debug = 0
 
+# Wire-protocol crate: opt-level=1 + thin-local-LTO spends ~86s LLVM on a
+# 130MiB rlib / 2.2M instructions of serde+DTO glue (measured). This is not a
+# kernel; keep it unoptimized so rmeta/rlib stay cheap for the root crate.
+[profile.dev.package.tracedecay-daemon-protocol]
+opt-level = 0
+
 [profile.test.package."*"]
 debug = 0
+
+[profile.test.package.tracedecay-daemon-protocol]
+opt-level = 0
 
 # Opt-in profile for hot-kernel runs: `cargo test --profile perf ...` or
 # `cargo build --profile perf ...`. It mirrors dev/test (line tables for
@@ -114,6 +123,9 @@ inherits = "dev"
 
 [profile.perf.package."*"]
 debug = 0
+
+[profile.perf.package.tracedecay-daemon-protocol]
+opt-level = 0
 
 # Code-index lifecycle tests exercise six-figure production generations under
 # the same bounded readiness contracts as the daemon. Keep the owning kernels
