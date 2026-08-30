@@ -4,7 +4,7 @@ fn current_unix_seconds() -> Result<u64, ModelLifecycleErrorV1> {
         .map(|duration| duration.as_secs())
         .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)
 }
-#[hotpath::measure]
+#[hotpath::measure(label = "semantic.model_lifecycle.acquire")]
 fn run_acquisition(
     root: &Path,
     catalog: &FastEmbedModelCatalogV1,

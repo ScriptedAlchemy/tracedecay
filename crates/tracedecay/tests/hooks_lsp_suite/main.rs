@@ -13,6 +13,8 @@
 mod common;
 
 #[cfg(feature = "test-transport")]
+mod hint_settlement_test;
+#[cfg(feature = "test-transport")]
 mod hook_branch_routing_test;
 mod hook_lifecycle_lease_test;
 mod hook_replay_test;

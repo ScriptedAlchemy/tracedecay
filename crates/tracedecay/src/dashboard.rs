@@ -1,15 +1,19 @@
-//! Root-side shim for the dashboard HTTP surface.
+//! Root-side dashboard composition: the embedded-asset bridge plus the
+//! daemon-coupled integration fixtures.
 //!
 //! The dashboard API — routes, read models, services and their tests — lives
-//! in `crates/tracedecay-dashboard-api`. Everything that used to be reachable
-//! at `crate::dashboard::…` is re-exported here so existing root modules,
-//! command adapters and integration tests keep compiling unchanged.
+//! in `crates/tracedecay-dashboard-api`; callers import it directly.
 //!
 //! [`assets`] retains only the root build-script bridge: the embedded
 //! single-app dist is generated into this crate's `OUT_DIR`. The canonical API
 //! crate owns the resulting HTTP router and transport policy.
 
-pub use tracedecay_dashboard_api::*;
+#[cfg(feature = "test-transport")]
+use tracedecay_dashboard_api::{
+    DashboardApplicationRuntime, DashboardAutomationAuthorityV1, DashboardAutomationWriter,
+    DashboardGitCorrelationReadPortV1, DashboardLcmReadPortV1,
+    DashboardProfileCodeIndexWorkerSettingsPort, standalone_dashboard_automation_writer,
+};
 
 pub(crate) mod assets;
 
@@ -108,7 +112,7 @@ pub async fn dashboard_automation_authority_for_test(
         ),
     );
     let invocation_service = crate::daemon::DaemonInvocationService::with_code_index_schedulers(
-        crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
             1,
             resident_memory,
         ),
@@ -272,7 +276,10 @@ impl DashboardGraphTestRuntimeV1 {
     ) -> tracedecay_runtime_core::errors::Result<crate::tracedecay::TraceDecay> {
         // Fixture identity is pinned in the sanctioned `.git/` repository
         // identity marker; nothing is written into the working tree.
-        crate::storage::pin_fixture_repository_identity(project_root, project_id.as_str())?;
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            project_root,
+            project_id.as_str(),
+        )?;
         let options = crate::tracedecay::TraceDecayOpenOptions {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),
@@ -417,7 +424,7 @@ pub async fn record_project_span_for_test(
     merge_gap_secs: i64,
 ) -> tracedecay_runtime_core::errors::Result<i64> {
     hotpath::future!(
-        crate::store::GlobalDbGitCorrelationStore::new(project_database)
+        tracedecay_global_db::GlobalDbGitCorrelationStore::new(project_database)
             .record_span_observation(observation, merge_gap_secs),
         label = "dashboard.span.persist"
     )

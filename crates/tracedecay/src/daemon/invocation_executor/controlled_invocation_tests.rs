@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::settle_in_process_invocation;
+use tracedecay_application::{CancellationSignal, clock::now_micros};
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
 };
-use tracedecay_application::{CancellationSignal, clock::now_micros};
 
 fn authoritative_response(request_id: &str) -> DaemonInvocationResponse {
     DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::ResetRequired)

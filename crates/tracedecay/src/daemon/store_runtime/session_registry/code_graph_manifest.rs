@@ -974,6 +974,7 @@ mod tests {
 
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
+    use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
     use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId};
     use tracedecay_graph_db::{
         GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphNamespace,
@@ -983,14 +984,13 @@ mod tests {
         BrainId, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, StoreShardIdV1,
         UserProfileId,
     };
-    use tracedecay_usecases::retention::code_index_generations::DurablePublicationPointerV1;
 
     use super::{
         DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES,
         validate_sealed_generation_metadata, verify_checked_seal,
         verify_sealed_generation_source_from_roots,
     };
-    use crate::daemon::code_index_scheduler::{
+    use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     };
 
@@ -1311,8 +1311,11 @@ mod tests {
         git(&project_root, &["add", "."]);
         git(&project_root, &["commit", "-qm", "single-pass fixture"]);
         let project_id = ProjectId::new("project.manifest-single-pass").unwrap();
-        crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
-            .unwrap();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .unwrap();
         let canonical_project = project_root.canonicalize().unwrap();
 
         // Seal one real generation through the production worktree scheduler.

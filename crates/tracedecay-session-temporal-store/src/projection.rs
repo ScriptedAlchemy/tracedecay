@@ -9,12 +9,10 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use crate::handle::{
-    SessionTemporalAccess, SessionTemporalRegisteredDb, SessionTemporalWriteTxn,
-};
 use super::query::{PERSIST_OPERATION, storage, storage_message};
 use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use super::relations::SessionRelationError;
+use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
 use crate::support as hotpath_observe;
 
 mod derived;
@@ -76,10 +74,7 @@ impl SessionTemporalRefreshDiscoveryPage {
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// Discovers sessions that need temporal projection.
     ///
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.query.pending_refresh"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.query.pending_refresh")]
     pub async fn pending_session_temporal_refresh_page_result(
         &self,
         limit: usize,
@@ -268,10 +263,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         })
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.projection.materialize"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.projection.materialize")]
     pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
         recovery: &SessionRefreshRecoveryV1,
@@ -347,10 +339,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         .await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.txn.persist_projection"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.txn.persist_projection")]
     pub async fn persist_session_temporal_projection_batch_result(
         &self,
         batch: SessionTemporalProjectionBatchV1,

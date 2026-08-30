@@ -9,9 +9,9 @@ use tracedecay_sessions::runtime::{
         LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest,
         LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters, LcmGrepOutcome,
         LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest,
-        LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest,
-        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus,
-        LcmSummaryExpansion, compression,
+        LcmPreflightResponse, LcmRecentSession, LcmRelationProjectionStatus,
+        LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
+        LcmSessionReplaySlice, LcmStatus, LcmSummaryExpansion, compression,
         dag::{self, LcmSummaryPublicationPort},
         gc, payload, query, raw,
         types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
@@ -19,10 +19,7 @@ use tracedecay_sessions::runtime::{
 };
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
-use super::{
-    RegisteredGlobalDb,
-    registered::RegisteredGlobalDbWriterConnection,
-};
+use super::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriterConnection};
 use tracedecay_session_temporal_store::operations as session_temporal_operations;
 use tracedecay_session_temporal_store::seed_session_relation_projection;
 use tracedecay_session_temporal_store::store::execution_control_graph_cancellation;
@@ -129,11 +126,10 @@ impl RegisteredGlobalDb {
 
     #[hotpath::measure(future = true, label = "global_db.registered.lcm.grep")]
     pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
-        let git_scope_session_ids = tracedecay_session_temporal_store::SessionTemporalAccess::new(
-            self,
-        )
-        .git_scope_session_ids(&request.git_filter)
-            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let git_scope_session_ids =
+            tracedecay_session_temporal_store::SessionTemporalAccess::new(self)
+                .git_scope_session_ids(&request.git_filter)
+                .map_err(|error| LcmError::Db(error.to_string()))?;
         let snapshot = self.lcm_read_snapshot().await?;
         query::grep(
             &snapshot,
@@ -341,7 +337,7 @@ impl RegisteredGlobalDb {
             &transaction,
             relation_projection,
         );
-        let response = compression::compress(
+        let mut response = compression::compress(
             &transaction,
             &publisher,
             storage_root,
@@ -363,6 +359,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| {
                 LcmError::Db(format!("apply native LCM relation projection: {error}"))
             })?;
+            response.relation_projection_status = LcmRelationProjectionStatus::Applied;
             check_execution(control)?;
         }
         Ok(response)

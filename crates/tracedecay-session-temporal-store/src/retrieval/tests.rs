@@ -400,7 +400,11 @@ impl RegisteredTemporalRead {
 
 trait HostAdmissionRetrievalFixture {
     async fn retrieval_read_for_test(&self) -> RegisteredTemporalRead;
-    async fn activate_temporal_generation_for_retrieval_test(&self, session_id: &str, generation: u64);
+    async fn activate_temporal_generation_for_retrieval_test(
+        &self,
+        session_id: &str,
+        generation: u64,
+    );
     async fn seed_candidate_query_fixture_for_test(&self);
     async fn seed_cross_session_record_fixture_for_test(&self);
     async fn seed_derived_record_fixture_for_test(&self);

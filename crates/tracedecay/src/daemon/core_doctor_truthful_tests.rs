@@ -2,18 +2,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tracedecay_daemon_protocol::DaemonClientIdentity;
 use crate::daemon::{DaemonHandshake, StoreAdministration};
 use crate::mcp::McpServer;
 use crate::mcp::server::McpServerConstructionContext;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_daemon_protocol::DaemonClientIdentity;
 
 static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
 async fn initialize_test_project(
     project_root: &Path,
     profile_root: &Path,
-) -> crate::storage::StoreLayout {
+) -> tracedecay_runtime_core::storage::StoreLayout {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

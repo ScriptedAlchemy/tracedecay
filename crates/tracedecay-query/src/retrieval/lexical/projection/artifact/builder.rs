@@ -2734,17 +2734,7 @@ fn projected_chunk_transient_bytes(
 }
 
 fn lexical_token_count(value: &str) -> usize {
-    let mut count = 0usize;
-    let mut inside_token = false;
-    for character in value.chars() {
-        let accepted =
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':' | '.' | '/');
-        if accepted && !inside_token {
-            count = count.saturating_add(1);
-        }
-        inside_token = accepted;
-    }
-    count
+    tracedecay_domain::technical_tokens(value).count()
 }
 
 fn chunk_owned_bytes(chunk: &CodeSearchChunkV1) -> usize {
@@ -3165,6 +3155,12 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 cardinality INTEGER NOT NULL CHECK(cardinality > 0),
                 PRIMARY KEY(page_ordinal, kind, ngram)
             ) WITHOUT ROWID;
+            CREATE TABLE ngram_statistics (
+                kind INTEGER NOT NULL,
+                ngram INTEGER NOT NULL,
+                document_frequency INTEGER NOT NULL CHECK(document_frequency > 0),
+                PRIMARY KEY(kind, ngram)
+            ) WITHOUT ROWID;
             CREATE TABLE vocabulary (term TEXT PRIMARY KEY) WITHOUT ROWID;
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_document_integrity_insert AFTER INSERT ON document_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
@@ -3335,7 +3331,7 @@ fn advance_pre_digest_work(
                     "lexical artifact serving-index step overflowed".to_owned(),
                 )
             })?;
-            if state.section_ordinal == 7 {
+            if state.section_ordinal == 8 {
                 verify_required_artifact_indexes(transaction)?;
                 state.phase = PersistedFinalizationPhaseV1::Digest;
                 state.section_ordinal = 0;
@@ -3557,6 +3553,18 @@ fn build_serving_index_step(
                 "CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal)",
             )
         ),
+        7 => hotpath::measure_block!(
+            "query.artifact.finalization.ngram_statistics",
+            transaction.execute_batch(
+                "INSERT INTO ngram_statistics(kind, ngram, document_frequency)
+                 SELECT kind, ngram, SUM(cardinality)
+                 FROM ngram_postings INDEXED BY ngram_postings_by_ngram
+                 GROUP BY kind, ngram;
+                 CREATE TRIGGER frozen_ngram_statistics_insert BEFORE INSERT ON ngram_statistics BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram statistics'); END;
+                 CREATE TRIGGER frozen_ngram_statistics_update BEFORE UPDATE ON ngram_statistics BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram statistics'); END;
+                 CREATE TRIGGER frozen_ngram_statistics_delete BEFORE DELETE ON ngram_statistics BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram statistics'); END;",
+            )
+        ),
         _ => {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact selected an unknown serving-index step".to_owned(),
@@ -3711,7 +3719,7 @@ fn validate_finalization_state(
     };
     let maximum_ordinal = match state.phase {
         PersistedFinalizationPhaseV1::Statistics => 3,
-        PersistedFinalizationPhaseV1::Indexes => 7,
+        PersistedFinalizationPhaseV1::Indexes => 8,
         PersistedFinalizationPhaseV1::Digest => section_count,
     };
     if state.section_ordinal > maximum_ordinal
@@ -5065,6 +5073,7 @@ mod tests {
             .transaction()
             .expect("start serving-index transaction");
         build_serving_index_step(&transaction, 6).expect("build ngram serving index");
+        build_serving_index_step(&transaction, 7).expect("build ngram serving statistics");
         transaction.commit().expect("commit ngram serving index");
 
         let unique: i64 = connection
@@ -5111,6 +5120,14 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("collect ngram candidates");
         assert_eq!(shard_cardinalities, [2, 1]);
+        let document_frequency: i64 = connection
+            .query_row(
+                "SELECT document_frequency FROM ngram_statistics WHERE kind = 1 AND ngram = 10",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query finalized ngram statistics");
+        assert_eq!(document_frequency, 3);
     }
 
     #[test]

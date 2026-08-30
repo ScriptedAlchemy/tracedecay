@@ -18,7 +18,7 @@ struct FreshnessRuntime {
 impl FreshnessRuntime {
     async fn open(profile_root: &std::path::Path) -> Self {
         std::fs::create_dir_all(profile_root).expect("freshness profile root");
-        crate::storage::set_private_dir_permissions(profile_root)
+        tracedecay_runtime_core::storage::set_private_dir_permissions(profile_root)
             .expect("restrict freshness profile root");
         let identity = crate::daemon::profile_identity::load_or_create(profile_root)
             .expect("freshness profile identity");
@@ -252,7 +252,7 @@ fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
         "observation_cursor_conflict",
         true,
         "Claude observation store operation failed",
-        tracedecay_usecases::host_admission::HostAdmissionStatus::Backpressured.as_wire(),
+        tracedecay_sessions::admission::HostAdmissionStatus::Backpressured.as_wire(),
     );
 
     let response = tool_error_response(serde_json::json!(7), "tracedecay_hook_runtime", &error);

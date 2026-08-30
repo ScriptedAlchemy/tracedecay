@@ -914,7 +914,7 @@ fn checkpoint_sample(result: &CheckpointResult) -> WalCheckpointSample {
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "rusqlite_runtime.writer.execution_batch")]
 pub(super) fn process_execution_batch(
     connection: &mut rusqlite::Connection,
     binding: &StoreRuntimeBindingV1,

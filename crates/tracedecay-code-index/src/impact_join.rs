@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, ContentDigest, FileOccurrenceId, ManifestDigest,
-    ProviderEvaluationStateV1, SymbolOccurrenceId, ValidatedCodeSnapshotV1,
+    ProviderEvaluationStateV1, SymbolOccurrenceId,
 };
 
 use super::capabilities::expected_seal_digest;
+use super::intake::ValidatedCodeSnapshotV1;
 use super::provider::{
     CodeIndexAffectedTestsEvidenceV1, CodeIndexGraphImpactEvidenceV1,
     GenerationProviderContractErrorV1, GenerationProviderReadV1,

@@ -9,11 +9,11 @@
 //! 1. Pull all `Function` / `Method` nodes (optionally path-filtered).
 //! 2. Group by file. Open each file once, parse with tree-sitter,
 //!    locate every target node via its `(start_line, end_line)`, and
-//!    compute a [`Fingerprint`](tracedecay_runtime_core::redundancy::Fingerprint). Fingerprints
+//!    compute a [`Fingerprint`](tracedecay_code_extraction::redundancy::Fingerprint). Fingerprints
 //!    remain request-owned; the code-index authority owns durable graph state.
 //! 3. Bucket the resulting fingerprints by `body_tokens` (±25 % window).
 //!    Within each bucket, score every pair via
-//!    [`redundancy_match_score`](tracedecay_runtime_core::redundancy::redundancy_match_score),
+//!    [`redundancy_match_score`](tracedecay_code_extraction::redundancy::redundancy_match_score),
 //!    which blends the composite similarity with the body-vector cosine,
 //!    relabels cosine-rescued `naming` pairs as `body_vector`, and downranks
 //!    generic helper names.
@@ -27,13 +27,13 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_domain::SourceSpan;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
-use tracedecay_runtime_core::redundancy::{
+use tracedecay_code_extraction::redundancy::{
     Fingerprint, RedundancyMatchScore, body_token_window, compute_fingerprint, parse_file,
     redundancy_match_score, round4,
 };
+use tracedecay_domain::SourceSpan;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_usecases::semantic_runtime::{
     SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,
 };
@@ -1186,8 +1186,8 @@ mod tests {
         find_redundant_pairs, is_generated_path, nodes_overlap, redundancy_output, semantic_cosine,
         semantic_pairs,
     };
+    use tracedecay_code_extraction::redundancy::{Fingerprint, RedundancyMatchScore};
     use tracedecay_domain::SourceSpan;
-    use tracedecay_runtime_core::redundancy::{Fingerprint, RedundancyMatchScore};
     use tracedecay_usecases::semantic_runtime::{
         SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
     };

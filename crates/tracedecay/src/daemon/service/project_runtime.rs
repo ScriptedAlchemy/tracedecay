@@ -156,7 +156,7 @@ pub(crate) struct ProjectRuntime {
     test_marker: Option<Arc<dyn Any + Send + Sync>>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
     semantic_activation_reconciler: Option<
-        Arc<crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1>,
+        Arc<tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1>,
     >,
     observability: Option<RegisteredObservabilityProducerV1>,
     reservations: Vec<TypeId>,
@@ -265,7 +265,7 @@ project_runtime_components!(
     RegisteredRetainedRuntime => retained,
     DaemonLspInvocationOwner => lsp_owner,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
-    Arc<crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1> => semantic_activation_reconciler,
+    Arc<tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1> => semantic_activation_reconciler,
     RegisteredObservabilityProducerV1 => observability,
 );
 

@@ -18,13 +18,14 @@ use crate::mcp::tool_analytics::{
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_host_admission::TerminalReason;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionStatus, is_wire_oversized_io_error,
+};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
-};
-use tracedecay_usecases::host_admission::{
-    HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
 };
 use tracedecay_usecases::request_identity::McpConnectionIdentityAuthority;
 
@@ -275,7 +276,7 @@ pub struct McpServer {
     registered_user_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     /// Daemon-retained admission queue for non-replayable project host events.
     /// Direct servers do not create an independent spool authority.
-    host_admission_broker: Option<tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
+    host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
     project_session_refresh_wake:
         Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
     user_session_refresh_wake:
@@ -302,17 +303,19 @@ pub struct McpServer {
     /// Registry-read service handed to MCP handlers so they read registered
     /// projects through a port instead of holding [`Self::registry_db`].
     project_registry_reads: Option<Arc<dyn ProjectRegistryReadPort>>,
-    automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    automation_scheduler_reconciler:
+        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
-    dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     remote_operational_status:
         Option<crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1>,
-    dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
-        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
-    dashboard_explorer_semantic_reader: Option<crate::dashboard::ExplorerSemanticReader>,
-    dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
+        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+    dashboard_explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
+    dashboard_feedback_status_reader:
+        Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
     /// scheduler queue. `None` for direct servers with no scheduler registry.
@@ -333,7 +336,7 @@ pub struct McpServer {
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
     generation_census_reader:
-        tokio::sync::OnceCell<crate::runtime_telemetry::GenerationCensusReader>,
+        tokio::sync::OnceCell<tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -434,7 +437,8 @@ pub struct McpServer {
     /// never masquerades as a real session.
     connection_identity: McpConnectionIdentityAuthority,
     /// One lazy authenticated application client retained for this server.
-    application_surface_client: tokio::sync::OnceCell<tracedecay_daemon_protocol::DaemonInvocationClient>,
+    application_surface_client:
+        tokio::sync::OnceCell<tracedecay_daemon_protocol::DaemonInvocationClient>,
     /// Daemon-local executor installed by production project composition.
     /// External/direct servers fall back to the authenticated socket client.
     application_invocation_executor:
@@ -541,7 +545,7 @@ impl McpServer {
         use_default_profile_root: bool,
     ) -> Arc<Self> {
         let profile_root = use_default_profile_root
-            .then(crate::storage::default_profile_root)
+            .then(tracedecay_runtime_core::storage::default_profile_root)
             .and_then(std::result::Result::ok);
         let context =
             Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
@@ -593,9 +597,7 @@ impl McpServer {
         {
             let database_path = session_db.db_path().to_path_buf();
             let admission_runtime = tokio::task::spawn_blocking(move || {
-                tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(
-                    &database_path,
-                )
+                tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
             })
             .await
             .map_err(|error| {
@@ -605,7 +607,7 @@ impl McpServer {
             })?;
             let (admission_runtime, _) = admission_runtime?;
             context.host_admission_broker = Some(Arc::new(
-                tracedecay_usecases::host_admission::HostAdmissionBroker::new(admission_runtime),
+                tracedecay_host_admission::HostAdmissionBroker::new(admission_runtime),
             ));
         }
         Self::new_with_registered_test_context(context, retained_servers).await
@@ -1130,10 +1132,10 @@ impl McpServer {
 
     pub(crate) async fn reconcile_automation_scheduler(
         &self,
-    ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
+    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
         match &self.automation_scheduler_reconciler {
             Some(reconcile) => reconcile().await,
-            None => crate::dashboard::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
+            None => tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
         }
     }
 

@@ -447,7 +447,7 @@ impl GraphDbRetirementReservation {
                 Vec::new(),
             ));
         }
-        if let Err(error) = check_request(cancellation.as_ref(), deadline) {
+        if let Err(error) = check_request(cancellation.as_ref(), deadline, "registry.retirement") {
             return Err(self.restore_for_retry(error));
         }
         // Establish every exact target's close transition before the first
@@ -650,7 +650,11 @@ impl GraphDbRegistry {
         &self,
         registration: GraphDbRegistration,
     ) -> Result<GraphDbLeaseV1, GraphDbError> {
-        check_request(registration.cancellation.as_ref(), registration.deadline)?;
+        check_request(
+            registration.cancellation.as_ref(),
+            registration.deadline,
+            "registry.resolve",
+        )?;
         validate_registration(&registration)?;
         let path = canonical_graph_database_file(registration.canonical_path())?;
         let expected_format = GraphFormatVersion::current();
@@ -730,7 +734,11 @@ impl GraphDbRegistry {
                         ),
                         (&binding, &verified_locator, &path, expected_format),
                     )?;
-                    check_request(registration.cancellation.as_ref(), registration.deadline)?;
+                    check_request(
+                        registration.cancellation.as_ref(),
+                        registration.deadline,
+                        "registry.resolve.wait_opening",
+                    )?;
                     let (next, _) = self
                         .inner
                         .changed
@@ -762,7 +770,11 @@ impl GraphDbRegistry {
                         ),
                         (&binding, &verified_locator, &path, expected_format),
                     )?;
-                    check_request(registration.cancellation.as_ref(), registration.deadline)?;
+                    check_request(
+                        registration.cancellation.as_ref(),
+                        registration.deadline,
+                        "registry.resolve.wait_closing",
+                    )?;
                     let (next, _) = self
                         .inner
                         .changed
@@ -871,7 +883,11 @@ impl GraphDbRegistry {
             operation,
             authority_attachment,
         } = registration;
-        check_request(operation.cancellation.as_ref(), operation.deadline)?;
+        check_request(
+            operation.cancellation.as_ref(),
+            operation.deadline,
+            "registry.attach",
+        )?;
         validate_registration(&operation)?;
         require_owner_attachment(&operation, authority_attachment.as_ref())?;
         let path = canonical_graph_database_file(operation.canonical_path())?;
@@ -905,7 +921,11 @@ impl GraphDbRegistry {
                             ),
                             (&binding, &verified_locator, &path, expected_format),
                         )?;
-                        check_request(operation.cancellation.as_ref(), operation.deadline)?;
+                        check_request(
+                            operation.cancellation.as_ref(),
+                            operation.deadline,
+                            "registry.attach.wait_closing",
+                        )?;
                         let (next, _) = self
                             .inner
                             .changed
@@ -1191,6 +1211,7 @@ impl GraphDbRegistry {
         check_request(
             registration.operation.cancellation.as_ref(),
             registration.operation.deadline,
+            "registry.reopen",
         )?;
         validate_registration(&registration.operation)?;
         let path = canonical_graph_database_file(registration.operation.canonical_path())?;
@@ -1204,6 +1225,7 @@ impl GraphDbRegistry {
             if let Err(error) = check_request(
                 registration.operation.cancellation.as_ref(),
                 registration.operation.deadline,
+                "registry.reopen.evict",
             ) {
                 self.restore_ready(*reservation)?;
                 return Err(error);
@@ -1231,7 +1253,11 @@ impl GraphDbRegistry {
 
     #[hotpath::measure(label = "graph_db.registry.close", impl_type = "GraphDbRegistry")]
     pub fn close(&self, registration: &GraphDbRegistration) -> Result<bool, GraphDbError> {
-        check_request(registration.cancellation.as_ref(), registration.deadline)?;
+        check_request(
+            registration.cancellation.as_ref(),
+            registration.deadline,
+            "registry.close",
+        )?;
         validate_registration(registration)?;
         let path = canonical_graph_database_file(registration.canonical_path())?;
         let reservation = match self.reserve_close(
@@ -1243,8 +1269,11 @@ impl GraphDbRegistry {
             CloseReservation::Absent => return Ok(false),
             CloseReservation::Closing(reservation) => reservation,
         };
-        if let Err(error) = check_request(registration.cancellation.as_ref(), registration.deadline)
-        {
+        if let Err(error) = check_request(
+            registration.cancellation.as_ref(),
+            registration.deadline,
+            "registry.close.reserved",
+        ) {
             self.restore_ready(*reservation)?;
             return Err(error);
         }
@@ -1303,7 +1332,7 @@ impl GraphDbRegistry {
         cancellation: Arc<dyn GraphCancellation>,
         deadline: Instant,
     ) -> Result<Vec<StoreRuntimeBindingV1>, GraphDbError> {
-        check_request(cancellation.as_ref(), deadline)?;
+        check_request(cancellation.as_ref(), deadline, "registry.evict_idle")?;
         let now = Instant::now();
         let evictions = {
             let mut state = self.state_lock()?;

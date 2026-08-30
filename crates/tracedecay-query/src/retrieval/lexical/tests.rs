@@ -14,7 +14,7 @@ use tracedecay_domain::{
     PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalError, RetrievalRequest,
     RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch, RetrieverKind, RetrieverOutcome,
     SanitizerRevision, SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros,
-    VectorWatermark,
+    VectorWatermark, split_subtokens, technical_tokens,
 };
 
 use super::{
@@ -50,11 +50,61 @@ fn shared_query_parser_retains_phrase_and_identifier_subtokens() {
         parts.phrases,
         ["who calls VectorWatermark::merge_max".to_owned()]
     );
-    assert!(parts.whole_terms.contains(&"VectorWatermark".to_owned()));
+    // The qualified name stays one whole term, exactly as the code index
+    // extracts it; its components remain reachable as subtokens.
+    assert!(
+        parts
+            .whole_terms
+            .contains(&"VectorWatermark::merge_max".to_owned())
+    );
     assert!(parts.subtokens.contains(&"vector".to_owned()));
     assert!(parts.subtokens.contains(&"watermark".to_owned()));
     assert!(parts.subtokens.contains(&"merge".to_owned()));
     assert!(parts.subtokens.contains(&"max".to_owned()));
+}
+
+/// The query tokenizer and the extraction tokenizer are one grammar: every
+/// separator-bearing term the indexer keeps whole is queried whole, and the
+/// query-side subtokens equal the extraction subtokens.
+#[test]
+fn query_tokenization_matches_index_tokenization_for_separator_terms() {
+    let text = "find foo-bar a::b p/q.rs --flag E0308 TS1234 ERR_X";
+    let parts = lexical_query_parts(text).expect("lexical query parts");
+
+    let index_tokens: Vec<String> = technical_tokens(text)
+        .map(|(_, token)| token.to_owned())
+        .collect();
+    let mut expected_whole: Vec<String> = index_tokens.clone();
+    expected_whole.sort();
+    expected_whole.dedup();
+    assert_eq!(parts.whole_terms, expected_whole);
+    for term in [
+        "foo-bar", "a::b", "p/q.rs", "--flag", "E0308", "TS1234", "ERR_X",
+    ] {
+        assert!(
+            parts.whole_terms.contains(&term.to_owned()),
+            "{term} must stay one whole query term"
+        );
+    }
+
+    let mut expected_subtokens: Vec<String> = index_tokens
+        .iter()
+        .flat_map(|token| {
+            let lowercase = token.to_ascii_lowercase();
+            split_subtokens(token)
+                .into_iter()
+                .filter(move |part| part != &lowercase)
+        })
+        .collect();
+    expected_subtokens.sort();
+    expected_subtokens.dedup();
+    assert_eq!(parts.subtokens, expected_subtokens);
+    for subtoken in ["foo", "bar", "q", "rs", "flag", "0308", "1234", "x"] {
+        assert!(
+            parts.subtokens.contains(&subtoken.to_owned()),
+            "{subtoken} must be reachable as a subtoken"
+        );
+    }
 }
 
 fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
@@ -123,7 +173,7 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         field_filters: Vec::new(),
         fuzzy_budget: 2,
         lexical_profile_revision: id("lexical-profile.v1"),
-        score_domain: id("score.lexical.v1"),
+        score_domain: id(crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1),
         budget: budget(max_candidates),
     }
 }

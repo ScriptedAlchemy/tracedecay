@@ -12,8 +12,8 @@ use tracedecay_application::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
-use tracedecay_daemon_protocol::{DaemonInvocationExecutor, invocation_now_micros};
 use crate::mcp::tools::ToolResult;
+use tracedecay_daemon_protocol::{DaemonInvocationExecutor, invocation_now_micros};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
@@ -228,8 +228,10 @@ mod tests {
             _subject_digest: tracedecay_domain::ManifestDigest,
             _observed_at: UtcMicros,
             _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>>
-        {
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+            '_,
+            tracedecay_runtime_core::errors::Result<()>,
+        > {
             Box::pin(async { Ok(()) })
         }
     }

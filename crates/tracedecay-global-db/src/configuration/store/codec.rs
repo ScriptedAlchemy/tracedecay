@@ -133,8 +133,8 @@ pub(super) fn invalid_store_data(message: impl Into<String>) -> ConfigurationSto
     ConfigurationStoreError::InvalidData(message.into())
 }
 
-pub(super) fn unavailable_store<E>(_error: E) -> ConfigurationStoreError {
-    ConfigurationStoreError::Unavailable
+pub(super) fn unavailable_store(error: impl std::fmt::Display) -> ConfigurationStoreError {
+    ConfigurationStoreError::unavailable(error)
 }
 
 pub(super) fn decode_id<T>(value: String, field: &'static str) -> ConfigurationStoreResult<T>

@@ -23,10 +23,11 @@ use tracedecay_domain::ObservationScopeV1;
 use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_host_admission::HostAdmissionFacade;
 use tracedecay_runtime_core::errors::Result;
+use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
-use tracedecay_usecases::host_admission::{HostAdmissionFacade, HostAdmissionOutcome};
 use tracedecay_usecases::observation::ObservationCancellation;
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityResponse,
@@ -96,7 +97,10 @@ impl<'a> TranscriptCaptureContext<'a> {
 
 /// Registered project roots as seen by the daemon session registry.
 async fn registered_project_roots(global_db: &RegisteredGlobalDb) -> Result<Vec<PathBuf>> {
-    let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
+    let registry_authority =
+        tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(
+            global_db,
+        );
     tracedecay_sessions::runtime::registered_project_roots_from(&registry_authority)
         .await
         .ok_or_else(|| config_error("daemon project registry is unavailable"))
@@ -338,7 +342,8 @@ async fn capture_hermes_profile(
         ctx.max_new_bytes,
         ctx.cancellation,
     )
-    .await;
+    .await
+    .ok_or_else(|| config_error("Hermes transcript source is unavailable"))?;
     Ok(TranscriptCaptureOutcome {
         messages_upserted: outcome.stats.messages_upserted,
         source_deferred: outcome.deferred_by_byte_cap,
@@ -389,7 +394,8 @@ async fn capture_hermes_project(
         ctx.max_new_bytes,
         ctx.cancellation,
     )
-    .await;
+    .await
+    .ok_or_else(|| config_error("Hermes transcript source is unavailable"))?;
     Ok(TranscriptCaptureOutcome {
         messages_upserted: outcome.stats.messages_upserted,
         source_deferred: outcome.deferred_by_byte_cap,

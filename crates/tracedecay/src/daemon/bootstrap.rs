@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 
+#[cfg(unix)]
+use tracedecay_code_index_runtime::{GitWatchMaintenanceWakeV1, git_watch};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::*;
@@ -657,7 +659,10 @@ async fn run_foreground_unix(
     // every watcher setting from the pinned configuration already held by
     // their retained server; bootstrap never supplies activation authority.
     let git_watcher = git_watch::GitWatcher::new_with_canonical_scheduler(
-        maintenance.clone(),
+        GitWatchMaintenanceWakeV1::new({
+            let maintenance = maintenance.clone();
+            move || maintenance.wake()
+        }),
         engine.invocation.code_index_schedulers.clone(),
     );
     if matches!(

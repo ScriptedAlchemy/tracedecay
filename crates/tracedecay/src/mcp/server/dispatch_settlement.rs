@@ -547,7 +547,8 @@ impl DispatchControl {
             Err(error) => return RetainedDispatchOutcome::failed(error),
         };
         let deadline = tokio::time::sleep_until(self.deadline_at);
-        let cancellation = tracedecay_daemon_protocol::wait_for_cancellation(self.cancellation.clone());
+        let cancellation =
+            tracedecay_daemon_protocol::wait_for_cancellation(self.cancellation.clone());
         tokio::pin!(deadline);
         tokio::pin!(cancellation);
 

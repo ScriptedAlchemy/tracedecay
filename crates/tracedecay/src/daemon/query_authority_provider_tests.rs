@@ -621,7 +621,7 @@ async fn retiring_project_query_authority_preserves_same_project_in_another_prof
         }
     ));
     let surviving_provider = provider.for_profile(surviving_profile.clone());
-    crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(
+    tracedecay_code_index_runtime::code_index_scheduler::query_runtime::prepare_query_authority(
         &scope,
         &id("privacy.query-profile-retirement"),
         &surviving_provider,
@@ -640,7 +640,7 @@ async fn retiring_project_query_authority_preserves_same_project_in_another_prof
         provider.status_for(&surviving_profile, &scope),
         QueryAuthorityProviderStatusV1::Available { .. }
     ));
-    crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(
+    tracedecay_code_index_runtime::code_index_scheduler::query_runtime::prepare_query_authority(
         &scope,
         &id("privacy.query-profile-retirement"),
         &surviving_provider,

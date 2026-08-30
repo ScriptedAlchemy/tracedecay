@@ -7,9 +7,7 @@ use super::{
     HydrationError, HydrationResolution, PayloadDescriptor, PayloadSource,
     TemporalExecutionSnapshot, TemporalSqlRead, nonnegative_usize, resolve_current,
 };
-use crate::operations::{
-    CanonicalPublicationManifest, PreparedPayload, load_and_verify_receipt,
-};
+use crate::operations::{CanonicalPublicationManifest, PreparedPayload, load_and_verify_receipt};
 
 pub(super) async fn resolve_external_manifest(
     conn: &TemporalSqlRead<'_>,

@@ -15,14 +15,6 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
-pub use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-pub use tracedecay_daemon_protocol::{
-    ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-    ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
-    ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest, ContextScoutSurfaceRequest,
-    GitReadSurfaceRequest,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -32,6 +24,7 @@ use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationOperation, HttpApplicationRequest,
     WorkOperation, WorkflowOperation, application_problem_response, sse_response,
 };
+pub use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_application::git::{
     GitHubStackSignalExpandSurfaceRequest, NativeWorktreeSurfaceRequest,
 };
@@ -44,11 +37,18 @@ use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
     ApplicationResult, CancellationContext, CancellationSignal, CancellationStage,
-    ConfigurationWireRequestV1, Deadline, HealthReadRequest, LegalAction,
+    ConfigurationWireRequestV1, Deadline, HealthReadRequest, LegalAction, ObservatoryReadRequestV1,
+    OperationTermination, PageRequest, ProblemOwningLayer, RequestContext, RequestId,
+    ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic, SessionLookupRequest,
+    SourceLinesRequest, StreamEvent, StreamEventKind,
     configuration_wire_request_from_invocation_payload,
-    ObservatoryReadRequestV1, OperationTermination, PageRequest, ProblemOwningLayer,
-    RequestContext, RequestId, ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic,
-    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
+};
+pub use tracedecay_daemon_protocol::{
+    ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+    ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
+    ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
+    ContextScoutSurfaceRequest, GitReadSurfaceRequest,
 };
 use tracedecay_domain::{
     ManifestDigest, ProjectId, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
@@ -63,18 +63,18 @@ use crate::catalog_composition::{
     ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
     compose_application_catalog_with,
 };
-use tracedecay_daemon_protocol::{
-    BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationError,
-    DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
-    InvocationControls, ResolvedBinding, ScopeSelector, resolve_dispatch,
-};
 pub use tracedecay_application::{
-    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCallersSurfaceRequest,
-    CodeCalleesSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
+    CodeCallersSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
     CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
     CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
     CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
     NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
+};
+use tracedecay_daemon_protocol::{
+    BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationError,
+    DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
+    InvocationControls, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
 pub use tracedecay_mcp::{RequestedOutputFormat, requested_output_format};
 use tracedecay_usecases::feedback::observations::{
@@ -234,7 +234,6 @@ pub struct FeedbackImpactSurfaceRequest {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TestResultsSurfaceRequest {}
-
 
 pub(crate) fn primitive_code_into_primitive(
     request: PrimitiveCodeSurfaceRequest,
@@ -780,7 +779,9 @@ where
     let owning_layer = match &outcome {
         Ok(
             tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { .. }
-            | tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplicationProblem { .. },
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplicationProblem {
+                ..
+            },
         ) => ProblemOwningLayer::Application,
         _ => ProblemOwningLayer::Runtime,
     };
@@ -3100,14 +3101,15 @@ pub async fn execute_application_surface(
             }
             tracedecay_daemon_protocol::DaemonInvocationOutcome::Feedback { scope, result }
             | tracedecay_daemon_protocol::DaemonInvocationOutcome::Primitive { scope, result }
-            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ObservatoryRead { scope, result } => {
-                Ok(ApplicationEnvelope::evidence(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    scope,
-                    result.into_application(),
-                ))
-            }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ObservatoryRead {
+                scope,
+                result,
+            } => Ok(ApplicationEnvelope::evidence(
+                result_contract.clone(),
+                request_id.clone(),
+                scope,
+                result.into_application(),
+            )),
             tracedecay_daemon_protocol::DaemonInvocationOutcome::CallableCode { scope, result } => {
                 Ok(ApplicationEnvelope::evidence(
                     result_contract.clone(),
@@ -3116,7 +3118,10 @@ pub async fn execute_application_surface(
                     result.into_application(),
                 ))
             }
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::Configuration { scope, outcome } => {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Configuration {
+                scope,
+                outcome,
+            } => {
                 if validate_configuration_outcome(
                     operation,
                     &outcome,
@@ -3150,14 +3155,15 @@ pub async fn execute_application_surface(
                 scope,
                 outcome,
             }
-            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
-                Ok(ApplicationEnvelope {
-                    contract: result_contract.clone(),
-                    request_id: request_id.clone(),
-                    scope,
-                    outcome,
-                })
-            }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ContextScout {
+                scope,
+                outcome,
+            } => Ok(ApplicationEnvelope {
+                contract: result_contract.clone(),
+                request_id: request_id.clone(),
+                scope,
+                outcome,
+            }),
             tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication {
                 scope,
                 outcome,

@@ -12,7 +12,7 @@ static BRANCH_REF_READ_ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
 enum BranchRouteReadErrorV1 {
     Capacity,
     Task,
-    Ref(crate::branch::LocalBranchSnapshotErrorV1),
+    Ref(crate::branch_snapshots::LocalBranchSnapshotErrorV1),
 }
 
 async fn run_branch_ref_read<T, F>(
@@ -27,15 +27,16 @@ where
     T: Send + 'static,
     F: FnOnce(
             &Path,
-            &crate::branch::LocalBranchReadControlV1,
-        ) -> std::result::Result<T, crate::branch::LocalBranchSnapshotErrorV1>
+            &crate::branch_snapshots::LocalBranchReadControlV1,
+        )
+            -> std::result::Result<T, crate::branch_snapshots::LocalBranchSnapshotErrorV1>
         + Send
         + 'static,
 {
     let permit = Arc::clone(&BRANCH_REF_READ_ADMISSION)
         .try_acquire_owned()
         .map_err(|_| BranchRouteReadErrorV1::Capacity)?;
-    let terminal_control = crate::branch::LocalBranchReadControlV1 {
+    let terminal_control = crate::branch_snapshots::LocalBranchReadControlV1 {
         max_refs,
         after: after.clone(),
         deadline: deadline.clone(),
@@ -45,7 +46,7 @@ where
         let _permit = permit;
         operation(
             &project_root,
-            &crate::branch::LocalBranchReadControlV1 {
+            &crate::branch_snapshots::LocalBranchReadControlV1 {
                 max_refs,
                 after,
                 deadline,
@@ -54,7 +55,7 @@ where
         )
         .map_err(BranchRouteReadErrorV1::Ref)
     });
-    match crate::daemon::code_index_task_support::settle_owned_blocking_task(
+    match tracedecay_code_index_runtime::code_index_task_support::settle_owned_blocking_task(
         task,
         std::time::Duration::from_millis(10),
         || {
@@ -72,7 +73,7 @@ where
 }
 
 fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
-    use crate::branch::LocalBranchSnapshotErrorV1;
+    use crate::branch_snapshots::LocalBranchSnapshotErrorV1;
 
     match error {
         BranchRouteReadErrorV1::Capacity => ("branch_read_capacity_unavailable", true),
@@ -132,7 +133,7 @@ pub(crate) async fn handle_branch_list(
             after,
             deadline,
             cancellation,
-            crate::branch::local_branch_snapshots_controlled,
+            crate::branch_snapshots::local_branch_snapshots_controlled,
         ),
         label = "mcp.git.branch_list.ref_read"
     )
@@ -301,7 +302,11 @@ pub(crate) async fn handle_branch_search(
             deadline.clone(),
             cancellation.clone(),
             move |root, control| {
-                crate::branch::local_branch_revision_controlled(root, &revision_branch, control)
+                crate::branch_snapshots::local_branch_revision_controlled(
+                    root,
+                    &revision_branch,
+                    control,
+                )
             },
         ),
         label = "mcp.git.branch_search.ref_read"
@@ -560,12 +565,12 @@ pub(crate) async fn handle_branch_diff(
             deadline.clone(),
             cancellation.clone(),
             move |root, control| {
-                let base = crate::branch::local_branch_revision_controlled(
+                let base = crate::branch_snapshots::local_branch_revision_controlled(
                     root,
                     &resolution_base,
                     control,
                 )?;
-                let head = crate::branch::local_branch_revision_controlled(
+                let head = crate::branch_snapshots::local_branch_revision_controlled(
                     root,
                     &resolution_head,
                     control,
@@ -792,7 +797,7 @@ mod tests {
         assert!(matches!(
             read.await.expect("branch read task"),
             Err(BranchRouteReadErrorV1::Ref(
-                crate::branch::LocalBranchSnapshotErrorV1::Cancelled
+                crate::branch_snapshots::LocalBranchSnapshotErrorV1::Cancelled
             ))
         ));
     }

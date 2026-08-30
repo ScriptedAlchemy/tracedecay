@@ -11,9 +11,9 @@ use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
-use tracedecay_sessions::runtime::SessionRecord;
+use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_sessions::runtime::SessionRecord;
 
 fn assert_sealed_graph_statistics_are_unavailable(text: &str) {
     let status: serde_json::Value = serde_json::from_str(text).unwrap();

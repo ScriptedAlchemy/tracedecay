@@ -17,6 +17,7 @@ use tracedecay_domain::{
 };
 
 use crate::support::{RUST_SOURCE, digest, id, registry, rust_descriptor, validated_rust_file};
+use tracedecay_code_index::chunks::CodeSearchEligibilityV1;
 
 #[test]
 fn extraction_to_chunks_is_deterministic_and_covers_all_grains() {
@@ -88,7 +89,7 @@ fn partial_extraction_never_chunks_unsupported_tail_bytes() {
 
     assert!(matches!(
         result.document.eligibility,
-        tracedecay_domain::CodeSearchEligibilityV1::Partial { .. }
+        CodeSearchEligibilityV1::Partial { .. }
     ));
     assert!(
         result

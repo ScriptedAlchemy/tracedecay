@@ -4,12 +4,13 @@ use std::fmt::Debug;
 use tracedecay_code_index::capabilities::expected_seal_digest;
 use tracedecay_code_index::generations::{GenerationPlanner, RebuildTriggerV1};
 use tracedecay_code_index::intake::INTAKE_DIGEST_SEPARATOR;
+use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
 use tracedecay_code_index::languages::StaticLanguageRegistry;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationManifestV1, ContentDigest, FileOccurrenceId, LanguageId,
     ManifestDigest, PrivacyDomainId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
     SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
-    ValidatedCodeSnapshotV1, canonical_sha256,
+    canonical_sha256,
 };
 
 fn id<T>(value: &str) -> T

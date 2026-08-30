@@ -3,9 +3,9 @@ use crate::RequestedOutputFormat;
 use crate::response_handles::{
     ResponseHandleLookup, lock_response_handle_store, retrieve_response_handle,
 };
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 use serde_json::json;
 use std::ffi::OsString;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Restores one environment variable on drop. Callers must already hold
 /// `lock_response_handle_store` (the user-data-dir test-env lock) so the
@@ -256,7 +256,7 @@ fn truncated_json_envelope_reports_store_failure() {
     let blocker = dir.path().join("blocker");
     std::fs::write(&blocker, b"not a directory").unwrap();
     let _profile = EnvRestore::set(
-        crate::config::USER_DATA_DIR_ENV,
+        tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
         blocker.join(".tracedecay"),
     );
     let long = format!(

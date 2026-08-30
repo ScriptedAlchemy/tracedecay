@@ -17,8 +17,9 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 
-use crate::store::{GlobalDbGitCorrelationStore, GlobalDbSessionIngestAuthority};
+use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
 const COALESCED_JOURNAL_RECHECK_INTERVAL: Duration = Duration::from_millis(250);

@@ -14,6 +14,10 @@ use super::project_composition::daemon_transcript_source_home;
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 #[cfg(any(test, feature = "test-transport"))]
 use super::*;
+#[cfg(any(test, feature = "test-transport"))]
+use tracedecay_code_index_runtime::code_index_scheduler;
+#[cfg(all(unix, feature = "test-transport"))]
+use tracedecay_code_index_runtime::git_transactions;
 
 /// Captures the daemon's exact native Git transaction precondition for
 /// transport-parity tests. This is not compiled into production builds.
@@ -532,7 +536,7 @@ impl ProductionProjectCompositionHarnessV1 {
         project_root: impl AsRef<Path>,
         worktree_root: impl AsRef<Path>,
         branch: &str,
-    ) -> Result<crate::branch::BranchAddOutcome> {
+    ) -> Result<tracedecay_runtime_core::branch::BranchAddOutcome> {
         let canonical_project_root =
             std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
                 TraceDecayError::Config {
@@ -612,7 +616,7 @@ impl ProductionProjectCompositionHarnessV1 {
             symbol.simple_name.contains(query) || symbol.qualified_name.contains(query)
         });
         Ok((
-            crate::branch::current_branch(&canonical_worktree_root),
+            tracedecay_runtime_core::branch::current_branch(&canonical_worktree_root),
             source
                 .reference
                 .strip_prefix("refs/heads/")

@@ -93,8 +93,11 @@ fn remove_fixed_profile_path(
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
     let path = profile_root.join(name);
-    tracedecay::storage::reject_symlink_components(&path, "profile database wipe target")
-        .map_err(|error| wipe_io("validate wipe target", &path, &error))?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &path,
+        "profile database wipe target",
+    )
+    .map_err(|error| wipe_io("validate wipe target", &path, &error))?;
     let removed = match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_dir() => {
             // `remove_dir_all` does not follow directory symlinks. The exact
@@ -106,7 +109,7 @@ fn remove_fixed_profile_path(
             true
         }
         Ok(metadata) if metadata.is_file() => {
-            tracedecay::storage::PrivateStoreIo::remove_file_durable(&path)
+            tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&path)
                 .map_err(|error| wipe_io("remove profile database file", &path, &error))?
         }
         Ok(_) => {
@@ -141,7 +144,7 @@ fn verify_wipe_path_absent(path: &Path) -> tracedecay_runtime_core::errors::Resu
 fn remove_local_wipe_directory(path: &Path) -> tracedecay_runtime_core::errors::Result<bool> {
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
-    tracedecay::storage::reject_symlink_components(path, "local wipe target")
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "local wipe target")
         .map_err(|error| wipe_io("validate local wipe target", path, &error))?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => {
@@ -180,9 +183,10 @@ fn wipe_complete_profile_database_state(
         for suffix in ["-wal", "-shm", "-journal", ""] {
             let member = sqlite_family_member(&database, suffix);
             removed += usize::from(
-                tracedecay::storage::PrivateStoreIo::remove_file_durable(&member).map_err(
-                    |error| wipe_io("remove profile SQLite family member", &member, &error),
-                )?,
+                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&member)
+                    .map_err(|error| {
+                        wipe_io("remove profile SQLite family member", &member, &error)
+                    })?,
             );
         }
     }
@@ -296,7 +300,7 @@ fn handle_wipe_inner(
     // Erase the deeply nested wipe future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        let profile_root = tracedecay::storage::default_profile_root()?;
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
         let home_tracedecay = Some(profile_root.clone());
         if all {
             validate_complete_wipe_profile_root(
@@ -462,7 +466,7 @@ fn handle_list_inner(
     // Erase the deeply nested list future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        use tracedecay::display::format_token_count;
+        use tracedecay_runtime_core::text::format_token_count;
 
         let home_tracedecay = tracedecay::config::user_data_dir();
         let project_paths = global::gather_target_projects(all, &home_tracedecay).await?;
@@ -587,7 +591,7 @@ fn handle_list_inner(
             let path_str = format!("{} [{}]", r.path.display(), r.status_label);
             let pad = path_w.saturating_sub(path_str.chars().count());
             let size_str = if r.has_data {
-                tracedecay::display::format_bytes(r.size)
+                tracedecay_runtime_core::text::format_bytes(r.size)
             } else {
                 "—".to_string()
             };
@@ -617,7 +621,7 @@ fn handle_list_inner(
         };
         println!(
             "Total: {} on disk · {} tokens saved{}",
-            tracedecay::display::format_bytes(total_size),
+            tracedecay_runtime_core::text::format_bytes(total_size),
             total_tokens_str,
             total_suffix
         );

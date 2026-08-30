@@ -97,7 +97,7 @@ pub async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    use tracedecay_usecases::host_admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
+    use tracedecay_sessions::admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
 
     let read = read_bounded_mcp_line(reader);
     tokio::pin!(read);
@@ -110,7 +110,7 @@ where
                         Err(TraceDecayError::Config {
                             message: format!(
                                 "daemon {request_label} response exceeded wire message bound ({})",
-                                tracedecay_usecases::host_admission::WIRE_RECORD_TOO_LARGE
+                                tracedecay_sessions::admission::WIRE_RECORD_TOO_LARGE
                             ),
                         })
                     }
@@ -163,7 +163,12 @@ pub fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
 }
 
 pub async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Result<BrokerStream> {
-    connect_with_restart_grace(connection, DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL).await
+    connect_with_restart_grace(
+        connection,
+        DAEMON_RESTART_GRACE,
+        DAEMON_RESTART_POLL_INTERVAL,
+    )
+    .await
 }
 
 #[hotpath::measure(label = "daemon_protocol.client.connect", future = true)]

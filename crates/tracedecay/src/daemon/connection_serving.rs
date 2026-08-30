@@ -1379,7 +1379,9 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         None
     };
     if let Some(cancellation) =
-        tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(&first_request_line)
+        tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(
+            &first_request_line,
+        )
     {
         hotpath::measure_block!("daemon.engine.transport.cancel", {
             crate::daemon::request_cancellation::cancel(cancellation.target_request_id());

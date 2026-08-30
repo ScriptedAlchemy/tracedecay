@@ -35,7 +35,7 @@ use tracedecay_usecases::graph::{
 };
 
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_usecases::edit::{
+use tracedecay_source_edit::{
     SourceEditApplicationResult, SourceEditOutcome, execute_source_edit,
     preview_source_edit_expected_state,
 };
@@ -270,7 +270,11 @@ pub(super) async fn fixture_graph(
             .expect("fixture layout has a project identity"),
     )
     .unwrap();
-    crate::storage::pin_fixture_repository_identity(project_root, project_id.as_str()).unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        project_root,
+        project_id.as_str(),
+    )
+    .unwrap();
     let configuration_database = runtime_registry
         .project_sessions(
             project_id,

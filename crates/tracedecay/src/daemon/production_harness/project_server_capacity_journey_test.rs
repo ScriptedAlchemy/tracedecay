@@ -2,8 +2,8 @@ use tempfile::TempDir;
 
 use super::journey_test_support::git;
 use super::*;
-use crate::daemon::code_index_scheduler::LatestCompleteCodeIndexV1;
 use crate::daemon::project_composition::ProductionProjectComposition;
+use tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1;
 
 async fn open_project_composition(
     harness: &ProductionProjectCompositionHarnessV1,
@@ -91,11 +91,16 @@ async fn seed_project_sessions_pending_convergence(
 ) {
     let identity = crate::daemon::profile_identity::load_or_create(profile_root)
         .expect("durable harness profile identity");
-    crate::storage::pin_fixture_repository_identity(project_root, project_id.as_str())
-        .expect("target project enrollment");
-    let sessions_path =
-        crate::storage::profile_sharded_data_root(profile_root, project_id.as_str())
-            .join(crate::storage::SESSIONS_DB_FILENAME);
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        project_root,
+        project_id.as_str(),
+    )
+    .expect("target project enrollment");
+    let sessions_path = tracedecay_runtime_core::storage::profile_sharded_data_root(
+        profile_root,
+        project_id.as_str(),
+    )
+    .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
     std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
         .expect("session database directory");
     crate::daemon::store_runtime::register_registered_schema_installer();

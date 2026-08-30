@@ -12,7 +12,7 @@ pub(super) async fn handle_automation_skills_command(
         disable_managed_skill, list_managed_skills, load_managed_skill, restore_managed_skill,
     };
 
-    let profile_root = tracedecay::storage::default_profile_root()?;
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     let skill = match action {
         AutomationSkillsAction::List { json } => {
             let skills = list_managed_skills(&profile_root).await?;

@@ -63,8 +63,13 @@ pub(super) fn open_registered_graph(
     check_request(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
+        "registry.open.lifecycle",
     )?;
-    check_request(registration.cancellation.as_ref(), registration.deadline)?;
+    check_request(
+        registration.cancellation.as_ref(),
+        registration.deadline,
+        "registry.open",
+    )?;
     let persistent_store_state = inspect_graph_database_file(path)?;
     let cancellation: Arc<dyn GraphCancellation> = match persistent_store_state {
         PersistentGraphStoreState::Prospective => Arc::new(ProspectiveGraphFormatCancellation),
@@ -87,8 +92,15 @@ pub(super) fn open_registered_graph(
         && let Err(error) = check_request(
             registration.lifecycle_cancellation.as_ref(),
             registration.deadline,
+            "registry.open.format_init.lifecycle",
         )
-        .and_then(|()| check_request(registration.cancellation.as_ref(), registration.deadline))
+        .and_then(|()| {
+            check_request(
+                registration.cancellation.as_ref(),
+                registration.deadline,
+                "registry.open.format_init",
+            )
+        })
     {
         return match owner.close() {
             Ok(()) => Err(error),
@@ -110,8 +122,17 @@ fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbEr
     }
 }
 
-pub(super) fn check_deadline(deadline: Instant) -> Result<(), GraphDbError> {
+/// `op` names the registered operation whose deadline is being enforced.
+/// `DeadlineExceeded` is a unit error, so without this label a failure deep
+/// in a projection or publication cannot be attributed to the registration
+/// that armed the clock.
+pub(super) fn check_deadline(deadline: Instant, op: &'static str) -> Result<(), GraphDbError> {
     if Instant::now() >= deadline {
+        tracing::warn!(
+            event = "graph_db_deadline_exceeded",
+            op,
+            "graph operation exceeded its registered deadline"
+        );
         Err(GraphDbError::DeadlineExceeded)
     } else {
         Ok(())
@@ -121,16 +142,22 @@ pub(super) fn check_deadline(deadline: Instant) -> Result<(), GraphDbError> {
 pub(super) fn check_request(
     cancellation: &dyn GraphCancellation,
     deadline: Instant,
+    op: &'static str,
 ) -> Result<(), GraphDbError> {
     check_cancelled(cancellation)?;
-    check_deadline(deadline)
+    check_deadline(deadline, op)
 }
 
 pub(super) fn check_registration_request(
     registration: &GraphDbRegistration,
+    op: &'static str,
 ) -> Result<(), GraphDbError> {
     check_cancelled(registration.lifecycle_cancellation.as_ref())?;
-    check_request(registration.cancellation.as_ref(), registration.deadline)
+    check_request(
+        registration.cancellation.as_ref(),
+        registration.deadline,
+        op,
+    )
 }
 
 pub(super) fn retains_fault(error: &GraphDbError) -> bool {

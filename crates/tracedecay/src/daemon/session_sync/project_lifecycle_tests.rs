@@ -46,10 +46,10 @@ async fn register(
     .await
     .unwrap();
     let project_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .unwrap();
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Profile)
         .unwrap();
     let brain_id = project_sessions.binding().shard_id.brain_id.clone();
     let profile_id = project_sessions.binding().shard_id.profile_id.clone();
@@ -125,7 +125,7 @@ async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
     let (runtime, project_sessions, profile_id) =
         register(&service, &root, project_id.clone()).await;
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Profile)
         .unwrap();
     let session_registry = runtime.session_registry_for_test();
     let cancellation = CancellationSignal::active("session-sync.shutdown-task-owner").unwrap();
@@ -346,7 +346,7 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
     .await
     .unwrap();
     let replacement_a = replacement_runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .unwrap();
     let recovery_request = SessionSyncRequestV1::new(
         RequestId::new("session-sync.rebind-recovery").unwrap(),
@@ -440,10 +440,10 @@ async fn registration_recovery_fences_concurrent_execute() {
     .await
     .unwrap();
     let project_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .unwrap();
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Profile)
         .unwrap();
     let brain_id = project_sessions.binding().shard_id.brain_id.clone();
     let profile_id = project_sessions.binding().shard_id.profile_id.clone();
@@ -530,10 +530,10 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
     .await
     .unwrap();
     let project_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .unwrap();
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Profile)
         .unwrap();
     let brain_id = project_sessions.binding().shard_id.brain_id.clone();
     let profile_id = project_sessions.binding().shard_id.profile_id.clone();
@@ -615,6 +615,98 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
                 .starts_with("session-sync.startup.")
         })
     }));
+    SessionSyncServicePort::shutdown(&service).await;
+}
+
+/// The dogfood defect this recovers from: a profile session store keeps one
+/// `source_cursors` row per observed session source, and a long-lived profile
+/// exceeds what the `SQLite` runtime materializes for one exact-SQL query.
+/// Recovering any live journal refreshes source frontiers during
+/// `register_project`, so an unbounded frontier read degraded every project
+/// full-upgrade (`project_open_phase` = `full_upgrade_degraded`). Registration
+/// must page those reads and succeed on arbitrarily large stores.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_upgrades_a_journal_whose_frontiers_exceed_one_query() {
+    const CURSOR_ROWS: i64 = 10_001;
+    let service = DaemonSessionSyncService::default();
+    let root = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.session-sync.large-frontier").unwrap();
+    let project_root = root.path().join(project_id.as_str());
+    std::fs::create_dir_all(&project_root).unwrap();
+    let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+        root.path(),
+        &project_root,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let project_sessions = runtime
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+        .unwrap();
+    let profile_sessions = runtime
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Profile)
+        .unwrap();
+    let brain_id = project_sessions.binding().shard_id.brain_id.clone();
+    let profile_id = project_sessions.binding().shard_id.profile_id.clone();
+    let scope = SessionSyncScopeV1::new(project_id.clone(), profile_id.clone());
+    profile_sessions
+        .writer_connection()
+        .unwrap()
+        .execute(
+            &format!(
+                "WITH RECURSIVE fixture(value) AS (
+                     SELECT 1 UNION ALL SELECT value + 1 FROM fixture WHERE value < {CURSOR_ROWS}
+                 )
+                 INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+                 SELECT json_object('session_id', printf('session-%07d', value)),
+                        json_object('kind', 'profile'),
+                        json_object('position', value)
+                 FROM fixture"
+            ),
+            tracedecay_runtime_core::db::engine::params![],
+        )
+        .await
+        .unwrap();
+    let live_request = request(project_id.clone(), profile_id.clone());
+    let live_key = super::journal_key(&scope, live_request.idempotency_key());
+    let live = SessionSyncJournalV1::queued(&live_request, UtcMicros(1));
+    assert!(
+        profile_sessions
+            .insert_session_sync_journal(&live_key, &serde_json::to_string(&live).unwrap())
+            .await
+            .unwrap()
+    );
+
+    service
+        .register_project(DaemonSessionSyncConfig {
+            brain_id,
+            profile_id,
+            project_id,
+            profile_root: root.path().to_path_buf(),
+            project_root,
+            transcript_source_home: None,
+            project_sessions,
+            user_sessions: profile_sessions.clone(),
+            registry: profile_sessions.clone(),
+            startup_import: false,
+            project_refresh:
+                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
+            user_refresh:
+                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
+        })
+        .await
+        .expect("recovery over a store larger than one exact-SQL query must not degrade the mount");
+
+    let refreshed = profile_sessions
+        .read_session_sync_journal(&live_key)
+        .await
+        .unwrap()
+        .unwrap();
+    let refreshed: SessionSyncJournalV1 = serde_json::from_str(&refreshed).unwrap();
+    assert!(
+        refreshed.source_frontiers.len() >= usize::try_from(CURSOR_ROWS).unwrap(),
+        "the recovered journal must carry the complete paged frontier scan"
+    );
     SessionSyncServicePort::shutdown(&service).await;
 }
 

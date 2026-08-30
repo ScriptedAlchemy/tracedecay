@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 
 use tracedecay_domain::ProjectId;
-use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
 use super::super::open_runtime_during_remote_restore;
@@ -747,8 +747,11 @@ mod tests {
         .expect("daemon database scope");
         let project_id =
             ProjectId::new("project.recovered-candidate-retry").expect("typed project identity");
-        crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
-            .expect("project enrollment");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
 
         let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
             .await

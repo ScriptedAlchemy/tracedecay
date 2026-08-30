@@ -6,18 +6,18 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::{Arc, OnceLock};
 
-use crate::branch;
 use crate::config::{
     install_usecase_runtime_configuration_authority, materialize_root_runtime_configuration,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::storage::{self, StoreLayout};
-use crate::support::weak_registry::WeakRegistry;
 use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::storage::{self, StoreLayout};
+use tracedecay_runtime_core::weak_registry::WeakRegistry;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;
 use tracedecay_usecases::config::{
@@ -33,8 +33,8 @@ mod branches;
 mod identity;
 mod registry;
 
-pub use tracedecay_daemon_protocol::MovedStoreAdoption;
 pub(crate) use registry::git_remote_url;
+pub use tracedecay_daemon_protocol::MovedStoreAdoption;
 
 #[cfg(not(any(test, feature = "test-transport")))]
 static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
@@ -247,7 +247,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let profile_root = open_options.resolved_profile_root()?;
         if let Some(message) =
-            crate::project_registry::ephemeral_root_rejection(project_root, &profile_root)
+            tracedecay_global_db::ephemeral_root_rejection(project_root, &profile_root)
         {
             return Err(TraceDecayError::Config { message });
         }
@@ -273,7 +273,10 @@ impl TraceDecay {
         // nothing here — its identity is deterministic from the canonical
         // path and durably owned by the profile registry. TraceDecay never
         // creates files inside a project's working tree.
-        crate::storage::write_repository_identity_marker(project_root, project_id.as_str())?;
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project_root,
+            project_id.as_str(),
+        )?;
         let configuration_database = runtime_registry
             .project_sessions(project_id, [project_root.to_path_buf()])
             .await?;
@@ -293,7 +296,7 @@ impl TraceDecay {
         project_root: &Path,
         project_id: &str,
     ) -> Result<(Self, Arc<crate::host_admission::HostAdmissionTestRuntimeV1>)> {
-        let profile_root = crate::storage::default_profile_root()?;
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
         let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
             TraceDecayError::Config {
                 message: format!("invalid test fixture project identity: {error}"),

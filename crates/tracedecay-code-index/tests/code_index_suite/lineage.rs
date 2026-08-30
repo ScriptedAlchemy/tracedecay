@@ -4,9 +4,9 @@ use tracedecay_code_index::lineage::{
     ABSTAIN_CANDIDATE_COUNT_MISMATCH, GenerationSymbolIndexV1, LineageSymbolRecordV1,
     SymbolLineageResolver,
 };
+use tracedecay_code_index::lineage::{LineageConfidenceKindV1, LineageKindV1, LineageMethodV1};
 use tracedecay_domain::{
-    CodeGenerationId, ContentDigest, FileIdentityDigest, LineageConfidenceKindV1, LineageKindV1,
-    LineageMethodV1, SymbolIdentityDigest, SymbolOccurrenceId,
+    CodeGenerationId, ContentDigest, FileIdentityDigest, SymbolIdentityDigest, SymbolOccurrenceId,
 };
 
 fn id<T>(value: &str) -> T

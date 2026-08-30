@@ -5,6 +5,7 @@
 //! Unix broker, the portable broker, and the in-process test harness.
 
 use super::*;
+use tracedecay_code_index_runtime::code_index_scheduler;
 
 mod code_index_activation;
 mod runtime;
@@ -132,7 +133,7 @@ async fn release_one_idle_project_server_before_open(
                 .await?;
             let project_sessions_path = retired_owner
                 .store_root
-                .join(crate::storage::SESSIONS_DB_FILENAME);
+                .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
             retirement_administration
                 .git_index_transaction_services()
                 .retire_project_database(&project_id, &project_sessions_path)
@@ -463,17 +464,19 @@ async fn production_project_server_inner(
         invocation.code_index_schedulers.clone(),
         code_search_project_id.clone(),
         read_admission_provider.clone(),
+        project_open_owners::DaemonCodeIndexScopeResolverV1,
     );
     let code_index_branch_diff_executor = code_index_branch_diff_executor(
         invocation.code_index_schedulers.clone(),
         code_search_project_id.clone(),
         read_admission_provider,
+        project_open_owners::DaemonCodeIndexScopeResolverV1,
     );
     let dashboard_code_index_freshness_reader =
         project_dashboard_freshness_reader(invocation.code_index_schedulers.clone());
     let configuration_client = cg.configuration_runtime().client();
-    let dashboard_explorer_semantic_reader: crate::dashboard::ExplorerSemanticReader = Arc::new(
-        move |project_root: std::path::PathBuf| {
+    let dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader =
+        Arc::new(move |project_root: std::path::PathBuf| {
             let configuration_client = Arc::clone(&configuration_client);
             Box::pin(async move {
                 let activated =
@@ -500,20 +503,21 @@ async fn production_project_server_inner(
                         configuration,
                     ),
                 );
-                crate::dashboard::ExplorerSemanticReadV1 { activated, status }
+                tracedecay_dashboard_api::ExplorerSemanticReadV1 { activated, status }
             })
-        },
-    );
-    let dashboard_feedback_status_reader = crate::dashboard::feedback_api::feedback_status_reader(
-        invocation.feedback_runtime_registrar(),
-    );
-    let application_invocation_executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor> =
-        Arc::new(InProcessDaemonInvocationExecutor::new(
-            invocation.clone(),
-            store_administration.clone(),
-            canonical_project_path.to_path_buf(),
-            code_search_scope.clone(),
-        ));
+        });
+    let dashboard_feedback_status_reader =
+        tracedecay_dashboard_api::feedback_api::feedback_status_reader(
+            invocation.feedback_runtime_registrar(),
+        );
+    let application_invocation_executor: Arc<
+        dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    > = Arc::new(InProcessDaemonInvocationExecutor::new(
+        invocation.clone(),
+        store_administration.clone(),
+        canonical_project_path.to_path_buf(),
+        code_search_scope.clone(),
+    ));
     let transcript_source_home = daemon_transcript_source_home(profile_identity.profile_root());
     let retained_server_resolver = retained_project_server_resolver(store_administration.clone());
     let mut core_context = crate::mcp::server::McpServerConstructionContext::daemon_owned_core(
@@ -682,7 +686,7 @@ async fn production_project_server_inner(
         let semantic_startup_project = canonical_project_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let started = Instant::now();
-            let _ = crate::semantic_code::apply_config_and_queue_startup(
+            let _ = crate::semantic_code::apply_config_selection(
                 semantic_startup_selection.as_deref(),
                 semantic_auto_download_enabled,
             );
@@ -690,7 +694,7 @@ async fn production_project_server_inner(
                 "project_open_phase",
                 &[
                     ("project", semantic_startup_project.display().to_string()),
-                    ("phase", "semantic_startup_configured".to_owned()),
+                    ("phase", "semantic_config_selected".to_owned()),
                     ("elapsed_ms", started.elapsed().as_millis().to_string()),
                 ],
             );
@@ -1291,7 +1295,7 @@ struct ProjectCodeIndexAuthorities {
     graph_projection_read_port: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
     ignored_dependency_admission:
         Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1>,
-    generation_census_reader: crate::runtime_telemetry::GenerationCensusReader,
+    generation_census_reader: tracedecay_usecases::runtime_telemetry::GenerationCensusReader,
     graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort,
     search_authority: tracedecay_query::code_search::CodeIndexSearchAuthorityV1,
     read_admission_provider: query_mcp_admission::QueryMcpReadAdmissionProviderV1,
@@ -1374,8 +1378,8 @@ fn project_code_index_authorities(
 /// Dashboard-facing freshness reader for this route's code-index schedulers.
 fn project_dashboard_freshness_reader(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-) -> crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader {
-    let reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader =
+) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader {
+    let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
         Arc::new(move |project_root| {
             let schedulers = schedulers.clone();
             Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })

@@ -716,7 +716,9 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 }
 
 #[hotpath::measure(future = true, label = "session_temporal.doctor.diagnose")]
-async fn diagnose_snapshot(conn: &impl crate::handle::SessionTemporalQuery) -> SessionTemporalHealthReport {
+async fn diagnose_snapshot(
+    conn: &impl crate::handle::SessionTemporalQuery,
+) -> SessionTemporalHealthReport {
     let inventory = match snapshot_schema_inventory(conn).await {
         Ok(inventory) => inventory,
         Err(error) => return unavailable_report(classify_engine_error(&error)),
@@ -844,10 +846,7 @@ struct SchemaInventory {
     triggers: BTreeMap<String, String>,
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.doctor.query.inventory"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.doctor.query.inventory")]
 async fn snapshot_schema_inventory(
     conn: &impl crate::handle::SessionTemporalQuery,
 ) -> tracedecay_runtime_core::db::engine::Result<SchemaInventory> {
@@ -885,10 +884,7 @@ async fn snapshot_schema_inventory(
     })
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.doctor.query.column_shape"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.doctor.query.column_shape")]
 async fn snapshot_column_shape_drift(
     conn: &impl crate::handle::SessionTemporalQuery,
     inventory: &SchemaInventory,
@@ -921,10 +917,7 @@ fn normalize_sql(sql: &str) -> String {
         .collect()
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.doctor.query.schema_version"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.doctor.query.schema_version")]
 async fn snapshot_schema_version(
     conn: &impl crate::handle::SessionTemporalQuery,
 ) -> tracedecay_runtime_core::db::engine::Result<Option<i64>> {

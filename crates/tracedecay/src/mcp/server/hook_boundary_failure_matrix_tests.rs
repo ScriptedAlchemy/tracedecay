@@ -18,10 +18,10 @@ use super::writer_test_support::{
 use super::{CodeIndexReconcileSink, McpServer};
 use crate::mcp::project_route::HookProjectRouteCache;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent};
-use tracedecay_usecases::host_admission::{
-    HostAdmissionBroker, HostAdmissionRuntime, HostAdmissionStatus, SharedHostAdmissionBroker,
-    SpoolBounds,
+use tracedecay_host_admission::{
+    HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker, SpoolBounds,
 };
+use tracedecay_sessions::admission::HostAdmissionStatus;
 
 fn session_start(root: PathBuf) -> Value {
     serde_json::to_value(DaemonHookEvent::session_start(HookAgent::Codex, root)).unwrap()

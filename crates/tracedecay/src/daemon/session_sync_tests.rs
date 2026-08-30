@@ -430,7 +430,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     let feature_worktree =
         WorktreeId::new("worktree.session-sync.feature").expect("feature worktree");
     for root in [&repository_root, &linked_root] {
-        crate::storage::pin_fixture_repository_identity(root, project.as_str())
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, project.as_str())
             .expect("project enrollment");
     }
     let roots = vec![
@@ -840,10 +840,10 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
     .await
     .unwrap();
     let project_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .unwrap();
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Profile)
         .unwrap();
     let service = DaemonSessionSyncService::default();
     service

@@ -138,7 +138,7 @@ fn doctor_runtime_store_layout(
     project_path: &Path,
     profile_root: &Path,
 ) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
-    let layout = crate::storage::resolve_layout(project_path, profile_root)
+    let layout = tracedecay_runtime_core::storage::resolve_layout(project_path, profile_root)
         .map_err(|_| "project_store_schema_unsupported")?;
     Ok((layout.graph_db_path, layout.sessions_db_path))
 }
@@ -566,11 +566,11 @@ mod doctor_runtime_route_tests {
         cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
         serve_core_doctor_runtime_request,
     };
-    use tracedecay_daemon_protocol::DaemonClientIdentity;
     use crate::daemon::{DaemonHandshake, DaemonLifecycle, StoreAdministration};
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+    use tracedecay_daemon_protocol::DaemonClientIdentity;
     use tracedecay_mcp::McpTransport;
     use tracedecay_usecases::semantic_runtime::{
         SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
@@ -609,7 +609,7 @@ mod doctor_runtime_route_tests {
     async fn initialize_test_project(
         project_root: &Path,
         profile_root: &Path,
-    ) -> crate::storage::StoreLayout {
+    ) -> tracedecay_runtime_core::storage::StoreLayout {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1282,7 +1282,8 @@ mod doctor_runtime_route_tests {
             "fixture must provide an uninitialized sessions placeholder"
         );
         assert!(
-            !crate::storage::has_sqlite_database_header(&session_path).unwrap_or(true),
+            !tracedecay_runtime_core::storage::has_sqlite_database_header(&session_path)
+                .unwrap_or(true),
             "sessions placeholder must not be a SQLite database yet"
         );
         let handshake = handshake(project, profile.clone(), registry_path);

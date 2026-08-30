@@ -159,6 +159,7 @@ lang-toml = ["tracedecay/lang-toml"]
 lang-lean = ["tracedecay/lang-lean"]
 
 [dependencies]
+crossterm = "0.28"
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3.33"
@@ -181,6 +182,7 @@ tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", ver
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
@@ -210,6 +212,7 @@ tower = "0.5"
 tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 ureq = { version = "3", features = ["json"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

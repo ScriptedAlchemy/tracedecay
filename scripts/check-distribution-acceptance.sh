@@ -129,6 +129,9 @@ assert_required_assets() {
     "plugin/.codex-plugin/plugin.json"
     "plugin/.cursor-plugin/plugin.json"
     "plugin/.kimi-plugin/plugin.json"
+    "plugin/opencode/tracedecay.ts"
+    "plugin/opencode/tracedecay-mcp.ts"
+    "plugin/opencode/opencode.registration.json"
     "plugin/cursor-native-extension/embedded/extension.js"
     "dashboard/app-dist/index.html"
     "tests/fixtures/packaged_host_events/claude.json"
@@ -549,6 +552,7 @@ for required_package in \
   tracedecay-tool-catalog \
   tracedecay-lsp \
   tracedecay-code-index \
+  tracedecay-code-index-runtime \
   tracedecay-code-extraction \
   tracedecay-query \
   tracedecay-semantic; do

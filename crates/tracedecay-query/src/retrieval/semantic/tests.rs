@@ -12,12 +12,12 @@ use tracedecay_domain::{
     ExactClass, FixedPointScore, FreshnessCompatibilityV1, FusedCandidate, FusionProfile,
     LogicalEvidenceId, ManifestDigest, PrincipalId, ProjectionKeyV1, PublicRetrieverStatus,
     QueryDigest, QueryFallbackSubpayload, QueryMac, QueryNormalizationRevision, RankedCandidate,
-    RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, Retriever, RetrieverBatch, RetrieverContinuation, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
-    SemanticSearchIndexKeyV1, SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness,
-    SourceNamespace, SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1,
-    VectorWatermark,
+    RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalError, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch, RetrieverContinuation,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SemanticSearchIndexKeyV1,
+    SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness, SourceNamespace,
+    SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
 };
 
 use super::*;
@@ -192,7 +192,7 @@ fn record(
             evidence_role: EvidenceRole::Primary,
             retriever: RetrieverKind::Semantic,
             retriever_revision: id::<ComponentRevision>("retriever.semantic-flat.v1"),
-            score_domain: id::<ScoreDomainId>("score.semantic-distance.v1"),
+            score_domain: id::<ScoreDomainId>(crate::retrieval::QUERY_SEMANTIC_SCORE_DOMAIN_V1),
             raw_score: tracedecay_domain::FixedPointScore::ZERO,
             ordinal_rank: 0,
             exact_admission_proof: None,
@@ -602,6 +602,26 @@ fn scan_rejects_foreign_generation_rows_instead_of_broadening_scope() {
         .expect_err("foreign vector generation must fail closed");
 
     assert_eq!(error, RetrievalPortError::GenerationMismatch);
+}
+
+#[test]
+fn retrieve_preserves_generation_mismatch_identity() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let mut foreign = record(&request, "foreign", vec![1.0, 0.0]);
+    foreign.source_generation = id::<CodeGenerationId>("generation.foreign");
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, vec![foreign]);
+    let control = FixedExecutionControl::default();
+    let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+
+    let error = Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
+        &retriever, &request,
+    )
+    .expect_err("foreign vector generation must fail closed");
+
+    assert_eq!(error, RetrievalError::GenerationMismatch);
 }
 
 struct MismatchedDigestEmbedder;
@@ -1224,25 +1244,38 @@ fn shared_fusion_profile() -> FusionProfile {
             )
         })
         .collect();
-    let score_domain_calibrations = lanes
-        .into_iter()
-        .map(|lane| {
-            let score_domain: ScoreDomainId = if lane == RetrieverKind::Semantic {
-                id("score.semantic-distance.v1")
-            } else {
-                id(&format!("score.{}.v1", lane.as_str()))
-            };
-            (
-                score_domain.clone(),
-                ScoreDomainCalibrationV1 {
-                    calibration_profile_id: id(&format!("calibration.{}.v1", lane.as_str())),
-                    score_domain,
-                    raw_min_micros: 0,
-                    raw_max_micros: u64::MAX,
-                },
-            )
-        })
-        .collect();
+    let score_domain_calibrations = [
+        (
+            RetrieverKind::ExactLiteral,
+            crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
+        ),
+        (
+            RetrieverKind::Lexical,
+            crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+        ),
+        (
+            RetrieverKind::Graph,
+            crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
+        ),
+        (
+            RetrieverKind::Semantic,
+            crate::retrieval::QUERY_SEMANTIC_SCORE_DOMAIN_V1,
+        ),
+    ]
+    .into_iter()
+    .map(|(lane, domain)| {
+        let score_domain: ScoreDomainId = id(domain);
+        (
+            score_domain.clone(),
+            ScoreDomainCalibrationV1 {
+                calibration_profile_id: id(&format!("calibration.{}.v1", lane.as_str())),
+                score_domain,
+                raw_min_micros: 0,
+                raw_max_micros: u64::MAX,
+            },
+        )
+    })
+    .collect();
     FusionProfile {
         profile_id: id("profile.semantic.v1"),
         evaluation_result_anchor: RetrievalAnchorId::new("evaluation.semantic.v1")

@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, FileOccurrenceId, FreshnessCompatibilityV1,
+    technical_tokens,
 };
 use tracedecay_query::retrieval::lexical::{
     CodeLexicalProjectionAdapterV1, LexicalLane, LexicalLaneRetriever,
@@ -74,13 +75,7 @@ fn immutable_postings_cold_warm_scaling() {
         for _ in 0..repetitions {
             let matches = corpus
                 .iter()
-                .filter(|text| {
-                    text.split(|character: char| {
-                        !(character.is_ascii_alphanumeric()
-                            || matches!(character, '_' | '-' | ':' | '.' | '/'))
-                    })
-                    .any(|term| term == "needle")
-                })
+                .filter(|text| technical_tokens(text).any(|(_, term)| term == "needle"))
                 .count();
             assert_eq!(black_box(matches), 1);
         }

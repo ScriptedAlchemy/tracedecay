@@ -5,12 +5,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use super::{DaemonInvocationClient, InvocationCancellationPolicy};
 use crate::client_identity::DaemonClientIdentity;
 use crate::connection::DaemonConnection;
-use crate::handshake::DaemonHandshake;
 use crate::contract::{
     CanonicalQualificationBlob, DaemonInvocationOutcome, DaemonInvocationPayload,
     DaemonInvocationProblem, DaemonInvocationRequest, DaemonInvocationResponse,
     parse_daemon_invocation_cancellation_request,
 };
+use crate::handshake::DaemonHandshake;
 use tracedecay_application::{CancellationContext, CancellationSignal, Deadline};
 use tracedecay_domain::UtcMicros;
 
@@ -105,11 +105,10 @@ async fn write_unavailable_response(
 async fn concurrent_invocations_report_queue_and_settle_activity() {
     const FIRST_ID: &str = "request.concurrent-first";
     const SECOND_ID: &str = "request.concurrent-second";
-    let (listener, endpoint) = crate::transport::BrokerListener::bind(
-        &crate::transport::default_loopback_endpoint(),
-    )
-    .await
-    .expect("bind invocation listener");
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind invocation listener");
     let (first_read, first_admitted) = tokio::sync::oneshot::channel();
     let (release_first, first_release) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
@@ -196,11 +195,10 @@ async fn controlled_client(
     tokio::sync::oneshot::Receiver<()>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (listener, endpoint) = crate::transport::BrokerListener::bind(
-        &crate::transport::default_loopback_endpoint(),
-    )
-    .await
-    .expect("bind invocation listener");
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind invocation listener");
     let (request_admitted, admitted) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
@@ -293,11 +291,10 @@ async fn reset_then_reconnect_client(
     tokio::sync::oneshot::Receiver<()>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (listener, endpoint) = crate::transport::BrokerListener::bind(
-        &crate::transport::default_loopback_endpoint(),
-    )
-    .await
-    .expect("bind invocation listener");
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind invocation listener");
     let (first_admitted, admitted) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let first_stream = listener.accept().await.expect("accept first invocation");
@@ -410,11 +407,10 @@ async fn unsettled_client(
     tokio::sync::oneshot::Receiver<()>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (listener, endpoint) = crate::transport::BrokerListener::bind(
-        &crate::transport::default_loopback_endpoint(),
-    )
-    .await
-    .expect("bind invocation listener");
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind invocation listener");
     let (request_admitted, admitted) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
@@ -672,11 +668,10 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
 async fn semantic_qualification_uses_daemon_owned_profile_deadline_and_canonical_bytes() {
     const DEADLINE_MICROS: i64 = 5_000_000;
     const CANCELLATION_ID: &str = "cancel.semantic-qualification.success";
-    let (listener, endpoint) = crate::transport::BrokerListener::bind(
-        &crate::transport::default_loopback_endpoint(),
-    )
-    .await
-    .expect("bind invocation listener");
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind invocation listener");
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
         let (invocation_reader, mut invocation_writer) = invocation_stream.into_split();
@@ -770,11 +765,10 @@ async fn semantic_qualification_uses_daemon_owned_profile_deadline_and_canonical
 #[tokio::test]
 async fn semantic_qualification_cancellation_controls_the_same_payload_request() {
     const CANCELLATION_ID: &str = "cancel.semantic-qualification.control";
-    let (listener, endpoint) = crate::transport::BrokerListener::bind(
-        &crate::transport::default_loopback_endpoint(),
-    )
-    .await
-    .expect("bind invocation listener");
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind invocation listener");
     let (request_admitted, admitted) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");

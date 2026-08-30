@@ -59,9 +59,6 @@ pub(super) fn work_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
         .collect()
 }
 
-fn invalid_work_discovery(
-    field: &'static str,
-    reason: &'static str,
-) -> crate::McpCatalogError {
+fn invalid_work_discovery(field: &'static str, reason: &'static str) -> crate::McpCatalogError {
     CatalogValidationError::InvalidValue { field, reason }.into()
 }

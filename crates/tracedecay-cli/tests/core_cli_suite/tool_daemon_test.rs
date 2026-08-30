@@ -12,15 +12,15 @@ use crate::common::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::storage::{
-    default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
-};
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     HOOK_CONFIGURATION_SCHEMA_VERSION, HookCapabilityV1, HookConfigurationFileWriterV1,
     HookConfigurationPublisherV1, HookConfigurationSnapshotV1, HookEventFamily, HookEventSupportV1,
     HookEventV2, HookHostV1, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolV1,
     hook_configuration_path,
+};
+use tracedecay_runtime_core::storage::{
+    default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
 };
 
 /// Bound for waits that depend on spawning and running the real `tracedecay`
@@ -281,6 +281,83 @@ fn git(project: &Path, args: &[&str]) {
         args,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn daemon_first_init_enrolls_a_clean_profile_from_a_linked_worktree() {
+    let home = TempDir::new().unwrap();
+    let repository = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let primary = repository.path().join("primary");
+    let linked = repository.path().join("linked");
+    std::fs::create_dir_all(primary.join("src")).unwrap();
+    git(&primary, &["init", "-b", "main"]);
+    std::fs::write(
+        primary.join("src/lib.rs"),
+        "pub fn daemon_first_init_fixture() {}\n",
+    )
+    .unwrap();
+    git(&primary, &["add", "."]);
+    git(
+        &primary,
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.local",
+            "commit",
+            "-m",
+            "seed linked worktree fixture",
+        ],
+    );
+    let linked_arg = linked.to_string_lossy().into_owned();
+    git(
+        &primary,
+        &["worktree", "add", "-b", "linked-init", &linked_arg],
+    );
+    let linked = canonical_existing_path(&linked);
+
+    // Match the production dogfood journey exactly: the profile is empty,
+    // daemon authority starts first, then the public CLI initializes the
+    // checkout through that already-running daemon.
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let initialized = run_command_with_timeout(
+        {
+            let mut command = tracedecay_command_with_home(&home_path);
+            command.arg("init").current_dir(&linked);
+            command
+        },
+        CLI_ROUNDTRIP_TIMEOUT,
+    );
+    assert!(
+        initialized.status.success(),
+        "daemon-first init from a linked worktree must enroll the authenticated profile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let init_stderr = String::from_utf8_lossy(&initialized.stderr);
+    assert!(
+        init_stderr.contains("daemon code-index reconciliation requested"),
+        "successful init must request the daemon-owned scheduler: {init_stderr}"
+    );
+
+    let linked_arg = linked.to_string_lossy().into_owned();
+    let status = run_command_with_timeout(
+        {
+            let mut command = tracedecay_command_with_home(&home_path);
+            command
+                .args(["tool", "--project", &linked_arg, "status", "--json"])
+                .current_dir(&linked);
+            command
+        },
+        CLI_ROUNDTRIP_TIMEOUT,
+    );
+    assert!(
+        status.status.success(),
+        "the initialized linked worktree must remain enrolled for a normal daemon call\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
     );
 }
 

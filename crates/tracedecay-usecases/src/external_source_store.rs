@@ -45,15 +45,15 @@ pub enum RuntimeExternalSourceErrorV1 {
 const HOST_EXTERNAL_SOURCE_PROJECTOR: &str = "projector.host-observation.external-source.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RuntimeSourceCaptureOutcomeV1 {
+pub enum RuntimeSourceCaptureOutcomeV1 {
     Projected(SourceCommitReceiptV1),
     ProjectionPending(SourceCommitReceiptV1),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeProjectionReplayOutcomeV1 {
-    pub(crate) projected: usize,
-    pub(crate) deferred: bool,
+pub struct RuntimeProjectionReplayOutcomeV1 {
+    pub projected: usize,
+    pub deferred: bool,
 }
 
 pub(crate) enum RuntimeSourceCaptureAuthorityV1 {
@@ -364,7 +364,7 @@ impl RuntimeExternalSourceStore {
         Self { runtime }
     }
 
-    pub(crate) async fn capture_host_observations(
+    pub async fn capture_host_observations(
         &self,
         receipts: &[tracedecay_store::ObservationCommitReceipt],
     ) -> Result<Vec<RuntimeSourceCaptureOutcomeV1>, RuntimeExternalSourceErrorV1> {
@@ -490,7 +490,7 @@ impl RuntimeExternalSourceStore {
             .collect()
     }
 
-    pub(crate) async fn capture_host_observation(
+    pub async fn capture_host_observation(
         &self,
         receipt: &tracedecay_store::ObservationCommitReceipt,
     ) -> Result<RuntimeSourceCaptureOutcomeV1, RuntimeExternalSourceErrorV1> {
@@ -504,7 +504,7 @@ impl RuntimeExternalSourceStore {
     /// The daemon-owned host-admission drain invokes this bounded operation;
     /// capture never creates detached replay tasks. Restart resumes from the
     /// durable predecessor chain on the next admission drain.
-    pub(crate) async fn drain_host_projection_replay(
+    pub async fn drain_host_projection_replay(
         &self,
         max: usize,
         cancellation: &crate::observation::ObservationCancellation,

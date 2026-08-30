@@ -2,13 +2,14 @@ use std::io::Write;
 
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::storage::PrivateStoreIo;
 use tracedecay_domain::{
     ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
     ProviderUsageScopeV1,
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay_global_db::ParseOffset;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::claude::ClaudeSource;
 use tracedecay_sessions::runtime::git_correlation::{
@@ -16,7 +17,6 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay_sessions::runtime::source::TranscriptSource;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{

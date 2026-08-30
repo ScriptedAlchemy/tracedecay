@@ -801,7 +801,7 @@ fn validate_batch(sql: &String) -> Result<(), ExactSqlError> {
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "rusqlite_runtime.exact_sql.execute_statement")]
 fn execute_statement(
     connection: &Connection,
     statement: ExactSqlStatement,
@@ -889,7 +889,7 @@ fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResu
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "rusqlite_runtime.exact_sql.execute_query")]
 pub(crate) fn execute_query(
     connection: &Connection,
     request: ExactSqlStatement,

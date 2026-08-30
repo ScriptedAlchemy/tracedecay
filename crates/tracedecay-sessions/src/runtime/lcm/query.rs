@@ -63,7 +63,7 @@ fn rerank_fetch_limit(limit: usize) -> usize {
     crate::retrieval_content::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.lcm.expand_query", future = true)]
 pub async fn expand_query(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmExpandQueryRequest,

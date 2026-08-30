@@ -13,8 +13,8 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 use tracedecay_automation_runtime::ports::project_runtime::ProjectRuntime;
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_global_db::ParseOffset;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use super::{project_memory_owner, test_automation_run_control};
 
@@ -287,7 +287,7 @@ pub(crate) struct SeededDuplicateFacts {
 }
 
 pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) -> SeededDuplicateFacts {
-    use tracedecay::store::memory::DatabaseFactStore;
+    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
     use tracedecay_usecases::memory::MemoryApplication;
 
     let owner = project_memory_owner(cg);
@@ -362,8 +362,8 @@ pub(crate) async fn fact_exists(
     fact_id: &str,
     read_control: &tracedecay_store::FactReadControl,
 ) -> bool {
-    use tracedecay::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactId;
+    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
     use tracedecay_store::{ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1};
     use tracedecay_usecases::memory::MemoryApplication;
 

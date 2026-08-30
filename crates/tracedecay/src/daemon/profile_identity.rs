@@ -3,11 +3,10 @@ use std::path::{Path, PathBuf};
 use tracedecay_automation_runtime::ports::project_runtime::ProfileIdentity;
 use tracedecay_domain::{BrainId, UserProfileId};
 
-use crate::storage::PROFILE_IDENTITY_FILENAME;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{
-    PROFILE_IDENTITY_RECORD_NAME, PROFILE_IDENTITY_SCHEMA_VERSION, ProfileIdentityRecordV1,
-    read_existing_profile_identity_record,
+    PROFILE_IDENTITY_FILENAME, PROFILE_IDENTITY_RECORD_NAME, PROFILE_IDENTITY_SCHEMA_VERSION,
+    ProfileIdentityRecordV1, read_existing_profile_identity_record,
 };
 
 use super::authority::canonical_identity_path;

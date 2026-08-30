@@ -10,7 +10,7 @@
   "prompt": "What currency are order totals stored in, and is multi-currency supported? Base your answer on the project's recorded decisions.",
   "expected_tools": {
     "required_first": [
-      "tracedecay_fact_store",
+      "tracedecay_fact_store_search",
       "tracedecay_context"
     ],
     "acceptable": [

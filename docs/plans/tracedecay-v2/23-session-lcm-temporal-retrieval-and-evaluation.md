@@ -149,10 +149,9 @@ coverage to empty-complete.
 This is the sole temporal retrieval kernel. Only independently released
 `message_search` and `lcm_grep`/load/describe/expand/query protocols may
 translate into this request and delegate; they do not keep separate ranking,
-hydration, context, pagination, or freshness logic. `src/mcp/server.rs`,
-`src/mcp/tools/handlers/session/message_search.rs`, and
-`src/mcp/tools/handlers/session/lcm_handlers/mod.rs` are translation/rendering
-adapters only: they do not query LCM tables, call `get_session_message`,
+hydration, context, pagination, or freshness logic. `src/mcp/server.rs`
+is a translation/rendering
+adapter only: it does not query LCM tables, call `get_session_message`,
 hydrate payloads, apply semantic filters after ranking, or encode a second LCM
 cursor. Workflow recovery consumes session evidence through this kernel; the
 executable-work product owns all other workflow semantics.
@@ -488,11 +487,6 @@ reads.
   owns canonical atomic summary publication.
 - `src/daemon/session_temporal_refresh_scheduler.rs` owns durable restart
   recovery and source scanning; it does not own query ranking or hydration.
-- `src/mcp/tools/handlers/session/message_search.rs` and
-  `src/mcp/tools/handlers/session/lcm_handlers/mod.rs` translate an evidenced
-  independently released request protocol to the application service. Missing
-  service wiring returns typed unavailable or deferred output and never probes
-  an older persisted shape.
 
 The schema-v3 derived projection tables are:
 

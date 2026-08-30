@@ -10,10 +10,9 @@ use rusqlite::Connection;
 use serde_json::Value;
 use serde_json::json;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
-use tracedecay_daemon_protocol::DaemonClientIdentity;
-#[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use tracedecay::daemon::{DaemonHandshake, call_tool};
-use tracedecay::store::GlobalDbObservationStore;
+#[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
+use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
@@ -21,6 +20,7 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationReplayRequest,
     ObservationStore, ObservationStoreError, ObservationWrite,

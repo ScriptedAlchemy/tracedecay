@@ -568,7 +568,8 @@ async fn settle_in_process_invocation(
     cancellation: tracedecay_application::CancellationSignal,
     admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
     policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
-) -> std::result::Result<DaemonInvocationResponse, tracedecay_daemon_protocol::DaemonInvocationError> {
+) -> std::result::Result<DaemonInvocationResponse, tracedecay_daemon_protocol::DaemonInvocationError>
+{
     use tracedecay_application::CancellationStage;
 
     let stage = match policy {
@@ -678,7 +679,10 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
         policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
-        std::result::Result<DaemonInvocationResponse, tracedecay_daemon_protocol::DaemonInvocationError>,
+        std::result::Result<
+            DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
+        >,
     > {
         Box::pin(async move {
             use tracedecay_application::CancellationStage;
@@ -688,9 +692,11 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
                     tracedecay_runtime_core::cancellation::CancellationToken::is_cancelled,
                 )
             {
-                return Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
-                    stage: CancellationStage::BeforeAdmission,
-                });
+                return Err(
+                    tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
+                        stage: CancellationStage::BeforeAdmission,
+                    },
+                );
             }
             let remaining = tracedecay_daemon_protocol::deadline_remaining(&deadline).ok_or(
                 tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {

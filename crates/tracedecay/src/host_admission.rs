@@ -5,17 +5,16 @@ use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use tracedecay_usecases::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
-    HostAdmissionStatus,
-};
+use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 #[cfg(test)]
-use tracedecay_usecases::host_admission::{
+use tracedecay_host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker,
+};
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::support::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
@@ -23,6 +22,7 @@ use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_store::StoreShardScopeV1;
 
 #[path = "host_admission/accounting_test_support.rs"]
@@ -38,10 +38,6 @@ mod profile_registry_test_support;
 #[path = "host_admission/session_test_support.rs"]
 mod session_test_support;
 mod verified_graph_test_support;
-
-#[cfg(feature = "test-transport")]
-#[doc(hidden)]
-pub(crate) use verified_graph_test_support::await_bound_graph_runtime;
 
 #[doc(hidden)]
 pub use lcm_fixture_test_support::{
@@ -378,7 +374,8 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn observation_store(
         &self,
         scope: HostAdmissionScope,
-    ) -> std::result::Result<crate::store::GlobalDbObservationStore, HostAdmissionOutcome> {
+    ) -> std::result::Result<tracedecay_global_db::GlobalDbObservationStore, HostAdmissionOutcome>
+    {
         let database = self
             .registered_database(scope)
             .ok_or_else(registered_authority_unavailable_outcome)?;
@@ -410,10 +407,17 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn session_temporal_store_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> Result<crate::store::GlobalDbSessionTemporalStore<'_>> {
-        Ok(crate::store::GlobalDbSessionTemporalStore::new(
-            self.session_database_for_test(scope)?,
-        ))
+    ) -> Result<
+        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
+            '_,
+            tracedecay_global_db::RegisteredGlobalDb,
+        >,
+    > {
+        Ok(
+            tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
+                self.session_database_for_test(scope)?,
+            ),
+        )
     }
 
     #[doc(hidden)]
@@ -692,7 +696,7 @@ impl HostAdmissionTestRuntimeV1 {
                 error.to_string(),
             )
         })?;
-        crate::store::GlobalDbGitCorrelationStore::new(database)
+        tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
             .sessions_for_with_relation(query, relation)
             .await
     }
@@ -776,9 +780,9 @@ impl HostAdmissionTestRuntimeV1 {
     /// authority returned by [`Self::registered_database`] is intentionally a
     /// different shard; callers that correlate analytics with sessions must
     /// bind both explicitly, just as production composition does.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
-    pub(crate) fn profile_database_for_test(&self) -> &RegisteredGlobalDb {
+    pub fn profile_database_for_test(&self) -> &RegisteredGlobalDb {
         self.profile_database.as_ref()
     }
 

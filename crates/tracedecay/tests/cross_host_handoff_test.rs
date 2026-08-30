@@ -13,8 +13,8 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::privacy::{
     ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
+use tracedecay_sessions::admission::{HostAdmissionScope, HostAdmissionStatus};
 use tracedecay_store::{ObservationReplayRequest, StoredObservation};
-use tracedecay_usecases::host_admission::{HostAdmissionScope, HostAdmissionStatus};
 use tracedecay_usecases::observation::{CaptureObservationRequest, ObservationCancellation};
 
 const PROJECT_ID: &str = "project.cross-host-handoff";
@@ -39,8 +39,11 @@ async fn codex_to_claude_handoff_preserves_identity_lineage_privacy_and_provenan
     );
     let project_id = ProjectId::new(PROJECT_ID).unwrap();
     assert!(
-        tracedecay::storage::write_repository_identity_marker(&project_root, project_id.as_str())
-            .unwrap()
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project_root,
+            project_id.as_str()
+        )
+        .unwrap()
     );
     let runtime =
         HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())

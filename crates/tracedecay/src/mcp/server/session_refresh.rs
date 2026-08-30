@@ -16,8 +16,8 @@ use crate::mcp::tools::{
     SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
     SessionRefreshServicePort, utc_micros_value,
 };
-use crate::store::GlobalDbSessionTemporalStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 use tracedecay_usecases::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
@@ -99,7 +99,7 @@ impl DaemonSessionRefreshService {
     ) -> Option<
         SessionRefreshService<
             DaemonSessionRefreshAuthorizer<'_>,
-            GlobalDbSessionTemporalStore<'_>,
+            GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
             &DaemonSessionRefreshWake,
         >,
     > {

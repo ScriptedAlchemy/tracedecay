@@ -27,9 +27,10 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_daemon_protocol::MovedStoreAdoption;
-use crate::storage::{self, StoreLayout};
+
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::TraceDecay;
 

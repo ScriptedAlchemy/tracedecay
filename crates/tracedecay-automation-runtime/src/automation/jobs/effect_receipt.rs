@@ -658,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn webhook_worker_panic_after_attempt_remains_a_bound_partial_effect() {
         let attempted = tokio::task::spawn_blocking(|| {
-            let _attempted_bytes = b"POST /hook HTTP/1.1";
+            // The worker "attempted" its write; the panic lands afterwards.
             panic!("injected panic after write")
         });
         let error = await_webhook_attempt(

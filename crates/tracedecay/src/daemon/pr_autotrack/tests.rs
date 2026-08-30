@@ -300,7 +300,7 @@ async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
-    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
     let origin = tempfile::tempdir().unwrap();
@@ -508,7 +508,7 @@ fn git_ref_exists(repo: &Path, reference: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_branch_activates_when_scheduler_is_injected() {
-    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature-manual");
@@ -525,7 +525,10 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
             .expect("manual branch activation");
 
     assert_eq!(activation.branch, "feature-manual");
-    assert_eq!(activation.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_eq!(
+        activation.outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
     assert!(
         activation.worktree.is_dir(),
         "branch head must be checked out"
@@ -538,7 +541,7 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
         repo.path(),
         "refs/tracedecay/branch/feature-manual"
     ));
-    let synthetic_branch = crate::branch::current_branch(&activation.worktree)
+    let synthetic_branch = tracedecay_runtime_core::branch::current_branch(&activation.worktree)
         .expect("manual worktree has an attached synthetic branch");
     let source = crate::daemon::branch_add::capture_exact_branch_source(
         &graph,
@@ -559,7 +562,7 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
-    use crate::daemon::code_index_scheduler::{
+    use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexSchedulerRegistryV1, identity::IndexingIdentityV1,
     };
     use tracedecay_domain::configuration::{
@@ -709,7 +712,7 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
-    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/a");
@@ -738,8 +741,14 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
             .await
             .expect("underscore branch activation");
 
-    assert_eq!(slashed.outcome, crate::branch::BranchAddOutcome::Added);
-    assert_eq!(underscored.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_eq!(
+        slashed.outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
+    assert_eq!(
+        underscored.outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
     assert_ne!(slashed.worktree, underscored.worktree);
     assert_ne!(
         manual_branch_worktree_path(&data_root, "feature/a"),
@@ -758,7 +767,7 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advances() {
-    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/advance");
@@ -798,7 +807,10 @@ async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advanc
         .output()
         .unwrap();
 
-    assert_eq!(replay.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_eq!(
+        replay.outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
     assert_ne!(initial.head_sha, replay.head_sha);
     assert_eq!(
         String::from_utf8_lossy(&advanced_head.stdout).trim(),
@@ -810,7 +822,7 @@ async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advanc
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_mutating_git() {
-    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/contended");
@@ -843,7 +855,7 @@ async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_muta
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_manual_branch_sealing_retires_the_exact_mount_worktree_and_tracking_ref() {
-    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/failure-cleanup");
@@ -924,7 +936,7 @@ async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutati
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_branch_missing_ref_is_typed_failure() {
-    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature-present");
@@ -1137,7 +1149,7 @@ fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() 
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_exact_read() {
-    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
     let branch = "feature/stalled-exact-read";

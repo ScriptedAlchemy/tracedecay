@@ -277,7 +277,10 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for FactStoreCurateSuc
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+        '_,
+        tracedecay_runtime_core::errors::Result<()>,
+    > {
         Box::pin(async { Ok(()) })
     }
 }
@@ -322,24 +325,25 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExe
             tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect,
         );
         assert!(deadline.is_elapsed_at(tracedecay_daemon_protocol::invocation_now_micros()));
-        let response = if deadline.is_elapsed_at(tracedecay_daemon_protocol::invocation_now_micros()) {
-            tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
-                &request.request_id,
-                ApplicationProblem::timed_out_before_admission(),
-            )
-        } else {
-            self.mutations.fetch_add(1, Ordering::SeqCst);
-            tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
-                &request.request_id,
-                ApplicationProblem::unavailable(
-                    SafeDiagnostic::new(
-                        "retained.fixture.unexpected-deadline-mutation",
-                        "The expired fixture would have attempted a mutation.",
-                    )
-                    .expect("fixture diagnostic"),
-                ),
-            )
-        };
+        let response =
+            if deadline.is_elapsed_at(tracedecay_daemon_protocol::invocation_now_micros()) {
+                tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+                    &request.request_id,
+                    ApplicationProblem::timed_out_before_admission(),
+                )
+            } else {
+                self.mutations.fetch_add(1, Ordering::SeqCst);
+                tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+                    &request.request_id,
+                    ApplicationProblem::unavailable(
+                        SafeDiagnostic::new(
+                            "retained.fixture.unexpected-deadline-mutation",
+                            "The expired fixture would have attempted a mutation.",
+                        )
+                        .expect("fixture diagnostic"),
+                    ),
+                )
+            };
         Box::pin(async move { Ok(response) })
     }
 
@@ -348,7 +352,10 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExe
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+        '_,
+        tracedecay_runtime_core::errors::Result<()>,
+    > {
         Box::pin(async { Ok(()) })
     }
 }
@@ -542,7 +549,10 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PostCommitPartialE
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+        '_,
+        tracedecay_runtime_core::errors::Result<()>,
+    > {
         Box::pin(async { Ok(()) })
     }
 }
@@ -613,7 +623,10 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PreCommitInterrupt
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+        '_,
+        tracedecay_runtime_core::errors::Result<()>,
+    > {
         Box::pin(async { Ok(()) })
     }
 }

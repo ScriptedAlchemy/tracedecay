@@ -103,7 +103,9 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
         &self,
         session_id: &tracedecay_domain::SessionId,
     ) -> SessionStoreResult<Option<SessionRefreshRecoveryV1>> {
-        self.access().session_refresh_recovery_result(session_id).await
+        self.access()
+            .session_refresh_recovery_result(session_id)
+            .await
     }
 
     pub async fn running_session_refreshes(

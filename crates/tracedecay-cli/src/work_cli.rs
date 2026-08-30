@@ -339,16 +339,6 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
     )
 }
 
-pub async fn invoke_work_cli(
-    project_root: PathBuf,
-    operation: WorkOperation,
-    body: Value,
-) -> Result<ApplicationResult<Value>> {
-    Ok(invoke_work_cli_with_delivery(project_root, operation, body)
-        .await?
-        .outcome)
-}
-
 /// Invokes Work while retaining the daemon connection until the presentation
 /// layer explicitly acknowledges the terminal output boundary.
 #[hotpath::measure(label = "work_cli.invoke", future = true)]
@@ -387,7 +377,8 @@ pub async fn invoke_work_cli_with_delivery(
         deadline.clone(),
         cancellation.context(),
     );
-    let handshake = tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
     let client = tracedecay::daemon::invocation_client_for_current(handshake)?;
     let response = match client
         .invoke_controlled(
@@ -665,8 +656,8 @@ mod tests {
     #[test]
     fn daemon_work_reset_remains_a_typed_cli_problem() {
         use super::daemon_application_problem;
-        use tracedecay_daemon_protocol::DaemonInvocationProblem;
         use tracedecay_application::ApplicationProblem;
+        use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
         let problem = daemon_application_problem(DaemonInvocationProblem::ResetRequired);
         let ApplicationProblem::ResetRequired {

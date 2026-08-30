@@ -28,8 +28,14 @@ pub enum ConfigurationStoreError {
     IdempotencyConflict,
     #[error("configuration store data is invalid: {0}")]
     InvalidData(String),
-    #[error("configuration store unavailable")]
-    Unavailable,
+    #[error("configuration store unavailable: {0}")]
+    Unavailable(String),
+}
+
+impl ConfigurationStoreError {
+    pub fn unavailable(source: impl std::fmt::Display) -> Self {
+        Self::Unavailable(source.to_string())
+    }
 }
 
 impl From<DomainError> for ConfigurationStoreError {

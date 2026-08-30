@@ -127,7 +127,7 @@ mod tests {
     use super::{remediation_read_control, remediation_write_control};
     use crate::daemon::profile_identity;
     use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-    use crate::store::DatabaseFactStore;
+    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
     fn secret() -> String {
         ["sk", "-test-", "1234567890abcdef"].concat()
@@ -136,8 +136,11 @@ mod tests {
     fn enrolled_root(base: &Path, project_id: &ProjectId) -> PathBuf {
         let root = base.join(project_id.as_str());
         std::fs::create_dir_all(&root).expect("project root");
-        crate::storage::pin_fixture_repository_identity(&root, project_id.as_str())
-            .expect("project enrollment");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
         root
     }
 

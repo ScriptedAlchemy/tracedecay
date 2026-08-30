@@ -7,10 +7,10 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracedecay::application_surface::{ApplicationSurfaceOperation, ApplicationSurfaceRequest};
 use tracedecay::daemon::{DaemonHandshake, call_default_tool};
-use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_application::retained_surfaces::RetainedSurfaceResultV1;
 use tracedecay_application::{ApplicationEnvelope, RequestId};
+use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay_usecases::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 
 fn initialize_project(home: &Path, project: &Path) {
@@ -105,8 +105,13 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
 }
 
 fn project_handshake(project: &Path) -> DaemonHandshake {
-    tracedecay::daemon::handshake_for_current_client(Some(project.to_path_buf()), None, false, false)
-        .expect("project daemon handshake")
+    tracedecay::daemon::handshake_for_current_client(
+        Some(project.to_path_buf()),
+        None,
+        false,
+        false,
+    )
+    .expect("project daemon handshake")
 }
 
 async fn assert_client_project_identity(
@@ -659,10 +664,10 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
 
     let first_a = project_handshake(&project_a);
     let first_b = project_handshake(&project_b);
-    let first_a_client =
-        tracedecay::daemon::invocation_client_for_current(first_a.clone()).expect("project A client");
-    let first_b_client =
-        tracedecay::daemon::invocation_client_for_current(first_b.clone()).expect("project B client");
+    let first_a_client = tracedecay::daemon::invocation_client_for_current(first_a.clone())
+        .expect("project A client");
+    let first_b_client = tracedecay::daemon::invocation_client_for_current(first_b.clone())
+        .expect("project B client");
     assert_client_project_identity(
         &first_a_client,
         &project_a_id,
@@ -843,10 +848,10 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
 
     let restarted_a = project_handshake(&project_a);
     let restarted_b = project_handshake(&project_b);
-    let restarted_a_client =
-        tracedecay::daemon::invocation_client_for_current(restarted_a.clone()).expect("restarted A client");
-    let restarted_b_client =
-        tracedecay::daemon::invocation_client_for_current(restarted_b.clone()).expect("restarted B client");
+    let restarted_a_client = tracedecay::daemon::invocation_client_for_current(restarted_a.clone())
+        .expect("restarted A client");
+    let restarted_b_client = tracedecay::daemon::invocation_client_for_current(restarted_b.clone())
+        .expect("restarted B client");
     assert_client_project_identity(
         &restarted_a_client,
         &project_a_id,

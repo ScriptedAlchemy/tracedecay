@@ -9,12 +9,12 @@ use tracedecay_domain::{
     RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
 };
 use tracedecay_global_db::StoreInstanceUpsert;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationStoreError, ObservationWrite,
 };
 use tracedecay_usecases::anchor_resolution::EvidenceAnchorReportResolver;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 use tracedecay_usecases::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
 
 use super::{
@@ -101,8 +101,11 @@ async fn project_runtime_at(
         );
     }
     assert!(
-        tracedecay::storage::write_repository_identity_marker(project_root, project_id.as_str())
-            .unwrap()
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project_root,
+            project_id.as_str()
+        )
+        .unwrap()
     );
     HostAdmissionTestRuntimeV1::project(
         tmp.path().join(".tracedecay"),

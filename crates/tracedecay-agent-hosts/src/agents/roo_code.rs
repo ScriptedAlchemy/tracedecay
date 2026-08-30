@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
-    McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
-    install_mcp_server_entry, load_json_file, load_json_file_strict,
-    mcp_servers_registration_state, uninstall_mcp_server_entry,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    McpDoctorLabels, McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
+    install_mcp_server_entry, load_json_file, mcp_servers_registration_state,
+    uninstall_mcp_server_entry,
 };
 
 pub struct RooCodeIntegration;
@@ -92,7 +92,7 @@ impl AgentIntegration for RooCodeIntegration {
                     "disabled": false
                 }),
                 "Roo Code",
-                load_json_file_strict,
+                JsonConfigDialect::Json,
             )?;
         }
         Ok(())
@@ -107,7 +107,7 @@ impl AgentIntegration for RooCodeIntegration {
             uninstall_mcp_server_entry(
                 &roo_settings_path(&ctx.home),
                 "mcpServers",
-                load_json_file,
+                JsonConfigDialect::Json,
                 McpUninstallPolicy::default(),
             )?;
         }

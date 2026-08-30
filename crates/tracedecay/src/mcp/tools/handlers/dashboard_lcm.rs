@@ -11,7 +11,7 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::session::{SessionRetrievalScope, SessionTemporalQuery};
 
-use crate::dashboard::{
+use tracedecay_dashboard_api::{
     DashboardHttpRequestControlV1, DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1,
     DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1, DashboardLcmCanonicalSummaryV1,
     DashboardLcmReadFutureV1, DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1,
@@ -1039,7 +1039,7 @@ mod tests {
     #[test]
     fn dashboard_aggregate_pages_use_the_canonical_cursor_and_authorized_root() {
         let request = DashboardLcmReadRequestV1::Timeline {
-            bucket: crate::dashboard::DashboardLcmTimelineBucketV1::Day,
+            bucket: tracedecay_dashboard_api::DashboardLcmTimelineBucketV1::Day,
             session_id: None,
             limit: 400,
         };

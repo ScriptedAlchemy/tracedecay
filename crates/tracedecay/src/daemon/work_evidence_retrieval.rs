@@ -25,13 +25,13 @@ use tracedecay_domain::{
     HydrationStateV1, PrincipalId, QueryNormalizationRevision, RetrievalCursor, RetrievalGrainV1,
     RetrievalRequest, RetrievalScope, SanitizerRevision, SingleRootScopeV1, VectorWatermark,
 };
-use tracedecay_session_temporal_store::execution::{
-    TaskSessionExecutionOmissionReasonV1, TaskSessionRankSelectorV1,
-    TaskSessionReauthorizationStageV1, TaskSessionSelectionCallbackErrorV1,
-};
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::evidence_lanes::{
     TaskSessionBindingV1, TaskSessionCandidateSelectionV1, TaskSessionLaneEvidenceV1,
+};
+use tracedecay_session_temporal_store::execution::{
+    TaskSessionExecutionOmissionReasonV1, TaskSessionRankSelectorV1,
+    TaskSessionReauthorizationStageV1, TaskSessionSelectionCallbackErrorV1,
 };
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::ExecutionLimits;
@@ -871,9 +871,7 @@ pub(crate) mod tests {
         .await
         .expect("registered project session runtime");
         let database = runtime
-            .registered_database_arc(
-                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
-            )
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("registered project session database");
         let session_id = id::<SessionId>("session.work-task-session");
         let task_id = id::<TaskId>("task.work-task-session");

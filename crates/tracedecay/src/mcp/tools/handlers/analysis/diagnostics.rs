@@ -108,7 +108,7 @@ async fn session_correlation_health_json(
     session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> Value {
     let health = match session_db {
-        Some(db) => crate::store::GlobalDbGitCorrelationStore::new(db)
+        Some(db) => tracedecay_global_db::GlobalDbGitCorrelationStore::new(db)
             .correlation_index_health()
             .await
             .ok(),

@@ -654,7 +654,7 @@ fn plan_linked_worktree_branch_add(
     if !git_roots_share_common_dir(&worktree_root, project_root) {
         return None;
     }
-    let branch = crate::branch::current_branch(&worktree_root)?;
+    let branch = tracedecay_runtime_core::branch::current_branch(&worktree_root)?;
     if branch.is_empty() {
         return None;
     }
@@ -731,7 +731,7 @@ pub(crate) fn authorize_planned_branch_effect(
     planned_branch: &str,
 ) -> Result<PathBuf, AddBranchAtRootAuthError> {
     let root = authorize_add_branch_at_root(planned_root, project_root)?;
-    if crate::branch::current_branch(&root).as_deref() != Some(planned_branch) {
+    if tracedecay_runtime_core::branch::current_branch(&root).as_deref() != Some(planned_branch) {
         return Err(AddBranchAtRootAuthError::Unauthorized);
     }
     Ok(root)

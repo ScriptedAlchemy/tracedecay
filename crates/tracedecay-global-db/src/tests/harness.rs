@@ -912,9 +912,11 @@ impl HostAdmissionTestRuntimeV1 {
             crate::RegisteredGlobalDb,
         >,
     > {
-        Ok(tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
-            self.session_database_for_test(scope)?,
-        ))
+        Ok(
+            tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
+                self.session_database_for_test(scope)?,
+            ),
+        )
     }
 
     #[cfg(test)]
@@ -1226,8 +1228,8 @@ fn bind_test_session_relation_graph_with_registry(
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use tracedecay_session_temporal_store::relations::SessionRelationScope;
     use tracedecay_graph_db::{GraphDbOwnerRegistrationV1, GraphDbRegistration, NeverCancelled};
+    use tracedecay_session_temporal_store::relations::SessionRelationScope;
     use tracedecay_store::{
         RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
         RetainedGraphStoreOwnerOperationLeaseErrorV1, StoreRuntimeBindingV1, StoreShardScopeV1,

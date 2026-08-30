@@ -1,5 +1,12 @@
 # Index Design
 
+> **Superseded.** This document describes the retired pre-V2 SQLite graph
+> (`nodes`/`edges`, `PRAGMA user_version`, repo-local `.tracedecay/tracedecay.db`).
+> It is not current product authority. The code graph lives in Grafeo via
+> `tracedecay-graph-db`. One project store; branch is provenance only — see
+> [Plan 38](plans/tracedecay-v2/38-storage-retention-size-and-efficiency.md)
+> and the [V2 operating model](V2-OPERATING-MODEL.md).
+
 How tracedecay builds and maintains a semantic code graph from source files, and how that graph powers diff-aware queries.
 
 ## Overview

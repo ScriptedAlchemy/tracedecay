@@ -17,6 +17,7 @@ use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::context::RegisteredScopeResolver;
 use tracedecay_usecases::graph::{
@@ -24,7 +25,6 @@ use tracedecay_usecases::graph::{
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 #[derive(Clone)]
 struct DashboardTestCodeGraphProjectionV1 {
@@ -677,7 +677,10 @@ fn initialize_fixture_repository_identity(
             });
         }
     }
-    if !tracedecay::storage::write_repository_identity_marker(project_root, project_id.as_str())? {
+    if !tracedecay_runtime_core::storage::write_repository_identity_marker(
+        project_root,
+        project_id.as_str(),
+    )? {
         return Err(TraceDecayError::Config {
             message: format!(
                 "dashboard fixture repository identity marker was not written for '{}'",

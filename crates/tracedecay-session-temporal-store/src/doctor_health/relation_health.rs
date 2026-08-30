@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use tracedecay_domain::{SessionId, SessionProjectionGenerationV1};
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_runtime_core::db::engine::{
-    Error as EngineError, Result as EngineResult,
-};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, Result as EngineResult};
 
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
 
@@ -23,10 +21,7 @@ const MAX_RELATION_HEALTH_ENTITIES: usize = 100_000;
 const MAX_RELATION_HEALTH_RELATIONS: usize = 100_000;
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.query.relation_health"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.query.relation_health")]
     pub(super) async fn with_relation_graph_health(
         &self,
         mut report: SessionTemporalHealthReport,

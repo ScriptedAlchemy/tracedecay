@@ -265,15 +265,14 @@ measurements, not inferred table sizes.
   `crates/tracedecay-application/src/storage/compaction.rs`. The placement enum
   is the type-level enforcement of the "no background compaction that competes
   with foreground writes" non-goal: a compaction cannot be constructed into a
-  foreground lane. The daemon maintenance cadence applies the policy at
-  `src/daemon/git_watch/store_maintenance.rs:1649` and performs the pass at
-  `:1558`. The bounded mechanic underneath is
-  `Database::run_incremental_vacuum` in
-  `crates/tracedecay-runtime-core/src/db/maintenance.rs:27`, delegating to
-  `run_bounded_incremental_compaction` in
-  `crates/tracedecay-runtime-core/src/store_runtime/registry.rs:288`, which
+  foreground lane. The daemon maintenance cadence applies the policy from
+  `crates/tracedecay/src/daemon/store_maintenance/`. The bounded mechanic
+  underneath is `Database::run_incremental_vacuum` in
+  `crates/tracedecay-runtime-core/src/db/connection/retained_maintenance.rs`,
+  delegating to `run_bounded_incremental_compaction` in
+  `crates/tracedecay-runtime-core/src/store_runtime/registry.rs`, which
   takes an explicit authority and a page bound. The configuration surface is
-  `CompactionThresholdConfig`, covered by `src/config/tests.rs:1832-1927`.
+  `CompactionThresholdConfig`.
 - Amended 2026-08-08: the historical ~41 GB identity-drift orphan-store backlog
   remains **operationally unverified**. The identity-drift *code* repairs are
   landed (moved-checkout daemon source rebinding; former-path project-root

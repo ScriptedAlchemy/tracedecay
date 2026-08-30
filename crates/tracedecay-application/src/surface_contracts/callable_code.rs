@@ -1,18 +1,16 @@
 //! Transport-neutral callable-code and primitive-code surface request DTOs.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{
-    ExactTechnicalTermKindV1, QueryNormalizationRevision, SanitizerRevision,
-};
+use tracedecay_domain::{ExactTechnicalTermKindV1, QueryNormalizationRevision, SanitizerRevision};
 
 use crate::error::ApplicationContractError;
+use crate::result::OpaqueCursor;
 use crate::retrieval::{
     CodeFacetDimension, CodeFacetRequest, CodeLexicalFieldFilter, CodeNavigationRequest,
     CodeQueryScope, CodeRelationRequest, CodeTimelineRequest, ExactOccurrenceRequest,
     ImplementationSelector, PageRequest, PhraseSearchRequest, ResultProjection, RetrievalOrder,
     RetrievalRequestMeta, SymbolGraphScope,
 };
-use crate::result::OpaqueCursor;
 
 /// Surface-owned query semantics. Page size remains an invocation control, but
 /// continuation is a request field so CLI, MCP, and HTTP callers all have the

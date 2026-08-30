@@ -15,11 +15,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracedecay_lsp::LspSessionRegistry;
 
-use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use super::project_open_owners::{
     daemon_owned_project_source_access_at, project_open_retained_grant, resolved_scope_for_project,
 };
 use super::service::invocation::{DaemonInvocationService, DaemonRetainedRuntimeRegistrar};
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_daemon_protocol::invocation_now_micros;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
@@ -61,14 +61,18 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
     > {
         Box::pin(async move {
             if cancellation.is_cancelled() {
-                return Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
-                    stage: tracedecay_application::CancellationStage::BeforeAdmission,
-                });
+                return Err(
+                    tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
+                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                    },
+                );
             }
             if tracedecay_daemon_protocol::deadline_remaining(&deadline).is_none() {
-                return Err(tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
-                    stage: tracedecay_application::CancellationStage::BeforeAdmission,
-                });
+                return Err(
+                    tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
+                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                    },
+                );
             }
             Ok(self
                 .service

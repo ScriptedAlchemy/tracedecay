@@ -10,10 +10,11 @@
 
 use super::project_open_admission::ProjectOpenWaitOutcome;
 use super::*;
-#[cfg(any(not(unix), test))]
-use tracedecay_daemon_protocol::DaemonInvocationProblem;
 use service::invocation::semantic_evaluation::SemanticInvocationControlV1;
 use std::future::Future;
+use tracedecay_code_index_runtime::git_transactions;
+#[cfg(any(not(unix), test))]
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 fn semantic_invocation_interruption_response(

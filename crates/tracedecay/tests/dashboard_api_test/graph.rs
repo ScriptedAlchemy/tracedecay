@@ -26,7 +26,7 @@ fn assert_ready_verified_generation(body: &Value) {
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::tracedecay::TraceDecay;
-use tracedecay::types::{Edge, EdgeKind, FileRecord, Node, NodeKind, Visibility};
+use tracedecay::types::FileRecord;
 use tracedecay_application::{
     CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestAdmission, RequestContext,
     ResolvedScope,
@@ -35,6 +35,7 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_domain::code_intelligence::{Edge, EdgeKind, Node, NodeKind, Visibility};
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
@@ -155,7 +156,7 @@ fn make_node(id: &str, kind: NodeKind, name: &str, file_path: &str, start_line: 
         id: id.to_string(),
         kind,
         name: name.to_string(),
-        qualified_name: format!("crate::dashboard::{name}"),
+        qualified_name: format!("tracedecay_dashboard_api::{name}"),
         file_path: file_path.to_string(),
         start_line,
         attrs_start_line: start_line,
@@ -723,7 +724,7 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         assert_eq!(status, 200);
         assert_eq!(
             node["payload"]["node"]["qualified_name"],
-            "crate::dashboard::route_graph"
+            "tracedecay_dashboard_api::route_graph"
         );
         assert_eq!(node["payload"]["node"]["span"]["start_line"], 8);
         assert_eq!(

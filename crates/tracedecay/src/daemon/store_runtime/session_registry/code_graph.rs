@@ -32,7 +32,7 @@ use tracedecay_store::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
-use crate::daemon::store_runtime::{
+use tracedecay_code_index_runtime::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
 
@@ -45,10 +45,12 @@ pub(super) mod graph_attachment;
 mod sealed_publication_tests;
 mod seals;
 mod semantic_vector;
+mod semantic_vector_runtime;
 use seals::{
     finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
     sealed_digest_from_generation_file, stage_project_graph_replay_unlink,
 };
+use semantic_vector_runtime::DaemonVerifiedSemanticVectorGraphRuntimeV1;
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -173,6 +175,10 @@ struct GraphPublicationProbeV1 {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     commit_started: AtomicBool,
+    /// One warn per probe when the deadline first trips: interruption() is
+    /// polled from hot loops, and `DeadlineExceeded` is a unit error that
+    /// cannot otherwise be attributed to the deadline that armed it.
+    deadline_warned: AtomicBool,
 }
 
 impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
@@ -188,6 +194,13 @@ impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
         if self.request_cancellation.is_cancelled() || self.lifecycle_cancellation.is_cancelled() {
             Some(RuntimeInterruptionV1::Cancelled)
         } else if Instant::now() >= self.deadline_at {
+            if !self.deadline_warned.swap(true, Ordering::AcqRel) {
+                tracing::warn!(
+                    event = "graph_db_deadline_exceeded",
+                    deadline_id = self.deadline.deadline_id.as_str(),
+                    "graph publication probe deadline exceeded"
+                );
+            }
             Some(RuntimeInterruptionV1::DeadlineExceeded)
         } else {
             None
@@ -438,6 +451,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -507,6 +521,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 cancellation: publish_cancellation_identity.clone(),
                 deadline: publish_deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let publish_control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -671,6 +686,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -878,6 +894,7 @@ impl RetainedCodeGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1069,6 +1086,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1120,10 +1138,22 @@ impl RetainedCodeGraphRuntimeV1 {
                     // The idempotent recovery arm: this publication already
                     // owns the verified head (the gate loser after the winner
                     // published, or a re-activation before replay retirement).
-                    // Recovery resolves against the mounted database's
-                    // retained verified-generation lease and never re-reads
-                    // the sealed source at this layer; re-proof depth is the
-                    // graph registry's own recovery contract.
+                    // Prefer the immutable sealed artifact so a cold daemon
+                    // does not mount and reopen the corpus-sized shared staging
+                    // database merely to recover an already-active generation.
+                    // Dependency-bearing or absent sealed artifacts explicitly
+                    // fall back to the ordinary staging recovery path; every
+                    // integrity or control failure remains terminal.
+                    match self.graph_registry.recover_verified_sealed_snapshot(
+                        registration(),
+                        &mut storage,
+                        context,
+                        &prepared.relational_projection,
+                    ) {
+                        Ok(snapshot) => return Ok(snapshot),
+                        Err(GraphDbError::Unavailable { .. }) => {}
+                        Err(error) => return Err(error),
+                    }
                     return self.graph_registry.recover_verified_snapshot(
                         registration(),
                         &mut storage,
@@ -1543,6 +1573,7 @@ impl RetainedCodeGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1821,6 +1852,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1910,6 +1942,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1974,6 +2007,48 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
         tracedecay_graph_db::GraphDbError,
     > {
         Self::load_sealed_read_bundle_catalog(self, request_cancelled)
+    }
+
+    fn semantic_vector_identity(
+        &self,
+    ) -> std::result::Result<
+        (
+            tracedecay_domain::ProjectId,
+            RepositoryId,
+            WorktreeId,
+            CodeGenerationId,
+            GraphGenerationDependency,
+        ),
+        tracedecay_graph_db::GraphDbError,
+    > {
+        Self::semantic_vector_identity(self)
+    }
+
+    fn semantic_vector_staging_binding(
+        &self,
+    ) -> (
+        tracedecay_store::StoreShardIdV1,
+        tracedecay_store::StoreRuntimeBindingV1,
+    ) {
+        let (scope, binding) = Self::semantic_vector_staging_binding(self);
+        (scope.clone(), binding.clone())
+    }
+
+    fn into_semantic_vector_runtime(
+        self: Box<Self>,
+        scope: tracedecay_usecases::semantic_runtime::SemanticVectorGraphScopeV1,
+    ) -> Arc<dyn tracedecay_usecases::semantic_runtime::VerifiedSemanticVectorGraphRuntimeV1> {
+        let (source_scope, binding) = {
+            let (scope, binding) =
+                RetainedCodeGraphRuntimeV1::semantic_vector_staging_binding(self.as_ref());
+            (scope.clone(), binding.clone())
+        };
+        Arc::new(DaemonVerifiedSemanticVectorGraphRuntimeV1::new(
+            Arc::from(self),
+            scope,
+            source_scope,
+            binding,
+        ))
     }
 }
 

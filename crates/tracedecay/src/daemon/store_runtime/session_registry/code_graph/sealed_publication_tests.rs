@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphProjectorRevision, SealedCodeGenerationReplay,
@@ -27,18 +28,17 @@ use tracedecay_store::{
     RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
 };
-use tracedecay_usecases::retention::code_index_generations::DurablePublicationPointerV1;
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 use super::{
     AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1,
     sealed_projection_requires_stage_boundary,
 };
-use crate::daemon::code_index_scheduler::{
-    CodeGraphReplayBindingV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
-    scoped_code_index_store_root,
-};
 use crate::daemon::profile_identity;
+use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
+};
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -79,6 +79,7 @@ fn with_publication_context<T>(
         cancellation: cancellation.clone(),
         deadline: deadline.clone(),
         commit_started: AtomicBool::new(false),
+        deadline_warned: AtomicBool::new(false),
     };
     let control = RuntimeRequestControlV1 {
         requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -272,8 +273,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     git(&project_root, &["add", "."]);
     git(&project_root, &["commit", "-qm", "sealed fixture"]);
     let project_id = ProjectId::new("project.sealed-code-publication").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
-        .expect("project enrollment");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
     let canonical_project = project_root.canonicalize().expect("canonical project root");
 
     // Seal one real generation through the production worktree scheduler.
@@ -554,7 +558,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         )
         .expect("next sealed state digest"),
     };
-    let next_runtime = registry
+    let mut next_runtime = registry
         .retain_code_graph_runtime(
             project_id,
             next.generation().snapshot().repository.clone(),
@@ -588,6 +592,50 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         )
         .expect("next projected generation")
         .as_str()
+    );
+
+    // A cold daemon has the durable relational head and the derived sealed
+    // graph store produced by the successful publication above, but no shared
+    // staging runtime in its new GraphDB registry. Reopening the exact active
+    // publication must use that verified sealed artifact directly and leave
+    // the staging shard unregistered.
+    let next_generation = next_snapshot.generation().clone();
+    let next_head = next_snapshot.verified_head().clone();
+    drop(next_snapshot);
+    let manifest_provider: Arc<dyn tracedecay_graph_db::GraphGenerationManifestProvider> =
+        next_runtime.graph_manifest_provider.clone();
+    let cold_graph_registry = tracedecay_graph_db::GraphDbRegistry::new_with_manifest_provider(
+        tracedecay_graph_db::GraphDbRegistryConfig { max_open: 1 },
+        manifest_provider,
+    )
+    .expect("cold graph registry");
+    // This test retains graph runtimes directly outside the daemon owner maps.
+    // Model the real process boundary by dropping every old-daemon runtime and
+    // registry owner, then seat the retained publication inputs in a fresh
+    // lifecycle and GraphDB registry. The old registry's final drop releases
+    // its staging and sealed Grafeo handles without bypassing lease checks.
+    drop(runtime);
+    drop(registry);
+    next_runtime.lifecycle_cancelled = Arc::new(AtomicBool::new(false));
+    drop(std::mem::replace(
+        &mut next_runtime.graph_registry,
+        cold_graph_registry.clone(),
+    ));
+    assert!(
+        !cold_graph_registry
+            .shard_is_registered(&next_runtime.authority.binding().shard_id)
+            .expect("cold staging registration state")
+    );
+    let cold_reopened = next_runtime
+        .publish_verified_snapshot(next.generation(), Arc::new(AtomicBool::new(false)))
+        .expect("cold activation must recover from the verified sealed artifact");
+    assert_eq!(cold_reopened.generation(), &next_generation);
+    assert_eq!(cold_reopened.verified_head(), &next_head);
+    assert!(
+        !cold_graph_registry
+            .shard_is_registered(&next_runtime.authority.binding().shard_id)
+            .expect("post-recovery staging registration state"),
+        "direct sealed recovery must not mount the shared staging database"
     );
 }
 
@@ -628,8 +676,11 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
     git(&project_root, &["add", "."]);
     git(&project_root, &["commit", "-qm", "sealed bundle fixture"]);
     let project_id = ProjectId::new("project.sealed-read-bundle").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
-        .expect("project enrollment");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
     let canonical_project = project_root.canonicalize().expect("canonical project root");
 
     let store_root = root.join("code-index-store");
@@ -833,8 +884,11 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
     git(&project_root, &["add", "."]);
     git(&project_root, &["commit", "-qm", "offered decode fixture"]);
     let project_id = ProjectId::new("project.offered-decode").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
-        .expect("project enrollment");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
     let canonical_project = project_root.canonicalize().expect("canonical project root");
 
     // Seal one real generation through the production worktree scheduler, then
@@ -1065,8 +1119,11 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         &["commit", "-qm", "concurrent publication fixture"],
     );
     let project_id = ProjectId::new("project.concurrent-code-publication").expect("project id");
-    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
-        .expect("project enrollment");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
     let canonical_project = project_root.canonicalize().expect("canonical project root");
 
     // Seal one real generation through the production worktree scheduler.

@@ -2,7 +2,7 @@
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
 Cursor, Kimi Code, and OpenCode. The installed bundles expose a host-specific MCP server
-key (`graph` for Claude/Codex, `tracedecay` for Cursor and Kimi Code), shared
+key (`graph` for Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode), shared
 workflow skills, and host-specific lifecycle hooks. Each hook is a bounded
 daemon-admission adapter; capture, sync, compaction, and advisory work stay in
 the daemon.
@@ -51,8 +51,15 @@ applied to every `Announce:` line.
 - `mcp-cursor.json`: Cursor MCP config, deployed as `mcp.json`.
 - `.kimi-plugin/plugin.json`: Kimi Code manifest. It embeds
   `mcpServers.tracedecay` inline, so there is no separate Kimi MCP config file.
+- `opencode/`: OpenCode native plugin (`tracedecay.ts`), MCP companion
+  (`tracedecay-mcp.ts`), and registration JSON (`opencode.registration.json`).
+  OpenCode has no `plugin.json`; the host discovers the TypeScript module.
 - `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`:
   host README files, deployed as `README.md`.
+- `README-opencode.md`: OpenCode host README. It is source documentation;
+  OpenCode has no plugin-manifest README deploy slot.
+- `README-host-bundles.md`: catalog/lifecycle contract and the host
+  capability matrix.
 
 ## Search Routing
 

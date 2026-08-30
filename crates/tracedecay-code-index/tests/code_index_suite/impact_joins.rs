@@ -13,10 +13,11 @@ use tracedecay_code_index::provider::{
 };
 use tracedecay_domain::{
     CodeGenerationManifestV1, ContentDigest, ProviderEvaluationStateV1, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeSnapshotV1,
+    SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros,
 };
 
 use super::support::{id, registry};
+use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
 
 fn content(byte: char) -> ContentDigest {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))

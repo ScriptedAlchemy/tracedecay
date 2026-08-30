@@ -14,7 +14,6 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
-use super::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use super::profile_host_admission_replay::{
     ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
     ProfileHostAdmissionReplayRegistry,
@@ -25,6 +24,7 @@ use super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRe
 use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
+use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 mod project_retirement;
@@ -46,11 +46,8 @@ type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
 #[cfg(not(feature = "hotpath"))]
 type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 
-type HostAdmissionBrokers = Arc<
-    ProfiledTokioMutex<
-        HashMap<PathBuf, tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
-    >,
->;
+type HostAdmissionBrokers =
+    Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_host_admission::SharedHostAdmissionBroker>>>;
 
 /// Resolves the writer scope for one store family.
 ///
@@ -398,7 +395,7 @@ impl ProfileHostAdmissionBootstrapContext {
     async fn open_broker(
         &self,
         path: &Path,
-    ) -> Result<tracedecay_usecases::host_admission::SharedHostAdmissionBroker> {
+    ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
         if let Some(broker) = self.host_admission_brokers.lock().await.get(path).cloned() {
             return Ok(broker);
         }
@@ -413,9 +410,7 @@ impl ProfileHostAdmissionBootstrapContext {
         let (runtime, _) = tokio::task::spawn_blocking(move || {
             hotpath::measure_block!(
                 "daemon.branch_admin.host_admission_runtime.open",
-                tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(
-                    &open_path
-                )
+                tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&open_path)
             )
         })
         .await
@@ -426,8 +421,7 @@ impl ProfileHostAdmissionBootstrapContext {
                 "host-admission spool runtime task failed",
             )
         })??;
-        let broker =
-            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
         self.host_admission_brokers
             .lock()
             .await
@@ -731,7 +725,7 @@ impl StoreAdministration {
     pub(super) async fn registered_project_session_database(
         &self,
         project_root: &Path,
-        store_layout: &crate::storage::StoreLayout,
+        store_layout: &tracedecay_runtime_core::storage::StoreLayout,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let project_id = store_layout
             .identity
@@ -803,7 +797,7 @@ impl StoreAdministration {
     pub(super) async fn host_admission_broker(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    ) -> Result<tracedecay_usecases::host_admission::SharedHostAdmissionBroker> {
+    ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
             .remote_account_deletion_tombstone(profile_id)
@@ -824,7 +818,7 @@ impl StoreAdministration {
     async fn host_admission_broker_for_path(
         &self,
         database_path: &Path,
-    ) -> Result<tracedecay_usecases::host_admission::SharedHostAdmissionBroker> {
+    ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
         let path = authority::canonical_identity_path(database_path)?;
         if let Some(broker) = self.host_admission_brokers.lock().await.get(&path).cloned() {
             self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
@@ -845,7 +839,7 @@ impl StoreAdministration {
                 let (runtime, _) = tokio::task::spawn_blocking(move || {
                     hotpath::measure_block!(
                         "daemon.branch_admin.host_admission_runtime.open",
-                        tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(
+                        tracedecay_host_admission::HostAdmissionRuntime::open_for_database(
                             &open_path
                         )
                     )
@@ -858,9 +852,7 @@ impl StoreAdministration {
                         "host-admission spool runtime task failed",
                     )
                 })??;
-                let broker = Arc::new(
-                    tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime),
-                );
+                let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
                 self.host_admission_brokers
                     .lock()
                     .await
@@ -881,7 +873,7 @@ impl StoreAdministration {
     pub(super) async fn ensure_user_profile_host_admission_replay(
         &self,
         profile_root: &Path,
-        broker: &tracedecay_usecases::host_admission::SharedHostAdmissionBroker,
+        broker: &tracedecay_host_admission::SharedHostAdmissionBroker,
         broker_path: &Path,
     ) {
         self.profile_host_admission_replay
@@ -975,7 +967,7 @@ impl StoreAdministration {
     async fn maybe_ensure_user_profile_host_admission_replay(
         &self,
         broker_path: &Path,
-        broker: &tracedecay_usecases::host_admission::SharedHostAdmissionBroker,
+        broker: &tracedecay_host_admission::SharedHostAdmissionBroker,
     ) {
         let is_user_sessions = broker_path.file_name().and_then(|name| name.to_str())
             == Some(tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME);
@@ -1319,7 +1311,7 @@ impl StoreAdministration {
     pub(super) async fn reconcile_cached_automation_for_profile(
         &self,
         profile_root: &Path,
-    ) -> Result<Vec<crate::dashboard::AutomationSchedulerOwnerReconcileOutcome>> {
+    ) -> Result<Vec<tracedecay_dashboard_api::AutomationSchedulerOwnerReconcileOutcome>> {
         self.ensure_account_active().await?;
         let profile_root = authority::canonical_identity_path(profile_root)?;
         let servers = {
@@ -1333,13 +1325,15 @@ impl StoreAdministration {
         };
         let mut outcomes = Vec::with_capacity(servers.len());
         for (key, server) in servers {
-            outcomes.push(crate::dashboard::AutomationSchedulerOwnerReconcileOutcome {
-                project_id: key.owner.project_id,
-                store_root: key.owner.store_root,
-                graph_db_path: key.owner.graph_db_path,
-                scope_prefix: key.scope_prefix,
-                outcome: server.reconcile_automation_scheduler().await,
-            });
+            outcomes.push(
+                tracedecay_dashboard_api::AutomationSchedulerOwnerReconcileOutcome {
+                    project_id: key.owner.project_id,
+                    store_root: key.owner.store_root,
+                    graph_db_path: key.owner.graph_db_path,
+                    scope_prefix: key.scope_prefix,
+                    outcome: server.reconcile_automation_scheduler().await,
+                },
+            );
         }
         Ok(outcomes)
     }
@@ -1401,10 +1395,10 @@ impl StoreAdministration {
     #[hotpath::measure(label = "daemon.branch_admin.handshake", future = true)]
     pub(super) async fn execute_branch_admin_for_handshake(
         &self,
-        schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         handshake: &DaemonHandshake,
-        action: crate::branch::BranchAdminAction,
-    ) -> Result<crate::branch::BranchAdminReport> {
+        action: tracedecay_runtime_core::branch::BranchAdminAction,
+    ) -> Result<tracedecay_runtime_core::branch::BranchAdminReport> {
         let project_root =
             handshake
                 .project_path
@@ -1412,7 +1406,7 @@ impl StoreAdministration {
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "branch administration requires a project path".to_string(),
                 })?;
-        let layout = crate::storage::resolve_persisted_layout(
+        let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(
             project_root,
             &handshake.client_identity.profile_root,
         )?
@@ -1461,14 +1455,14 @@ impl StoreAdministration {
     #[hotpath::measure(label = "daemon.branch_admin.execute", future = true)]
     pub(super) async fn execute_branch_admin_in_layout(
         &self,
-        schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: &Path,
         data_root: &Path,
-        action: crate::branch::BranchAdminAction,
+        action: tracedecay_runtime_core::branch::BranchAdminAction,
         branch_gc_days: u64,
         orphan_db_gc_days: u64,
-    ) -> Result<crate::branch::BranchAdminReport> {
-        let prepared = crate::branch::prepare_branch_admin_mutation(
+    ) -> Result<tracedecay_runtime_core::branch::BranchAdminReport> {
+        let prepared = tracedecay_runtime_core::branch::prepare_branch_admin_mutation(
             project_root,
             data_root,
             action,
@@ -1563,7 +1557,7 @@ impl StoreAdministration {
 #[hotpath::measure(label = "daemon.branch_admin.acquire_retirement_leases")]
 fn acquire_manual_branch_retirement_leases(
     data_root: &Path,
-    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+    retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
 ) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
     retirements
         .iter()
@@ -1583,8 +1577,8 @@ fn acquire_manual_branch_retirement_leases(
 async fn cleanup_manual_branch_retirements(
     project_root: &Path,
     data_root: &Path,
-    schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
     lifecycle_leases: Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>,
 ) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
     if retirements.len() != lifecycle_leases.len() {
@@ -1617,7 +1611,8 @@ async fn cleanup_manual_branch_retirements(
 
 pub(super) struct BranchAdminRequest {
     pub(super) id: serde_json::Value,
-    pub(super) action: std::result::Result<crate::branch::BranchAdminAction, String>,
+    pub(super) action:
+        std::result::Result<tracedecay_runtime_core::branch::BranchAdminAction, String>,
 }
 
 pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminRequest> {
@@ -1700,7 +1695,7 @@ fn destructive_reservation_error(
 }
 
 fn branch_admin_tool_result(
-    report: &crate::branch::BranchAdminReport,
+    report: &tracedecay_runtime_core::branch::BranchAdminReport,
 ) -> Result<serde_json::Value> {
     Ok(json!({
         "content": [{
@@ -1731,7 +1726,7 @@ fn branch_admin_error_response(id: serde_json::Value, error: &TraceDecayError) -
 pub(super) async fn write_branch_admin_response(
     transport: &mut impl McpTransport,
     request: BranchAdminRequest,
-    result: Result<crate::branch::BranchAdminReport>,
+    result: Result<tracedecay_runtime_core::branch::BranchAdminReport>,
 ) -> Result<()> {
     let response = match (request.action, result) {
         (Err(message), _) => JsonRpcResponse::error(request.id, ErrorCode::InvalidParams, message),
@@ -2153,7 +2148,7 @@ mod tests {
         assert_eq!(request.id, json!(7));
         assert_eq!(
             request.action.expect("valid action"),
-            crate::branch::BranchAdminAction::Remove {
+            tracedecay_runtime_core::branch::BranchAdminAction::Remove {
                 branch: "feature/a".to_string()
             }
         );

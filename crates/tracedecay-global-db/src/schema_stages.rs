@@ -688,7 +688,8 @@ async fn install_registered_schema_stages(
             session_temporal_schema::install_session_temporal_schema(transaction).await?;
         }
         session_temporal_schema::SessionTemporalSchemaAdmission::ReleasedV3 => {
-            session_temporal_schema::migrate_released_v3_session_temporal_schema(transaction).await?;
+            session_temporal_schema::migrate_released_v3_session_temporal_schema(transaction)
+                .await?;
         }
         session_temporal_schema::SessionTemporalSchemaAdmission::Current => {}
     }

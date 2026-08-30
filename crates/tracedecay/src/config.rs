@@ -755,7 +755,7 @@ pub fn install_pinned_runtime_configuration(
 /// never replaced by a path-derived identity.
 pub fn runtime_configuration_target_for_layout(
     project_root: &Path,
-    layout: &crate::storage::StoreLayout,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
 ) -> Result<RuntimeConfigurationTarget> {
     let project_id = layout.identity.project_id.as_deref().ok_or_else(|| {
         config_error("configuration authority unavailable: store layout has no project id")
@@ -785,7 +785,7 @@ pub fn runtime_configuration_target_for_project_id(
 /// [`open_runtime_configuration_for_registered_database`] instead.
 pub fn runtime_configuration_for_layout(
     project_root: &Path,
-    layout: &crate::storage::StoreLayout,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
 ) -> Result<PinnedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     let configuration = runtime_configuration_cache()
@@ -811,7 +811,7 @@ pub fn runtime_configuration_for_layout(
 /// than a fabricated default authority.
 pub(crate) async fn resolve_runtime_configuration_for_registered_database(
     project_root: &Path,
-    layout: &crate::storage::StoreLayout,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
 ) -> Result<PinnedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
@@ -892,7 +892,7 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
     fn open<'a>(
         &'a self,
         project_root: &'a Path,
-        layout: &'a crate::storage::StoreLayout,
+        layout: &'a tracedecay_runtime_core::storage::StoreLayout,
         database: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
         'a,
@@ -909,7 +909,7 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
     fn open_read_only<'a>(
         &'a self,
         project_root: &'a Path,
-        layout: &'a crate::storage::StoreLayout,
+        layout: &'a tracedecay_runtime_core::storage::StoreLayout,
         database: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
         'a,
@@ -930,7 +930,7 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
     fn resolve<'a>(
         &'a self,
         project_root: &'a Path,
-        layout: &'a crate::storage::StoreLayout,
+        layout: &'a tracedecay_runtime_core::storage::StoreLayout,
         database: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
         'a,
@@ -951,7 +951,7 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
     fn load_read_only<'a>(
         &'a self,
         project_root: &'a Path,
-        layout: &'a crate::storage::StoreLayout,
+        layout: &'a tracedecay_runtime_core::storage::StoreLayout,
         database: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
         'a,
@@ -993,7 +993,7 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
 #[hotpath::measure(label = "daemon.config.open", future = true)]
 pub(crate) async fn open_runtime_configuration_for_registered_database(
     project_root: &Path,
-    layout: &crate::storage::StoreLayout,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
 ) -> Result<OpenedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
@@ -1223,7 +1223,7 @@ async fn open_runtime_configuration_from_store(
 #[cfg(test)]
 pub(crate) async fn ensure_runtime_configuration_for_registered_database(
     project_root: &Path,
-    layout: &crate::storage::StoreLayout,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
 ) -> Result<PinnedRuntimeConfiguration> {
     Ok(
@@ -1238,7 +1238,7 @@ pub(crate) async fn ensure_runtime_configuration_for_registered_database(
 #[hotpath::measure(label = "daemon.config.open.read_only", future = true)]
 pub(crate) async fn open_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
-    layout: &crate::storage::StoreLayout,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
 ) -> Result<OpenedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
@@ -1290,7 +1290,7 @@ fn validate_registered_configuration_database(
 
 pub(crate) async fn load_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
-    layout: &crate::storage::StoreLayout,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
 ) -> Result<PinnedRuntimeConfiguration> {
     Ok(
@@ -1307,7 +1307,7 @@ pub(crate) async fn load_runtime_configuration_for_registered_database_read_only
 #[cfg(not(test))]
 pub async fn ensure_runtime_configuration_for_layout(
     _project_root: &Path,
-    _layout: &crate::storage::StoreLayout,
+    _layout: &tracedecay_runtime_core::storage::StoreLayout,
 ) -> Result<PinnedRuntimeConfiguration> {
     Err(registered_configuration_database_required())
 }
@@ -1315,7 +1315,7 @@ pub async fn ensure_runtime_configuration_for_layout(
 #[cfg(not(test))]
 pub async fn resolve_runtime_configuration_for_layout(
     _project_root: &Path,
-    _layout: &crate::storage::StoreLayout,
+    _layout: &tracedecay_runtime_core::storage::StoreLayout,
 ) -> Result<PinnedRuntimeConfiguration> {
     Err(registered_configuration_database_required())
 }
@@ -1323,7 +1323,7 @@ pub async fn resolve_runtime_configuration_for_layout(
 #[cfg(not(test))]
 pub async fn load_runtime_configuration_for_layout_read_only(
     _project_root: &Path,
-    _layout: &crate::storage::StoreLayout,
+    _layout: &tracedecay_runtime_core::storage::StoreLayout,
 ) -> Result<PinnedRuntimeConfiguration> {
     Err(registered_configuration_database_required())
 }
@@ -1380,7 +1380,7 @@ pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
 #[hotpath::measure(label = "daemon.config.bootstrap")]
 pub fn bootstrap_runtime_configuration(
     project_root: &Path,
-    layout: &crate::storage::StoreLayout,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
 ) -> Result<PinnedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     if let Ok(existing) = runtime_configuration_cache().for_project(&target.project_id) {
@@ -1594,7 +1594,9 @@ pub fn brand_env(suffix: &str) -> Option<String> {
 /// Returns the path to the configuration file (`config.json`) within the
 /// resolved data directory.
 pub fn get_config_path(project_root: &Path) -> PathBuf {
-    if let Ok(layout) = crate::storage::resolve_layout_for_current_profile(project_root) {
+    if let Ok(layout) =
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root)
+    {
         return layout.config_path;
     }
     get_tracedecay_dir(project_root).join(CONFIG_FILENAME)
@@ -1670,7 +1672,7 @@ pub fn save_config_to_path(config_path: &Path, config: &TraceDecayConfig) -> Res
                 config_path.display()
             ),
         })?;
-    crate::storage::PrivateStoreIo::create_dir_all(data_dir).map_err(|e| {
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(data_dir).map_err(|e| {
         TraceDecayError::Config {
             message: format!(
                 "failed to create tracedecay directory '{}': {}",

@@ -102,18 +102,20 @@ fn attach_full_branch_status(cg: &TraceDecay, output: &mut Value) {
 
 /// Serialize the generation census exactly as the CLI decoder reads it back.
 ///
-/// [`crate::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
+/// [`tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
 /// authority for the `graph_statistics` field: this route serializes it and
 /// `tracedecay status` deserializes the same Rust type, so the two sides
 /// cannot drift.
 pub(crate) async fn graph_statistics_value(
-    generation_census_reader: Option<&crate::runtime_telemetry::GenerationCensusReader>,
+    generation_census_reader: Option<
+        &tracedecay_usecases::runtime_telemetry::GenerationCensusReader,
+    >,
 ) -> Result<Value> {
     let census = match generation_census_reader {
         Some(reader) => reader().await,
-        None => crate::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+        None => tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
             reason:
-                crate::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+                tracedecay_usecases::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
         },
     };
     Ok(serde_json::to_value(&census)?)
@@ -127,9 +129,11 @@ pub(crate) async fn handle_status(
     scope_prefix: Option<&str>,
     project_session_db: Option<&RegisteredGlobalDb>,
     code_index_freshness_reader: Option<
-        &crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
+        &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
     >,
-    generation_census_reader: Option<&crate::runtime_telemetry::GenerationCensusReader>,
+    generation_census_reader: Option<
+        &tracedecay_usecases::runtime_telemetry::GenerationCensusReader,
+    >,
 ) -> Result<ToolResult> {
     if status_arg_flag(&args, "admission_only", false) {
         let mut output = json!({
@@ -506,11 +510,11 @@ pub(crate) fn handle_active_project(
 mod tests {
     use std::sync::Arc;
 
-    use crate::runtime_telemetry::{
-        GenerationCensusReader, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
-    };
     use tracedecay_global_db::{
         SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
+    };
+    use tracedecay_usecases::runtime_telemetry::{
+        GenerationCensusReader, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
     };
 
     use super::{graph_statistics_value, historical_session_catch_up_state};

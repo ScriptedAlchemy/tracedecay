@@ -12,10 +12,11 @@ use tracedecay_domain::{
     GitChangeKindV1, GitCommitIdentityV1, GitCommitMetadataV1, GitCoverageV1, GitDegradationV1,
     GitDiffScopeV1, GitDiffV1, GitFileDiffV1, GitFileModeV1, GitHistoryV1, GitHunkV1, GitOidV1,
     ManifestDigest, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeSnapshotV1,
+    SnapshotFileDispositionV1, UtcMicros,
 };
 
 use super::support::{id, registry};
+use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
 
 fn content(byte: char) -> ContentDigest {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))

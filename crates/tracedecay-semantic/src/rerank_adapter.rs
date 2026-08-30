@@ -161,7 +161,7 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
         Ok(candidate_count.div_ceil(self.authority.max_batch_size))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.embedding.rerank")]
     fn rerank(
         &self,
         _policy: &RerankPolicy,
@@ -201,9 +201,9 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
             }));
         }
         run_session(
-            session
-                .as_mut()
-                .unwrap_or_else(|| panic!("rerank session initialized above")),
+            session.as_mut().ok_or_else(|| {
+                LocalRerankFailureV1::Unavailable(SanitizedStageFailure::Internal)
+            })?,
             query,
             &documents,
             inputs,

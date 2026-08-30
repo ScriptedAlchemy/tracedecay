@@ -28,7 +28,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
 const EXPIRES_AT: UtcMicros = UtcMicros(10_000);

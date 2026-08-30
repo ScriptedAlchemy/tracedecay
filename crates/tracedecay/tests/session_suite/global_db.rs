@@ -2,12 +2,12 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::lcm::LcmStorageKind;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     SessionSearchScope, SessionSearchTimeRange,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{global_message as sample_message, global_session as sample_session};
 
@@ -1378,7 +1378,7 @@ async fn session_ingest_health_can_filter_by_provider() {
 
 #[tokio::test]
 async fn hook_analytics_import_is_incremental_and_idempotent() {
-    use tracedecay::analytics_bridge::HookImportSource;
+    use tracedecay_usecases::analytics_bridge::HookImportSource;
 
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;

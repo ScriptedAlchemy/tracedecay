@@ -13,10 +13,11 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use tracedecay_usecases::host_admission::{
-    HostAdmissionOutcome, REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, SharedHostAdmissionBroker,
-    classify_replay_pass, replay_backoff,
+use tracedecay_host_admission::{
+    REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
+    replay_backoff,
 };
+use tracedecay_sessions::admission::HostAdmissionOutcome;
 
 type PassFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = HostAdmissionOutcome> + Send>> + Send + Sync>;
@@ -238,13 +239,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_retryable_pending_record_stops_until_an_external_kick() {
         let temp = tempfile::TempDir::new().unwrap();
-        let (runtime, _) = tracedecay_usecases::host_admission::HostAdmissionRuntime::open(
+        let (runtime, _) = tracedecay_host_admission::HostAdmissionRuntime::open(
             temp.path(),
-            tracedecay_usecases::host_admission::SpoolBounds::default(),
+            tracedecay_host_admission::SpoolBounds::default(),
         )
         .unwrap();
-        let broker =
-            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
         broker.admit("test:pending", b"pending").await.unwrap();
         let passes = Arc::new(AtomicUsize::new(0));
         let passes_for_run = Arc::clone(&passes);
@@ -275,13 +275,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropping_task_aborts_an_in_flight_pass_without_an_arc_cycle() {
         let temp = tempfile::TempDir::new().unwrap();
-        let (runtime, _) = tracedecay_usecases::host_admission::HostAdmissionRuntime::open(
+        let (runtime, _) = tracedecay_host_admission::HostAdmissionRuntime::open(
             temp.path(),
-            tracedecay_usecases::host_admission::SpoolBounds::default(),
+            tracedecay_host_admission::SpoolBounds::default(),
         )
         .unwrap();
-        let broker =
-            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
         let started = Arc::new(Notify::new());
         let started_for_run = Arc::clone(&started);
         let pass: PassFn = Arc::new(move || {

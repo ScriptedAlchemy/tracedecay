@@ -53,6 +53,12 @@ impl<'a> GraphPublicationOperationContextV1<'a> {
         self.probe.interruption()
     }
 
+    /// The registered deadline identity this context enforces, so a typed
+    /// `DeadlineExceeded` can be attributed to the operation that armed it.
+    pub fn deadline_id(&self) -> &str {
+        self.probe.deadline_identity().deadline_id.as_str()
+    }
+
     pub fn try_begin_verified_commit(&self) -> bool {
         self.try_begin_commit()
     }

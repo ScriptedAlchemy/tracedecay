@@ -632,10 +632,7 @@ fn record_relation_derivation_work(work: RelationDerivationWork) {
     let _ = work;
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.candidate_parent"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.projection.candidate_parent")]
 async fn candidate_parent_message_resolver(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
@@ -704,10 +701,7 @@ async fn candidate_parent_message_resolver(
     Ok(resolver)
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.parent_resolver"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.projection.parent_resolver")]
 pub async fn canonical_parent_message_resolver(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &str,
@@ -854,10 +848,7 @@ impl ParentMessageResolver {
             });
     }
 
-    pub(crate) fn reject_ambiguity(
-        &self,
-        operation: &'static str,
-    ) -> SessionStoreResult<()> {
+    pub(crate) fn reject_ambiguity(&self, operation: &'static str) -> SessionStoreResult<()> {
         if let Some((message_id, resolution)) = self
             .occurrences
             .iter()

@@ -7,9 +7,7 @@ use tracedecay_store::SessionStoreResult;
 
 use super::query::{generation_i64, now_micros, storage, storage_message};
 use super::relations::{SessionRelationProjection, projection_watermark};
-use crate::handle::{
-    SessionTemporalExec, SessionTemporalRegisteredDb, SessionTemporalWriteTxn,
-};
+use crate::handle::{SessionTemporalExec, SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
 
 const RECEIPT_OPERATION: &str = "publish native session relation receipt";
 

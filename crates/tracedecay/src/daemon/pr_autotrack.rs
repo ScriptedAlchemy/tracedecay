@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::canonical_text::sha256_hex;
 
-use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const GIT_AUTHORITY_UNAVAILABLE: &str = "git_authority_unavailable";
@@ -74,7 +74,7 @@ pub struct ManualBranchActivation {
     /// Linked worktree checked out for the code-index scheduler.
     pub worktree: PathBuf,
     /// CLI/MCP outcome for the activation.
-    pub outcome: crate::branch::BranchAddOutcome,
+    pub outcome: tracedecay_runtime_core::branch::BranchAddOutcome,
 }
 
 /// The exact Git and filesystem artifacts owned by one manually activated
@@ -408,7 +408,11 @@ fn save_state(data_root: &Path, state: &PrAutotrackState) -> std::io::Result<()>
     let path = state_path(data_root);
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
     let temp = path.with_extension("json.tmp");
-    crate::storage::PrivateStoreIo::write_file_atomically(&path, &temp, json.as_bytes())
+    tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically(
+        &path,
+        &temp,
+        json.as_bytes(),
+    )
 }
 
 /// A summary of managed PR branches for status surfaces (dashboard / CLI).
@@ -933,7 +937,7 @@ async fn activate_manual_branch_with_administration(
             branch: branch.to_string(),
             head_sha,
             worktree,
-            outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
+            outcome: tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked,
         });
     }
 
@@ -1028,7 +1032,7 @@ async fn activate_manual_branch_with_administration(
             branch: branch.to_string(),
             head_sha,
             worktree,
-            outcome: crate::branch::BranchAddOutcome::Added,
+            outcome: tracedecay_runtime_core::branch::BranchAddOutcome::Added,
         }),
         Err(reason) => {
             cleanup_failed_manual_track(
@@ -2104,7 +2108,7 @@ async fn activate_linked_worktree(
             None,
             graph_runtime.code_graph_seat_port(),
             project_database,
-            crate::daemon::code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
+            tracedecay_code_index_runtime::code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                 graph.get_config().native_graph_activation,
             ),
         )

@@ -663,11 +663,12 @@ fn skill_tree_files(root: &Path) -> Vec<String> {
 }
 
 /// The composed Codex deploy set (sourced from the shared `plugin/` tree
-/// via `codex_files`) must cover every shared model-invocable skill and the
-/// 13 canonical `tracedecay-*` workflow dispatchers, plus Codex's manifest,
-/// `.mcp.json`, hooks, and README. Codex has no slash-command or
-/// `disable-model-invocation` surface, so it ships all skills in their
-/// canonical (model-invocable) form.
+/// via `codex_files`) must cover every file under `plugin/skills/` plus
+/// Codex's manifest, `.mcp.json`, hooks, and README. Codex has no
+/// slash-command or `disable-model-invocation` surface, so it ships all
+/// skills in their canonical (model-invocable) form. Workflow dispatch lives
+/// in native slash commands on other hosts; Codex does not ship those
+/// commands or retired `tracedecay-*` dispatcher skills.
 #[test]
 fn codex_embedded_file_list_covers_the_whole_source_bundle() {
     let deploy: std::collections::BTreeSet<String> = codex_embedded_plugin_files()
@@ -1227,4 +1228,44 @@ fn codex_update_plugin_refreshes_bundle_and_records_hook_trust() {
         CodexHookTrustState::Trusted
     );
     assert_eq!(codex_hook_trust_followup(home.path()), None);
+}
+
+#[test]
+fn deactivation_fails_on_corrupt_plugins_table() {
+    let home = tempfile::tempdir().unwrap();
+    install_codex_marketplace_entry(
+        &codex_personal_marketplace_path(home.path()),
+        "personal",
+        "Personal",
+        CODEX_GLOBAL_PLUGIN_SOURCE_PATH,
+    )
+    .unwrap();
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "plugins = \"corrupt\"\n").unwrap();
+
+    let error = CodexIntegration
+        .deactivate_deployed_host_registration(&install_ctx(home.path()))
+        .expect_err("a corrupt plugins table must fail deactivate");
+    assert!(
+        error
+            .to_string()
+            .contains("could not read Codex native plugin activation state"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "plugins = \"corrupt\"\n"
+    );
+}
+
+#[test]
+fn detected_host_surface_reports_codex_home() {
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(CodexIntegration.detected_host_surface(home.path()), None);
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    assert_eq!(
+        CodexIntegration.detected_host_surface(home.path()),
+        Some(home.path().join(".codex"))
+    );
 }

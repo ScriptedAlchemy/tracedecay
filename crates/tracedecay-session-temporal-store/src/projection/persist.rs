@@ -78,10 +78,7 @@ pub async fn session_temporal_projection_record_count(
     u64::try_from(count).map_err(|error| storage(MATERIALIZE_REFRESH, error))
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.persist.projection_batch"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.persist.projection_batch")]
 pub async fn persist_session_temporal_projection_batch_in_transaction(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -172,10 +169,7 @@ pub(crate) enum ProjectionProgressBaseline {
     SeededFromActive,
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.persist.seed_projection"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.persist.seed_projection")]
 pub async fn seed_active_projection_in_transaction(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -616,8 +610,7 @@ fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
     {
         hotpath::gauge!("session_temporal.persistence.source_projections")
             .inc(work.source_projections);
-        hotpath::gauge!("session_temporal.persistence.envelope_parses")
-            .inc(work.envelope_parses);
+        hotpath::gauge!("session_temporal.persistence.envelope_parses").inc(work.envelope_parses);
         hotpath::gauge!("session_temporal.persistence.projection_output_index_rows")
             .inc(work.indexed_outputs);
         hotpath::gauge!("session_temporal.persistence.projection_output_lookups")

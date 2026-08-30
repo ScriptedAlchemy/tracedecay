@@ -66,9 +66,9 @@ use tracedecay_lsp::{
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
 use crate::surface::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
-use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_application::ConfigurationWireRequestV1;
 use tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
+use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_usecases::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 use tracedecay_usecases::primitives::PrimitiveRequest;
 
@@ -1242,15 +1242,13 @@ impl DaemonInvocationRequest {
             | (
                 surface_operation @ crate::surface::ApplicationSurfaceOperation::DiagnosticsRead,
                 request @ PrimitiveRequest::DiagnosticsRead(_),
-            ) => {
-                DaemonInvocationPayload::PrimitiveRead {
-                    surface_operation,
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                }
-            }
+            ) => DaemonInvocationPayload::PrimitiveRead {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
             _ => unreachable!("surface operation and primitive request must match"),
         };
         Self {
@@ -1783,7 +1781,7 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::GitPreview { .. } => DaemonInvocationOperation::GitPreview,
             DaemonInvocationPayload::GitHubStackSignalExpand { .. } => {
                 DaemonInvocationOperation::GitHubStackSignalExpand
-            },
+            }
             DaemonInvocationPayload::GitApply { .. } => DaemonInvocationOperation::GitApply,
             DaemonInvocationPayload::NativeIntegration {
                 surface_operation, ..

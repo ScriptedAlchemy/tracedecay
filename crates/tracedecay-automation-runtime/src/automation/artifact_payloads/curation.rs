@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tracedecay_store::{
     FactCommitReceipt, ProjectMemoryFactCurationOperationEffectV1,
-    ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactIdV1,
 };
 
 use super::super::artifact_feedback::validation_report_hash;
@@ -50,7 +50,7 @@ fn receipt_summaries(applied_ops: Option<&Value>) -> Vec<Value> {
                 "replay_fact_id": receipt.replay_fact_id(),
                 "replay_event_id": receipt.replay_event_id(),
                 "changed_fact_ids": receipt.changed_facts().iter()
-                    .map(|fact| fact.fact_id())
+                    .map(ProjectMemoryFactIdV1::fact_id)
                     .collect::<Vec<_>>(),
                 "effects": receipt.operation_effects().iter()
                     .map(effect_summary)
@@ -72,7 +72,7 @@ fn effect_summary(effect: &ProjectMemoryFactCurationOperationEffectV1) -> Value 
             "kind": "add",
             "fact_id": fact.fact_id(),
             "disposition": disposition,
-            "closest_fact_id": closest_fact.as_ref().map(|fact| fact.fact_id()),
+            "closest_fact_id": closest_fact.as_ref().map(ProjectMemoryFactIdV1::fact_id),
             "similarity_millionths": similarity_millionths,
             "commit": commit.as_ref().map(commit_summary),
         }),
@@ -92,7 +92,7 @@ fn effect_summary(effect: &ProjectMemoryFactCurationOperationEffectV1) -> Value 
             "winner_fact_id": outcome.winner().fact_id(),
             "content_updated": outcome.content_updated(),
             "deleted_loser_fact_ids": outcome.deleted_losers().iter()
-                .map(|fact| fact.fact_id())
+                .map(ProjectMemoryFactIdV1::fact_id)
                 .collect::<Vec<_>>(),
             "commits": outcome.commit_receipts().iter()
                 .map(commit_summary)

@@ -123,7 +123,7 @@ pub trait TemporalCandidatePreparationPort: Send + Sync {
     ) -> PortFuture<'a, PageStatus>;
 }
 
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "temporal_query.candidates.prepare")]
 pub async fn prepare_temporal_candidate_cohort(
     request: &TemporalSnapshotRequest,
     port: &impl TemporalCandidatePreparationPort,

@@ -1,5 +1,5 @@
 use tracedecay_domain::UtcMicros;
-use tracedecay_usecases::host_admission::HostAdmissionStatus;
+use tracedecay_sessions::admission::HostAdmissionStatus;
 
 use super::super::ingest::complete_ingest_admission;
 use super::super::test_support::*;
@@ -273,7 +273,7 @@ fn hook_v2_catchup_response_propagates_transport_disposition() {
 #[test]
 fn profile_scoped_native_admission_is_idempotent_in_the_authenticated_profile() {
     let _profile = crate::config::PinnedUserDataDir::new();
-    let profile_root = crate::storage::default_profile_root().unwrap();
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
     let decoded = tracedecay_hooks::decode_native_hook_event(
         tracedecay_hooks::HookHostV1::ClaudeCode,

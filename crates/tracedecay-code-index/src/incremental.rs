@@ -13,14 +13,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId,
-    CodeSearchChunkV1, FileOccurrenceId, ManifestDigest, SymbolLineageCandidateV1,
-    SymbolOccurrenceId,
+    CodeSearchChunkV1, FileOccurrenceId, ManifestDigest, SymbolOccurrenceId,
 };
 
 use super::chunks::{ChunkingFailureV1, CodeFileChunksV1};
 use super::generations::{FileExtractionActionV1, GenerationIncrementPlanV1};
 use super::lineage::{
-    GenerationSymbolIndexV1, LineageResolutionErrorV1, LineageSymbolRecordV1, SymbolLineageResolver,
+    GenerationSymbolIndexV1, LineageResolutionErrorV1, LineageSymbolRecordV1,
+    SymbolLineageCandidateV1, SymbolLineageResolver,
 };
 
 /// Chunk-manifest construction and comparison failures.

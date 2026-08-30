@@ -23,15 +23,14 @@ deployment.
 3. [Connecting to Your Agent](#connecting-to-your-agent)
 4. [Exploring Your Codebase from the CLI](#exploring-your-codebase-from-the-cli)
 5. [Keeping the Index Fresh](#keeping-the-index-fresh)
-6. [The Embedded File Watcher](#the-embedded-file-watcher)
-7. [Checking Your Setup with Doctor](#checking-your-setup-with-doctor)
-8. [Finding Affected Tests](#finding-affected-tests)
-9. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
-10. [Supported Languages](#supported-languages)
-11. [Privacy and Network](#privacy-and-network)
-12. [Updating TraceDecay](#updating-tracedecay)
-13. [Configuration Files](#configuration-files)
-14. [Troubleshooting](#troubleshooting)
+6. [Checking Your Setup with Doctor](#checking-your-setup-with-doctor)
+7. [Finding Affected Tests](#finding-affected-tests)
+8. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
+9. [Supported Languages](#supported-languages)
+10. [Privacy and Network](#privacy-and-network)
+11. [Updating TraceDecay](#updating-tracedecay)
+12. [Configuration Files](#configuration-files)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -761,7 +760,7 @@ Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, 
 Source builds can cherry-pick individual languages without taking a full tier:
 
 ```bash
-cargo build --release --no-default-features --features lang-nix,lang-bash
+kache cargo -- build -p tracedecay-cli --release --no-default-features --features lang-nix,lang-bash
 ```
 
 ### What gets extracted

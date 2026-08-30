@@ -431,7 +431,7 @@ pub(crate) fn evaluate_generated_outputs_against_corpus(
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "search_eval.compare.evaluate_profile")]
 fn evaluate_profile(
     workload: &CandidateWorkloadV1,
     queries: &BTreeMap<&str, &WorkloadQueryV1>,
@@ -794,7 +794,7 @@ fn validate_output_matrix(
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "search_eval.compare.evaluate_query")]
 fn evaluate_query(
     query: &WorkloadQueryV1,
     row: &candidate_output::QueryCandidateRowV1,
@@ -1114,7 +1114,7 @@ fn mean_ppm(values: impl Iterator<Item = u32>, support: u64) -> u32 {
     u32::try_from(total / u128::from(support)).unwrap_or(METRIC_SCALE_PPM as u32)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "search_eval.compare.evaluate_resources")]
 fn evaluate_resources(output: &ProductionCandidateOutputV1) -> DirectEvaluationStatusV1 {
     if output.resources.len() != 2 {
         return DirectEvaluationStatusV1::Fail;

@@ -308,7 +308,7 @@ async fn dispatch_admin_cli(
             sessions_unfinished(context.require_registered_project_session_db()?, limit).await?
         }
         AdminCliAction::AnalyticsSync => {
-            crate::analytics_bridge::analytics_sync_with_db(
+            tracedecay_usecases::analytics_bridge::analytics_sync_with_db(
                 context.require_accounting_db()?,
                 context.project_root(),
             )
@@ -465,7 +465,9 @@ async fn registry_list(
     limit: usize,
     query: Option<&str>,
 ) -> Result<Value> {
-    use crate::project_registry::{PublicCodeProject, build_project_registry_view};
+    use tracedecay_dashboard_api::project_registry::{
+        PublicCodeProject, build_project_registry_view,
+    };
 
     let limit = limit.clamp(1, 100_000);
     let mut projects = match query {
@@ -513,7 +515,7 @@ async fn registry_context(
     global_db: &RegisteredGlobalDb,
     project_arg: Option<&Path>,
 ) -> Result<Value> {
-    use crate::project_registry::PublicProjectRegistryContext;
+    use tracedecay_dashboard_api::project_registry::PublicProjectRegistryContext;
 
     let Some(selector) = project_arg.or_else(|| cg.map(TraceDecay::project_root)) else {
         return Ok(json!({ "status": "invalid", "project": null }));
@@ -816,7 +818,7 @@ fn render_session_sync_outcome(outcome: SessionSyncOutcomeV1) -> Value {
 }
 
 async fn sessions_unfinished(db: &RegisteredGlobalDbLeaseV1, limit: usize) -> Result<Value> {
-    let items = crate::store::GlobalDbWorkflowStore::new(db.clone())
+    let items = tracedecay_global_db::GlobalDbWorkflowStore::new(db.clone())
         .list_unfinished_workflows(limit)
         .await
         .map_err(|message| TraceDecayError::Config { message })?;

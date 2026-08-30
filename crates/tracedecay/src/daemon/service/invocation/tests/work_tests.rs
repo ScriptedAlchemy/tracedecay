@@ -69,14 +69,14 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.work.core-invocation").expect("project id");
     let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
-        crate::storage::default_profile_root().expect("profile root"),
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         project.path(),
         project_id.clone(),
     )
     .await
     .expect("registered project runtime");
     let database = host
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project database");
     let actor = ActorId::new("actor.work.core-invocation").expect("actor id");
     let scope = ResolvedScope::new(
@@ -490,14 +490,14 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.work.task-activity").expect("project id");
     let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
-        crate::storage::default_profile_root().expect("profile root"),
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         project.path(),
         project_id.clone(),
     )
     .await
     .expect("registered project runtime");
     let database = host
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project database");
     let actor = ActorId::new("actor.work.task-activity").expect("actor id");
     let scope = ResolvedScope::new(

@@ -1,5 +1,12 @@
 # Multi-Branch Indexing Guide
 
+> **Superseded.** This document describes the retired pre-V2 per-branch SQLite
+> graph model. It is not current product authority. The code graph lives in
+> Grafeo via `tracedecay-graph-db`. One project store; branch is provenance
+> only — see
+> [Plan 38](plans/tracedecay-v2/38-storage-retention-size-and-efficiency.md)
+> and the [V2 operating model](V2-OPERATING-MODEL.md).
+
 ## The problem
 
 TraceDecay maintains a code graph in the active project store. Without multi-branch indexing, that store has one SQLite database for the project. When you switch

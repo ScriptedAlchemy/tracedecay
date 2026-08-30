@@ -89,8 +89,8 @@ pub mod workflow_runtime;
 pub mod workflow_synthesis;
 
 mod error;
-pub mod surface_contracts;
 mod surface_binding;
+pub mod surface_contracts;
 
 pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
 
@@ -316,14 +316,6 @@ pub use source_edit::{
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };
 pub use source_edit_rollback::{SourceEditRollbackRequestV1, source_edit_rollback_operation};
-pub use surface_contracts::{
-    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCallersSurfaceRequest,
-    CodeCalleesSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
-    CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
-    CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
-    CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
-    NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
-};
 pub use storage::{
     CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,
@@ -333,6 +325,14 @@ pub use storage::{
     StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
     incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
     semantic_vector_retention_finding,
+};
+pub use surface_contracts::{
+    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
+    CodeCallersSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
+    CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
+    NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
 };
 pub use work::*;
 pub use work_artifact_hydration::*;

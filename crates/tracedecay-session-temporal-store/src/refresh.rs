@@ -6,9 +6,7 @@ use tracedecay_domain::{
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
-use tracedecay_runtime_core::db::engine::{
-    Error as EngineError, Row, params,
-};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, Row, params};
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionRefreshBeginOrJoinReceiptV1,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
@@ -20,10 +18,6 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use crate::handle::{
-    SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
-    SessionTemporalWriteTxn,
-};
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
     ProjectionProgressBaseline, digest_bytes,
@@ -38,6 +32,10 @@ use super::query::{
 use super::rebuild::{
     checkpoint_relation_rebuild_control, rebuild_candidate_session_relations,
     validate_candidate_frontier,
+};
+use crate::handle::{
+    SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
+    SessionTemporalWriteTxn,
 };
 
 const BEGIN_REFRESH: &str = "begin or join session refresh";
@@ -333,10 +331,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         .await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.persist.refresh_batch"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.persist.refresh_batch")]
     pub async fn persist_session_refresh_projection_batch_controlled_result(
         &self,
         progress: SessionRefreshProgressV1,
@@ -434,10 +429,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok((progress, receipt))
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.persist.refresh_progress"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.persist.refresh_progress")]
     pub async fn persist_session_refresh_progress_result(
         &self,
         progress: SessionRefreshProgressV1,
@@ -519,10 +511,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(progress)
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.query.refresh_progress"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.query.refresh_progress")]
     pub async fn session_refresh_progress_result(
         &self,
         request: SessionRefreshProgressRequestV1,
@@ -534,10 +523,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         read_progress(&snapshot, request.session_id(), request.operation_id()).await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.txn.complete_refresh"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.txn.complete_refresh")]
     pub async fn complete_session_refresh_result(
         &self,
         request: SessionRefreshCompletionRequestV1,
@@ -877,10 +863,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(SessionRefreshReceiptV1::cancelled(request, terminal_at))
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.query.refresh_receipt"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.query.refresh_receipt")]
     pub async fn session_refresh_receipt_result(
         &self,
         request: SessionRefreshReceiptRequestV1,
@@ -892,10 +875,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         read_receipt(&snapshot, request.session_id(), request.operation_id()).await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.query.refresh_recovery"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.query.refresh_recovery")]
     pub async fn session_refresh_recovery_result(
         &self,
         session_id: &SessionId,
@@ -908,10 +888,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(recoveries.pop())
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.query.refresh_running"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.query.refresh_running")]
     pub async fn running_session_refreshes_result(
         &self,
     ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {
