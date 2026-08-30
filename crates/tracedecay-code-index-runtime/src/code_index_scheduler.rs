@@ -6669,8 +6669,7 @@ fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortEr
                 Ok(receipt) => {
                     let previous_mode = receipt
                         .previous_unix_mode
-                        .map(|mode| format!("{mode:o}"))
-                        .unwrap_or_else(|| "platform-acl".to_owned());
+                        .map_or_else(|| "platform-acl".to_owned(), |mode| format!("{mode:o}"));
                     tracing::info!(
                         event = "code_index_text_artifacts_root_privacy_healed",
                         previous_mode = %previous_mode,
