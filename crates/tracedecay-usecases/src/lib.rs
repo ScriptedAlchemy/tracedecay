@@ -109,6 +109,7 @@ pub mod stack_coordinator;
 pub mod store;
 pub mod tracedecay;
 pub mod user_config;
+pub mod work;
 
 pub use lsp_support::analyzer_runtime_config_error;
 pub use source_authorization::{

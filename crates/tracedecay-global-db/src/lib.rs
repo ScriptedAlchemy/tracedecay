@@ -16,9 +16,7 @@
 //! a guarded database client issued by the registered owner, so the composition
 //! root retains its own typed client without receiving raw runtime authority.
 
-use tracedecay_sessions::runtime::SessionMessageSearchResult;
 pub use tracedecay_store::ParseOffset;
-use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 mod api_types;
 pub mod configuration;
@@ -106,6 +104,7 @@ pub fn register_test_schema_installer() {
     });
 }
 
+mod session_handle;
 mod session_temporal_handle;
 mod session_temporal_schema;
 mod sqlite_persist;
@@ -130,8 +129,7 @@ pub use registered::{
     PendingDeliverySourceReceiptV1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
     RegisteredGlobalDbOwnerV1, RegisteredGlobalDbWeakLeaseIssuerV1,
     RegisteredGlobalDbWriteTransaction, RegisteredGlobalDbWriterConnection,
-    RegisteredWorkApplicationServicesV1, RegisteredWorkProductServicesV1,
-    RegisteredWorkflowApplicationServicesV1, WorkAttemptDeliveryCensusReadV1,
+    WorkAttemptDeliveryCensusReadV1,
 };
 pub use registered_analytics::ObservabilityRetentionReceiptV1;
 pub use registered_lcm_privacy::{LcmPrivacyRescanOutcomeV1, LcmPrivacyRescanReceiptV1};
@@ -143,9 +141,7 @@ pub use remote_deletion::{
 pub use tracedecay_runtime_core::store_runtime::{
     VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,
 };
-pub use transcript::TranscriptPersistenceError;
-
-pub(crate) const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
+pub use tracedecay_sessions::runtime::TranscriptPersistenceError;
 
 pub use api_types::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
@@ -162,12 +158,10 @@ pub use support::{
     global_db_path, global_db_path_is_overridden,
 };
 use support::{
-    SESSION_MESSAGE_SEARCH_MAX_FETCH, analytics_scope_query, downrank_inventory_messages,
-    ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
+    analytics_scope_query, ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
     ensure_session_parent_columns, ensure_table_columns, git_remote_search_alias,
-    global_db_operation_error, global_db_operation_message, interleave_workflow_search_results,
-    like_pattern, normalize_git_remote_url, push_optional_analytics_filter, repo_identity_aliases,
-    row_to_analytics_event, session_fts_query,
+    global_db_operation_error, global_db_operation_message, like_pattern, normalize_git_remote_url,
+    push_optional_analytics_filter, repo_identity_aliases, row_to_analytics_event,
 };
 /// Compatibility re-export: workflow search filters now live beside the
 /// workflow-index contracts in [`tracedecay_sessions::runtime::workflow_index`].
