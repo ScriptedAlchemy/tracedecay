@@ -6053,22 +6053,21 @@ fn exact_source_readiness_abstains_when_a_file_is_added_inside_freshness_window(
     published(scheduler.reconcile_now().expect("initial publish"));
     assert!(
         scheduler
-            .latest_complete_ready_for_exact_source_with(
-                GenerationDecodeAdmissionV1::AlreadyDecoded,
-            )
+            .exact_source_is_ready()
             .expect("exact source readiness")
+    );
+    assert!(
+        scheduler
+            .latest_complete_with(GenerationDecodeAdmissionV1::AlreadyDecoded)
             .is_some()
     );
 
     fixture.edit("src/added.rs", "pub fn added() {}\n");
 
     assert!(
-        scheduler
-            .latest_complete_ready_for_exact_source_with(
-                GenerationDecodeAdmissionV1::AlreadyDecoded,
-            )
-            .expect("exact source readiness after file add")
-            .is_none(),
+        !scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness after file add"),
         "workspace completeness must abstain before the added file is published"
     );
 }
