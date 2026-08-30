@@ -776,7 +776,7 @@ fn unreadable_host_registration_refuses_instead_of_reporting_no_conflict() {
 #[test]
 fn cline_family_routes_come_only_from_the_checked_in_evidence_packet() {
     let packet: Value = serde_json::from_str(include_str!(
-        "../../../crates/tracedecay-hooks/fixtures/host_events/cline-family.json"
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/cline-family.json"
     ))
     .expect("the checked-in Cline evidence packet parses");
 
@@ -1257,42 +1257,42 @@ fn authentic_host_fixtures_use_production_typed_decoders() {
         (
             HookHostV1::ClaudeCode,
             include_str!(
-                "../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
+                "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
             ),
         ),
         (
             HookHostV1::ClaudeCode,
-            include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"),
+            include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"),
         ),
         (
             HookHostV1::Codex,
-            include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"),
+            include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"),
         ),
         (
             HookHostV1::CursorDesktop,
             include_str!(
-                "../../../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
+                "../../../../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
             ),
         ),
         (
             HookHostV1::Hermes,
             include_str!(
-                "../../../crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
+                "../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
             ),
         ),
         (
             HookHostV1::Hermes,
-            include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json"),
+            include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json"),
         ),
         (
             HookHostV1::KimiCode,
             include_str!(
-                "../../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
+                "../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
             ),
         ),
         (
             HookHostV1::KimiCode,
-            include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/kimi/stop.json"),
+            include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/stop.json"),
         ),
     ];
     for (host, fixture) in fixtures {
@@ -1301,7 +1301,7 @@ fn authentic_host_fixtures_use_production_typed_decoders() {
     }
 
     let opencode = parse_fixture(include_str!(
-        "../../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
     ));
     let events = opencode["events"].as_array().expect("OpenCode events");
     for identity in ["saved_edit", "stop"] {
@@ -1341,7 +1341,7 @@ fn authentic_host_fixtures_use_production_typed_decoders() {
 #[test]
 fn corrupted_host_identity_fails_typed_decoder() {
     let mut fixture = parse_fixture(include_str!(
-        "../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
     ));
     fixture["hook_event_name"] = json!("NotARealEvent");
     assert!(

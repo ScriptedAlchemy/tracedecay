@@ -2,7 +2,10 @@
 
 use std::path::Path;
 
-use super::{contract_error, journal::DurableAutomationAdmission, recovery_index, retirement};
+use tracedecay_automation_runtime::automation::effect_runtime::journal::DurableAutomationAdmission;
+use tracedecay_automation_runtime::automation::effect_runtime::{contract_error, retirement};
+
+use super::recovery_index;
 use tracedecay_runtime_core::errors::Result;
 
 #[hotpath::measure(label = "daemon.automation.effect.housekeeping", future = true)]

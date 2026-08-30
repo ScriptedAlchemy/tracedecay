@@ -51,7 +51,7 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
         None,
     )
     .unwrap();
-    let request = super::super::automation_effect::memory_curator_run_request(
+    let request = tracedecay_automation_runtime::automation::effect_runtime::memory_curator_run_request(
         "run.scheduler-log-privacy",
         24,
         0.72,

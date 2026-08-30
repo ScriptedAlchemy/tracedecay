@@ -5,16 +5,15 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
     AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
     AutomationTaskV1, RetainedSurfaceResultV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal,
-    Deadline, ProblemOwningLayer, RequestContext, RequestId, ResolvedScope,
-    RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
+    ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal, Deadline,
+    ProblemOwningLayer, RequestContext, RequestId, RetainedSurfaceExecutionContextV1,
+    RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
     retained_surface_application_operation, retained_surface_execution_problem,
     retained_surface_outcome_matches_terminal, retained_surface_problem_matches_terminal,
 };
@@ -37,19 +36,7 @@ use crate::daemon::retained_owner::receipts::{PreparedRetainedEffect, prepare_re
 use crate::daemon::service::invocation::{
     DaemonInvocationService, RegisteredRetainedRequestContextError,
 };
-use tracedecay_runtime_core::errors::Result;
-
-mod authority;
-mod contract;
-mod input;
-mod journal;
-mod problem;
-mod projection;
-mod recovery_index;
-mod retirement;
-use authority::finalize_terminal_housekeeping as finalize_terminal_housekeeping_owned;
-use contract::{contract_error, digest};
-use journal::{
+use tracedecay_automation_runtime::automation::effect_runtime::journal::{
     AutomationRecoveryBinding, AutomationReservationClaim, DurableAutomationAdmission,
     DurableSettlementClassification, ReservationResult, abandon_reservation_blocking,
     classify_durable_settlement_blocking, persist_prepared_terminal_blocking,
@@ -57,14 +44,27 @@ use journal::{
     promote_prepared_terminal_blocking, replay_exact_binding_after_error_blocking,
     reserve_or_replay_indexed_blocking, retained_source_bindings,
 };
-use problem::{
+use tracedecay_automation_runtime::automation::effect_runtime::problem::{
     failed_ledger_problem, indeterminate_external_effect_problem, reset_required_problem,
     runtime_problem, shipped_proposal_reset_required_problem,
 };
-use projection::{
+use tracedecay_automation_runtime::automation::effect_runtime::projection::{
     project_committed_receipts, project_recovered_committed_receipts, project_run_summary,
     project_skip_reason,
 };
+use tracedecay_automation_runtime::automation::effect_runtime::{
+    AutomationSettledProblem, AutomationSettledTerminal, contract_error, digest, journal,
+    retirement,
+};
+use tracedecay_runtime_core::errors::Result;
+
+mod authority;
+pub(crate) mod recovery_index;
+use authority::finalize_terminal_housekeeping as finalize_terminal_housekeeping_owned;
+
+#[cfg(test)]
+#[path = "automation_effect/journal/tests.rs"]
+mod journal_tests;
 
 /// Total wall-clock budget for a retained-settlement blocking-pool retry
 /// loop before it gives up and returns an error instead of retrying
@@ -437,121 +437,6 @@ struct RetainedAbandonment {
     reservation_abandoned: bool,
 }
 
-pub(crate) type AutomationSettledProblem = AutomationRunProblemV1;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub(crate) enum AutomationSettledTerminal {
-    Outcome {
-        scope: ResolvedScope,
-        outcome: Box<ApplicationOutcome<RetainedSurfaceResultV1>>,
-    },
-    Problem(AutomationSettledProblem),
-}
-
-impl AutomationSettledTerminal {
-    pub(crate) fn into_outcome(
-        self,
-    ) -> std::result::Result<
-        ApplicationOutcome<RetainedSurfaceResultV1>,
-        Box<AutomationSettledProblem>,
-    > {
-        match self {
-            Self::Outcome { outcome, .. } => Ok(*outcome),
-            Self::Problem(problem) => Err(Box::new(problem)),
-        }
-    }
-
-    fn matches_admission(&self, admission: &DurableAutomationAdmission) -> bool {
-        match self {
-            Self::Outcome {
-                scope: terminal_scope,
-                outcome,
-            } => {
-                terminal_scope == &admission.scope
-                    && retained_surface_outcome_matches_terminal(
-                        RetainedSurfaceOperation::FactStoreCurate,
-                        &admission.request_id,
-                        &admission.scope,
-                        outcome,
-                    )
-                    && matches!(
-                        outcome.as_ref(),
-                        ApplicationOutcome::Effect(effect)
-                            if matches!(
-                                effect.payload.as_ref(),
-                                Some(RetainedSurfaceResultV1::FactStoreCurate(result))
-                                    if result.matches_admission(&admission.request)
-                            )
-                    )
-            }
-            Self::Problem(problem) => {
-                problem.scope == admission.scope
-                    && problem.matches_terminal(&admission.request_id)
-                    && problem.matches_admission(&admission.request, &admission.request_id)
-            }
-        }
-    }
-
-    pub(crate) fn run_result(&self) -> Option<&AutomationRunResultV1> {
-        let Self::Outcome { outcome, .. } = self else {
-            return None;
-        };
-        let ApplicationOutcome::Effect(effect) = outcome.as_ref() else {
-            return None;
-        };
-        let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
-            return None;
-        };
-        Some(result)
-    }
-
-    pub(crate) fn problem(&self) -> Option<&AutomationSettledProblem> {
-        match self {
-            Self::Outcome { .. } => None,
-            Self::Problem(problem) => Some(problem),
-        }
-    }
-
-    pub(crate) fn is_completed(&self) -> bool {
-        let Self::Outcome { outcome, .. } = self else {
-            return false;
-        };
-        let ApplicationOutcome::Effect(effect) = outcome.as_ref() else {
-            return false;
-        };
-        let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
-            return false;
-        };
-        matches!(result.terminal, AutomationRunTerminalV1::Completed { .. })
-    }
-
-    fn is_retirement_terminal(&self) -> bool {
-        let Self::Outcome { outcome, .. } = self else {
-            return false;
-        };
-        let ApplicationOutcome::Effect(effect) = outcome.as_ref() else {
-            return false;
-        };
-        let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
-            return false;
-        };
-        matches!(
-            &result.terminal,
-            AutomationRunTerminalV1::Skipped { reason, .. }
-                if Some(*reason)
-                    == AutomationSkipReasonV1::from_ledger_reason(
-                        "shipped_fact_proposal_history_retired"
-                    )
-        ) && result.committed_receipts.is_empty()
-    }
-}
-
 fn ledger_record_matches_result(
     record: &AutomationRunLedgerRecord,
     result: &AutomationRunResultV1,
@@ -617,12 +502,6 @@ fn observe_admission_decision(admission: &AutomationEffectAdmission) {
         }
     }
 }
-
-pub(crate) use input::{
-    memory_curator_run_request, session_reflector_run_request, skill_writer_run_request,
-    user_job_run_request,
-};
-pub(crate) use recovery_index::reconcile_reserved_automation_effects_for_project;
 
 pub(crate) fn pinned_automation_configuration_digest(
     revision: &ConfigurationRevisionId,
