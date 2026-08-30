@@ -3769,7 +3769,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 &prepared_redundancy,
                 false,
             );
-            return Err(CodeIndexSchedulerErrorV1::Identity(error.to_string()));
+            return Err(CodeIndexSchedulerErrorV1::Identity(error));
         }
         tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
             project_root.clone(),

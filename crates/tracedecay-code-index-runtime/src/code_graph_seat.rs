@@ -88,6 +88,10 @@ pub trait CodeGraphSeatLeaseV1: Send {
     ) -> Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>;
 }
 
+/// Object-safe retain future returned by [`CodeGraphSeatRuntimePortV1`].
+pub type CodeGraphSeatRetainFuture<'port> =
+    Pin<Box<dyn Future<Output = Result<Box<dyn CodeGraphSeatLeaseV1 + Send>>> + Send + 'port>>;
+
 /// Registry-side seat gate the code-index scheduler consumes.
 ///
 /// Object-safe so `CodeGraphActivationAuthorityV1::Persistent` can hold one
@@ -103,5 +107,5 @@ pub trait CodeGraphSeatRuntimePortV1: Send + Sync {
         project_database: Arc<Database>,
         replay_binding: CodeGraphReplayBindingV1,
         decoded_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn CodeGraphSeatLeaseV1 + Send>>> + Send + '_>>;
+    ) -> CodeGraphSeatRetainFuture<'_>;
 }

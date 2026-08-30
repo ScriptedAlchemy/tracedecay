@@ -9,13 +9,17 @@ use tracedecay_application::ResolvedScope;
 use tracedecay_domain::ProjectId;
 use tracedecay_query::code_search;
 
+/// Scope resolution failed; executors map this onto an unavailable search outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeIndexScopeUnresolvedV1;
+
 /// Scope resolver the search/diff executors call for each request root.
 pub trait CodeIndexScopeResolverV1: Clone + Send + Sync + 'static {
     fn resolved_scope_for_project(
         &self,
         project_root: &Path,
         project_id: &ProjectId,
-    ) -> Result<ResolvedScope, ()>;
+    ) -> Result<ResolvedScope, CodeIndexScopeUnresolvedV1>;
 }
 
 /// Closed admission refusal vocabulary the executors map onto search outcomes.
