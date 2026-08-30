@@ -187,7 +187,7 @@ async fn invoke_operation(
         controls,
         body,
     } = request;
-    let Some(request) = decode_request(operation, body) else {
+    let Ok(request) = decode_request(operation, body) else {
         return tracedecay_api::retained_invalid_request_response(request_id);
     };
     let invocation = DaemonInvocationRequest::retained_application(
@@ -220,16 +220,20 @@ async fn invoke_operation(
     .await
 }
 
+/// Decode one retained operation body into its typed request.
+///
+/// The returned error carries the exact serde diagnostic (unknown field,
+/// unknown enum variant with the admitted values, wrong type) so every
+/// dispatch surface can hand the caller a corrective message instead of a
+/// blank "invalid request".
 #[hotpath::measure(label = "application_surface.retained.decode")]
 pub(crate) fn decode_request(
     operation: RetainedSurfaceOperation,
     body: serde_json::Value,
-) -> Option<RetainedSurfaceRequestV1> {
+) -> Result<RetainedSurfaceRequestV1, serde_json::Error> {
     macro_rules! decode {
         ($request:ty, $variant:ident) => {
-            serde_json::from_value::<$request>(body)
-                .ok()
-                .map(RetainedSurfaceRequestV1::$variant)
+            serde_json::from_value::<$request>(body).map(RetainedSurfaceRequestV1::$variant)
         };
     }
     match operation {
@@ -291,18 +295,20 @@ pub(crate) fn decode_request(
         RetainedSurfaceOperation::LcmExpandQuery => {
             decode!(LcmExpandQueryRequestV1, LcmExpandQuery)
         }
-        RetainedSurfaceOperation::SessionRefresh => None,
+        RetainedSurfaceOperation::SessionRefresh => Err(serde::de::Error::custom(
+            "session_refresh is dispatched through its action-specific operations",
+        )),
     }
 }
 
 fn decode_session_refresh(
     body: serde_json::Value,
     action: SessionRefreshActionV1,
-) -> Option<RetainedSurfaceRequestV1> {
-    serde_json::from_value::<SessionRefreshActionRequestV1>(body)
-        .ok()
-        .map(|request| SessionRefreshRequestV1::with_action(action, request))
-        .map(RetainedSurfaceRequestV1::SessionRefresh)
+) -> Result<RetainedSurfaceRequestV1, serde_json::Error> {
+    let request = serde_json::from_value::<SessionRefreshActionRequestV1>(body)?;
+    Ok(RetainedSurfaceRequestV1::SessionRefresh(
+        SessionRefreshRequestV1::with_action(action, request),
+    ))
 }
 
 pub(crate) fn result_value(
@@ -394,7 +400,7 @@ mod tests {
                 RetainedSurfaceOperation::SessionRefreshStatus,
                 json!({ "action": "status" }),
             )
-            .is_none()
+            .is_err()
         );
     }
 
@@ -415,7 +421,32 @@ mod tests {
                     RetainedSurfaceOperation::FactStoreCurate,
                     serde_json::Value::Object(value),
                 )
-                .is_none()
+                .is_err()
+            );
+        }
+    }
+
+    /// A closed-vocabulary decode rejection must carry the admitted values so
+    /// every dispatch surface can hand the caller a corrective message.
+    #[test]
+    fn decode_rejection_names_admitted_enum_values() {
+        let error = decode_request(
+            RetainedSurfaceOperation::FactStoreAdd,
+            json!({ "content": "categorized", "category": "pitfall" }),
+        )
+        .expect_err("unknown category must be rejected");
+        let message = error.to_string();
+        for admitted in [
+            "general",
+            "user_pref",
+            "project",
+            "tool",
+            "decision",
+            "code_area",
+        ] {
+            assert!(
+                message.contains(admitted),
+                "decode rejection must name `{admitted}`: {message}"
             );
         }
     }

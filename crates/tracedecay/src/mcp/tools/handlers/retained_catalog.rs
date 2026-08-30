@@ -156,7 +156,9 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
         "mcp.retained.profile.decode",
         crate::application_surface::retained::decode_request(operation, normalized.request)
     )
-    .ok_or_else(|| retained_catalog_error("retained MCP request is invalid"))?;
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("invalid retained application request for {tool_name}: {error}"),
+    })?;
     if typed_request.operation() != operation {
         return Err(retained_catalog_error(
             "retained MCP request does not match its catalog operation",
