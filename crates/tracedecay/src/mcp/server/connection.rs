@@ -1426,16 +1426,17 @@ mod cancellable_queue_tests {
         let resolver_target = Arc::clone(&target);
         let resolver_entered = Arc::clone(&route_entered);
         let resolver_release = Arc::clone(&release_route);
-        let resolver: super::super::RetainedProjectServerResolver = Arc::new(move |_request| {
-            let target = Arc::clone(&resolver_target);
-            let entered = Arc::clone(&resolver_entered);
-            let release = Arc::clone(&resolver_release);
-            Box::pin(async move {
-                entered.notify_one();
-                release.notified().await;
-                Ok(Some(target))
-            })
-        });
+        let resolver: super::super::RetainedProjectServerResolver =
+            super::super::install_retained_project_server_resolver(move |_request| {
+                let target = Arc::clone(&resolver_target);
+                let entered = Arc::clone(&resolver_entered);
+                let release = Arc::clone(&resolver_release);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(Some(target))
+                })
+            });
         let context = super::super::McpServerConstructionContext::direct(
             mounted_active.cg_snapshot().await,
             None,

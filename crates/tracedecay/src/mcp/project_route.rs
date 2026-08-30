@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 use serde_json::Value;
 
 use super::hook_events;
+use crate::mcp::server::McpProjectServerResolvePort;
 use tracedecay_global_db::ProjectRegistryContext;
 
 const MAX_HOOK_ROUTE_CACHE_ENTRIES: usize = 256;
@@ -73,7 +74,7 @@ pub(crate) async fn resolve_registered_project_route(
         context.clone(),
         requested_path.clone(),
     );
-    let server = resolver(request.clone()).await?.ok_or_else(|| {
+    let server = resolver.resolve(request).await?.ok_or_else(|| {
         tracedecay_runtime_core::errors::TraceDecayError::project_route(
             "project_route_unavailable",
             true,

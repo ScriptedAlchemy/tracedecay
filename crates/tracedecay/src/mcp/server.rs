@@ -656,60 +656,61 @@ impl McpServer {
         let resolver_slot = Arc::clone(&active_server_slot);
         let active_root =
             tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&retained_root);
-        let resolver: RetainedProjectServerResolver = Arc::new(move |request| {
-            let retained_servers = retained_servers.clone();
-            let resolver_slot = Arc::clone(&resolver_slot);
-            let active_root = active_root.clone();
-            Box::pin(async move {
-                let requested = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                    &request.requested_worktree_root,
-                );
-                let registered = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                    &request.registered_root,
-                );
-                let project_id = request
-                    .owner
-                    .as_ref()
-                    .map(|owner| owner.project.project_id.as_str());
-                let mut matches = Vec::new();
-                for server in &retained_servers {
-                    let graph = server.cg_snapshot().await;
-                    let root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                        graph.project_root(),
+        let resolver: RetainedProjectServerResolver =
+            install_retained_project_server_resolver(move |request| {
+                let retained_servers = retained_servers.clone();
+                let resolver_slot = Arc::clone(&resolver_slot);
+                let active_root = active_root.clone();
+                Box::pin(async move {
+                    let requested = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                        &request.requested_worktree_root,
                     );
+                    let registered =
+                        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                            &request.registered_root,
+                        );
+                    let project_id = request
+                        .owner
+                        .as_ref()
+                        .map(|owner| owner.project.project_id.as_str());
+                    let mut matches = Vec::new();
+                    for server in &retained_servers {
+                        let graph = server.cg_snapshot().await;
+                        let root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                            graph.project_root(),
+                        );
+                        let identity_matches = project_id.is_none_or(|project_id| {
+                            graph.store_layout().identity.project_id.as_deref() == Some(project_id)
+                        });
+                        if (root == requested || root == registered) && identity_matches {
+                            matches.push(Arc::clone(server));
+                        }
+                    }
+                    if matches.len() == 1 {
+                        return Ok(matches.pop());
+                    }
+                    if !matches.is_empty() {
+                        return Err(
+                            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                                "project_route_ambiguous",
+                                false,
+                                "multiple retained test servers match one registered project route",
+                            ),
+                        );
+                    }
+                    let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
+                    let Some(active) = active else {
+                        return Ok(None);
+                    };
+                    let graph = active.cg_snapshot().await;
                     let identity_matches = project_id.is_none_or(|project_id| {
                         graph.store_layout().identity.project_id.as_deref() == Some(project_id)
                     });
-                    if (root == requested || root == registered) && identity_matches {
-                        matches.push(Arc::clone(server));
-                    }
-                }
-                if matches.len() == 1 {
-                    return Ok(matches.pop());
-                }
-                if !matches.is_empty() {
-                    return Err(
-                        tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                            "project_route_ambiguous",
-                            false,
-                            "multiple retained test servers match one registered project route",
-                        ),
-                    );
-                }
-                let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
-                let Some(active) = active else {
-                    return Ok(None);
-                };
-                let graph = active.cg_snapshot().await;
-                let identity_matches = project_id.is_none_or(|project_id| {
-                    graph.store_layout().identity.project_id.as_deref() == Some(project_id)
-                });
-                Ok(
-                    ((active_root == requested || active_root == registered) && identity_matches)
-                        .then_some(active),
-                )
-            })
-        });
+                    Ok(((active_root == requested || active_root == registered)
+                        && identity_matches)
+                        .then_some(active))
+                })
+            });
         context = context.with_retained_project_server_resolver(resolver);
         let server = Self::new_with_context(context).await;
         // Registered test servers exercise real completion without consulting
