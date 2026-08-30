@@ -1568,6 +1568,62 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
     restarted.shutdown().await;
 }
 
+/// Dirty remount seating must not park on the publication decode barrier
+/// while holding the scheduler lock. Activation may already own that cache;
+/// joining it left remount warming with no seated generation.
+#[tokio::test]
+async fn dirty_retained_seat_does_not_join_the_publication_decode_cache() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let held_decode = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hold_active_decode();
+    let seating = scheduler.clone();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            seating
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .seat_retained_generation_on_empty_serving_for_test()
+        }),
+    )
+    .await
+    .expect("dirty retained seat must not wait for the decode cache")
+    .expect("seat task")
+    .expect("seat result");
+    assert!(
+        matches!(outcome, Some(CodeIndexReconcileOutcomeV1::Noop(_))),
+        "dirty remount must still emit a retained-seat Noop without decoding"
+    );
+    assert_eq!(
+        held_decode.waiter_count(),
+        0,
+        "retained seating must not join the publication decode flight"
+    );
+
+    drop(held_decode);
+    registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);

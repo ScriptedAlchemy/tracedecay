@@ -4783,9 +4783,24 @@ impl CodeIndexWorktreeSchedulerV1 {
                 return Ok(None);
             }
         }
+        // Cheap witness/stat checks run before any decode. A dirty remount
+        // (cancelled mid-batch, uncommitted files) used to join
+        // `load_active_shared` under the scheduler lock; when activation
+        // already owned that barrier the worker parked until the 45s
+        // remount wait expired with `last_reconcile_micros` unset.
+        let Some(pointer) = self
+            .publication
+            .read_publication_pointer()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+        else {
+            return Ok(None);
+        };
+        if !self.retained_frontier_is_quietly_current(&pointer) {
+            return Ok(None);
+        }
         let Some(generation) = self
             .publication
-            .load_active_shared()
+            .active_already_decoded()
             .map_err(CodeIndexProductionErrorV1::Publication)?
         else {
             return Ok(None);
@@ -4866,24 +4881,69 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        let Some(generation) = self
+        let Some(pointer) = self
             .publication
-            .load_active_shared()
+            .read_publication_pointer()
             .map_err(CodeIndexProductionErrorV1::Publication)?
         else {
             return Ok(None);
         };
-        self.validate_generation_identity(&generation)?;
-        self.adopt_ignored_source_roster(&generation);
-        let snapshot_content_identity = generation.snapshot().content_identity.clone();
+        let dirty = {
+            let hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            hints.overflow || !hints.paths.is_empty()
+        } || !self.retained_frontier_is_quietly_current(&pointer);
+        if dirty {
+            self.request_background_reconcile();
+        }
+        // Graph prepare decodes without the scheduler mutex. Joining
+        // `load_active_shared` here parked remount on the publication
+        // barrier while activation owned it, so the seated event never
+        // published and the dirty successor extract never started.
+        let snapshot_content_identity = if let Some(generation) = self
+            .publication
+            .active_already_decoded()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+        {
+            self.validate_generation_identity(&generation)?;
+            self.adopt_ignored_source_roster(&generation);
+            generation.snapshot().content_identity.clone()
+        } else {
+            ContentDigest::new(pointer.snapshot_content_identity.clone())
+                .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?
+        };
         self.latest_content_identity = Some(snapshot_content_identity.clone());
-        self.request_background_reconcile();
         Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
             CodeIndexNoopEvidenceV1 {
                 snapshot_content_identity,
                 overflow_reconciled: false,
             },
         )))
+    }
+
+    /// Witness + git/stat fence that does not read sealed generation bytes.
+    fn retained_frontier_is_quietly_current(&self, pointer: &DurablePublicationPointerV1) -> bool {
+        let Some(witness) = RestoreFreshnessWitnessV1::load(&self.store_root) else {
+            return false;
+        };
+        if witness.generation_id != pointer.generation_id {
+            return false;
+        }
+        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        if witness.git_metadata_signature != metadata.stable_signature() {
+            return false;
+        }
+        self.worktree_stat_signature()
+            .is_ok_and(|signature| witness.stat_signature == signature)
+    }
+
+    #[cfg(test)]
+    pub fn seat_retained_generation_on_empty_serving_for_test(
+        &mut self,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        self.seat_retained_generation_on_empty_serving()
     }
 
     /// Verify an unchanged retained text generation without decoding the full
