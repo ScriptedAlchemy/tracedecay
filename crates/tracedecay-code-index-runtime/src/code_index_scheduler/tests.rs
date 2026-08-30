@@ -6497,6 +6497,48 @@ fn restart_restores_complete_generation_and_content_noop() {
 }
 
 #[test]
+fn layout_scan_progress_publish_does_not_wait_for_status_reader() {
+    let generation = CodeGenerationId::new("generation.progress-scan").expect("generation");
+    let slot = Arc::new(std::sync::RwLock::new(
+        super::CodeIndexBuildProgressSlotStateV1::default(),
+    ));
+    let owner = slot
+        .write()
+        .expect("progress owner")
+        .replace_generation(generation.clone());
+    let status_reader = slot.read().expect("status progress reader");
+
+    let started = Instant::now();
+    let published = super::try_publish_build_progress(
+        &slot,
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 1),
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "observational progress must not block the authenticated layout scan"
+    );
+    assert!(!published, "a busy observational slot must skip the sample");
+    drop(status_reader);
+
+    assert!(super::try_publish_build_progress(
+        &slot,
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 2),
+    ));
+    assert_eq!(
+        slot.read()
+            .expect("published progress")
+            .snapshot()
+            .expect("progress snapshot")
+            .committed_pages,
+        2
+    );
+}
+
+#[test]
 fn restored_generation_abstains_and_schedules_background_truth() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");

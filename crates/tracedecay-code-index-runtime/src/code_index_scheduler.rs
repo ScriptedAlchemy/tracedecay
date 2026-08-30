@@ -2061,6 +2061,29 @@ impl CodeIndexBuildProgressSlotStateV1 {
     }
 }
 
+/// Publishes an observational scan sample without delaying sealed-byte authentication.
+/// Generation ownership and durable phase transitions continue to use blocking writes.
+fn try_publish_build_progress(
+    slot: &CodeIndexBuildProgressSlotV1,
+    generation_id: &CodeGenerationId,
+    owner_epoch: u64,
+    snapshot: CodeIndexBuildProgressV1,
+) -> bool {
+    match slot.try_write() {
+        Ok(mut slot) => slot.publish(generation_id, owner_epoch, snapshot),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("query.artifact.progress.skipped_busy_total").inc(1u64);
+            false
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            poisoned
+                .into_inner()
+                .publish(generation_id, owner_epoch, snapshot)
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CodeIndexCommittedProgressSampleV1 {
     observed_at: Instant,
@@ -5536,10 +5559,12 @@ impl CodeIndexWorktreeSchedulerV1 {
                         last_progress_micros: now_micros().0,
                         blocked_reason: None,
                     };
-                    let _ = progress_slot
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .publish(&progress_generation, text_progress_owner_epoch, snapshot);
+                    let _ = try_publish_build_progress(
+                        &progress_slot,
+                        &progress_generation,
+                        text_progress_owner_epoch,
+                        snapshot,
+                    );
                 },
             )
             .ok()?;
