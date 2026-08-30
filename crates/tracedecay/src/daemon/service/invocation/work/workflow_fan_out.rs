@@ -20,7 +20,7 @@ pub(in crate::daemon::service::invocation) use recovery::{
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reconcile_workflow_fan_out(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     mut projection: tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
@@ -68,10 +68,10 @@ pub(super) fn reconcile_workflow_fan_out(
         );
         return Ok(projection);
     }
-    let work = registered
-        .database
-        .work_application_services()
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+        &registered.database,
+    )
+    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let authority = tracedecay_domain::WorkAuthority::new(
         context.scope().project_id.clone(),
         context.scope().repository_id.clone(),
@@ -253,10 +253,11 @@ pub(super) fn reconcile_workflow_fan_out(
             }
             admit_workflow_child(registered, context, &work, child, observed_at)?;
             let product_binding = workflow_product_binding()?;
-            let product = registered
-                .database
-                .work_product_services(product_binding.clone())
-                .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            let product = tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+                &registered.database,
+                product_binding.clone(),
+            )
+            .map_err(|_| DaemonInvocationProblem::Unavailable)?;
             let revisions = workflow_product_revision_pins(registered)?;
             let attempt = product
                 .attempts()
@@ -318,16 +319,16 @@ pub(super) fn reconcile_workflow_fan_out(
 
 fn reconcile_cancelled_fan_out(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     projection: tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
     attempt_processes: &super::super::work_attempt_exec::WorkAttemptProcessRegistryV1,
 ) -> Result<(tracedecay_domain::WorkflowRunProjection, bool), DaemonInvocationProblem> {
-    let work = registered
-        .database
-        .work_application_services()
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+        &registered.database,
+    )
+    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let mut all_terminal = true;
     let mut cancelled_children = false;
     for plan in projection.fan_out_plans().values() {
@@ -381,7 +382,7 @@ fn reconcile_cancelled_fan_out(
 }
 
 fn settle_workflow_fan_out(
-    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     projection: &tracedecay_domain::WorkflowRunProjection,
     plan: &tracedecay_domain::WorkflowFanOutPlanV1,
     attempts: &[tracedecay_domain::WorkAttemptV1],
@@ -487,7 +488,7 @@ fn settle_workflow_fan_out(
 
 fn request_fan_out_cancellation(
     context: &RequestContext,
-    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
     attempt_processes: &super::super::work_attempt_exec::WorkAttemptProcessRegistryV1,
     plan: &tracedecay_domain::WorkflowFanOutPlanV1,
     terminal: &[tracedecay_domain::WorkAttemptV1],
@@ -545,7 +546,7 @@ fn request_fan_out_cancellation(
 }
 
 fn apply_scheduler_command(
-    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     projection: &tracedecay_domain::WorkflowRunProjection,
     command: tracedecay_domain::WorkflowRunCommand,
     operation: &str,
@@ -583,7 +584,7 @@ fn apply_scheduler_command(
 pub(in crate::daemon::service::invocation) fn admit_workflow_child(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
-    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
     occurred_at: UtcMicros,
 ) -> Result<(), DaemonInvocationProblem> {
@@ -597,10 +598,11 @@ pub(in crate::daemon::service::invocation) fn admit_workflow_child(
     )
     .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
     let binding = workflow_product_binding()?;
-    let product = registered
-        .database
-        .work_product_services(binding.clone())
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let product = tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+        &registered.database,
+        binding.clone(),
+    )
+    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let graph = current_workflow_product_graph(&product, context, selection.clone(), occurred_at)?;
     match graph {
         None => {
@@ -729,7 +731,7 @@ pub(in crate::daemon::service::invocation) fn workflow_product_revision_pins(
 }
 
 fn current_workflow_product_graph(
-    product: &tracedecay_global_db::RegisteredWorkProductServicesV1,
+    product: &tracedecay_usecases::work::RegisteredWorkProductServicesV1,
     context: &RequestContext,
     selection: tracedecay_application::WorkProductSelectionScopeV1,
     observed_at: UtcMicros,
@@ -768,7 +770,7 @@ fn workflow_child_task_matches(
 #[allow(clippy::too_many_arguments)]
 fn apply_workflow_child_product_mutation(
     registered: &RegisteredWorkRuntime,
-    product: &tracedecay_global_db::RegisteredWorkProductServicesV1,
+    product: &tracedecay_usecases::work::RegisteredWorkProductServicesV1,
     context: &RequestContext,
     binding: &tracedecay_application::WorkProductBindingV1,
     selection: tracedecay_application::WorkProductSelectionScopeV1,
@@ -809,7 +811,9 @@ pub(in crate::daemon::service::invocation) fn reconcile_workflow_fan_out_after_a
         Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
     >,
 ) {
-    let Ok(services) = registered.database.workflow_application_services() else {
+    let Ok(services) = tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
+        &registered.database,
+    ) else {
         return;
     };
     let Ok(projection) = tracedecay_application::WorkflowRunStoragePort::projection(
@@ -842,10 +846,10 @@ pub(super) fn synchronize_fan_out_run_controls(
     paused: bool,
     occurred_at: UtcMicros,
 ) -> Result<(), DaemonInvocationProblem> {
-    let work = registered
-        .database
-        .work_application_services()
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+        &registered.database,
+    )
+    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     for plan in projection.fan_out_plans().values() {
         for child in &plan.children {
             if !projection
