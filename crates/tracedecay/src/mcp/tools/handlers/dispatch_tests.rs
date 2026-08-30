@@ -715,7 +715,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     .expect("active routed server");
 
     let result = server
-        .handle_request(&crate::mcp::transport::JsonRpcRequest {
+        .handle_request(&tracedecay_mcp::transport::JsonRpcRequest {
             jsonrpc: "2.0".to_owned(),
             id: Some(json!(1)),
             method: "tools/call".to_owned(),
@@ -758,7 +758,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     );
 
     let retrieved = server
-        .handle_request(&crate::mcp::transport::JsonRpcRequest {
+        .handle_request(&tracedecay_mcp::transport::JsonRpcRequest {
             jsonrpc: "2.0".to_owned(),
             id: Some(json!(2)),
             method: "tools/call".to_owned(),
@@ -814,7 +814,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
         ),
     ] {
         let missing = server
-            .handle_request(&crate::mcp::transport::JsonRpcRequest {
+            .handle_request(&tracedecay_mcp::transport::JsonRpcRequest {
                 jsonrpc: "2.0".to_owned(),
                 id: Some(json!(id)),
                 method: "tools/call".to_owned(),

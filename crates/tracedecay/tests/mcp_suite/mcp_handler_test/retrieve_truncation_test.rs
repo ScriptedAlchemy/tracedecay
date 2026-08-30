@@ -13,7 +13,7 @@ use retrieve_truncation_support::retrieve_json_arguments;
 async fn retrieve_tool_returns_full_stored_response() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let original = "{\"items\":[{\"id\":1,\"name\":\"alpha\"}]}";
-    let stored = tracedecay::mcp::response_handles::store_response_handle(
+    let stored = tracedecay_mcp::response_handles::store_response_handle(
         cg.project_root(),
         original,
         tracedecay::tracedecay::current_timestamp(),
@@ -95,11 +95,11 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
             .contains("Re-run the original MCP tool")
     );
 
-    let expired = tracedecay::mcp::response_handles::store_response_handle(
+    let expired = tracedecay_mcp::response_handles::store_response_handle(
         cg.project_root(),
         "{\"items\":[42]}",
         tracedecay::tracedecay::current_timestamp()
-            - tracedecay::mcp::response_handles::RESPONSE_HANDLE_TTL_SECS
+            - tracedecay_mcp::response_handles::RESPONSE_HANDLE_TTL_SECS
             - 5,
     )
     .unwrap();

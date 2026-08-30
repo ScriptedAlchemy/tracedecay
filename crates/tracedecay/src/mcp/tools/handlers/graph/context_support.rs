@@ -72,7 +72,7 @@ fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
     }
     let prefix = utf8_prefix_at_or_before(lane, budget);
     preview.push_str(prefix);
-    if crate::mcp::tools::render::has_open_markdown_fence(prefix) {
+    if tracedecay_mcp::tools::render::has_open_markdown_fence(prefix) {
         preview.push_str("\n```\n");
     }
     preview.push_str(CONTEXT_LANE_TRUNCATED_NOTE);

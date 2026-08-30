@@ -2,8 +2,8 @@
 
 use serde_json::Value;
 
-use super::super::ToolResult;
 use super::{MAX_TESTS_HARD_CAP, error_result};
+use tracedecay_mcp::ToolResult;
 
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 300;
 /// Managed test runs are foreground tool effects. A caller cannot turn one

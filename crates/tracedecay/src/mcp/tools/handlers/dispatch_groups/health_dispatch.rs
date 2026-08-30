@@ -7,9 +7,9 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::errors::Result;
 
 use super::super::ToolCallRegistryOptions;
-use super::super::ToolResult;
 use super::super::{health, redundancy};
 use super::admitted_graph_query;
+use tracedecay_mcp::ToolResult;
 
 /// Dispatch code-health and session-baseline tools (`tracedecay_health`,
 /// `tracedecay_test_risk`, `tracedecay_runtime`, ...).

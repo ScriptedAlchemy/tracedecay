@@ -16,11 +16,11 @@ use crate::application_surface::{
     observe_surface_argument_rejection, resolve_application_surface_dispatch,
     resolve_application_surface_dispatch_with_controls,
 };
-use crate::mcp::tools::ToolDefinition;
 use tracedecay_daemon_protocol::{
     DaemonInvocationExecutor, DispatchedInvocation, RequestedOutputFormat,
 };
 use tracedecay_mcp::McpCatalogError;
+use tracedecay_mcp::ToolDefinition;
 
 pub(crate) const DISPATCH_METADATA_KEY: &str = "tracedecay/dispatch";
 

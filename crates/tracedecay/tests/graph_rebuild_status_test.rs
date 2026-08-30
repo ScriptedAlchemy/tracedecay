@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::mcp::JsonRpcResponse;
+use tracedecay_mcp::JsonRpcResponse;
 
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 

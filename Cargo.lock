@@ -6511,6 +6511,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-domain",
+ "tracedecay-hooks",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
  "tracedecay-tool-catalog",
