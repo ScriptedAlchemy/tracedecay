@@ -56,6 +56,6 @@ truthful coverage. It is not a promise that a generic context prefill product,
 an embedding-first search product, a visualization product, or an autonomous
 refactoring system is being replaced.
 
-See [the user guide](USER-GUIDE.md), [the branching guide](BRANCHING-USER-GUIDE.md),
+See [the user guide](USER-GUIDE.md), [the V2 operating model](V2-OPERATING-MODEL.md),
 and [the V2 product contract](plans/tracedecay-v2/00-plan-set-index.md) for the
 supported journeys and their state semantics.
