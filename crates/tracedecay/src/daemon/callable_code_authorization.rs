@@ -594,7 +594,7 @@ mod tests {
         );
 
         let routed = tracedecay_usecases::graph::map_code_graph_read_runtime_error(read_error);
-        let tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
+        let tracedecay_domain::errors::TraceDecayError::ProjectRoute {
             reason_code,
             retryable,
             ..
