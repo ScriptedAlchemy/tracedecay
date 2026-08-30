@@ -233,6 +233,8 @@ class PortableProcessTests(unittest.TestCase):
         finally:
             holder.kill()
             holder.wait()
+            if holder.stdout is not None:
+                holder.stdout.close()
 
     def test_missing_command_has_bounded_error_output(self) -> None:
         completed = helper(
