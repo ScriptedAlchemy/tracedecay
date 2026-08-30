@@ -47,6 +47,7 @@ mod maintenance;
 mod memory_graph_reconciliation_tasks;
 mod mounts;
 mod profile_memory;
+mod project_store_runtime;
 mod remote_recovery;
 mod retained_hook_tasks;
 mod terminal_tasks;
