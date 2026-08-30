@@ -104,12 +104,14 @@ impl VerifiedGraphQuery {
 
     /// Returns one stable page restricted to the requested logical files.
     ///
-    /// The underlying projection pages by occurrence rather than by file. We
-    /// therefore continue its canonical occurrence scan until this page is
-    /// full, one additional matching symbol proves `has_more`, or the
-    /// generation ends. `max_symbols_examined` bounds unrelated symbols that
-    /// may occur between requested files; exhausting it is a typed budget
-    /// refusal rather than a false end-of-page result.
+    /// Resolution goes through the per-file catalog index rather than the
+    /// whole-corpus occurrence stream — a page for a handful of changed
+    /// files must never hydrate every symbol in the generation. The canonical
+    /// stream orders by occurrence, so sorting the per-file union preserves
+    /// the exact page identity the stream scan produced.
+    /// `max_symbols_examined` bounds the requested files' combined symbol
+    /// count; exhausting it is a typed budget refusal rather than a false
+    /// end-of-page result.
     #[hotpath::measure(label = "graph.query.file_symbols_page")]
     pub(crate) fn symbols_in_logical_files_page(
         &self,
@@ -129,53 +131,38 @@ impl VerifiedGraphQuery {
                 has_more: false,
             });
         }
-        let mut cursor = after.cloned();
-        let mut symbols = Vec::with_capacity(limit);
-        let mut examined = 0usize;
-        loop {
-            let remaining = max_symbols_examined.saturating_sub(examined);
-            if remaining == 0 {
+        let mut matched = Vec::new();
+        for path in logical_paths {
+            let budget = max_symbols_examined
+                .checked_sub(matched.len())
+                .filter(|remaining| *remaining > 0)
+                .ok_or_else(|| {
+                    graph_budget_exhausted(
+                        "verified graph file-symbol paging exceeded its scan budget",
+                    )
+                })?;
+            let mut in_file = self.symbols_in_logical_file(path, budget.saturating_add(1))?;
+            if in_file.len() > budget {
                 return Err(graph_budget_exhausted(
                     "verified graph file-symbol paging exceeded its scan budget",
                 ));
             }
-            let page = self.symbols_page(cursor.as_ref(), remaining.min(1_024))?;
-            if page.symbols.is_empty() {
-                return Ok(CodeGraphSymbolPageV1 {
-                    symbols,
-                    has_more: false,
-                });
-            }
-            examined = examined.saturating_add(page.symbols.len());
-            cursor = page.symbols.last().map(|symbol| symbol.occurrence.clone());
-            for symbol in page.symbols {
-                let Some(path) = symbol
-                    .binding
-                    .as_ref()
-                    .and_then(|binding| binding.logical_path.as_ref())
-                else {
-                    return Err(graph_corrupt(
-                        "verified graph symbol is missing its logical file binding",
-                    ));
-                };
-                if !logical_paths.contains(path) {
-                    continue;
-                }
-                if symbols.len() == limit {
-                    return Ok(CodeGraphSymbolPageV1 {
-                        symbols,
-                        has_more: true,
-                    });
-                }
-                symbols.push(symbol);
-            }
-            if !page.has_more {
-                return Ok(CodeGraphSymbolPageV1 {
-                    symbols,
-                    has_more: false,
-                });
-            }
+            matched.append(&mut in_file);
         }
+        matched.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+        let mut symbols = Vec::with_capacity(limit.min(matched.len()));
+        let mut has_more = false;
+        for symbol in matched {
+            if after.is_some_and(|after| symbol.occurrence <= *after) {
+                continue;
+            }
+            if symbols.len() == limit {
+                has_more = true;
+                break;
+            }
+            symbols.push(symbol);
+        }
+        Ok(CodeGraphSymbolPageV1 { symbols, has_more })
     }
 
     pub(crate) fn symbols_in_logical_file(
@@ -289,6 +276,13 @@ impl VerifiedGraphQuery {
 
     /// Finds files containing functions targeted by canonical annotation
     /// edges whose source is a recognized test annotation marker.
+    ///
+    /// A request scoped to specific files resolves through the per-file
+    /// catalog index instead of the whole-corpus symbol stream: the four
+    /// recognized markers are lexically attached attributes, so a marker
+    /// always occupies the same file as the function it annotates, and only
+    /// the requested files can contribute either endpoint. The unscoped
+    /// census keeps the corpus sweep — that is its job.
     #[hotpath::measure(label = "graph.query.test_annotated_files")]
     pub(crate) fn test_annotated_logical_files(
         &self,
@@ -296,15 +290,41 @@ impl VerifiedGraphQuery {
         max_symbols: usize,
         max_relations: usize,
     ) -> Result<HashSet<String>> {
-        let page = self.symbols_page(None, max_symbols)?;
-        if page.has_more {
-            return Err(graph_budget_exhausted(
-                "verified test-attribution census exceeded its symbol budget",
-            ));
-        }
+        let (symbols, scoped) = match logical_paths {
+            Some(requested) => {
+                let mut symbols = Vec::new();
+                for path in requested {
+                    let budget = max_symbols
+                        .checked_sub(symbols.len())
+                        .filter(|remaining| *remaining > 0)
+                        .ok_or_else(|| {
+                            graph_budget_exhausted(
+                                "verified test-attribution census exceeded its symbol budget",
+                            )
+                        })?;
+                    let mut in_file = self.symbols_in_logical_file(path, budget.saturating_add(1))?;
+                    if in_file.len() > budget {
+                        return Err(graph_budget_exhausted(
+                            "verified test-attribution census exceeded its symbol budget",
+                        ));
+                    }
+                    symbols.append(&mut in_file);
+                }
+                (symbols, true)
+            }
+            None => {
+                let page = self.symbols_page(None, max_symbols)?;
+                if page.has_more {
+                    return Err(graph_budget_exhausted(
+                        "verified test-attribution census exceeded its symbol budget",
+                    ));
+                }
+                (page.symbols, false)
+            }
+        };
         let mut paths = HashMap::new();
         let mut test_markers = HashSet::new();
-        for symbol in &page.symbols {
+        for symbol in &symbols {
             let binding = symbol.binding.as_ref().ok_or_else(|| {
                 graph_corrupt("verified graph symbol is missing its file binding")
             })?;
@@ -324,8 +344,24 @@ impl VerifiedGraphQuery {
                 test_markers.insert(symbol.occurrence.clone());
             }
         }
-        let occurrences = page
-            .symbols
+        if scoped {
+            if test_markers.is_empty() {
+                return Ok(HashSet::new());
+            }
+            // Outgoing annotation edges from the scoped markers alone: the
+            // corpus-seeded `edges_among` variant below needs every endpoint
+            // in its seed set, which is exactly the full-corpus hydration a
+            // file-scoped request must not pay.
+            let markers = test_markers.iter().cloned().collect::<Vec<_>>();
+            return Ok(self
+                .callees(&markers, &[RelationEdgeKindV1::Annotates], max_relations)?
+                .into_iter()
+                .flatten()
+                .filter_map(|edge| paths.get(&edge.edge.to_occurrence).cloned())
+                .filter(|path| logical_paths.is_none_or(|requested| requested.contains(path)))
+                .collect());
+        }
+        let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
