@@ -449,7 +449,9 @@ async fn codex_workflow_lifecycle_secret_content_is_sanitized_before_persistence
     init_git_repo(&project);
     mark_test_project(&project);
 
-    const SECRET: &str = "AKIACODEXLIFECYCLE01";
+    // A real AWS access-key-id shape: base32 body ([A-Z2-7]{16}), which the
+    // vendored gitleaks rule detects; 0/1 never appear in genuine key ids.
+    const SECRET: &str = "AKIACODEXLIFECYCLE77";
     let dir = home.join(".codex/sessions/2026/01/04");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rollout-2026-01-04T00-00-00-codex-wf-secret.jsonl");

@@ -332,10 +332,21 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     let warmup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         let warmup = cursor_pre_compact_via_daemon(&warmup_event).await;
-        if warmup.status != "error" {
+        let retryable = match (warmup.status.as_str(), warmup.reason.as_str()) {
+            ("error", reason) => {
+                assert_eq!(reason, "timed out", "warmup hit a non-budget error");
+                true
+            }
+            // The daemon-owned LCM authority mounts asynchronously after
+            // spawn; until it does, the route truthfully reports unavailable.
+            // That is a startup state to warm through, not the pressure
+            // behavior under test.
+            ("unavailable", "lcm_daemon_authority_unavailable") => true,
+            _ => false,
+        };
+        if !retryable {
             break;
         }
-        assert_eq!(warmup.reason, "timed out", "warmup hit a non-budget error");
         assert!(
             std::time::Instant::now() < warmup_deadline,
             "daemon never acknowledged pressure within the warmup deadline"

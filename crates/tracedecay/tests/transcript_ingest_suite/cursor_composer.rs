@@ -1132,7 +1132,9 @@ async fn composer_envelope_todos_exact_duplicate_is_idempotent() {
 
 #[tokio::test]
 async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
-    const SECRET: &str = "AKIACOMPOSERTODO0001";
+    // A real AWS access-key-id shape: base32 body ([A-Z2-7]{16}), which the
+    // vendored gitleaks rule detects; 0/1 never appear in genuine key ids.
+    const SECRET: &str = "AKIACOMPOSERTODO2345";
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
