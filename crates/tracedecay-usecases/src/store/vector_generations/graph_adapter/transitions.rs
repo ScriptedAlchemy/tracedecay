@@ -30,10 +30,11 @@ use tracedecay_store::{
 
 use super::super::identity::generation_identity_digest;
 use super::super::{
-    BaseGenerationIncompatibilityV1, PhysicalVectorBytePoolV1, PreparedVectorGenerationV1,
-    PublishedStateV1, VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, VectorGenerationBuildIdV1,
-    VectorGenerationPlanV1, VectorGenerationPublicationV1, VectorGenerationStateMachineV1,
-    VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1, validate_plan,
+    BaseGenerationIncompatibilityV1, BatchCommitDecisionV1, PreparedBatchCommitV1,
+    PreparedVectorGenerationV1, PublishedStateV1, StagedVectorValueRetentionV1,
+    VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, VectorGenerationBuildIdV1, VectorGenerationPlanV1,
+    VectorGenerationPublicationV1, VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1,
+    VectorProjectionCheckpointV1, validate_plan,
 };
 use super::native_records::{
     NativeGraphStateV1, ScopedBuildRecordsV1, ScopedGenerationRecordsV1,
@@ -208,8 +209,7 @@ impl GraphVectorGenerationStoreV1 {
                 plan.base_generation.as_ref(),
                 Arc::clone(&cancellation),
             )?;
-            let before = transition_state(existing.as_ref(), generations.iter())?;
-            let mut after = before.clone();
+            let mut after = transition_state(existing.as_ref(), generations.iter())?;
             let result = if rebuild {
                 after.rebuild_generation(plan.clone())
             } else {
@@ -498,24 +498,47 @@ impl GraphVectorGenerationStoreV1 {
         let pending = pending
             .get_mut(build_id)
             .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
-        let before = pending.state.clone();
-        let mut after = before.clone();
-        let checkpoint = after.commit_batch_ref(build_id, expected_checkpoint, &prepared)?;
+        // Decide the batch against the unmodified machine, write it durably,
+        // and only then apply the decided effects in place. A failed durable
+        // append drops the decision and leaves the machine byte-identical, so
+        // no whole-machine clone is needed for transactionality — cloning the
+        // accumulated corpus per batch is what made projection peak RSS a
+        // multiple of the corpus.
+        let staged_commit =
+            match pending
+                .state
+                .validate_batch(build_id, expected_checkpoint, &prepared)?
+            {
+                BatchCommitDecisionV1::Replay(checkpoint) => {
+                    // An idempotent replay may be the lost-ack final batch, so
+                    // the completeness probe still runs before acknowledging.
+                    pending.publication = match pending.state.publish_generation(build_id) {
+                        Ok(publication) => Some(publication),
+                        Err(VectorGenerationStoreErrorV1::IncompleteGeneration) => {
+                            pending.publication.take()
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    return Ok(checkpoint);
+                }
+                BatchCommitDecisionV1::Commit(staged_commit) => staged_commit,
+            };
         let next_revision = pending.revision.checked_add(1).ok_or_else(|| {
             VectorGenerationStoreErrorV1::Corrupt(
                 "semantic vector graph revision overflowed".to_owned(),
             )
         })?;
         let mutations = full_native_mutations(encode_generation_batch_delta(
-            &after,
+            &pending.state,
             build_id,
             &prepared,
+            &staged_commit,
             next_revision,
         )?);
         let next_watermark = GraphWatermark::new(format!(
             "semantic-vector-stage:{}:{}",
             pending.stage.next_ordinal,
-            canonical_sha256(&checkpoint)
+            canonical_sha256(staged_commit.checkpoint())
                 .map_err(storage_error)?
                 .as_str()
         ))
@@ -534,22 +557,7 @@ impl GraphVectorGenerationStoreV1 {
         let native_output = batch
             .semantic_vector_output_digest()
             .map_err(map_graph_error)?;
-        // A one-batch corpus publishes and removes the staged build. The
-        // stage receipt still has to name those rows, so it must be built
-        // before publish_generation drops them.
-        let receipt = stage_batch_receipt(
-            &pending.stage,
-            &after,
-            build_id,
-            &prepared,
-            &checkpoint,
-            native_output,
-        )?;
-        let publication = match after.publish_generation(build_id) {
-            Ok(publication) => Some(publication),
-            Err(VectorGenerationStoreErrorV1::IncompleteGeneration) => None,
-            Err(error) => return Err(error),
-        };
+        let receipt = stage_batch_receipt(&pending.stage, &prepared, &staged_commit, native_output)?;
         self.runtime
             .append_stage_batch(&receipt, batch, &authority)
             .map_err(map_graph_error)?;
@@ -570,9 +578,15 @@ impl GraphVectorGenerationStoreV1 {
                 return Err(VectorGenerationStoreErrorV1::ConcurrentMutation);
             }
         };
-        pending.state = after;
+        let checkpoint = pending.state.apply_batch(build_id, staged_commit)?;
+        // A complete corpus publishes in memory here; the durable publication
+        // still happens from staged native records on the publish drive.
+        pending.publication = match pending.state.publish_generation(build_id) {
+            Ok(publication) => Some(publication),
+            Err(VectorGenerationStoreErrorV1::IncompleteGeneration) => None,
+            Err(error) => return Err(error),
+        };
         pending.revision = next_revision;
-        pending.publication = publication;
         crate::hotpath_observe::vector_batch_committed(
             prepared.receipt.receipts.len(),
             checkpoint.completed_batches,
@@ -774,10 +788,8 @@ fn require_same_semantic_plan(
 
 fn stage_batch_receipt(
     stage: &SemanticVectorStageRecord,
-    state: &VectorGenerationStateMachineV1,
-    build_id: &VectorGenerationBuildIdV1,
     prepared: &PreparedVectorGenerationV1,
-    checkpoint: &VectorProjectionCheckpointV1,
+    staged_commit: &PreparedBatchCommitV1,
     output_digest: SemanticVectorBatchOutputDigest,
 ) -> Result<SemanticVectorStageBatchReceipt, VectorGenerationStoreErrorV1> {
     let input = canonical_sha256(&(
@@ -787,8 +799,9 @@ fn stage_batch_receipt(
         &prepared.receipt,
     ))
     .map_err(storage_error)?;
-    let checkpoint_digest = canonical_sha256(checkpoint).map_err(storage_error)?;
-    let chunks = semantic_stage_chunk_receipts(state, build_id, prepared)?;
+    let checkpoint_digest =
+        canonical_sha256(staged_commit.checkpoint()).map_err(storage_error)?;
+    let chunks = semantic_stage_chunk_receipts(prepared, staged_commit)?;
     SemanticVectorStageBatchReceipt::new(
         SemanticVectorStageBatchKey {
             stage: stage.plan.key.clone(),
@@ -804,14 +817,14 @@ fn stage_batch_receipt(
 }
 
 pub(in crate::store::vector_generations) fn semantic_stage_chunk_receipts(
-    state: &VectorGenerationStateMachineV1,
-    build_id: &VectorGenerationBuildIdV1,
     prepared: &PreparedVectorGenerationV1,
+    staged_commit: &PreparedBatchCommitV1,
 ) -> Result<Vec<SemanticVectorStageChunkReceipt>, VectorGenerationStoreErrorV1> {
-    let build = state
-        .staged
-        .get(build_id)
-        .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
+    let prepared_vectors = prepared
+        .vectors
+        .iter()
+        .map(|vector| (&vector.chunk_id, vector))
+        .collect::<BTreeMap<_, _>>();
     prepared
         .receipt
         .receipts
@@ -820,7 +833,7 @@ pub(in crate::store::vector_generations) fn semantic_stage_chunk_receipts(
         .map(|(ordinal, receipt)| {
             let (operation, chunk_digest, output_digest) = match receipt.operation {
                 ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
-                    let vector = build.vectors.get(&receipt.chunk_id).ok_or_else(|| {
+                    let vector = prepared_vectors.get(&receipt.chunk_id).ok_or_else(|| {
                         VectorGenerationStoreErrorV1::Corrupt(
                             "semantic vector native receipt has no carried vector effect"
                                 .to_owned(),
@@ -833,7 +846,7 @@ pub(in crate::store::vector_generations) fn semantic_stage_chunk_receipts(
                     )
                 }
                 ProjectionOperationV1::Reused => {
-                    if !build.vectors.contains_key(&receipt.chunk_id) {
+                    if !staged_commit.has_vector_effect(&receipt.chunk_id) {
                         return Err(VectorGenerationStoreErrorV1::Corrupt(
                             "semantic vector reused receipt has no staged lineage vector"
                                 .to_owned(),
@@ -881,12 +894,20 @@ pub(super) fn transition_state<'a>(
 ) -> Result<VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1> {
     let staged = build
         .map(|build| -> Result<_, VectorGenerationStoreErrorV1> {
+            // Hydrated staged rows were row-validated against the admitted
+            // embedding key during decode; this machine's durable bytes live
+            // in the graph, so their payloads elide exactly like commit-time
+            // inserts do.
+            let mut staged = build.staged.clone();
+            for vector in staged.vectors.values_mut() {
+                vector.values = Vec::new();
+            }
             Ok(BTreeMap::from([(
                 VectorGenerationBuildIdV1(
-                    canonical_sha256(&(VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, &build.staged.plan))
+                    canonical_sha256(&(VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, &staged.plan))
                         .map_err(storage_error)?,
                 ),
-                build.staged.clone(),
+                staged,
             )]))
         })
         .transpose()?
@@ -899,12 +920,17 @@ pub(super) fn transition_state<'a>(
             )
         })
         .collect();
-    let mut state = VectorGenerationStateMachineV1 {
-        staged,
-        published: PublishedStateV1::immutable_graph_generation(generations),
-        physical_vector_pool: PhysicalVectorBytePoolV1::default(),
-    };
-    state.ensure_physical_reuse_index()?;
+    // The graph adapter's machine never serves float payloads and never
+    // seals state documents: the durable rows are the graph's native
+    // entities, so staged retention is elided and no physical reuse index is
+    // derived. Hydrated base generations keep their payloads — reused-row
+    // lineage checks read them.
+    let mut state =
+        VectorGenerationStateMachineV1::with_staged_value_retention(
+            StagedVectorValueRetentionV1::Elided,
+        );
+    state.staged = staged;
+    state.published = PublishedStateV1::immutable_graph_generation(generations);
     Ok(state)
 }
 

@@ -68,6 +68,28 @@ pub struct VectorProjectionCheckpointV1 {
     pub last_publication_digest: Option<ManifestDigest>,
 }
 
+/// Whether committed vector rows keep their float payloads resident in this
+/// state machine.
+///
+/// The machine is the deterministic reference model for both drivers, but the
+/// two drivers own bytes differently. The plain in-memory machine (parity
+/// tests, sealed persistence) is itself the byte authority, so it retains
+/// payloads. The graph adapter durably appends every batch's rows to the
+/// store before the in-memory commit is applied, so retaining a second copy
+/// of the whole corpus in the machine only multiplies projection peak RSS —
+/// the adapter elides payloads and keeps row identity (chunk digest, output
+/// digest) only. Elided rows are fully validated against the admitted
+/// embedding key at commit time, while the values are still in hand;
+/// publication re-checks row identity but cannot re-derive float digests it
+/// no longer holds, and sealed persistence refuses elided state rather than
+/// writing empty payloads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StagedVectorValueRetentionV1 {
+    #[default]
+    Retained,
+    Elided,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 struct PhysicalVectorReuseKeyV1 {
@@ -465,6 +487,102 @@ struct CommittedVectorBatchV1 {
     request_digest: ManifestDigest,
     prepared_digest: ManifestDigest,
     receipt: ProjectionBatchReceiptV1,
+}
+
+/// One staged-row mutation of a validated batch, in receipt order.
+enum StagedChunkEffectV1 {
+    Vector(ProjectedChunkVectorV1),
+    Tombstone {
+        chunk_id: CodeSearchChunkId,
+        prior_chunk_digest: ContentDigest,
+    },
+}
+
+/// One fully validated batch commit, decided against the exact current staged
+/// state and applied separately.
+///
+/// Splitting decision from application lets the persistent adapter write the
+/// batch durably *between* the two halves without cloning the accumulated
+/// machine for transactionality: a failed durable append simply drops this
+/// value and the machine is byte-identical to before the attempt, while
+/// [`VectorGenerationStateMachineV1::apply_batch`] cannot fail once the
+/// decision exists. The post-apply counts are decided here — the build's
+/// committed chunk effects are disjoint across batches, so every vector
+/// effect inserts a new row and every tombstone effect is outside the row
+/// set — which is what lets the adapter encode the batch's native generation
+/// metadata before the in-memory state has moved.
+pub struct PreparedBatchCommitV1 {
+    embedding_key: AdmittedEmbeddingProjectionKeyV1,
+    checkpoint: VectorProjectionCheckpointV1,
+    batch: CommittedVectorBatchV1,
+    effects: Vec<StagedChunkEffectV1>,
+    batch_ordinal: u64,
+    row_count_after: u64,
+    vector_bytes_after: u64,
+    tombstone_count_after: u64,
+    receipt_count_after: u64,
+}
+
+impl PreparedBatchCommitV1 {
+    pub(crate) fn embedding_key(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
+        &self.embedding_key
+    }
+
+    pub(crate) fn checkpoint(&self) -> &VectorProjectionCheckpointV1 {
+        &self.checkpoint
+    }
+
+    pub(crate) fn receipt(&self) -> &ProjectionBatchReceiptV1 {
+        &self.batch.receipt
+    }
+
+    pub(crate) fn batch_ordinal(&self) -> u64 {
+        self.batch_ordinal
+    }
+
+    pub(crate) fn row_count_after(&self) -> u64 {
+        self.row_count_after
+    }
+
+    pub(crate) fn vector_bytes_after(&self) -> u64 {
+        self.vector_bytes_after
+    }
+
+    pub(crate) fn tombstone_count_after(&self) -> u64 {
+        self.tombstone_count_after
+    }
+
+    pub(crate) fn receipt_count_after(&self) -> u64 {
+        self.receipt_count_after
+    }
+
+    pub(crate) fn has_vector_effect(&self, chunk_id: &CodeSearchChunkId) -> bool {
+        self.effects.iter().any(|effect| {
+            matches!(effect, StagedChunkEffectV1::Vector(row) if &row.chunk_id == chunk_id)
+        })
+    }
+
+    pub(crate) fn tombstone_prior_digest(
+        &self,
+        chunk_id: &CodeSearchChunkId,
+    ) -> Option<&ContentDigest> {
+        self.effects.iter().find_map(|effect| match effect {
+            StagedChunkEffectV1::Tombstone {
+                chunk_id: effect_chunk,
+                prior_chunk_digest,
+            } if effect_chunk == chunk_id => Some(prior_chunk_digest),
+            _ => None,
+        })
+    }
+}
+
+/// The two idempotency-checked outcomes of validating one prepared batch.
+#[allow(clippy::large_enum_variant)]
+pub enum BatchCommitDecisionV1 {
+    /// This exact batch (same request and prepared digests) is already
+    /// committed; the commit is an idempotent no-op at this checkpoint.
+    Replay(VectorProjectionCheckpointV1),
+    Commit(PreparedBatchCommitV1),
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
@@ -893,6 +1011,12 @@ impl PublishedVectorGenerationV1 {
         &self.manifest_digest
     }
 
+    /// Whether two published generations carry byte-identical vector content
+    /// regardless of execution lineage. Production publication decides replay
+    /// admission against the staged build directly via
+    /// [`Self::same_staged_vector_content`]; this whole-generation form backs
+    /// the immutability assertions in tests.
+    #[cfg(test)]
     fn same_vector_content(&self, other: &Self) -> bool {
         self.projection_key == other.projection_key
             && self.source_generation == other.source_generation
@@ -902,6 +1026,26 @@ impl PublishedVectorGenerationV1 {
             && self.tombstones == other.tombstones
             && self.tombstone_digests == other.tombstone_digests
             && self.manifest_digest == other.manifest_digest
+    }
+
+    /// Whether a fully staged build carries byte-identical vector content to
+    /// this already published generation — the replay admission for a
+    /// publication of an identity the store already holds, decided before the
+    /// staged rows move anywhere.
+    fn same_staged_vector_content(
+        &self,
+        staged: &StagedVectorGenerationV1,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        manifest_digest: &ManifestDigest,
+    ) -> bool {
+        self.projection_key == staged.plan.target_projection_key
+            && self.source_generation == staged.plan.source_generation
+            && self.source_manifest_digest == staged.plan.source_manifest_digest
+            && &self.embedding_key == embedding_key
+            && *self.vectors == *staged.vectors
+            && self.tombstones.iter().eq(staged.tombstones.keys())
+            && *self.tombstone_digests == *staged.tombstones
+            && &self.manifest_digest == manifest_digest
     }
 
     fn canonicalize_tombstones(&mut self) {
@@ -1066,11 +1210,22 @@ pub struct VectorGenerationStateMachineV1 {
     published: PublishedStateV1,
     #[serde(skip, default)]
     physical_vector_pool: PhysicalVectorBytePoolV1,
+    #[serde(skip, default)]
+    staged_values: StagedVectorValueRetentionV1,
 }
 
 impl VectorGenerationStateMachineV1 {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A machine whose committed rows follow `retention`. See
+    /// [`StagedVectorValueRetentionV1`] for which driver uses which mode.
+    pub fn with_staged_value_retention(retention: StagedVectorValueRetentionV1) -> Self {
+        Self {
+            staged_values: retention,
+            ..Self::default()
+        }
     }
 
     pub fn begin_generation(
@@ -1178,6 +1333,23 @@ impl VectorGenerationStateMachineV1 {
         expected_checkpoint: Option<&VectorProjectionCheckpointV1>,
         prepared: &PreparedVectorGenerationV1,
     ) -> Result<VectorProjectionCheckpointV1, VectorGenerationStoreErrorV1> {
+        match self.validate_batch(build_id, expected_checkpoint, prepared)? {
+            BatchCommitDecisionV1::Replay(checkpoint) => Ok(checkpoint),
+            BatchCommitDecisionV1::Commit(staged) => self.apply_batch(build_id, staged),
+        }
+    }
+
+    /// Decide one prepared batch against the current staged state without
+    /// mutating anything. Every fallible check — replay identity, checkpoint
+    /// freshness, receipt verification, per-row validation against the
+    /// admitted embedding key, base-generation lineage — happens here, while
+    /// the batch's float payloads are still in hand.
+    pub fn validate_batch(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+        expected_checkpoint: Option<&VectorProjectionCheckpointV1>,
+        prepared: &PreparedVectorGenerationV1,
+    ) -> Result<BatchCommitDecisionV1, VectorGenerationStoreErrorV1> {
         let prepared_digest = canonical_sha256(&(VECTOR_COMMITTED_BATCH_DIGEST_DOMAIN, prepared))
             .map_err(storage_error)?;
         let vector_by_chunk = prepared
@@ -1190,196 +1362,331 @@ impl VectorGenerationStateMachineV1 {
             .iter()
             .map(|tombstone| (tombstone.chunk_id.clone(), tombstone))
             .collect::<BTreeMap<_, _>>();
+        let current = self
+            .staged
+            .get(build_id)
+            .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
+        if let Some(existing) = current
+            .batches
+            .iter()
+            .find(|batch| batch.request_digest == prepared.request.request_digest)
         {
-            let current = self
-                .staged
-                .get(build_id)
-                .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
-            if let Some(existing) = current
-                .batches
-                .iter()
-                .find(|batch| batch.request_digest == prepared.request.request_digest)
-            {
-                if existing.prepared_digest == prepared_digest {
-                    return Ok(current.checkpoint.clone());
-                }
-                return Err(VectorGenerationStoreErrorV1::ConflictingBatchReplay);
+            if existing.prepared_digest == prepared_digest {
+                return Ok(BatchCommitDecisionV1::Replay(current.checkpoint.clone()));
             }
-            if current.checkpoint.completed_batches == 0 {
-                if expected_checkpoint.is_some() {
-                    return Err(VectorGenerationStoreErrorV1::StaleCheckpoint);
-                }
-            } else if expected_checkpoint != Some(&current.checkpoint) {
+            return Err(VectorGenerationStoreErrorV1::ConflictingBatchReplay);
+        }
+        if current.checkpoint.completed_batches == 0 {
+            if expected_checkpoint.is_some() {
                 return Err(VectorGenerationStoreErrorV1::StaleCheckpoint);
             }
-
-            validate_batch_identity(&current.plan, prepared)?;
-            validate_base_generation_for_batch(&self.published, &current.plan, prepared)?;
-            verify_batch_receipt(&prepared.request, &prepared.receipt)
-                .map_err(SemanticProjectionErrorV1::from)?;
-            if let Some(key) = &current.embedding_key
-                && key != &prepared.embedding_key
-            {
-                return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-            }
-            if vector_by_chunk.len() != prepared.vectors.len()
-                || tombstone_by_chunk.len() != prepared.tombstones.len()
-            {
-                return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-            }
-
-            let mut batch_chunks = BTreeSet::new();
-            for receipt in &prepared.receipt.receipts {
-                if current.committed_chunk_effects.contains(&receipt.chunk_id)
-                    || !batch_chunks.insert(receipt.chunk_id.clone())
-                {
-                    return Err(VectorGenerationStoreErrorV1::DuplicateChunkEffect(
-                        receipt.chunk_id.clone(),
-                    ));
-                }
-                match receipt.operation {
-                    ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
-                        let vector = vector_by_chunk.get(&receipt.chunk_id).ok_or_else(|| {
-                            VectorGenerationStoreErrorV1::MissingAppliedVector(
-                                receipt.chunk_id.clone(),
-                            )
-                        })?;
-                        validate_prepared_vector_row(prepared, vector)?;
-                        if receipt.outcome != ProjectionOutcomeV1::Applied
-                            || receipt.output_digest.as_ref() != Some(&vector.output_digest)
-                        {
-                            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-                        }
-                    }
-                    ProjectionOperationV1::Deleted => {
-                        let tombstone = tombstone_by_chunk
-                            .get(&receipt.chunk_id)
-                            .ok_or(VectorGenerationStoreErrorV1::BatchIdentityMismatch)?;
-                        if receipt.prior_chunk_digest.as_ref()
-                            != Some(&tombstone.prior_chunk_digest)
-                        {
-                            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-                        }
-                        validate_base_digest(&self.published, &current.plan, receipt)?;
-                    }
-                    ProjectionOperationV1::Reused => {
-                        let base = base_vector(&self.published, &current.plan, &receipt.chunk_id)?;
-                        if current.plan.target_projection_key != base.projection_key
-                            || receipt.prior_chunk_digest.as_ref() != Some(&base.chunk_digest)
-                            || receipt.current_chunk_digest.as_ref() != Some(&base.chunk_digest)
-                        {
-                            return Err(VectorGenerationStoreErrorV1::MissingBaseVector(
-                                receipt.chunk_id.clone(),
-                            ));
-                        }
-                    }
-                }
-            }
-            if vector_by_chunk.len()
-                != prepared
-                    .receipt
-                    .receipts
-                    .iter()
-                    .filter(|receipt| {
-                        matches!(
-                            receipt.operation,
-                            ProjectionOperationV1::Added | ProjectionOperationV1::Updated
-                        )
-                    })
-                    .count()
-                || tombstone_by_chunk.len()
-                    != prepared
-                        .receipt
-                        .receipts
-                        .iter()
-                        .filter(|receipt| receipt.operation == ProjectionOperationV1::Deleted)
-                        .count()
-            {
-                return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-            }
+        } else if expected_checkpoint != Some(&current.checkpoint) {
+            return Err(VectorGenerationStoreErrorV1::StaleCheckpoint);
         }
 
-        let next = self
-            .staged
-            .get_mut(build_id)
-            .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
-        if next.embedding_key.is_none() {
-            next.embedding_key = Some(prepared.embedding_key.clone());
+        validate_batch_identity(&current.plan, prepared)?;
+        validate_base_generation_for_batch(&self.published, &current.plan, prepared)?;
+        verify_batch_receipt(&prepared.request, &prepared.receipt)
+            .map_err(SemanticProjectionErrorV1::from)?;
+        if let Some(key) = &current.embedding_key
+            && key != &prepared.embedding_key
+        {
+            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
         }
+        if vector_by_chunk.len() != prepared.vectors.len()
+            || tombstone_by_chunk.len() != prepared.tombstones.len()
+        {
+            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+        }
+
+        let retained_values = |values: &Vec<f32>| match self.staged_values {
+            StagedVectorValueRetentionV1::Retained => values.clone(),
+            StagedVectorValueRetentionV1::Elided => Vec::new(),
+        };
+        let mut batch_chunks = BTreeSet::new();
+        let mut effects = Vec::with_capacity(prepared.receipt.receipts.len());
+        let mut vector_effects = 0_u64;
+        let mut tombstone_effects = 0_u64;
         for receipt in &prepared.receipt.receipts {
-            next.committed_chunk_effects
-                .insert(receipt.chunk_id.clone());
+            if current.committed_chunk_effects.contains(&receipt.chunk_id)
+                || !batch_chunks.insert(receipt.chunk_id.clone())
+            {
+                return Err(VectorGenerationStoreErrorV1::DuplicateChunkEffect(
+                    receipt.chunk_id.clone(),
+                ));
+            }
             match receipt.operation {
                 ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
                     let vector = vector_by_chunk.get(&receipt.chunk_id).ok_or_else(|| {
                         VectorGenerationStoreErrorV1::MissingAppliedVector(receipt.chunk_id.clone())
                     })?;
-                    next.tombstones.remove(&receipt.chunk_id);
-                    let mut rebound = (*vector).clone();
-                    rebound.source_manifest_digest = next.plan.source_manifest_digest.clone();
-                    next.vectors.insert(receipt.chunk_id.clone(), rebound);
+                    validate_prepared_vector_row(prepared, vector)?;
+                    if receipt.outcome != ProjectionOutcomeV1::Applied
+                        || receipt.output_digest.as_ref() != Some(&vector.output_digest)
+                    {
+                        return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+                    }
+                    effects.push(StagedChunkEffectV1::Vector(ProjectedChunkVectorV1 {
+                        projection_key: vector.projection_key.clone(),
+                        source_generation: vector.source_generation.clone(),
+                        source_manifest_digest: current.plan.source_manifest_digest.clone(),
+                        chunk_id: vector.chunk_id.clone(),
+                        chunk_digest: vector.chunk_digest.clone(),
+                        values: retained_values(&vector.values),
+                        output_digest: vector.output_digest.clone(),
+                    }));
+                    vector_effects += 1;
                 }
                 ProjectionOperationV1::Deleted => {
                     let tombstone = tombstone_by_chunk
                         .get(&receipt.chunk_id)
                         .ok_or(VectorGenerationStoreErrorV1::BatchIdentityMismatch)?;
-                    next.vectors.remove(&receipt.chunk_id);
-                    next.tombstones.insert(
-                        receipt.chunk_id.clone(),
-                        tombstone.prior_chunk_digest.clone(),
-                    );
+                    if receipt.prior_chunk_digest.as_ref() != Some(&tombstone.prior_chunk_digest) {
+                        return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+                    }
+                    validate_base_digest(&self.published, &current.plan, receipt)?;
+                    effects.push(StagedChunkEffectV1::Tombstone {
+                        chunk_id: receipt.chunk_id.clone(),
+                        prior_chunk_digest: tombstone.prior_chunk_digest.clone(),
+                    });
+                    tombstone_effects += 1;
                 }
                 ProjectionOperationV1::Reused => {
-                    let base = base_vector(&self.published, &next.plan, &receipt.chunk_id)?;
-                    let mut rebound = base.clone();
-                    rebound.source_generation = next.plan.source_generation.clone();
-                    rebound.source_manifest_digest = next.plan.source_manifest_digest.clone();
-                    next.vectors.insert(receipt.chunk_id.clone(), rebound);
+                    let base = base_vector(&self.published, &current.plan, &receipt.chunk_id)?;
+                    if current.plan.target_projection_key != base.projection_key
+                        || receipt.prior_chunk_digest.as_ref() != Some(&base.chunk_digest)
+                        || receipt.current_chunk_digest.as_ref() != Some(&base.chunk_digest)
+                    {
+                        return Err(VectorGenerationStoreErrorV1::MissingBaseVector(
+                            receipt.chunk_id.clone(),
+                        ));
+                    }
+                    effects.push(StagedChunkEffectV1::Vector(ProjectedChunkVectorV1 {
+                        projection_key: base.projection_key.clone(),
+                        source_generation: current.plan.source_generation.clone(),
+                        source_manifest_digest: current.plan.source_manifest_digest.clone(),
+                        chunk_id: base.chunk_id.clone(),
+                        chunk_digest: base.chunk_digest.clone(),
+                        values: retained_values(&base.values),
+                        output_digest: base.output_digest.clone(),
+                    }));
+                    vector_effects += 1;
                 }
             }
         }
-        next.checkpoint.completed_batches += 1;
-        next.checkpoint.last_request_digest = Some(prepared.request.request_digest.clone());
-        next.checkpoint.last_publication_digest = Some(prepared.receipt.publication_digest.clone());
-        next.batches.push(CommittedVectorBatchV1 {
-            request_digest: prepared.request.request_digest.clone(),
-            prepared_digest,
-            receipt: prepared.receipt.clone(),
-        });
+        if vector_by_chunk.len()
+            != prepared
+                .receipt
+                .receipts
+                .iter()
+                .filter(|receipt| {
+                    matches!(
+                        receipt.operation,
+                        ProjectionOperationV1::Added | ProjectionOperationV1::Updated
+                    )
+                })
+                .count()
+            || tombstone_by_chunk.len()
+                != prepared
+                    .receipt
+                    .receipts
+                    .iter()
+                    .filter(|receipt| receipt.operation == ProjectionOperationV1::Deleted)
+                    .count()
+        {
+            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+        }
+
+        let overflow =
+            || VectorGenerationStoreErrorV1::Corrupt("staged row census overflowed".to_owned());
+        // Effect chunks are disjoint from every previously committed batch,
+        // so vector effects insert new rows and tombstone effects land outside
+        // the current row set; the post-apply census is exactly additive.
+        let row_count_after = u64::try_from(current.vectors.len())
+            .map_err(storage_error)?
+            .checked_add(vector_effects)
+            .ok_or_else(overflow)?;
+        let vector_bytes_after = row_count_after
+            .checked_mul(u64::from(
+                prepared.embedding_key.embedding_key().dimensions,
+            ))
+            .and_then(|scalars| scalars.checked_mul(4))
+            .ok_or_else(overflow)?;
+        let tombstone_count_after = u64::try_from(current.tombstones.len())
+            .map_err(storage_error)?
+            .checked_add(tombstone_effects)
+            .ok_or_else(overflow)?;
+        let receipt_count_after = u64::try_from(current.batches.len())
+            .map_err(storage_error)?
+            .checked_add(1)
+            .ok_or_else(overflow)?;
+        let mut checkpoint = current.checkpoint.clone();
+        checkpoint.completed_batches += 1;
+        checkpoint.last_request_digest = Some(prepared.request.request_digest.clone());
+        checkpoint.last_publication_digest = Some(prepared.receipt.publication_digest.clone());
+        Ok(BatchCommitDecisionV1::Commit(PreparedBatchCommitV1 {
+            embedding_key: prepared.embedding_key.clone(),
+            checkpoint,
+            batch: CommittedVectorBatchV1 {
+                request_digest: prepared.request.request_digest.clone(),
+                prepared_digest,
+                receipt: prepared.receipt.clone(),
+            },
+            effects,
+            batch_ordinal: receipt_count_after.saturating_sub(1),
+            row_count_after,
+            vector_bytes_after,
+            tombstone_count_after,
+            receipt_count_after,
+        }))
+    }
+
+    /// Install one validated batch decision. The only failures are a build
+    /// that disappeared between decision and application and a census that
+    /// contradicts the decision — both are foreign-mutation corruption, never
+    /// a property of the batch itself.
+    pub fn apply_batch(
+        &mut self,
+        build_id: &VectorGenerationBuildIdV1,
+        staged_commit: PreparedBatchCommitV1,
+    ) -> Result<VectorProjectionCheckpointV1, VectorGenerationStoreErrorV1> {
+        let next = self
+            .staged
+            .get_mut(build_id)
+            .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
+        if next.embedding_key.is_none() {
+            next.embedding_key = Some(staged_commit.embedding_key);
+        }
+        for effect in staged_commit.effects {
+            match effect {
+                StagedChunkEffectV1::Vector(row) => {
+                    next.committed_chunk_effects.insert(row.chunk_id.clone());
+                    next.tombstones.remove(&row.chunk_id);
+                    next.vectors.insert(row.chunk_id.clone(), row);
+                }
+                StagedChunkEffectV1::Tombstone {
+                    chunk_id,
+                    prior_chunk_digest,
+                } => {
+                    next.committed_chunk_effects.insert(chunk_id.clone());
+                    next.vectors.remove(&chunk_id);
+                    next.tombstones.insert(chunk_id, prior_chunk_digest);
+                }
+            }
+        }
+        next.checkpoint = staged_commit.checkpoint;
+        next.batches.push(staged_commit.batch);
+        if u64::try_from(next.vectors.len()).map_err(storage_error)?
+            != staged_commit.row_count_after
+            || u64::try_from(next.tombstones.len()).map_err(storage_error)?
+                != staged_commit.tombstone_count_after
+            || u64::try_from(next.batches.len()).map_err(storage_error)?
+                != staged_commit.receipt_count_after
+        {
+            return Err(VectorGenerationStoreErrorV1::Corrupt(
+                "staged build census diverged from its validated batch decision".to_owned(),
+            ));
+        }
         Ok(next.checkpoint.clone())
     }
 
     /// Validate and atomically publish a fully staged immutable generation.
     /// Partial generations remain in `staged` and are never readable.
+    ///
+    /// Every fallible check runs against the borrowed staged build before any
+    /// state moves, so an incomplete-build probe (the incremental driver asks
+    /// after every batch) allocates nothing, a rejected publication leaves the
+    /// machine byte-identical, and an accepted one moves the staged rows into
+    /// the published generation instead of deep-copying the corpus.
     pub fn publish_generation(
         &mut self,
         build_id: &VectorGenerationBuildIdV1,
     ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
+        let (generation_id, manifest_digest, replays_existing) = {
+            let staged = self
+                .staged
+                .get(build_id)
+                .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
+            // Equal-length row and membership sets are compared exactly below;
+            // a length mismatch is already the incomplete (or divergent) case.
+            if staged.vectors.len() != staged.plan.expected_chunk_ids.len()
+                || staged.batches.is_empty()
+            {
+                return Err(VectorGenerationStoreErrorV1::IncompleteGeneration);
+            }
+            let embedding_key = staged
+                .embedding_key
+                .as_ref()
+                .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?;
+            let expected = staged
+                .plan
+                .expected_chunk_ids
+                .iter()
+                .collect::<BTreeSet<_>>();
+            if staged
+                .vectors
+                .keys()
+                .any(|chunk_id| !expected.contains(chunk_id))
+            {
+                return Err(VectorGenerationStoreErrorV1::IncompleteGeneration);
+            }
+            if embedding_key.projection_key() != &staged.plan.target_projection_key {
+                return Err(VectorGenerationStoreErrorV1::Storage(
+                    "published embedding key does not match projection key".to_string(),
+                ));
+            }
+            for vector in staged.vectors.values() {
+                validate_vector_row_with(&staged.plan, embedding_key, vector, self.staged_values)?;
+            }
+            for chunk_id in staged.tombstones.keys() {
+                if staged.vectors.contains_key(chunk_id) {
+                    return Err(VectorGenerationStoreErrorV1::Storage(format!(
+                        "published generation retains both vector and tombstone for {chunk_id}"
+                    )));
+                }
+            }
+            validate_receipt_parts(PublishedReceiptPartsV1 {
+                projection_key: &staged.plan.target_projection_key,
+                source_generation: &staged.plan.source_generation,
+                source_manifest_digest: &staged.plan.source_manifest_digest,
+                checkpoint: &staged.checkpoint,
+                receipts: staged.batches.iter().map(|batch| &batch.receipt).collect(),
+                vectors: &staged.vectors,
+                tombstone_digests: &staged.tombstones,
+            })?;
+            let manifest_digest = generation_identity_digest(&staged.plan)?;
+            let generation_id = VectorGenerationIdV1::new(manifest_digest.clone());
+            let replays_existing = match self.published.generations.get(&generation_id) {
+                Some(existing) => {
+                    if !existing.same_staged_vector_content(staged, embedding_key, &manifest_digest)
+                    {
+                        return Err(VectorGenerationStoreErrorV1::ImmutableGenerationConflict);
+                    }
+                    true
+                }
+                None => false,
+            };
+            (generation_id, manifest_digest, replays_existing)
+        };
+        if replays_existing {
+            let checkpoint = self
+                .published
+                .generations
+                .get(&generation_id)
+                .ok_or(VectorGenerationStoreErrorV1::ImmutableGenerationConflict)?
+                .checkpoint
+                .clone();
+            self.staged.remove(build_id);
+            return Ok(VectorGenerationPublicationV1 {
+                generation_id,
+                manifest_digest,
+                checkpoint,
+            });
+        }
         let staged = self
             .staged
-            .get(build_id)
-            .cloned()
+            .remove(build_id)
             .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
-        let expected = staged
-            .plan
-            .expected_chunk_ids
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let actual = staged.vectors.keys().cloned().collect::<BTreeSet<_>>();
-        if expected != actual || staged.batches.is_empty() {
-            return Err(VectorGenerationStoreErrorV1::IncompleteGeneration);
-        }
-        let embedding_key = staged
-            .embedding_key
-            .clone()
-            .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?;
-        for vector in staged.vectors.values() {
-            validate_vector_row(&staged.plan, &embedding_key, vector)?;
-        }
-
-        let manifest_digest = generation_identity_digest(&staged.plan)?;
-        let generation_id = VectorGenerationIdV1::new(manifest_digest.clone());
         let tombstone_digests = staged.tombstones;
         let mut generation = PublishedVectorGenerationV1 {
             generation_id: generation_id.clone(),
@@ -1387,7 +1694,11 @@ impl VectorGenerationStateMachineV1 {
             source_generation: staged.plan.source_generation,
             source_manifest_digest: staged.plan.source_manifest_digest,
             base_generation: staged.plan.base_generation,
-            embedding_key,
+            embedding_key: staged.embedding_key.ok_or_else(|| {
+                VectorGenerationStoreErrorV1::Corrupt(
+                    "validated staged build lost its embedding key".to_owned(),
+                )
+            })?,
             vectors: staged.vectors,
             tombstones: ExternalV1::default(),
             tombstone_digests,
@@ -1398,39 +1709,14 @@ impl VectorGenerationStateMachineV1 {
                 .into_iter()
                 .map(|batch| batch.receipt)
                 .collect(),
-            checkpoint: staged.checkpoint.clone(),
+            checkpoint: staged.checkpoint,
             manifest_digest: manifest_digest.clone(),
         };
         generation.canonicalize_tombstones();
-        generation.validate_persisted()?;
-        // Decide the whole publication against the current state before
-        // touching it, so the swap needs no defensive deep copy of every
-        // published generation.
-        let replays_existing = match self.published.generations.get(&generation_id) {
-            Some(existing) => {
-                if !existing.same_vector_content(&generation) {
-                    return Err(VectorGenerationStoreErrorV1::ImmutableGenerationConflict);
-                }
-                true
-            }
-            None => false,
-        };
-        intern_generation_vectors(&self.physical_vector_pool, &mut self.published, &generation)?;
-        let checkpoint = if replays_existing {
-            self.published
-                .generations
-                .get(&generation_id)
-                .ok_or(VectorGenerationStoreErrorV1::ImmutableGenerationConflict)?
-                .checkpoint
-                .clone()
-        } else {
-            let checkpoint = generation.checkpoint.clone();
-            self.published
-                .generations
-                .insert(generation_id.clone(), generation);
-            checkpoint
-        };
-        self.staged.remove(build_id);
+        let checkpoint = generation.checkpoint.clone();
+        self.published
+            .generations
+            .insert(generation_id.clone(), generation);
         Ok(VectorGenerationPublicationV1 {
             generation_id,
             manifest_digest,
@@ -1459,8 +1745,15 @@ impl VectorGenerationStateMachineV1 {
     /// The document stores only content addresses. Serializing an unsealed
     /// slot fails closed rather than writing a fabricated address. Physical
     /// vector bytes are persisted beside the document because the row map
-    /// elides them.
+    /// elides them, so the payload index is (re)derived here — publication
+    /// itself never copies floats into the pool.
     pub fn persist_sealed(&mut self) -> Result<Vec<u8>, VectorGenerationStoreErrorV1> {
+        if self.staged_values == StagedVectorValueRetentionV1::Elided {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "sealed persistence requires retained staged vector values".to_owned(),
+            ));
+        }
+        self.ensure_physical_reuse_index()?;
         let collections = seal_external_state(self, &BTreeSet::new())?;
         let document = serde_json::to_vec(self).map_err(storage_error)?;
         serde_json::to_vec(&PersistedSealedStateV1 {
@@ -1631,18 +1924,46 @@ impl PublishedVectorGenerationV1 {
 fn validate_published_receipts(
     generation: &PublishedVectorGenerationV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
-    let checkpoint = generation.checkpoint();
-    if checkpoint.target_projection_key != *generation.projection_key()
-        || checkpoint.source_generation != *generation.source_generation()
-        || checkpoint.source_manifest_digest != *generation.source_manifest_digest()
+    validate_receipt_parts(PublishedReceiptPartsV1 {
+        projection_key: generation.projection_key(),
+        source_generation: generation.source_generation(),
+        source_manifest_digest: generation.source_manifest_digest(),
+        checkpoint: generation.checkpoint(),
+        receipts: generation.receipts().iter().collect(),
+        vectors: generation.vectors(),
+        tombstone_digests: generation.tombstone_digests(),
+    })
+}
+
+/// The receipt-bearing parts of a generation, borrowed either from a built
+/// [`PublishedVectorGenerationV1`] or from the staged build a publication is
+/// being decided over — the checks are identical, so publication can run them
+/// before any state moves.
+struct PublishedReceiptPartsV1<'parts> {
+    projection_key: &'parts ProjectionKeyV1,
+    source_generation: &'parts CodeGenerationId,
+    source_manifest_digest: &'parts ManifestDigest,
+    checkpoint: &'parts VectorProjectionCheckpointV1,
+    receipts: Vec<&'parts ProjectionBatchReceiptV1>,
+    vectors: &'parts BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
+    tombstone_digests: &'parts BTreeMap<CodeSearchChunkId, ContentDigest>,
+}
+
+fn validate_receipt_parts(
+    parts: PublishedReceiptPartsV1<'_>,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    let checkpoint = parts.checkpoint;
+    if checkpoint.target_projection_key != *parts.projection_key
+        || checkpoint.source_generation != *parts.source_generation
+        || checkpoint.source_manifest_digest != *parts.source_manifest_digest
         || checkpoint.completed_batches == 0
-        || checkpoint.completed_batches != generation.receipts().len() as u64
+        || checkpoint.completed_batches != parts.receipts.len() as u64
     {
         return Err(VectorGenerationStoreErrorV1::Storage(
             "published generation checkpoint is incomplete or incompatible".to_owned(),
         ));
     }
-    let last = generation.receipts().last().ok_or_else(|| {
+    let last = parts.receipts.last().ok_or_else(|| {
         VectorGenerationStoreErrorV1::Storage(
             "published generation has no projection receipt".to_owned(),
         )
@@ -1656,9 +1977,9 @@ fn validate_published_receipts(
     }
 
     let mut effects = BTreeSet::new();
-    for batch in generation.receipts() {
-        if batch.target_projection_key != *generation.projection_key()
-            || batch.source_generation != *generation.source_generation()
+    for batch in &parts.receipts {
+        if batch.target_projection_key != *parts.projection_key
+            || batch.source_generation != *parts.source_generation
             || expected_publication_digest(batch).map_err(storage_error)?
                 != batch.publication_digest
             || batch.reused_count
@@ -1674,9 +1995,9 @@ fn validate_published_receipts(
         }
         for receipt in &batch.receipts {
             if !effects.insert(receipt.chunk_id.clone())
-                || receipt.projection_key != *generation.projection_key()
+                || receipt.projection_key != *parts.projection_key
                 || receipt.request_digest != batch.request_digest
-                || receipt.source_generation != *generation.source_generation()
+                || receipt.source_generation != *parts.source_generation
                 || receipt.source_manifest_digest != batch.source_manifest_digest
             {
                 return Err(VectorGenerationStoreErrorV1::Storage(
@@ -1685,16 +2006,14 @@ fn validate_published_receipts(
             }
             match receipt.operation {
                 ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
-                    let vector = generation.vectors().get(&receipt.chunk_id);
+                    let vector = parts.vectors.get(&receipt.chunk_id);
                     if receipt.outcome != ProjectionOutcomeV1::Applied
                         || vector.is_none()
                         || receipt.current_chunk_digest.as_ref()
                             != vector.map(|vector| &vector.chunk_digest)
                         || receipt.output_digest.as_ref()
                             != vector.map(|vector| &vector.output_digest)
-                        || generation
-                            .tombstone_digests()
-                            .contains_key(&receipt.chunk_id)
+                        || parts.tombstone_digests.contains_key(&receipt.chunk_id)
                     {
                         return Err(VectorGenerationStoreErrorV1::Storage(
                             "published applied receipt has no matching vector".to_owned(),
@@ -1702,7 +2021,7 @@ fn validate_published_receipts(
                     }
                 }
                 ProjectionOperationV1::Reused => {
-                    let vector = generation.vectors().get(&receipt.chunk_id);
+                    let vector = parts.vectors.get(&receipt.chunk_id);
                     if receipt.outcome != ProjectionOutcomeV1::Reused
                         || vector.is_none()
                         || receipt.prior_chunk_digest.as_ref()
@@ -1710,9 +2029,7 @@ fn validate_published_receipts(
                         || receipt.current_chunk_digest.as_ref()
                             != vector.map(|vector| &vector.chunk_digest)
                         || receipt.output_digest.is_some()
-                        || generation
-                            .tombstone_digests()
-                            .contains_key(&receipt.chunk_id)
+                        || parts.tombstone_digests.contains_key(&receipt.chunk_id)
                     {
                         return Err(VectorGenerationStoreErrorV1::Storage(
                             "published reused receipt has no matching vector".to_owned(),
@@ -1724,8 +2041,8 @@ fn validate_published_receipts(
                         || receipt.current_chunk_digest.is_some()
                         || receipt.output_digest.is_some()
                         || receipt.prior_chunk_digest.as_ref()
-                            != generation.tombstone_digests().get(&receipt.chunk_id)
-                        || generation.vectors().contains_key(&receipt.chunk_id)
+                            != parts.tombstone_digests.get(&receipt.chunk_id)
+                        || parts.vectors.contains_key(&receipt.chunk_id)
                     {
                         return Err(VectorGenerationStoreErrorV1::Storage(
                             "published deletion receipt has no matching tombstone".to_owned(),
@@ -1736,10 +2053,10 @@ fn validate_published_receipts(
         }
     }
 
-    let expected_effects = generation
-        .vectors()
+    let expected_effects = parts
+        .vectors
         .keys()
-        .chain(generation.tombstone_digests().keys())
+        .chain(parts.tombstone_digests.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
     if effects != expected_effects {
@@ -1916,13 +2233,42 @@ fn validate_vector_row(
     embedding_key: &AdmittedEmbeddingProjectionKeyV1,
     vector: &ProjectedChunkVectorV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
+    validate_vector_row_with(
+        plan,
+        embedding_key,
+        vector,
+        StagedVectorValueRetentionV1::Retained,
+    )
+}
+
+/// Row validation under the machine's staged-value retention. A retained row
+/// re-proves its float payload against the admitted embedding key; an elided
+/// row was proven at commit time while the payload was in hand, so only its
+/// identity can — and must — be re-checked here.
+fn validate_vector_row_with(
+    plan: &VectorGenerationPlanV1,
+    embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+    vector: &ProjectedChunkVectorV1,
+    retention: StagedVectorValueRetentionV1,
+) -> Result<(), VectorGenerationStoreErrorV1> {
     if vector.projection_key != plan.target_projection_key
         || vector.source_generation != plan.source_generation
         || vector.source_manifest_digest != plan.source_manifest_digest
     {
         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
     }
-    vector.validate(embedding_key.embedding_key().dimensions)?;
+    match retention {
+        StagedVectorValueRetentionV1::Retained => {
+            vector.validate(embedding_key.embedding_key().dimensions)?;
+        }
+        StagedVectorValueRetentionV1::Elided => {
+            if !vector.values.is_empty() {
+                return Err(VectorGenerationStoreErrorV1::Storage(
+                    "elided staged vector row unexpectedly retains a float payload".to_owned(),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2281,15 +2627,20 @@ mod tests {
                 base_generation: Some(base_id),
             })
             .expect("split-batch build");
-        store
-            .commit_batch(&split_build, None, compatible.clone())
-            .expect("a per-batch changed-set digest commits against the plan");
+        let BatchCommitDecisionV1::Commit(staged_commit) = store
+            .validate_batch(&split_build, None, &compatible)
+            .expect("a per-batch changed-set digest validates against the plan")
+        else {
+            panic!("fresh split batch must not replay");
+        };
         let durable_chunks = graph_adapter::transitions::semantic_stage_chunk_receipts(
-            &store,
-            &split_build,
             &compatible,
+            &staged_commit,
         )
         .expect("reused batch binds lineage without a local vector effect");
+        store
+            .apply_batch(&split_build, staged_commit)
+            .expect("a per-batch changed-set digest commits against the plan");
         assert_eq!(durable_chunks.len(), 1);
         assert_eq!(
             durable_chunks[0].operation,
@@ -2352,11 +2703,25 @@ mod tests {
                 base_generation: Some(base_id.clone()),
             })
             .expect("staged build");
+        // The adapter's order: decide the batch, encode the native delta from
+        // the pre-batch machine plus the decision, then apply.
+        let BatchCommitDecisionV1::Commit(staged_commit) = store
+            .validate_batch(&build, None, &prepared)
+            .expect("validated reused batch")
+        else {
+            panic!("fresh reused batch must not replay");
+        };
+        let encoded = graph_adapter::encode_generation_batch_delta(
+            &store,
+            &build,
+            &prepared,
+            &staged_commit,
+            1,
+        )
+        .expect("receipt-only reused encode");
         store
-            .commit_batch(&build, None, prepared.clone())
+            .apply_batch(&build, staged_commit)
             .expect("complete reused batch");
-        let encoded = graph_adapter::encode_generation_batch_delta(&store, &build, &prepared, 1)
-            .expect("receipt-only reused encode");
         assert!(
             encoded.entities.iter().all(|entity| {
                 !entity.labels.iter().any(|label| {
