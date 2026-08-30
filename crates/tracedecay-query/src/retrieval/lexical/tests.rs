@@ -123,7 +123,7 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         field_filters: Vec::new(),
         fuzzy_budget: 2,
         lexical_profile_revision: id("lexical-profile.v1"),
-        score_domain: id("score.lexical.v1"),
+        score_domain: id(crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1),
         budget: budget(max_candidates),
     }
 }

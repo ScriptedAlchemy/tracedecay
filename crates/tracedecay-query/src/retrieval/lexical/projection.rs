@@ -1734,7 +1734,8 @@ mod deadline_budget_tests {
             exact_retriever_revision: ComponentRevision::new("retriever.exact.v1").expect("exact"),
             lexical_retriever_revision: ComponentRevision::new("retriever.lexical.v1")
                 .expect("lexical"),
-            exact_score_domain: ScoreDomainId::new("score.exact.v1").expect("score"),
+            exact_score_domain: ScoreDomainId::new(crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)
+                .expect("score"),
         }
     }
 
