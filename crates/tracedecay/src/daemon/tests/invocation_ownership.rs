@@ -22,9 +22,10 @@ use crate::daemon::{
     DaemonEngine, DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
     execute_daemon_invocation,
 };
+use tracedecay_application::retrieval::PrimitiveRequest;
 use tracedecay_application::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::WorkApplicationInvocationV1;
-use tracedecay_usecases::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
+use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")

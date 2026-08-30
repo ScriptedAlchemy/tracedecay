@@ -41,7 +41,6 @@ mod native_integration;
 mod overlay;
 mod protocol;
 mod provider;
-mod request_sequence;
 mod rpc;
 mod session;
 mod workspace;
@@ -50,9 +49,8 @@ mod workspace_diagnostics;
 pub use bridge::{
     AsyncContentLengthError, BridgeDirection, BridgePumpOutcome, ContentLengthCodec,
     ContentLengthCodecError, ContentLengthStdioError, ContentLengthStdioTransport,
-    DaemonLspSessionTransport, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
-    MAX_LSP_HEADER_BYTES, StdioFrameTransport, StdioLspBridge, StdioLspBridgeError,
-    read_content_length_frame_until,
+    DaemonLspSessionTransport, MAX_LSP_HEADER_BYTES, StdioFrameTransport, StdioLspBridge,
+    StdioLspBridgeError, read_content_length_frame_until,
 };
 pub use capabilities::{
     CapabilityAvailability, CapabilityParseError, CapabilityUnavailable,
@@ -121,17 +119,13 @@ pub use provider::{
     GenerationDiagnostics, MAX_ANALYZER_RESTARTS, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
     UnavailableDiagnosticSnapshotProvider,
 };
-pub use request_sequence::{
-    ConnectionLocalRequestSequence, ProcessLocalRequestSequence, SequenceExhausted,
-};
 pub use session::{
     AuthorizedLspSession, AuthorizedLspWorkspace, CancellationOutcome, CompletionDisposition,
     DaemonLspSessionEndpoint, LSP_SESSION_TTL_MS, LifecycleError, LspEndpointError,
-    LspRequestFailure, LspRequestId, LspSessionAccess, LspSessionAdmissionPort, LspSessionControl,
-    LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
-    LspWorkspaceRouteError, MAX_LSP_SESSIONS, MAX_LSP_WORKSPACE_ROOTS, MAX_PENDING_REQUESTS,
-    MAX_PUBLICATION_BYTES, PublicationAdmission, PublicationDelivery, PublicationState,
-    RequestAdmission, SessionLifecycle,
+    LspRequestFailure, LspRequestId, LspSessionAdmissionPort, LspSessionControl,
+    LspSessionOpenRequest, LspSessionRegistry, LspWorkspaceRouteError, MAX_LSP_SESSIONS,
+    MAX_PENDING_REQUESTS, MAX_PUBLICATION_BYTES, PublicationAdmission, PublicationDelivery,
+    PublicationState, RequestAdmission, SessionLifecycle,
 };
 pub use workspace::{WorkspaceFolderMutation, WorkspaceFolderMutationApplyError};
 pub use workspace_diagnostics::{

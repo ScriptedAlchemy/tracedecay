@@ -239,7 +239,7 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     let mut active =
         tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project(&[])
             .expect("active empty projection");
-    active.coverage = tracedecay_usecases::feedback::observations::FeedbackCoverageV1::Known;
+    active.coverage = tracedecay_application::feedback::observations::FeedbackCoverageV1::Known;
     active.watermark.producer_boot_id =
         Some(tracedecay_domain::canonical_sha256(&"active-observation-boot").unwrap());
     assert_eq!(

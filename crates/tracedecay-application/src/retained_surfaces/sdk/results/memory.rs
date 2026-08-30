@@ -400,8 +400,7 @@ mod tests {
             );
         }
         assert!(
-            serde_json::from_value::<FactRetrievalTelemetryV1>(json!({"kind": "skipped"}))
-                .is_err(),
+            serde_json::from_value::<FactRetrievalTelemetryV1>(json!({"kind": "skipped"})).is_err(),
             "unknown telemetry states must be rejected"
         );
     }

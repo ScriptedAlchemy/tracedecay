@@ -4,7 +4,7 @@
 //! durable query/cursor keys. Optional-stage upgrades additionally require an
 //! accepted profile/evaluation from the configured authority port.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,8 +15,8 @@ use tracedecay_domain::{
     DiversityPolicy, ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile,
     FusionProfileId, PrincipalId, PrivacyDomainId, QueryNormalizationRevision, RelationEdgeKindV1,
     RetrievalAnchorId, RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId,
-    SingleRootScopeV1, TemporalModeV1, VectorWatermark,
+    RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, VectorWatermark,
 };
 
 use super::CodeIndexSchedulerRegistryV1;
@@ -438,7 +438,37 @@ impl CodeIndexSchedulerRegistryV1 {
             Some(serving) => match self.latest_complete_ready_decoded_for_scope(scope).await {
                 // Warm path: the ready gate admits, byte-identical to before.
                 Some(ready) => (ready, false),
-                None => (serving, true),
+                None => {
+                    // Graph decode/activation is optional enrichment. Its
+                    // readiness gate may abstain while the authenticated text
+                    // owner for the same generation is already current. Keep
+                    // exact and lexical truthful in that window without
+                    // awaiting the decode. If text has advanced beyond the
+                    // seated graph, serve that newer text generation alone;
+                    // the graph lane remains typed unavailable until its own
+                    // generation catches up.
+                    match self.latest_text_serving_freshness_for_scope(scope).await {
+                        Some((text, true))
+                            if text.metadata().manifest().generation_id
+                                == serving.generation().manifest().generation_id =>
+                        {
+                            (serving, false)
+                        }
+                        Some((text, true)) => {
+                            return execute_query_search_on_text(
+                                self,
+                                scope,
+                                input,
+                                text,
+                                None,
+                                false,
+                                graph_control,
+                            )
+                            .await;
+                        }
+                        Some((_, false)) | None => (serving, true),
+                    }
+                }
             },
             None => {
                 if let Some((text, current)) =
@@ -612,14 +642,30 @@ where
     })?;
     let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
     let graph = hotpath::measure_block!("daemon.code_index.query.lane.graph", {
-        if graph_seeds.is_empty() {
-            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                detail: "exact and lexical lanes produced no graph seed".to_owned(),
-            })
-        } else if let Some(graph_serving) = graph_latest
+        // Graph retrieval requires at least one seed. An empty seed list is
+        // "the lane had nothing to expand", not "the retriever is missing",
+        // once a generation has seated native graph serving. Reporting
+        // Unavailable here made a terminal delete/miss search look like a
+        // seating failure (`retriever_unavailable`) after exact and lexical
+        // had already completed. Text-only or still-pending generations keep
+        // the typed unavailable receipt.
+        let graph_serving = graph_latest
             .as_ref()
-            .and_then(|latest| latest.production_graph_serving().ok())
-        {
+            .and_then(|latest| latest.production_graph_serving().ok());
+        if graph_seeds.is_empty() {
+            if graph_serving.is_some() {
+                RetrieverOutcome::Complete(RetrieverBatch {
+                    candidates: Vec::new(),
+                    evidence_by_occurrence: BTreeMap::default(),
+                    coverage: RetrieverCoverage::default(),
+                    continuation: None,
+                })
+            } else {
+                RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
+                    detail: "exact and lexical lanes produced no graph seed".to_owned(),
+                })
+            }
+        } else if let Some(graph_serving) = graph_serving {
             graph_serving.graph.retrieve_graph(
                 &GraphLaneRequest {
                     base: request.clone(),

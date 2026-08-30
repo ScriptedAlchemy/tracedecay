@@ -61,9 +61,8 @@ use tracedecay_lsp::{
     AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace, ClientFrameAdmission,
     DaemonLspRuntimeSession, DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest,
     FeedbackCycleRuntimePort, GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError,
-    LspRuntimeFailure, LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort,
-    LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
-    SessionLifecycle, UpstreamCapabilities,
+    LspRuntimeFailure, LspRuntimeFuture, LspSessionAdmissionPort, LspSessionOpenRequest,
+    LspSessionRegistry, SessionLifecycle, UpstreamCapabilities,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -106,6 +105,11 @@ use tracedecay_usecases::configuration::{
     configuration_layer_scope_digest,
 };
 
+use tracedecay_application::feedback::observations::{
+    FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
+    FeedbackOperationV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1,
+};
+use tracedecay_application::retrieval::{PrimitiveInvocation, PrimitiveRequest};
 use tracedecay_usecases::advisory::{
     AdvisoryDaemonStartupErrorV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
     AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
@@ -115,11 +119,7 @@ use tracedecay_usecases::feedback::concrete::{
     FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackStore, open_feedback_runtime,
 };
 use tracedecay_usecases::feedback::cycle_production::production_proximity_feedback_cycle_input;
-use tracedecay_usecases::feedback::observations::{
-    FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
-    FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
-    FeedbackRejectedArgumentV1, FeedbackSourceEventV1,
-};
+use tracedecay_usecases::feedback::observations::FeedbackObservationEmitterV1;
 use tracedecay_usecases::feedback::owner::{
     DaemonFeedbackReadOwnerV1, FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1,
     FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
@@ -134,9 +134,7 @@ use tracedecay_usecases::lsp_runtime::{
 use tracedecay_usecases::operation_stream::{
     OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
 };
-use tracedecay_usecases::primitives::{
-    PrimitiveDispatch, PrimitiveInvocation, PrimitiveProjectRuntime, PrimitiveRequest,
-};
+use tracedecay_usecases::primitives::{PrimitiveDispatch, PrimitiveProjectRuntime};
 use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
     SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
@@ -144,6 +142,10 @@ use tracedecay_usecases::semantic_runtime::{
 // Re-exported so daemon-internal call sites can keep naming the contract
 // through `service::invocation::`.
 use crate::production_semantic_authorities;
+use tracedecay_application::request_identity::{
+    GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
+    mint_global_opaque_id,
+};
 #[cfg(test)]
 use tracedecay_application::{
     CancellationStage, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
@@ -157,16 +159,12 @@ pub(crate) use tracedecay_daemon_protocol::{
     DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
-    HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, WorkApplicationInvocationV1,
-    WorkApplicationOutcomeV1,
+    HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, LspSessionAccess,
+    LspSessionCredential, LspSessionId, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
 };
 use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::TraceDecayError;
-use tracedecay_usecases::request_identity::{
-    GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
-    mint_global_opaque_id,
-};
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).
@@ -188,6 +186,7 @@ mod primitive;
 pub(crate) use primitive::callable_code_request_context;
 mod registrars;
 mod retained;
+mod semantic_activation;
 pub(in crate::daemon) mod semantic_evaluation;
 #[cfg(test)]
 mod tests;

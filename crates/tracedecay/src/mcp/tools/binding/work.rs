@@ -46,20 +46,39 @@ pub(super) fn work_executable_binding_for_tool(
 }
 
 /// Project every canonical Work executable into a dispatch entry.
+///
+/// Resolves the registry once and looks each operation up in it, rather than
+/// re-fetching the registry per operation through
+/// [`work_executable_binding_for_tool`].
 pub(super) fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::super::dispatch::McpDispatchMetadataError> {
+    let registry = tracedecay_application::work_executable_binding_registry()
+        .map_err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation)?;
     tracedecay_api::WorkOperation::ALL
         .into_iter()
         .map(|operation| {
             let name = format!("tracedecay_work_{}", operation.operation_key());
-            let binding = work_executable_binding_for_tool(&name)?.ok_or({
-                super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
-                    tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
-                        field: "MCP Work executable binding",
-                        reason: "canonical Work operation is not executable",
-                    },
-                )
-            })?;
+            let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
+                .map_err(|_| {
+                    super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
+                        tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
+                            field: "MCP Work operation identity",
+                            reason: "must name one canonical Work operation",
+                        },
+                    )
+                })?;
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .cloned()
+                .ok_or({
+                    super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
+                        tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
+                            field: "MCP Work executable binding",
+                            reason: "canonical Work operation is not executable",
+                        },
+                    )
+                })?;
             Ok(DispatchCatalogBinding {
                 name,
                 group: Some(McpToolDispatchGroup::Work),

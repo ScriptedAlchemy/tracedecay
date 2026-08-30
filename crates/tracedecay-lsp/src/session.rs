@@ -2,9 +2,12 @@
 //! ordering. The stdio bridge has no copy of this state.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use constant_time_eq::constant_time_eq;
+use tracedecay_daemon_protocol::{
+    LspSessionAccess, LspSessionCredential, LspSessionId, LspSessionIdentityError,
+    MAX_LSP_WORKSPACE_ROOTS,
+};
 use tracedecay_domain::ManifestDigest;
 
 use crate::gateway::AdmittedRoot;
@@ -22,11 +25,6 @@ pub const MAX_PENDING_REQUESTS: usize = 64;
 /// unrelated interactive requests.
 pub const MAX_PUBLICATION_BYTES: usize = 256 * 1024;
 pub const MAX_LSP_SESSIONS: usize = 64;
-/// Maximum roots admitted into one exact workspace-folder set.
-/// A client may only admit the bounded root set authorized for this session.
-/// Keeping this small also bounds federated provider fan-out before any graph
-/// or analyzer operation is started.
-pub const MAX_LSP_WORKSPACE_ROOTS: usize = 8;
 /// Detached session state is deterministically discarded after this TTL.
 pub const LSP_SESSION_TTL_MS: u64 = 15 * 60 * 1_000;
 
@@ -34,75 +32,6 @@ pub const LSP_SESSION_TTL_MS: u64 = 15 * 60 * 1_000;
 pub enum LspRequestId {
     Number(i64),
     String(String),
-}
-
-/// Opaque daemon-assigned LSP session identity.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct LspSessionId(String);
-
-impl LspSessionId {
-    pub fn new(value: impl Into<String>) -> Result<Self, LspEndpointError> {
-        let value = value.into();
-        if value.is_empty() || value.len() > 128 {
-            return Err(LspEndpointError::InvalidSessionId);
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Opaque credential minted by the daemon admission authority.
-#[derive(Clone, Eq, PartialEq)]
-pub struct LspSessionCredential(Vec<u8>);
-
-impl LspSessionCredential {
-    pub fn new(value: impl Into<Vec<u8>>) -> Result<Self, LspEndpointError> {
-        let value = value.into();
-        if value.len() < 16 || value.len() > 256 {
-            return Err(LspEndpointError::InvalidCredential);
-        }
-        Ok(Self(value))
-    }
-
-    /// Returns credential material only to an authenticated daemon wire
-    /// adapter. Presentation code must never log or render this value.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for LspSessionCredential {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("LspSessionCredential([redacted])")
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LspSessionAccess {
-    session_id: LspSessionId,
-    credential: LspSessionCredential,
-}
-
-impl LspSessionAccess {
-    pub fn new(session_id: LspSessionId, credential: LspSessionCredential) -> Self {
-        Self {
-            session_id,
-            credential,
-        }
-    }
-
-    pub fn session_id(&self) -> &LspSessionId {
-        &self.session_id
-    }
-
-    /// Returns the opaque credential only to the authenticated daemon
-    /// invocation service.
-    pub fn credential(&self) -> &LspSessionCredential {
-        &self.credential
-    }
 }
 
 /// Request to begin one typed daemon session. Requested roots are
@@ -319,6 +248,15 @@ pub enum LspEndpointError {
     SessionExpired,
     SessionUnavailable,
     Lifecycle(LifecycleError),
+}
+
+impl From<LspSessionIdentityError> for LspEndpointError {
+    fn from(error: LspSessionIdentityError) -> Self {
+        match error {
+            LspSessionIdentityError::InvalidSessionId => Self::InvalidSessionId,
+            LspSessionIdentityError::InvalidCredential => Self::InvalidCredential,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

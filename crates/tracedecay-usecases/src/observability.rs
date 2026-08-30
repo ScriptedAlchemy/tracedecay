@@ -101,10 +101,10 @@ use tracedecay_application::{
 use tracedecay_domain::CoverageStateV1;
 
 use crate::feedback::observations::{
-    FeedbackCoverageV1, FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1,
-    FeedbackSystemMetricKindV1, FeedbackSystemMetricUnavailableReasonV1,
-    FeedbackSystemMetricUnitV1,
+    FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1, FeedbackSystemMetricKindV1,
+    FeedbackSystemMetricUnavailableReasonV1, FeedbackSystemMetricUnitV1,
 };
+use tracedecay_application::feedback::observations::FeedbackCoverageV1;
 
 const EVENT_LIMIT: usize = 10_000;
 const OBSERVABILITY_SCAN_PAGE: usize = 64;

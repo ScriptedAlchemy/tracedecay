@@ -2,7 +2,7 @@
 //! JSON-RPC frames.
 //!
 //! Host-event stdin and durable spool admission stay at
-//! [`DEFAULT_MAX_RECORD_BYTES`] (1 MiB). MCP/daemon JSON-RPC frames use the
+//! [`MAX_WIRE_MESSAGE_BYTES`] (1 MiB). MCP/daemon JSON-RPC frames use the
 //! separate [`MAX_MCP_JSONRPC_FRAME_BYTES`] cap so legitimate edit/tool
 //! requests are not rejected by host-event record coupling.
 //!
@@ -26,12 +26,12 @@ use std::io::{self, Read};
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
-use super::bounds::DEFAULT_MAX_RECORD_BYTES;
-
-/// Host-event wire byte cap (hook stdin and other host-admission inputs).
+/// Wire frame/record ceiling (1 MiB).
 ///
-/// Equal to the durable host-admission spool max record size (1 MiB).
-pub const MAX_WIRE_MESSAGE_BYTES: usize = DEFAULT_MAX_RECORD_BYTES;
+/// This is the authority for host-event stdin, hook payloads, and other
+/// newline-delimited wire records. Durable host-admission spool budgets
+/// derive their per-record cap from this constant.
+pub const MAX_WIRE_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// Bounded MCP/daemon JSON-RPC frame cap (16 MiB).
 ///
@@ -381,8 +381,6 @@ mod tests {
 
     use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, ReadBuf};
 
-    use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
-
     /// Generates `total` bytes in small chunks without pre-materializing the
     /// full hostile value for the product reader to copy from.
     struct ChunkedHostileReader {
@@ -464,17 +462,6 @@ mod tests {
         assert!(hostile.remaining < max + 1_048_576);
     }
 
-    #[test]
-    fn wire_oversized_maps_to_typed_non_durable_outcome_without_payload() {
-        let outcome = HostAdmissionOutcome::wire_record_too_large();
-        assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
-        assert!(!outcome.retryable);
-        assert_eq!(outcome.reason_code, Some(WIRE_RECORD_TOO_LARGE));
-        let encoded = serde_json::to_string(&outcome).unwrap();
-        assert!(!encoded.contains('x'));
-        assert!(encoded.contains(WIRE_RECORD_TOO_LARGE));
-    }
-
     #[tokio::test]
     async fn async_line_reader_streams_hostile_line_and_returns_oversized() {
         let max = 32;
@@ -510,7 +497,6 @@ mod tests {
 
     #[test]
     fn host_event_wire_cap_stays_one_mib_and_mcp_frame_is_larger() {
-        assert_eq!(MAX_WIRE_MESSAGE_BYTES, DEFAULT_MAX_RECORD_BYTES);
         assert_eq!(MAX_WIRE_MESSAGE_BYTES, 1024 * 1024);
         assert_eq!(MAX_MCP_JSONRPC_FRAME_BYTES, 16 * 1024 * 1024);
         assert_eq!(MCP_OVERSIZE_ID_INSPECT_BYTES, 4096);

@@ -730,11 +730,11 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
         &self,
         subject_digest: tracedecay_domain::ManifestDigest,
         observed_at: tracedecay_domain::UtcMicros,
-        event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
+        event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async move {
-            let request_id = tracedecay_usecases::request_identity::mint_global_request_id(
-                tracedecay_usecases::request_identity::GlobalRequestSurface::FeedbackObservation,
+            let request_id = tracedecay_application::request_identity::mint_global_request_id(
+                tracedecay_application::request_identity::GlobalRequestSurface::FeedbackObservation,
             )
             .map_err(|error| TraceDecayError::Config {
                 message: error.to_string(),

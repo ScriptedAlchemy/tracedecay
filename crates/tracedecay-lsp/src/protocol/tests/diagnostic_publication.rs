@@ -1,7 +1,9 @@
+use tracedecay_daemon_protocol::{FramePoll, FrameSend};
+
 use super::super::*;
 use super::{initialize, session};
 use crate::PublicationDelivery;
-use crate::bridge::{DaemonLspSessionTransport, FramePoll, FrameSend};
+use crate::bridge::DaemonLspSessionTransport;
 use crate::diagnostics::{
     DiagnosticSeverity, DiagnosticSource, GatewayDiagnosticRelatedInformation, LspPosition,
     LspRange,

@@ -1,13 +1,13 @@
 use serde_json::{Value, json};
+use tracedecay_daemon_protocol::{FramePoll, FrameSend};
 use tracedecay_lsp::{
     AdmittedRoot, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState, ClientCapabilities,
     ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
     ContextProjectionRegistration, ContextProjectionRequest, DaemonLspProtocolSession,
     DaemonLspProtocolTransport, DaemonLspSessionTransport, FeedbackCyclePort, FeedbackCycleRequest,
-    FeedbackCycleResponse, FramePoll, FrameSend, GatewayCapabilities, LspLocation, LspPosition,
-    LspRange, LspRequestId, SemanticCapability, SemanticProviderOutcome, SemanticProviderPort,
-    TRACEDECAY_CONTEXT_REVISION, UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities,
-    negotiate_capabilities,
+    FeedbackCycleResponse, GatewayCapabilities, LspLocation, LspPosition, LspRange, LspRequestId,
+    SemanticCapability, SemanticProviderOutcome, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION,
+    UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, negotiate_capabilities,
 };
 
 const ROOT_URI: &str = "file:///workspace";

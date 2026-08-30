@@ -5,15 +5,18 @@ use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay::agents::context_scout_v2::{
-    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutDecisionV1,
-    ContextScoutDeliveryWindowV1, ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
-    ContextScoutEvidenceSourceReceiptV1, ContextScoutLimitsV1, ContextScoutRedactionReceiptV1,
+    ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt, ContextScoutLimitsV1,
     ContextScoutSelectionInputV1, select_deterministic_context_scout,
 };
 use tracedecay::agents::host_bundle_v2::{
     HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
 };
 use tracedecay::tracedecay::TraceDecay;
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+    ContextScoutDeliveryWindowV1, ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
+    ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
+};
 use tracedecay_application::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
     EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
@@ -31,7 +34,7 @@ use tracedecay_hooks::{
 };
 use tracedecay_tool_catalog::BindingSurface;
 
-mod common;
+use crate::common;
 
 fn id<T>(value: &str) -> T
 where
@@ -132,7 +135,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
         .expect("production project-open startup");
 
     let callback = include_bytes!(
-        "../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
     );
     let decoded =
         decode_native_hook_event(HookHostV1::ClaudeCode, callback).expect("authentic callback");

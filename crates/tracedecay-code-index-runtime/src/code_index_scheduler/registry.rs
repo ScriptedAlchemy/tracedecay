@@ -59,12 +59,12 @@ const TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1: usize = 64;
 /// floor stays above the query staleness threshold and the ceiling keeps a
 /// persistently failing artifact from being retried more than a few times an
 /// hour while never resealing it. Tests shrink the clock, not the shape.
-const ACTIVATION_RETRY_BACKOFF_FLOOR: Duration = if cfg!(test) {
+const ACTIVATION_RETRY_BACKOFF_FLOOR: Duration = if cfg!(any(test, feature = "test-helpers")) {
     Duration::from_millis(50)
 } else {
     Duration::from_secs(30)
 };
-const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(test) {
+const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(any(test, feature = "test-helpers")) {
     Duration::from_millis(400)
 } else {
     Duration::from_mins(10)
@@ -616,6 +616,26 @@ fn dashboard_freshness_identity(
         identity.sealed_at_micros = Some(generation.manifest().seal.sealed_at.0);
     }
     identity
+}
+
+/// Whether status may report this worktree as terminal (`fresh` / `current`).
+///
+/// Exact and lexical serve from the text owner while native graph activation
+/// is still in flight. Search on that text-only path reports
+/// `retriever_unavailable` for the graph lane. Dashboard `current` must wait
+/// for the seated serving generation whose graph is Ready or Refused so a
+/// terminal receipt is one search can actually complete. Graph-off worktrees
+/// keep the text-owner receipt.
+fn dashboard_generation_is_ready(
+    latest: Option<&LatestCompleteCodeIndexV1>,
+    text_ready: bool,
+    graph_activation_enabled: bool,
+) -> bool {
+    if graph_activation_enabled {
+        latest.is_some_and(|latest| !latest.graph_activation_is_pending())
+    } else {
+        latest.is_some() || text_ready
+    }
 }
 
 fn dashboard_text_freshness_identity(
@@ -2809,6 +2829,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
+                let serving_empty = worker_serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_none();
                 let retained_text_metadata =
                     retained_text.as_ref().map(|text| text.metadata().clone());
                 let shutting_down = Arc::clone(&worker_shutting_down);
@@ -2830,8 +2854,22 @@ impl CodeIndexSchedulerRegistryV1 {
                         {
                             return Ok(outcome);
                         }
+                        // An empty serving slot must publish the retained
+                        // complete generation before a dirty-tree rebuild.
+                        // Restart remounts otherwise stay warming through the
+                        // successor extract with no seated generation.
+                        if serving_empty
+                            && text_serving_ready
+                            && let Some(outcome) =
+                                scheduler.seat_retained_generation_on_empty_serving()?
+                        {
+                            return Ok(outcome);
+                        }
                         if let Some(metadata) = retained_text_metadata {
-                            match scheduler.reconcile_retained_text_generation(&metadata) {
+                            match scheduler.reconcile_retained_text_generation_with(
+                                &metadata,
+                                !graph_activation_enabled,
+                            ) {
                                 Ok(Some(outcome)) => Ok(outcome),
                                 Ok(None) if graph_activation_enabled => {
                                     scheduler.activate_or_reconcile()
@@ -3769,7 +3807,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 &prepared_redundancy,
                 false,
             );
-            return Err(CodeIndexSchedulerErrorV1::Identity(error.to_string()));
+            return Err(CodeIndexSchedulerErrorV1::Identity(error));
         }
         tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
             project_root.clone(),
@@ -4186,6 +4224,7 @@ impl CodeIndexSchedulerRegistryV1 {
             text_generation,
             build_progress,
             hints,
+            graph_activation_enabled,
         ) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&canonical_root)?;
@@ -4197,6 +4236,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
+                worktree.graph_activation.policy().is_enabled(),
             )
         };
         tokio::task::spawn_blocking(move || {
@@ -4242,7 +4282,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .count();
-                    let ready = latest.is_some() || text_ready;
+                    let ready = dashboard_generation_is_ready(
+                        latest.as_ref(),
+                        text_ready,
+                        graph_activation_enabled,
+                    );
                     let stale = hook_hint_count != Some(0);
                     let last_reconcile_micros = match last_reconciled_at_micros
                         .load(Ordering::Acquire)
@@ -4254,10 +4298,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         worktree_root: canonical_root.display().to_string(),
                         last_reconcile_micros,
                         staleness_state: Some(
-                            if ready && last_reconcile_micros.is_some() && !stale {
-                                "fresh"
-                            } else if refreshing && ready {
-                                "refreshing"
+                            if refreshing {
+                                if ready {
+                                    "refreshing"
+                                } else {
+                                    "indexing"
+                                }
                             } else if stale && ready {
                                 "stale"
                             } else if ready {
@@ -4295,19 +4341,24 @@ impl CodeIndexSchedulerRegistryV1 {
                 .as_ref()
                 .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
             let hook_hint_count = scheduler.pending_hint_count();
+            let ready = dashboard_generation_is_ready(
+                latest.as_ref(),
+                text_ready,
+                graph_activation_enabled,
+            );
             let staleness_state = if refreshing {
-                if latest.is_some() || text_ready {
+                if ready {
                     "refreshing"
                 } else {
                     "indexing"
                 }
             } else if stale || hook_hint_count != Some(0) {
-                if latest.is_some() || text_ready {
+                if ready {
                     "stale"
                 } else {
                     "indexing"
                 }
-            } else if latest.is_some() || text_ready {
+            } else if ready {
                 "fresh"
             } else {
                 "indexing"
@@ -4322,7 +4373,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
                 staleness_state: Some(staleness_state.to_owned()),
                 hook_hint_count,
-                coverage: if !verified {
+                coverage: if refreshing {
+                    "partial_refresh_in_progress"
+                } else if !verified {
                     "partial_unverified_restore"
                 } else if hook_hint_count.is_some() {
                     "complete"
@@ -4610,32 +4663,29 @@ impl CodeIndexSchedulerRegistryV1 {
         // before entering the exact freshness probe: probing an unseated slot
         // cannot produce a decoded owner, and on an initial lightweight mount
         // it would turn `freshness_unknown` into a fabricated overflow wake.
-        if serving_generation
+        let serving = serving_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_none()
-        {
-            return None;
-        }
+            .clone()?;
         let mut scheduler = match scheduler.try_lock() {
             Ok(scheduler) => scheduler,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
         };
-        let latest = scheduler
-            .latest_complete_ready_for_exact_source_with(
-                GenerationDecodeAdmissionV1::AlreadyDecoded,
-            )
-            .ok()
-            .flatten()?;
+        if !scheduler
+            .serving_generation_ready_for_exact_source(&serving)
+            .ok()?
+        {
+            return None;
+        }
         // Checkout-identity gate: the ready probe above already proved the
         // generation current against the live worktree, and the sealed
         // reference label is attribution, not identity (see
         // [`latest_matches_scope_identity`]).
-        if !latest_matches_scope_identity(&latest, scope) {
+        if !latest_matches_scope_identity(&serving, scope) {
             return None;
         }
-        exact_activated_serving_generation(&serving_generation, &latest)
+        Some(serving)
     }
 
     /// Report an already-decoded current generation for one exact mounted root

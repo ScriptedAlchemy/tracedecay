@@ -51,6 +51,7 @@ pub mod observability;
 pub mod observatory_surface;
 pub mod policy;
 pub mod remote;
+pub mod request_identity;
 pub mod result;
 pub mod retained_surfaces;
 pub mod retrieval;

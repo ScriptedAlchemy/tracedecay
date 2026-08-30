@@ -1,12 +1,16 @@
-//! Canonical Context Scout operations for CLI/MCP/HTTP surfaces.
+//! Canonical Context Scout operations and wire vocabulary for CLI/MCP/HTTP surfaces.
 //!
-//! The application crate owns operation identity and catalog metadata only.
-//! Exact-address authorization and durable mutation remain daemon authorities.
+//! The application crate owns operation identity, catalog metadata, and the
+//! Context Scout wire vocabulary. Exact-address authorization and durable
+//! mutation remain daemon authorities.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
-use tracedecay_domain::{CodeGenerationId, ManifestDigest, RetrievalAnchorId, UtcMicros};
+use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
+use tracedecay_domain::{
+    CodeGenerationId, ManifestDigest, RetrievalAnchorId, SanitizationReceiptId, UtcMicros,
+};
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
@@ -20,10 +24,14 @@ use tracedecay_tool_catalog::{
     TerminalStateContract, UseCaseId,
 };
 
+use crate::context::{DisclosureClass, ResolvedScope};
 use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
-use crate::result::{IdempotencyKey, ResultContractRef};
+use crate::result::{
+    AuthorityReceipt, EvidenceCoverage, IdempotencyKey, Omission, ResultContractRef,
+    RetrieverContributionState, TemporalState,
+};
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 
 const SCOUT_SURFACES: [BindingSurface; 3] = [
@@ -60,7 +68,9 @@ const CONTEXT_SCOUT_SPECS: [ContextScoutOperationSpec; 11] = [
 /// The daemon converts this transport-neutral address into its runtime value
 /// only after catalog admission. Keeping the public wire here makes CLI, MCP,
 /// HTTP, and both SDKs share one generated schema authority.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutAddressV1 {
     pub profile_id: [u8; 16],
@@ -87,9 +97,12 @@ pub enum ContextScoutDeliveryWindowV1 {
     NextBoundary,
     IdleWindow,
     OnRequest,
+    Suppressed,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutCategoryV1 {
     Retrieval,
@@ -114,9 +127,10 @@ pub enum ContextScoutModelBackendV1 {
     Unsupported,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutModelOutcomeV1 {
+    #[default]
     NotRequested,
     Succeeded,
     Disabled,
@@ -294,6 +308,116 @@ pub struct ContextScoutDeliveryReceiptV1 {
 pub struct ContextScoutFeedbackV1 {
     pub receipt_id: [u8; 16],
     pub kind: ContextScoutFeedbackKindV1,
+}
+
+/// A daemon-produced candidate. The text is compact prompt-eligible advice;
+/// its evidence remains separately pinned to durable opaque identities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutCandidateV1 {
+    pub dedupe_key: [u8; 32],
+    pub category: ContextScoutCategoryV1,
+    pub relevance_score: u16,
+    pub suggestion_text: String,
+    pub evidence: ContextScoutEvidenceEnvelopeV1,
+    pub expires_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutSuggestionEnvelopeV1 {
+    pub envelope_id: [u8; 16],
+    pub address: ContextScoutAddressV1,
+    pub input_watermark: [u8; 32],
+    pub configuration_revision: [u8; 32],
+    pub delivery_window: ContextScoutDeliveryWindowV1,
+    pub candidate: ContextScoutCandidateV1,
+}
+
+/// Canonical owner that produced one bounded Scout evidence contribution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutEvidenceSourceKindV1 {
+    Query,
+    Lcm,
+    Semantic,
+    Code,
+    Git,
+}
+
+/// Privacy proof for prompt-eligible Scout framing. Metadata-only framing
+/// contains no recovered source/session body. Content-bearing evidence must
+/// instead retain its canonical sanitization receipts or explicit omissions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum ContextScoutRedactionReceiptV1 {
+    MetadataOnly {
+        disclosure: DisclosureClass,
+    },
+    Sanitized {
+        disclosure: DisclosureClass,
+        receipts: Vec<SanitizationReceiptId>,
+    },
+    Redacted {
+        disclosure: DisclosureClass,
+        omissions: Vec<Omission>,
+    },
+}
+
+/// Reference-only contribution receipt. Anchors are canonical expansion
+/// handles; this value contains no recovered evidence body or shadow cache.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutEvidenceSourceReceiptV1 {
+    pub source: ContextScoutEvidenceSourceKindV1,
+    pub contribution_state: RetrieverContributionState,
+    pub temporal: TemporalState,
+    pub coverage: EvidenceCoverage,
+    pub anchors: Vec<RetrievalAnchorId>,
+}
+
+/// Exact, immutable evidence claim retained by one candidate and copied into
+/// its durable suggestion. The digest binds scope, saved generation,
+/// authorization, redaction, source states, canonical anchors, and claim time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutEvidenceEnvelopeV1 {
+    pub scope: FeedbackScopeV1,
+    pub authorized_scope: ResolvedScope,
+    pub content: FeedbackContentIdentityV1,
+    pub code_generation_id: CodeGenerationId,
+    pub authority: AuthorityReceipt,
+    pub redaction: ContextScoutRedactionReceiptV1,
+    pub availability: ContextScoutEvidenceAvailabilityV1,
+    pub sources: Vec<ContextScoutEvidenceSourceReceiptV1>,
+    pub claimed_at: UtcMicros,
+    pub claim_digest: ManifestDigest,
+}
+
+/// One exact durable queue entry. The queue records the work-generation token
+/// next to the envelope, so a replay cannot turn a superseded model result
+/// into a current delivery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutDurableQueueEntryV1 {
+    pub work: ContextScoutWorkV1,
+    pub route: ContextScoutRouteV1,
+    #[serde(default)]
+    pub model_outcome: ContextScoutModelOutcomeV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_receipt: Option<ContextScoutModelReceiptV1>,
+    pub envelope: ContextScoutSuggestionEnvelopeV1,
+}
+
+/// Caller-supplied lease identity and deadline. The store owns no timing
+/// policy; it only applies the exact lease and compares its absolute expiry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutLeaseV1 {
+    pub lease_id: [u8; 16],
+    pub expires_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutDurableClaimV1 {
+    pub entry: ContextScoutDurableQueueEntryV1,
+    pub lease: ContextScoutLeaseV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

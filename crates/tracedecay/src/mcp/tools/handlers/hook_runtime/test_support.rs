@@ -1,5 +1,23 @@
+use crate::agents::context_scout_v2::ContextScoutEvidenceEnvelopeExt;
 use serde_json::{Value, json};
-use tracedecay_domain::UtcMicros;
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+    ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
+    ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
+    ContextScoutEvidenceSourceReceiptV1, ContextScoutLeaseV1, ContextScoutModelOutcomeV1,
+    ContextScoutRedactionReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
+    ContextScoutWorkV1,
+};
+use tracedecay_application::{
+    AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
+    EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
+    TemporalState,
+};
+use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
+use tracedecay_domain::{
+    CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId, TemporalModeV1,
+    UtcMicros,
+};
 
 pub(super) fn admission_test_envelope(
     event_id: u8,
@@ -48,28 +66,7 @@ pub(super) fn admission_test_binding(epoch: u64) -> tracedecay_hooks::HookScopeB
     }
 }
 
-pub(super) fn retained_claim(
-    id: u8,
-) -> crate::agents::context_scout_v2::ContextScoutDurableClaimV1 {
-    use crate::agents::context_scout_v2::{
-        ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
-        ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
-        ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
-        ContextScoutEvidenceSourceReceiptV1, ContextScoutLeaseV1, ContextScoutModelRunOutcomeV1,
-        ContextScoutRedactionReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
-        ContextScoutWorkV1,
-    };
-    use tracedecay_application::{
-        AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass,
-        EvidenceCoverage, EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope,
-        RetrieverContributionState, TemporalState,
-    };
-    use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
-    use tracedecay_domain::{
-        CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId,
-        TemporalModeV1,
-    };
-
+pub(super) fn retained_claim(id: u8) -> ContextScoutDurableClaimV1 {
     fn typed_id<T>(value: &str) -> T
     where
         T: TryFrom<String>,
@@ -189,7 +186,7 @@ pub(super) fn retained_claim(
                 input_watermark,
             },
             route: ContextScoutRouteV1::Deterministic,
-            model_outcome: ContextScoutModelRunOutcomeV1::NotRequested,
+            model_outcome: ContextScoutModelOutcomeV1::NotRequested,
             model_receipt: None,
             envelope,
         },

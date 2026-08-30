@@ -267,8 +267,10 @@ pub(super) struct DatabaseInner {
     /// The daemon map owns the graph runtime attachment. The database keeps
     /// only this weak binding so mounting a derived graph cannot contribute a
     /// counted Store/Graph client that blocks retirement of its own owner.
+    /// The cell is shared (`Arc`) so a deferred-activation graph proxy can
+    /// resolve it at use time without retaining this inner allocation.
     pub(super) memory_graph_runtime:
-        OnceLock<Weak<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>>,
+        Arc<OnceLock<Weak<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>>>,
 }
 
 impl DatabaseInner {
@@ -345,7 +347,7 @@ impl DatabaseInner {
                 ProjectMemoryReconciliationTelemetryV1::default(),
             ),
             _authority: authority,
-            memory_graph_runtime: OnceLock::new(),
+            memory_graph_runtime: Arc::new(OnceLock::new()),
         })
     }
 

@@ -8,6 +8,7 @@ use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
     GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
 };
+use tracedecay_application::git::GitReadRequestV1;
 use tracedecay_application::{
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext,
 };
@@ -18,9 +19,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::advisory::GitHubReleaseReadControlV1;
 use tracedecay_usecases::delivery::{ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1};
 use tracedecay_usecases::git_query::GitQueryBounds;
-use tracedecay_usecases::git_reads::{
-    GitReadAuthorityV1, GitReadOutcomeV1, GitReadRequestV1, GitReadResultV1,
-};
+use tracedecay_usecases::git_reads::{GitReadAuthorityV1, GitReadOutcomeV1, GitReadResultV1};
 
 use crate::daemon::DaemonInvocationService;
 use tracedecay_dashboard_api::{

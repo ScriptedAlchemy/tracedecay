@@ -6,7 +6,7 @@ use tracedecay_domain::{ActorId, FactOwnerV1, ProvenanceId, canonical_sha256};
 use tracedecay_sessions::runtime::source::canonical_framed_sha256;
 
 use super::error::MemoryApplicationError;
-use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
+use tracedecay_application::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 
 /// Trusted daemon-issued identity for one memory operation. The raw
 /// JSON-RPC identifier is never retained: it is domain-separated and hashed

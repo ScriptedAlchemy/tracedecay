@@ -31,9 +31,7 @@ use tracedecay_sessions::runtime::{claude, codex, cursor, hermes};
 use tracedecay_store::ObservationReplayRequest;
 use tracedecay_usecases::observation::{CaptureObservationRequest, ObservationCancellation};
 
-mod common;
-
-use common::{
+use crate::common::{
     EnvVarGuard, GLOBAL_DB_ENV_LOCK, git_program, spawn_tracedecay_daemon,
     tracedecay_command_with_home,
 };
@@ -41,23 +39,23 @@ use common::{
 const FIXTURES: [(&str, &str); 5] = [
     (
         "codex",
-        include_str!("../../../tests/fixtures/host_events/codex/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/codex/baseline.json"),
     ),
     (
         "claude",
-        include_str!("../../../tests/fixtures/host_events/claude/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/claude/baseline.json"),
     ),
     (
         "cursor",
-        include_str!("../../../tests/fixtures/host_events/cursor/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/cursor/baseline.json"),
     ),
     (
         "hermes",
-        include_str!("../../../tests/fixtures/host_events/hermes/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/hermes/baseline.json"),
     ),
     (
         "kiro",
-        include_str!("../../../tests/fixtures/host_events/kiro/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/kiro/baseline.json"),
     ),
 ];
 
@@ -382,7 +380,7 @@ fn initialize_boundary_project(home: &Path) -> std::path::PathBuf {
 fn write_claude_boundary_transcript(home: &Path, project: &Path) -> std::path::PathBuf {
     let path = home.join("claude-boundary.jsonl");
     let mut record: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json"
+        "../../../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json"
     ))
     .unwrap();
     record["cwd"] = project.to_string_lossy().into_owned().into();
@@ -595,12 +593,12 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         "codex" => {
             let transcript = tmp.path().join("codex-golden-session.jsonl");
             let mut meta: Value = serde_json::from_str(include_str!(
-                "../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
+                "../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
             ))
             .unwrap();
             meta["payload"]["cwd"] = project.to_string_lossy().into_owned().into();
             let message = include_str!(
-                "../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
+                "../../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
             );
             let usage = json!({
                 "type": "event_msg",
@@ -635,7 +633,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             let transcript_dir = home.join(".claude/projects/host-event-fixture");
             std::fs::create_dir_all(&transcript_dir).unwrap();
             let mut record: Value = serde_json::from_str(include_str!(
-                "../../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json"
+                "../../../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json"
             ))
             .unwrap();
             record["cwd"] = tmp.path().to_string_lossy().into_owned().into();
@@ -659,7 +657,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         "cursor" => {
             let transcript = tmp.path().join("cursor-golden-session.jsonl");
             let record: Value = serde_json::from_str(include_str!(
-                "../../../tests/fixtures/provider_normalization/cursor/tool_use.input.json"
+                "../../../../tests/fixtures/provider_normalization/cursor/tool_use.input.json"
             ))
             .unwrap();
             std::fs::write(&transcript, format!("{record}\n")).unwrap();
@@ -830,7 +828,7 @@ fn write_kiro_native_fixture(home: &Path, project: &Path) {
     std::fs::write(
         directory.join("sess-golden.json"),
         include_str!(
-            "../../../tests/fixtures/provider_normalization/kiro/workspace_session.input.json"
+            "../../../../tests/fixtures/provider_normalization/kiro/workspace_session.input.json"
         ),
     )
     .unwrap();
@@ -865,7 +863,7 @@ async fn write_hermes_native_fixture(home: &Path, project: &Path) {
     )
     .unwrap();
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/provider_normalization/hermes/assistant_tool_call.input.json"
+        "../../../../tests/fixtures/provider_normalization/hermes/assistant_tool_call.input.json"
     ))
     .unwrap();
     let session_id = fixture["session_id"].as_str().unwrap();

@@ -7,11 +7,11 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::RequestId;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_application::RequestId;
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -313,16 +313,6 @@ pub fn mcp_connection_request_id(id: &Value, connection_scope: &str) -> Option<R
     ))
     .ok()
 }
-
-/// Connection- and process-local protocol sequences.
-///
-/// These are neither global nor durable identities, so they live beside the
-/// LSP protocol that mints them. They stay re-exported here because callers
-/// choose between them and [`mint_global_request_id`] at the same decision
-/// point.
-pub use tracedecay_lsp::{
-    ConnectionLocalRequestSequence, ProcessLocalRequestSequence, SequenceExhausted,
-};
 
 pub struct McpConnectionIdentityAuthority {
     instance_id: Option<String>,

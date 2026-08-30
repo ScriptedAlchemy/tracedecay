@@ -1,6 +1,7 @@
 //! Typed Git application-surface requests and bounded Git-read decoding.
 
 use serde_json::Value;
+use tracedecay_application::git::GitReadRequestV1;
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 
 use super::{ApplicationSurfaceAdapterError, ApplicationSurfaceOperation};
@@ -74,34 +75,24 @@ pub(super) fn parse_git_read_surface_request(
         _ => Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
     };
     let request = match operation {
-        ApplicationSurfaceOperation::GitStatus => {
-            tracedecay_usecases::git_reads::GitReadRequestV1::Status
-        }
-        ApplicationSurfaceOperation::GitDiff => {
-            tracedecay_usecases::git_reads::GitReadRequestV1::Diff {
-                scope: scope(true)?,
-            }
-        }
-        ApplicationSurfaceOperation::GitHistory => {
-            tracedecay_usecases::git_reads::GitReadRequestV1::History {
-                max_count: bounded_u64("count", 100, 1_000)? as u32,
-                path: optional_string("path")?,
-                follow: boolean("follow", false)?,
-                first_parent: boolean("first_parent", false)?,
-            }
-        }
-        ApplicationSurfaceOperation::GitBlame => {
-            tracedecay_usecases::git_reads::GitReadRequestV1::Blame {
-                path: string("path")?,
-                follow_renames: boolean("follow_renames", false)?,
-            }
-        }
-        ApplicationSurfaceOperation::GitHunks => {
-            tracedecay_usecases::git_reads::GitReadRequestV1::Hunks {
-                scope: scope(false)?,
-                daemon_binding: None,
-            }
-        }
+        ApplicationSurfaceOperation::GitStatus => GitReadRequestV1::Status,
+        ApplicationSurfaceOperation::GitDiff => GitReadRequestV1::Diff {
+            scope: scope(true)?,
+        },
+        ApplicationSurfaceOperation::GitHistory => GitReadRequestV1::History {
+            max_count: bounded_u64("count", 100, 1_000)? as u32,
+            path: optional_string("path")?,
+            follow: boolean("follow", false)?,
+            first_parent: boolean("first_parent", false)?,
+        },
+        ApplicationSurfaceOperation::GitBlame => GitReadRequestV1::Blame {
+            path: string("path")?,
+            follow_renames: boolean("follow_renames", false)?,
+        },
+        ApplicationSurfaceOperation::GitHunks => GitReadRequestV1::Hunks {
+            scope: scope(false)?,
+            daemon_binding: None,
+        },
         _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
     };
     let allowed = match operation {

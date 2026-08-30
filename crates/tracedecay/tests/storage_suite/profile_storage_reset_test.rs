@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use tempfile::TempDir;
-use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
+use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::serve;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_runtime_core::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
@@ -210,15 +210,16 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
         Ok(_) => panic!("an incompatible profile store must require a reset"),
         Err(error) => error,
     };
-    let tracedecay_runtime_core::errors::TraceDecayError::Database { message, operation } = error
+    let tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { authority, reason } =
+        error
     else {
         panic!("incompatible profile store returned the wrong error: {error}");
     };
-    assert_eq!(operation, "ensure_schema_current");
+    assert_eq!(authority, "SQLite store");
     assert!(
-        message.contains("created by an incompatible binary")
-            && message.contains("Remove the store directory"),
-        "reset-required error must explain the fresh-profile remedy: {message}"
+        reason.contains("created by an incompatible binary")
+            && reason.contains("Remove the store directory"),
+        "reset-required error must explain the fresh-profile remedy: {reason}"
     );
     assert_eq!(
         schema_version(&db_path),
@@ -473,9 +474,7 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
     let home = root.join("home");
     let profile_root = home.join(".tracedecay");
     let project = root.join("repo");
-    let shard_root = profile_root.join("projects/proj_branch");
-    fs::create_dir_all(&shard_root).unwrap();
-    fs::create_dir_all(project.join(".tracedecay")).unwrap();
+    fs::create_dir_all(&project).unwrap();
     run_git(&project, &["init"]);
     run_git(&project, &["config", "user.email", "test@example.com"]);
     run_git(&project, &["config", "user.name", "TraceDecay Test"]);
@@ -485,18 +484,25 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
     run_git(&project, &["branch", "feature/profile"]);
     let _home_guard = HomeEnvGuard::set(&home);
     pin_fixture_repository_identity(&project, "proj_branch").unwrap();
-    let config = TraceDecayConfig {
-        root_dir: project.to_string_lossy().to_string(),
-        ..TraceDecayConfig::default()
-    };
-    fs::write(
-        shard_root.join("config.json"),
-        serde_json::to_string_pretty(&config).unwrap(),
-    )
-    .unwrap();
-    crate::common::initialize_test_database(&shard_root.join("tracedecay.db"))
-        .await
-        .unwrap();
+    let initialized =
+        init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+            .await
+            .unwrap();
+    let shard_root = initialized.store_layout().data_root.clone();
+    assert_path_eq(&shard_root, profile_root.join("projects/proj_branch"));
+    drop(initialized);
+
+    let mut branch_meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
+        .expect("init must persist branch tracking");
+    if !branch_meta.is_tracked("feature/profile") {
+        let default_branch = branch_meta.default_branch.clone();
+        branch_meta.add_branch(
+            "feature/profile",
+            tracedecay_runtime_core::config::db_filename(&shard_root),
+            &default_branch,
+        );
+        tracedecay_runtime_core::branch_meta::save_branch_meta(&shard_root, &branch_meta).unwrap();
+    }
 
     let cg = open_branch_with_maintenance(
         &project,

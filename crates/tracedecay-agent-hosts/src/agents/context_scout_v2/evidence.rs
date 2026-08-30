@@ -1,61 +1,25 @@
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use tracedecay_application::context_scout::ContextScoutEvidenceSourceKindV1;
+use tracedecay_application::context_scout::{
+    ContextScoutEvidenceAvailabilityV1, ContextScoutEvidenceEnvelopeV1,
+    ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
+};
 use tracedecay_application::{
-    AuthorityReceipt, CoverageCompleteness, DisclosureClass, EvidenceCoverage, Omission,
-    OmissionReason, ResolvedScope, RetrieverContributionState, TemporalState,
+    AuthorityReceipt, CoverageCompleteness, OmissionReason, ResolvedScope,
+    RetrieverContributionState,
 };
 use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
-use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, RetrievalAnchorId, SanitizationReceiptId, UtcMicros,
-    canonical_sha256,
-};
+use tracedecay_domain::{CodeGenerationId, RetrievalAnchorId, UtcMicros, canonical_sha256};
 
 use super::{ContextScoutErrorV1, MAX_SCOUT_EVIDENCE};
 
 const EVIDENCE_CLAIM_DIGEST_DOMAIN: &str = "tracedecay.context-scout.evidence-claim.v1";
 
-/// Canonical owner that produced one bounded Scout evidence contribution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutEvidenceSourceKindV1 {
-    Query,
-    Lcm,
-    Semantic,
-    Code,
-    Git,
+trait ContextScoutRedactionReceiptExt {
+    fn validate(&self, authority: &AuthorityReceipt) -> Result<(), ContextScoutErrorV1>;
 }
 
-/// Folded availability retained in the durable suggestion. Partial, stale,
-/// cancelled, and unavailable truth never become a generic empty success.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutEvidenceAvailabilityV1 {
-    Complete,
-    Partial,
-    Stale,
-    Cancelled,
-    Unavailable,
-}
-
-/// Privacy proof for prompt-eligible Scout framing. Metadata-only framing
-/// contains no recovered source/session body. Content-bearing evidence must
-/// instead retain its canonical sanitization receipts or explicit omissions.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "state")]
-pub enum ContextScoutRedactionReceiptV1 {
-    MetadataOnly {
-        disclosure: DisclosureClass,
-    },
-    Sanitized {
-        disclosure: DisclosureClass,
-        receipts: Vec<SanitizationReceiptId>,
-    },
-    Redacted {
-        disclosure: DisclosureClass,
-        omissions: Vec<Omission>,
-    },
-}
-
-impl ContextScoutRedactionReceiptV1 {
+impl ContextScoutRedactionReceiptExt for ContextScoutRedactionReceiptV1 {
     fn validate(&self, authority: &AuthorityReceipt) -> Result<(), ContextScoutErrorV1> {
         let disclosure = match self {
             Self::MetadataOnly { disclosure }
@@ -102,19 +66,11 @@ impl ContextScoutRedactionReceiptV1 {
     }
 }
 
-/// Reference-only contribution receipt. Anchors are canonical expansion
-/// handles; this value contains no recovered evidence body or shadow cache.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutEvidenceSourceReceiptV1 {
-    pub source: ContextScoutEvidenceSourceKindV1,
-    pub contribution_state: RetrieverContributionState,
-    pub temporal: TemporalState,
-    pub coverage: EvidenceCoverage,
-    pub anchors: Vec<RetrievalAnchorId>,
+trait ContextScoutEvidenceSourceReceiptExt {
+    fn validate(&self) -> Result<(), ContextScoutErrorV1>;
 }
 
-impl ContextScoutEvidenceSourceReceiptV1 {
+impl ContextScoutEvidenceSourceReceiptExt for ContextScoutEvidenceSourceReceiptV1 {
     fn validate(&self) -> Result<(), ContextScoutErrorV1> {
         if self.temporal.requested_at.0 <= 0
             || self.temporal.resolved_at < self.temporal.requested_at
@@ -185,27 +141,26 @@ impl ContextScoutEvidenceSourceReceiptV1 {
     }
 }
 
-/// Exact, immutable evidence claim retained by one candidate and copied into
-/// its durable suggestion. The digest binds scope, saved generation,
-/// authorization, redaction, source states, canonical anchors, and claim time.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutEvidenceEnvelopeV1 {
-    pub scope: FeedbackScopeV1,
-    pub authorized_scope: ResolvedScope,
-    pub content: FeedbackContentIdentityV1,
-    pub code_generation_id: CodeGenerationId,
-    pub authority: AuthorityReceipt,
-    pub redaction: ContextScoutRedactionReceiptV1,
-    pub availability: ContextScoutEvidenceAvailabilityV1,
-    pub sources: Vec<ContextScoutEvidenceSourceReceiptV1>,
-    pub claimed_at: UtcMicros,
-    pub claim_digest: ManifestDigest,
+pub trait ContextScoutEvidenceEnvelopeExt {
+    #[allow(clippy::too_many_arguments)]
+    fn claim(
+        scope: FeedbackScopeV1,
+        authorized_scope: ResolvedScope,
+        content: FeedbackContentIdentityV1,
+        code_generation_id: CodeGenerationId,
+        authority: AuthorityReceipt,
+        redaction: ContextScoutRedactionReceiptV1,
+        sources: Vec<ContextScoutEvidenceSourceReceiptV1>,
+        claimed_at: UtcMicros,
+    ) -> Result<ContextScoutEvidenceEnvelopeV1, ContextScoutErrorV1>;
+    fn validate(&self) -> Result<(), ContextScoutErrorV1>;
+    fn anchor_count(&self) -> usize;
+    fn anchors(&self) -> impl Iterator<Item = &RetrievalAnchorId>;
 }
 
-impl ContextScoutEvidenceEnvelopeV1 {
+impl ContextScoutEvidenceEnvelopeExt for ContextScoutEvidenceEnvelopeV1 {
     #[allow(clippy::too_many_arguments)]
-    pub fn claim(
+    fn claim(
         scope: FeedbackScopeV1,
         authorized_scope: ResolvedScope,
         content: FeedbackContentIdentityV1,
@@ -260,7 +215,7 @@ impl ContextScoutEvidenceEnvelopeV1 {
         Ok(envelope)
     }
 
-    pub fn validate(&self) -> Result<(), ContextScoutErrorV1> {
+    fn validate(&self) -> Result<(), ContextScoutErrorV1> {
         self.scope
             .validate()
             .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
@@ -330,11 +285,11 @@ impl ContextScoutEvidenceEnvelopeV1 {
         Ok(())
     }
 
-    pub fn anchor_count(&self) -> usize {
+    fn anchor_count(&self) -> usize {
         self.sources.iter().map(|source| source.anchors.len()).sum()
     }
 
-    pub fn anchors(&self) -> impl Iterator<Item = &RetrievalAnchorId> {
+    fn anchors(&self) -> impl Iterator<Item = &RetrievalAnchorId> {
         self.sources.iter().flat_map(|source| source.anchors.iter())
     }
 }
@@ -380,10 +335,12 @@ fn fold_availability(
 #[cfg(test)]
 pub(super) fn fixture_context_scout_evidence() -> ContextScoutEvidenceEnvelopeV1 {
     use tracedecay_application::{
-        CoverageDomainState, EvidenceDomain, FreshnessState, PolicyDecisionRef,
+        CoverageDomainState, DisclosureClass, EvidenceCoverage, EvidenceDomain, FreshnessState,
+        PolicyDecisionRef, TemporalState,
     };
     use tracedecay_domain::{
-        CommitId, ComponentVersion, ProjectId, RefId, RepositoryId, TemporalModeV1, WorktreeId,
+        CommitId, ComponentVersion, ManifestDigest, ProjectId, RefId, RepositoryId, TemporalModeV1,
+        WorktreeId,
     };
 
     fn id<T>(value: &str) -> T

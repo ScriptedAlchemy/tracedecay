@@ -6,6 +6,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::context_scout::ContextScoutDeliveryOutcomeV1;
+use tracedecay_application::feedback::observations::{
+    FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
+};
 use tracedecay_application::feedback::{
     FeedbackRuntimeStatePort, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
@@ -56,10 +60,7 @@ use tracedecay_usecases::delivery::{
     gated_project_delivery_read_handle_v1, open_project_delivery_read_authority_v1,
 };
 use tracedecay_usecases::feedback::concrete::FeedbackRuntime;
-use tracedecay_usecases::feedback::observations::{
-    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
-    FeedbackSourceEventV1,
-};
+use tracedecay_usecases::feedback::observations::FeedbackObservationEmitterV1;
 use tracedecay_usecases::feedback::{
     FeedbackCycleInvocation, FeedbackCycleLspInput, FeedbackCycleRuntime,
     ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
@@ -79,8 +80,8 @@ use crate::agents::context_scout_ports::{
     ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
 };
 use crate::agents::context_scout_v2::{
-    ContextScoutDeliverySelectionInputV1, ContextScoutOutcomeV1, ContextScoutRuntimeOutcomeV1,
-    ContextScoutServiceStateV1, ContextScoutTriggerV1,
+    ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1, ContextScoutServiceStateV1,
+    ContextScoutTriggerV1,
 };
 use crate::daemon::context_scout_lifecycle::{
     AuthorityRegistrationV1, register_context_scout_lifecycle_authority,
@@ -773,11 +774,11 @@ async fn run_production_hook_cycle(
                 delivery.feedback.is_none()
                     && matches!(
                         delivery.receipt.outcome,
-                        ContextScoutOutcomeV1::Attempted
-                            | ContextScoutOutcomeV1::Delayed
-                            | ContextScoutOutcomeV1::Displayed
-                            | ContextScoutOutcomeV1::Expanded
-                            | ContextScoutOutcomeV1::Unknown
+                        ContextScoutDeliveryOutcomeV1::Attempted
+                            | ContextScoutDeliveryOutcomeV1::Delayed
+                            | ContextScoutDeliveryOutcomeV1::Displayed
+                            | ContextScoutDeliveryOutcomeV1::Expanded
+                            | ContextScoutDeliveryOutcomeV1::Unknown
                     )
             })
     });
@@ -1793,8 +1794,8 @@ fn github_discovery_authorization_context(
         DisclosureClass::Evidence,
     )
     .ok()?;
-    let request_id = tracedecay_usecases::request_identity::mint_global_request_id(
-        tracedecay_usecases::request_identity::GlobalRequestSurface::ProjectOpenGithubDiscovery,
+    let request_id = tracedecay_application::request_identity::mint_global_request_id(
+        tracedecay_application::request_identity::GlobalRequestSurface::ProjectOpenGithubDiscovery,
     )
     .ok()?;
     RequestContext::new(

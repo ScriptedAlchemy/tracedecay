@@ -35,14 +35,8 @@
 //!   refuses any store whose relational shape is not byte-for-byte the exact
 //!   final shape this binary creates, returning `ResetRequired` with a
 //!   `Reset`-only legal action for every subsequent open of that store.
-mod common;
+use crate::common;
 /// The HTTP, MCP-host, and Rust SDK legs of this same journey.
-///
-/// This file is a crate root, so a bare `mod` would resolve to
-/// `tests/transport_boundaries.rs` — and a file there would be
-/// auto-discovered as its own test crate. The `#[path]` keeps the submodule
-/// inside this journey's directory.
-#[path = "typed_terminal_restart_acceptance/transport_boundaries.rs"]
 mod transport_boundaries;
 
 use std::path::Path;
@@ -51,7 +45,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use common::{
+use crate::common::{
     canonical_existing_path, open_test_database, spawn_tracedecay_daemon_with,
     tracedecay_command_with_home,
 };

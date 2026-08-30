@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use tracedecay::application_surface::{ApplicationSurfaceOperation, ApplicationSurfaceRequest};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{
     ApplicationEnvelope, ApplicationOutcome, CancellationSignal, ComponentConfigurationState,
     Deadline, EffectReceipt, ResolvedSetting,
@@ -16,7 +17,6 @@ use tracedecay_domain::configuration::{
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
 };
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
-use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::daemon::daemon_tool_json;
 

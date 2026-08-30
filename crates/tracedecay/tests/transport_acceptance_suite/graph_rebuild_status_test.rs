@@ -1,8 +1,6 @@
-#![cfg(feature = "test-transport")]
 // Deeply nested async fixture bodies exceed rustc's default layout query
 // depth under the perf profile; match the workspace-standard limit used by
 // the tracedecay lib and CLI crate roots.
-#![recursion_limit = "256"]
 
 //! Production-boundary coverage for retained code-index publication and reopen.
 //!

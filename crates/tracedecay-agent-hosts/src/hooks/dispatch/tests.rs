@@ -1,6 +1,11 @@
 use super::*;
+use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
 use crate::hooks::daemon_ports::daemon_admission_response;
 use std::sync::Mutex;
+use tracedecay_application::context_scout::{
+    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutFeedbackKindV1,
+    ContextScoutFeedbackV1,
+};
 use tracedecay_domain::feedback::{FeedbackCycleId, FeedbackResultId, FeedbackScopeV1};
 use tracedecay_domain::{CodeGenerationId, CommitId, ManifestDigest, RepositoryId, WorktreeId};
 use tracedecay_hooks::{
@@ -378,15 +383,15 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
     let mut envelope = sample_envelope(&notice);
     envelope.event_id = [7; 16];
     let envelope_id = [22; 16];
-    let receipt = crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+    let receipt = ContextScoutDeliveryReceiptV1 {
         receipt_id: context_scout_delivery_receipt_id(envelope.event_id, envelope_id),
         envelope_id,
         delivered_at: UtcMicros(23),
-        outcome: crate::agents::context_scout_v2::ContextScoutOutcomeV1::Displayed,
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
-    let feedback = crate::agents::context_scout_v2::ContextScoutFeedbackV1 {
+    let feedback = ContextScoutFeedbackV1 {
         receipt_id: receipt.receipt_id,
-        kind: crate::agents::context_scout_v2::ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+        kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
     };
     let commit = ContextScoutFeedbackCommitV1 {
         receipt: receipt.clone(),
@@ -408,7 +413,9 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
         &envelope,
         &admission,
         rollback,
-        Some(receipt.clone()),
+        Some(ContextScoutDeliveryReceiptHookV1 {
+            receipt: receipt.clone(),
+        }),
         deadline,
         &DaemonDeliveryReceiptPort::new(project.path()),
     )
@@ -455,18 +462,13 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
     assert_eq!(calls[0].0.as_deref(), Some(project.path()));
     assert_eq!(calls[0].1["action"], "hook_v2_delivery_receipt");
     assert_eq!(
-        serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1>(
-            calls[0].1["receipt"].clone()
-        )
-        .unwrap(),
+        serde_json::from_value::<ContextScoutDeliveryReceiptV1>(calls[0].1["receipt"].clone())
+            .unwrap(),
         receipt
     );
     assert_eq!(calls[1].1["action"], "hook_v2_feedback");
     assert_eq!(
-        serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutFeedbackV1>(
-            calls[1].1["feedback"].clone()
-        )
-        .unwrap(),
+        serde_json::from_value::<ContextScoutFeedbackV1>(calls[1].1["feedback"].clone()).unwrap(),
         commit.feedback
     );
     assert_eq!(calls[2].1["action"], "hook_v2_feedback_notice_delivery");
@@ -482,15 +484,15 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
 #[tokio::test]
 async fn scout_receipt_and_feedback_helpers_delegate_to_daemon_ports() {
     let project = tempfile::tempdir().unwrap();
-    let receipt = crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+    let receipt = ContextScoutDeliveryReceiptV1 {
         receipt_id: [21; 16],
         envelope_id: [22; 16],
         delivered_at: UtcMicros(23),
-        outcome: crate::agents::context_scout_v2::ContextScoutOutcomeV1::Displayed,
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
-    let feedback = crate::agents::context_scout_v2::ContextScoutFeedbackV1 {
+    let feedback = ContextScoutFeedbackV1 {
         receipt_id: receipt.receipt_id,
-        kind: crate::agents::context_scout_v2::ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+        kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
     };
     let guard = crate::hooks::TestDaemonHookActionGuard::install([
         serde_json::json!({ "status": "stored" }),
@@ -590,13 +592,13 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
     let mut envelope = sample_envelope(&notice);
     envelope.event_id = [9; 16];
     let envelope_id = [11; 16];
-    let receipt = crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+    let receipt = ContextScoutDeliveryReceiptV1 {
         receipt_id: context_scout_delivery_receipt_id(envelope.event_id, envelope_id),
         envelope_id,
         delivered_at: UtcMicros(23),
-        outcome: crate::agents::context_scout_v2::ContextScoutOutcomeV1::Attempted,
+        outcome: ContextScoutDeliveryOutcomeV1::Attempted,
     };
-    let foreign = crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+    let foreign = ContextScoutDeliveryReceiptV1 {
         receipt_id: [3; 16],
         ..receipt.clone()
     };
@@ -614,7 +616,9 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         &envelope,
         &sample_receipt(HookImmediateAdmissionStateV1::Accepted, true),
         rollback,
-        Some(receipt.clone()),
+        Some(ContextScoutDeliveryReceiptHookV1 {
+            receipt: receipt.clone(),
+        }),
         deadline,
         &port,
     )
@@ -626,7 +630,7 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         &envelope,
         &sample_receipt(HookImmediateAdmissionStateV1::Accepted, false),
         rollback,
-        Some(foreign),
+        Some(ContextScoutDeliveryReceiptHookV1 { receipt: foreign }),
         deadline,
         &port,
     )
@@ -638,7 +642,7 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         &envelope,
         &sample_receipt(HookImmediateAdmissionStateV1::Accepted, false),
         rollback,
-        Some(receipt),
+        Some(ContextScoutDeliveryReceiptHookV1 { receipt }),
         deadline,
         &port,
     )

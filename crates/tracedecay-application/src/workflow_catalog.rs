@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, CancellationContract, CancellationPoint,
@@ -107,7 +109,20 @@ pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 16] = [
     ),
 ];
 
+/// Every input to the registry is process-static, but each binding
+/// regenerates and cross-validates schemars schemas, so assembly is
+/// expensive. Per-operation lookups used to rebuild the whole registry per
+/// call, making operation-table iteration quadratic in schema generations on
+/// the daemon startup path. Build it once per process and clone the
+/// assembled value instead.
 pub fn workflow_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
+    static REGISTRY: LazyLock<Result<ExecutableBindingRegistryV1, CatalogValidationError>> =
+        LazyLock::new(build_workflow_executable_binding_registry);
+    REGISTRY.clone()
+}
+
+fn build_workflow_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     ExecutableBindingRegistryV1::new(
         WORKFLOW_APPLICATION_OPERATION_IDS

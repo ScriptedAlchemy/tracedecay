@@ -1,6 +1,12 @@
 //! application primitive, callable-code, and context-scout daemon invocation handlers.
 
 use super::*;
+use crate::agents::context_scout_v2::{
+    ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
+};
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutDeliveryWindowV1, ContextScoutLeaseV1,
+};
 
 mod context_scout_registry;
 
@@ -615,7 +621,7 @@ pub(super) async fn execute_context_scout(
                 .ok()
                 .filter(|outcome| {
                     *outcome
-                        != crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable
+                        != ContextScoutDurableStoreOutcomeV1::Unavailable
                 })
                 .map(|outcome| {
                     serde_json::json!({ "outcome": context_scout_store_outcome(outcome) })
@@ -624,10 +630,10 @@ pub(super) async fn execute_context_scout(
         ContextScoutSurfaceRequest::Claim(request) => {
             let window = match request.window {
                 crate::application_surface::ContextScoutClaimWindowSurfaceV1::IdleWindow => {
-                    crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::IdleWindow
+                    ContextScoutDeliveryWindowV1::IdleWindow
                 }
                 crate::application_surface::ContextScoutClaimWindowSurfaceV1::OnRequest => {
-                    crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::OnRequest
+                    ContextScoutDeliveryWindowV1::OnRequest
                 }
             };
             let digest = canonical_sha256(&(
@@ -643,7 +649,7 @@ pub(super) async fn execute_context_scout(
                 (bytes.len() >= 16).then(|| {
                     let mut lease_id = [0; 16];
                     lease_id.copy_from_slice(&bytes[..16]);
-                    crate::agents::context_scout_v2::ContextScoutLeaseV1 {
+                    ContextScoutLeaseV1 {
                         lease_id,
                         expires_at: UtcMicros(
                             deadline
@@ -659,13 +665,13 @@ pub(super) async fn execute_context_scout(
                     .claim_delivery_exact(request.address, window, observed_at, lease)
                     .await
                 {
-                    crate::agents::context_scout_v2::ContextScoutDurableClaimOutcomeV1::Claimed(
+                    ContextScoutDurableClaimOutcomeV1::Claimed(
                         claim,
                     ) => serde_json::to_value(claim).ok(),
-                    crate::agents::context_scout_v2::ContextScoutDurableClaimOutcomeV1::Empty => {
+                    ContextScoutDurableClaimOutcomeV1::Empty => {
                         Some(serde_json::json!({ "outcome": "empty" }))
                     }
-                    crate::agents::context_scout_v2::ContextScoutDurableClaimOutcomeV1::Unavailable => {
+                    ContextScoutDurableClaimOutcomeV1::Unavailable => {
                         None
                     }
                 },
@@ -679,7 +685,7 @@ pub(super) async fn execute_context_scout(
                 .record_delivery(&request.claim, &request.receipt)
                 .await;
             (outcome
-                != crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable)
+                != ContextScoutDurableStoreOutcomeV1::Unavailable)
                 .then(|| {
                     serde_json::json!({
                         "outcome": context_scout_store_outcome(outcome)
@@ -691,7 +697,7 @@ pub(super) async fn execute_context_scout(
                 .record_feedback_exact(request.address, &request.receipt, request.feedback)
                 .await;
             (outcome
-                != crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable)
+                != ContextScoutDurableStoreOutcomeV1::Unavailable)
                 .then(|| {
                     serde_json::json!({
                         "outcome": context_scout_store_outcome(outcome)
@@ -872,7 +878,7 @@ async fn reconcile_context_scout_configuration(
     runtime: &Arc<ProjectConfigurationRuntime>,
     owner: &Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
     registry: &Arc<ProjectContextScoutAddressRegistryV1>,
-    address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    address: ContextScoutAddressV1,
     scope: &ResolvedScope,
     observed_at: UtcMicros,
 ) -> Result<(), ContextScoutActivationReconciliationError> {
@@ -909,20 +915,12 @@ async fn reconcile_context_scout_configuration(
         .map_err(|_| ContextScoutActivationReconciliationError::ObservationUnavailable)
 }
 
-const fn context_scout_store_outcome(
-    outcome: crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1,
-) -> &'static str {
+const fn context_scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1) -> &'static str {
     match outcome {
-        crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Stored => "stored",
-        crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Duplicate => {
-            "duplicate"
-        }
-        crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Superseded => {
-            "superseded"
-        }
-        crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable => {
-            "unavailable"
-        }
+        ContextScoutDurableStoreOutcomeV1::Stored => "stored",
+        ContextScoutDurableStoreOutcomeV1::Duplicate => "duplicate",
+        ContextScoutDurableStoreOutcomeV1::Superseded => "superseded",
+        ContextScoutDurableStoreOutcomeV1::Unavailable => "unavailable",
     }
 }
 

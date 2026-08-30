@@ -169,7 +169,7 @@ fn now_micros() -> i64 {
 /// Absolute deadline this journey gives a parked request, in UTC micros.
 fn parked_request_deadline_micros() -> i64 {
     now_micros()
-        + i64::try_from(crate::PARTIAL_EFFECT_DEADLINE.as_micros())
+        + i64::try_from(super::PARTIAL_EFFECT_DEADLINE.as_micros())
             .expect("the parked request budget fits in i64 microseconds")
 }
 
@@ -354,14 +354,14 @@ where
             "the request settled without ever reaching the durable commit boundary"
         );
         assert!(
-            started.elapsed() < crate::BARRIER_ARRIVAL_TIMEOUT,
+            started.elapsed() < super::BARRIER_ARRIVAL_TIMEOUT,
             "the request never reached the durable commit boundary within {:?}",
-            crate::BARRIER_ARRIVAL_TIMEOUT
+            super::BARRIER_ARRIVAL_TIMEOUT
         );
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    let release_at = Instant::now() + crate::PARTIAL_EFFECT_DEADLINE + Duration::from_secs(1);
+    let release_at = Instant::now() + super::PARTIAL_EFFECT_DEADLINE + Duration::from_secs(1);
     while Instant::now() < release_at {
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -411,8 +411,8 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
     let barrier = tempfile::TempDir::new().expect("fact commit barrier");
     let barrier_path = crate::common::canonical_existing_path(barrier.path());
 
-    let mut daemon = crate::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
-    crate::initialize_project(&home_path, &project_path, "partial-effect-boundaries");
+    let mut daemon = super::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
+    super::initialize_project(&home_path, &project_path, "partial-effect-boundaries");
     let identity = admitted_project_id(&home_path, &project_path);
     let mount = http_mount(&home_path);
 
@@ -433,7 +433,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
             Some(parked_request_deadline_micros()),
         )
     });
-    crate::assert_partial_effect_committed_receipt(
+    super::assert_partial_effect_committed_receipt(
         &problem_envelope(&http_body, "HTTP partial effect"),
         "HTTP mount, pre-restart",
     );
@@ -455,7 +455,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
             Some(parked_request_deadline_micros()),
         )
     });
-    crate::assert_partial_effect_committed_receipt(
+    super::assert_partial_effect_committed_receipt(
         &problem_envelope(&mcp_payload(&mcp_response), "MCP partial effect"),
         "MCP stdio host, pre-restart",
     );
@@ -491,7 +491,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         sdk_kind, "partial_effect",
         "the Rust SDK must classify the terminal as a partial effect: {sdk_envelope}"
     );
-    crate::assert_partial_effect_committed_receipt(
+    super::assert_partial_effect_committed_receipt(
         &problem_envelope(&sdk_envelope, "Rust SDK partial effect"),
         "Rust SDK, pre-restart",
     );
@@ -502,7 +502,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         .kill_and_wait()
         .expect("force-stop and reap the first physical daemon");
     assert!(!stopped.success(), "forced daemon stop exited cleanly");
-    let mut daemon = crate::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
+    let mut daemon = super::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     assert_ne!(
         daemon.id(),
         first_pid,
@@ -554,7 +554,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
             Some(parked_request_deadline_micros()),
         )
     });
-    crate::assert_partial_effect_committed_receipt(
+    super::assert_partial_effect_committed_receipt(
         &problem_envelope(&restart_body, "HTTP partial effect after restart"),
         "HTTP mount, post-restart",
     );
@@ -571,21 +571,21 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
     let barrier = tempfile::TempDir::new().expect("fact commit barrier");
     let barrier_path = crate::common::canonical_existing_path(barrier.path());
 
-    let mut daemon = crate::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
-    crate::initialize_project(&home_path, &project_path, "reset-required-boundaries");
+    let mut daemon = super::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
+    super::initialize_project(&home_path, &project_path, "reset-required-boundaries");
     let identity = admitted_project_id(&home_path, &project_path);
 
     // Tamper the store. `tracedecay init` is daemon-owned, so this daemon holds
     // a verified handle already; the refused shape is what the *next* process
     // observes on its first open, which is the physical restart below.
-    crate::make_store_reset_required(&home_path, &project_path);
+    super::make_store_reset_required(&home_path, &project_path);
 
     let first_pid = daemon.id();
     let stopped = daemon
         .kill_and_wait()
         .expect("force-stop and reap the first physical daemon");
     assert!(!stopped.success(), "forced daemon stop exited cleanly");
-    let mut daemon = crate::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
+    let mut daemon = super::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     assert_ne!(
         daemon.id(),
         first_pid,
@@ -602,7 +602,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         &storage_status_body,
         None,
     );
-    crate::assert_reset_required(
+    super::assert_reset_required(
         &problem_envelope(&http_body, "HTTP reset required"),
         "HTTP mount, first observation",
     );
@@ -618,7 +618,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         &storage_status_body,
         None,
     );
-    crate::assert_reset_required(
+    super::assert_reset_required(
         &problem_envelope(&mcp_payload(&mcp_response), "MCP reset required"),
         "MCP stdio host, first observation",
     );
@@ -634,7 +634,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         sdk_kind, "reset_required",
         "the Rust SDK must classify the terminal as reset required: {sdk_envelope}"
     );
-    crate::assert_reset_required(
+    super::assert_reset_required(
         &problem_envelope(&sdk_envelope, "Rust SDK reset required"),
         "Rust SDK, first observation",
     );
@@ -646,7 +646,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         .kill_and_wait()
         .expect("force-stop and reap the second physical daemon");
     assert!(!stopped.success(), "forced daemon stop exited cleanly");
-    let mut daemon = crate::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
+    let mut daemon = super::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     assert_ne!(
         daemon.id(),
         second_pid,
@@ -661,7 +661,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         &storage_status_body,
         None,
     );
-    crate::assert_reset_required(
+    super::assert_reset_required(
         &problem_envelope(&http_body_after, "HTTP reset required after restart"),
         "HTTP mount, after a physical restart",
     );
@@ -673,7 +673,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         &storage_status_body,
         None,
     );
-    crate::assert_reset_required(
+    super::assert_reset_required(
         &problem_envelope(&mcp_payload(&mcp_after), "MCP reset required after restart"),
         "MCP stdio host, after a physical restart",
     );
@@ -688,7 +688,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         sdk_kind_after, "reset_required",
         "the Rust SDK must keep classifying the terminal as reset required: {sdk_envelope_after}"
     );
-    crate::assert_reset_required(
+    super::assert_reset_required(
         &problem_envelope(&sdk_envelope_after, "Rust SDK reset required after restart"),
         "Rust SDK, after a physical restart",
     );

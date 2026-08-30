@@ -95,8 +95,8 @@ async fn cli_configuration_set(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
     .expect("configuration deadline");
-    let request_id = tracedecay_usecases::request_identity::mint_global_request_id(
-        tracedecay_usecases::request_identity::GlobalRequestSurface::Cli,
+    let request_id = tracedecay_application::request_identity::mint_global_request_id(
+        tracedecay_application::request_identity::GlobalRequestSurface::Cli,
     )
     .expect("CLI request id");
     let cancellation =
@@ -185,15 +185,16 @@ async fn configuration_batch_via_surface(
     .expect("configuration deadline");
     let request_surface = match surface {
         tracedecay_tool_catalog::BindingSurface::Cli => {
-            tracedecay_usecases::request_identity::GlobalRequestSurface::Cli
+            tracedecay_application::request_identity::GlobalRequestSurface::Cli
         }
         tracedecay_tool_catalog::BindingSurface::Dashboard => {
-            tracedecay_usecases::request_identity::GlobalRequestSurface::DashboardSettings
+            tracedecay_application::request_identity::GlobalRequestSurface::DashboardSettings
         }
         other => panic!("unsupported configuration batch test surface: {other:?}"),
     };
-    let request_id = tracedecay_usecases::request_identity::mint_global_request_id(request_surface)
-        .expect("surface request id");
+    let request_id =
+        tracedecay_application::request_identity::mint_global_request_id(request_surface)
+            .expect("surface request id");
     if surface == tracedecay_tool_catalog::BindingSurface::Dashboard {
         return crate::application_surface::resolve_dashboard_application_surface(
             operation,

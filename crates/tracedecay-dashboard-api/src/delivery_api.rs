@@ -11,6 +11,7 @@ use axum::extract::State;
 use axum::{Extension, Json};
 use schemars::JsonSchema;
 use serde::Serialize;
+use tracedecay_application::git::GitReadRequestV1;
 use tracedecay_domain::CommitId;
 use tracedecay_domain::feedback::{
     CiFailureKindV1, GitHubReviewAuthorClassV1, GitHubReviewCoverageV1,
@@ -36,7 +37,7 @@ use tracedecay_usecases::delivery::{
 };
 
 use crate::application::git_reads::{
-    GitReadAuthorityV1, GitReadOutcomeV1, GitReadRequestV1, GitReadResultV1, execute_git_read,
+    GitReadAuthorityV1, GitReadOutcomeV1, GitReadResultV1, execute_git_read,
 };
 use crate::git_query::{GitQueryBounds, GitStatusSummaryV1};
 

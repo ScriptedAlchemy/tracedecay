@@ -6,7 +6,6 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::context_headings::CONTEXT_PRIORITY_HEADINGS;
-use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
 use crate::path_tree::format_compact_path_list;
 use crate::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL, ResponseHandleRecord,
@@ -14,6 +13,7 @@ use crate::response_handles::{
     store_response_handle,
 };
 use crate::tools::MAX_RESPONSE_CHARS;
+use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
 use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 

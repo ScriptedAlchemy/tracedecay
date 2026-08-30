@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use tracedecay_daemon_protocol::ProcessLocalRequestSequence;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 use crate::gateway::operation_table::{BoundedOperationTable, OperationAdmission, OperationPoll};
 use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner};
 use crate::provider::{DiagnosticRefreshAdmission, DiagnosticRefreshIdentity};
-use crate::request_sequence::ProcessLocalRequestSequence;
 use crate::session::AuthorizedLspWorkspace;
 use crate::workspace_diagnostics::{
     CanonicalWorkspaceDiagnosticRefreshRequest, MAX_WORKSPACE_DIAGNOSTIC_FANOUT,
@@ -120,7 +120,7 @@ impl WorkspaceDiagnosticAdapter {
             overlays: overlays.to_vec(),
         };
         let authority = Arc::clone(&self.authority);
-        let admission: Result<_, crate::request_sequence::SequenceExhausted> =
+        let admission: Result<_, tracedecay_daemon_protocol::SequenceExhausted> =
             self.operations.admit_with(key, self.runtime.as_ref(), || {
                 let operation_id = self
                     .next_operation

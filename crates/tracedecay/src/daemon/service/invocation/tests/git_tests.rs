@@ -22,7 +22,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
     )
     .expect("scope");
-    let request = tracedecay_usecases::git_reads::GitReadRequestV1::Status;
+    let request = tracedecay_application::git::GitReadRequestV1::Status;
     let capability =
         tracedecay_tool_catalog::CapabilityId::new(request.capability_id()).expect("capability");
     let digest =
