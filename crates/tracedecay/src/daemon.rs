@@ -17,15 +17,13 @@ use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
-use crate::mcp::ReplayTransport;
 use crate::mcp::server::{
     McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, SERVER_INSTRUCTIONS,
     classify_mcp_method, initialize_result,
 };
 use crate::mcp::tools::{
-    ToolRegistryMode, default_catalog_discovery_authority, explore_call_budget,
-    get_catalog_filtered_tool_definitions_with_budget,
-    get_catalog_filtered_tool_definitions_with_warming_budget, project_catalog_discovery_scope,
+    default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
+    get_catalog_filtered_tool_definitions_with_warming_budget,
 };
 use branch_add::{branch_add_response, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
@@ -47,7 +45,9 @@ pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 pub(crate) use tracedecay_daemon_protocol::{
     ensure_private_socket_parent, unix_socket_path_within_limit,
 };
+use tracedecay_mcp::transport::ReplayTransport;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 

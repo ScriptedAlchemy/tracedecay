@@ -244,7 +244,10 @@ impl DaemonInvocationService {
             .project_runtimes
             .get::<RegisteredWorkRuntime>(project_root?)
             .await?;
-        let workflow = runtime.database.workflow_application_services().ok()?;
+        let workflow = tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
+            &runtime.database,
+        )
+        .ok()?;
         tracedecay_application::WorkflowRunStoragePort::fan_out_binding(
             workflow.effects(),
             identity,

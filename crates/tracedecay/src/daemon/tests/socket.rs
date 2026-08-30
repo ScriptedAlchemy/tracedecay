@@ -70,7 +70,7 @@ async fn project_owner_wait_stops_when_the_client_disconnects() {
         }
     }
 
-    let (mut transport, input, _output) = crate::mcp::transport::ChannelTransport::new();
+    let (mut transport, input, _output) = tracedecay_mcp::transport::ChannelTransport::new();
     drop(input);
     let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let probe = DropProbe(Arc::clone(&dropped));
@@ -96,7 +96,7 @@ async fn project_owner_wait_stops_when_the_client_disconnects() {
 
 #[tokio::test]
 async fn project_owner_half_close_can_still_receive_a_bounded_result() {
-    let (mut transport, input, _output) = crate::mcp::transport::ChannelTransport::new();
+    let (mut transport, input, _output) = tracedecay_mcp::transport::ChannelTransport::new();
     drop(input);
     let result = super::super::await_project_owner_or_disconnect(&mut transport, async {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;

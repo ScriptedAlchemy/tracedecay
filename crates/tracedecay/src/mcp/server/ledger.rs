@@ -163,8 +163,14 @@ impl McpServer {
                 let cg = cg_lock.read().await.clone();
                 let _ = cg.set_tokens_saved(new_total).await;
                 let _ = cg.add_local_counter(net_saved_tokens).await;
-                if let LedgerSink::Mounted(gdb) = sink {
-                    gdb.upsert(cg.project_root(), new_total).await;
+                if let LedgerSink::Mounted(gdb) = sink
+                    && let Err(error) = gdb
+                        .try_upsert_project_tokens(cg.project_root(), new_total)
+                        .await
+                {
+                    // Background persist: the response already went out, so
+                    // the failed ledger write degrades to a named warning.
+                    tracing::warn!(error = %error, "background token-accounting persist failed");
                 }
             }
             // The monitor entry opens, locks, and mmaps a file; keep that

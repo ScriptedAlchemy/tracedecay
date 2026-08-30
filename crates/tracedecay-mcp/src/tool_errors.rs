@@ -1,11 +1,12 @@
 //! Semantic tool-failure classification and JSON-RPC error-response mapping.
 
 use serde_json::{Value, json};
-
-use crate::mcp::response_handles::RESPONSE_RETRIEVE_TOOL;
-use crate::mcp::tools::ToolResult;
-use crate::mcp::transport::{ErrorCode, JsonRpcResponse};
 use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_sessions::admission::HostAdmissionStatus;
+
+use crate::response_handles::RESPONSE_RETRIEVE_TOOL;
+use crate::tools::ToolResult;
+use crate::transport::{ErrorCode, JsonRpcResponse};
 
 fn plain_text_tool_failure(text: &str) -> bool {
     text.starts_with("git error:") || text.starts_with("git diff failed:")
@@ -43,18 +44,40 @@ fn value_has_semantic_error(value: &Value) -> bool {
         })
 }
 
+/// Projects a hook-runtime error onto the structured JSON-RPC data object.
+///
+/// The status is whatever the admission authority reported, carried through
+/// the error rather than re-derived here. Failures raised without an
+/// authority behind them report the application-level default.
+#[must_use]
+pub fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
+    let (reason_code, retryable, detail) = error.hook_runtime_context()?;
+    let status = error
+        .hook_runtime_status()
+        .and_then(HostAdmissionStatus::from_wire)
+        .unwrap_or(HostAdmissionStatus::Degraded);
+    Some(json!({
+        "tool": "tracedecay_hook_runtime",
+        "status": status,
+        "reason_code": reason_code,
+        "retryable": retryable,
+        "detail": detail,
+    }))
+}
+
 /// Whether an MCP tool result should be classified as a semantic failure for
 /// analytics/`isError` purposes.
 ///
 /// Handlers that build results structurally (e.g. edit tools, whose result
 /// struct carries a `success: bool`) call
-/// [`crate::mcp::tools::ToolResult::with_semantic_error`] to record the
-/// outcome directly — that marker is authoritative and wins over the
-/// rendered text. Handlers that have not been migrated to set the marker
-/// leave it `None`, and this falls back to the pre-existing text-based
-/// heuristic (`value_has_semantic_error`) that sniffs the rendered response
-/// text for JSON failure shapes or known plain-text failure prefixes.
-pub(crate) fn tool_result_has_semantic_error(result: &ToolResult) -> bool {
+/// [`ToolResult::with_semantic_error`] to record the outcome directly — that
+/// marker is authoritative and wins over the rendered text. Handlers that
+/// have not been migrated to set the marker leave it `None`, and this falls
+/// back to the pre-existing text-based heuristic (`value_has_semantic_error`)
+/// that sniffs the rendered response text for JSON failure shapes or known
+/// plain-text failure prefixes.
+#[must_use]
+pub fn tool_result_has_semantic_error(result: &ToolResult) -> bool {
     result
         .semantic_error()
         .unwrap_or_else(|| value_has_semantic_error(&result.value))
@@ -67,7 +90,8 @@ pub(crate) fn tool_result_has_semantic_error(result: &ToolResult) -> bool {
 /// block for handlers that only signal failure via `value_has_semantic_error`
 /// text heuristics. Callers must only invoke this once the result is already
 /// known to be a semantic failure — it does not itself re-check that.
-pub(crate) fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
+#[must_use]
+pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
     if let Some(message) = result.failure_message() {
         return Some(message.to_string());
     }
@@ -83,7 +107,7 @@ pub(crate) fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
         .map(|text| text.trim_start().to_string())
 }
 
-pub(crate) fn mark_semantic_tool_error(result: &mut ToolResult) {
+pub fn mark_semantic_tool_error(result: &mut ToolResult) {
     if !tool_result_has_semantic_error(result) {
         return;
     }
@@ -92,10 +116,10 @@ pub(crate) fn mark_semantic_tool_error(result: &mut ToolResult) {
     }
 }
 
-/// Canonical wire problem kind for reason codes minted inside this crate's
-/// MCP dispatch and application-surface layers. The boundary owns this
-/// translation so clients (and the catalog sweep) can read a truthful
-/// `kind` alongside the machine `code` instead of inferring from prose.
+/// Canonical wire problem kind for reason codes minted inside MCP dispatch
+/// and application-surface layers. The boundary owns this translation so
+/// clients (and the catalog sweep) can read a truthful `kind` alongside the
+/// machine `code` instead of inferring from prose.
 fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
     match reason_code {
         "tool_dispatch_deadline_exceeded" => Some("deadline_exceeded"),
@@ -114,11 +138,8 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
 
 /// Map response-handle failures onto actionable JSON-RPC errors at the MCP
 /// boundary so clients can distinguish bad input from cache/runtime problems.
-pub(crate) fn tool_error_response(
-    id: Value,
-    tool_name: &str,
-    error: &TraceDecayError,
-) -> JsonRpcResponse {
+#[must_use]
+pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) -> JsonRpcResponse {
     if let Some((reason_code, retryable, detail)) = error.project_route_context() {
         let code = if retryable {
             ErrorCode::InternalError
@@ -148,7 +169,7 @@ pub(crate) fn tool_error_response(
         );
     }
     if tool_name == "tracedecay_hook_runtime"
-        && let Some(data) = crate::mcp::tools::structured_hook_error_data(error)
+        && let Some(data) = structured_hook_error_data(error)
     {
         let detail = data
             .get("detail")
@@ -296,7 +317,8 @@ fn hardcoded_internal_error_response(id: &Value, detail: &str) -> String {
     )
 }
 
-pub(crate) fn serialize_response_line(resp: &JsonRpcResponse) -> String {
+#[must_use]
+pub fn serialize_response_line(resp: &JsonRpcResponse) -> String {
     match serde_json::to_string(resp) {
         Ok(line) => line,
         Err(e) => {

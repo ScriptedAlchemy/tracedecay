@@ -258,19 +258,22 @@ fn dashboard_automation_project_resolver(
         let daemon_user_profile_id = daemon_user_profile_id.clone();
         let retained_project_server_resolver = Arc::clone(&retained_project_server_resolver);
         Box::pin(async move {
-            let retained_server = retained_project_server_resolver(
-                RetainedProjectGraphRequest::for_mounted_root(requested_project_root.clone()),
-            )
-            .await
-            .map_err(|error| DashboardAutomationAuthorityErrorV1::Unavailable {
-                detail: format!("dashboard automation project authority is unavailable: {error}"),
-            })?
-            .ok_or_else(|| DashboardAutomationAuthorityErrorV1::Unavailable {
-                detail: format!(
-                    "dashboard automation project '{}' is not retained by the daemon",
-                    requested_project_root.display()
-                ),
-            })?;
+            let retained_server = retained_project_server_resolver
+                .resolve(RetainedProjectGraphRequest::for_mounted_root(
+                    requested_project_root.clone(),
+                ))
+                .await
+                .map_err(|error| DashboardAutomationAuthorityErrorV1::Unavailable {
+                    detail: format!(
+                        "dashboard automation project authority is unavailable: {error}"
+                    ),
+                })?
+                .ok_or_else(|| DashboardAutomationAuthorityErrorV1::Unavailable {
+                    detail: format!(
+                        "dashboard automation project '{}' is not retained by the daemon",
+                        requested_project_root.display()
+                    ),
+                })?;
             if retained_server
                 .profile_identity()
                 .is_none_or(|identity| identity.profile_id() != &daemon_user_profile_id)

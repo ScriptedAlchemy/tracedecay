@@ -24,10 +24,11 @@ pub(super) fn prepare_graph_mutation(
     let capability =
         CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
     let binding = tracedecay_application::WorkProductBindingV1::new(capability, use_case.clone());
-    let product_services = registered
-        .database
-        .work_product_services(binding.clone())
-        .map_err(|_| work_product_authority_unavailable())?;
+    let product_services = tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+        &registered.database,
+        binding.clone(),
+    )
+    .map_err(|_| work_product_authority_unavailable())?;
     let revisions = current_work_product_revision_pins(registered)?;
     let command_id =
         tracedecay_domain::WorkCommandId::new(canonical_request_id.as_str().to_owned())
@@ -46,7 +47,7 @@ pub(super) fn prepare_graph_mutation(
 }
 
 pub(super) fn prepare_duplicate_adjudication(
-    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     request: tracedecay_application::PrepareWorkDuplicateAdjudicationRequestV1,
     canonical_request_id: &RequestId,
@@ -96,7 +97,7 @@ pub(super) fn prepare_duplicate_adjudication(
 }
 
 fn require_attempt(
-    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     identity: &tracedecay_domain::WorkAttemptIdentityV1,
 ) -> Result<(), ApplicationProblem> {
@@ -146,10 +147,11 @@ pub(super) fn decide_product_proposal(
     let capability =
         CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
     let binding = tracedecay_application::WorkProductBindingV1::new(capability, use_case.clone());
-    let services = registered
-        .database
-        .work_product_services(binding.clone())
-        .map_err(|_| work_product_authority_unavailable())?;
+    let services = tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+        &registered.database,
+        binding.clone(),
+    )
+    .map_err(|_| work_product_authority_unavailable())?;
     if request.mutation.revisions != current_work_product_revision_pins(registered)? {
         return Err(work_product_problem(
             tracedecay_application::WorkProductApplicationErrorV1::RevisionConflict,

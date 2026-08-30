@@ -1,7 +1,7 @@
 use crate::support::*;
 use serde_json::{Value, json};
-use tracedecay::mcp::get_tool_definitions;
 use tracedecay::tracedecay::TraceDecay;
+use tracedecay_mcp::get_tool_definitions;
 #[test]
 fn outline_schema_requires_file_without_provider_property() {
     let tools = get_tool_definitions().expect("tool definitions");
@@ -645,7 +645,7 @@ fn message_search_provider_schema_matches_ingested_providers() {
 }
 
 pub(crate) fn tool_schema<'a>(
-    tools: &'a [tracedecay::mcp::ToolDefinition],
+    tools: &'a [tracedecay_mcp::ToolDefinition],
     name: &str,
 ) -> &'a Value {
     &tools
@@ -673,7 +673,7 @@ pub(crate) fn required_args_at<'a>(schema: &'a Value, path: &[&str]) -> Vec<&'a 
 }
 
 pub(crate) fn assert_schema_requires(
-    tools: &[tracedecay::mcp::ToolDefinition],
+    tools: &[tracedecay_mcp::ToolDefinition],
     tool_name: &str,
     expected: &[&str],
 ) {
