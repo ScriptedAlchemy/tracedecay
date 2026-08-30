@@ -272,11 +272,7 @@ pub fn normalize_replay_tool_pairs(messages: &[Value]) -> Vec<Value> {
 }
 
 fn replay_content_text(message: &Value) -> String {
-    match message.get("content") {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(text)) => text.clone(),
-        Some(content) => serde_json::to_string(content).unwrap_or_default(),
-    }
+    crate::lcm::lcm_message_visible_text(message)
 }
 
 pub fn raw_replay_message(message: &LcmRawMessage) -> Value {

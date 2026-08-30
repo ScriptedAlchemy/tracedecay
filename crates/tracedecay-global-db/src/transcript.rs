@@ -73,45 +73,62 @@ pub(super) async fn get_parse_offset(
     conn: &impl QueryExecutor,
     path: &str,
 ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
-    let rows = conn
+    match conn
         .query(
             "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
             params![path],
         )
-        .await;
-    let Ok(mut rows) = rows else {
-        let mut legacy_rows = conn
-            .query(
-                "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
-                params![path],
-            )
-            .await
-            .map_err(|error| {
+        .await
+    {
+        Ok(mut rows) => {
+            let Some(row) = rows.next().await.map_err(|error| {
                 TranscriptPersistenceError::storage("read transcript parse offset", error)
-            })?;
-        let Some(row) = legacy_rows.next().await.map_err(|error| {
-            TranscriptPersistenceError::storage("read transcript parse offset", error)
-        })?
-        else {
-            return Ok(None);
-        };
-        return Ok(Some(ParseOffset {
-            byte_offset: decode_u64(&row, 0, "decode transcript byte offset")?,
-            mtime: decode_u64(&row, 1, "decode transcript mtime")?,
-            file_id: 0,
-        }));
-    };
-    let Some(row) = rows.next().await.map_err(|error| {
-        TranscriptPersistenceError::storage("read transcript parse offset", error)
-    })?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(ParseOffset {
-        byte_offset: decode_u64(&row, 0, "decode transcript byte offset")?,
-        mtime: decode_u64(&row, 1, "decode transcript mtime")?,
-        file_id: decode_u64(&row, 2, "decode transcript file id")?,
-    }))
+            })?
+            else {
+                return Ok(None);
+            };
+            Ok(Some(ParseOffset {
+                byte_offset: decode_u64(&row, 0, "decode transcript byte offset")?,
+                mtime: decode_u64(&row, 1, "decode transcript mtime")?,
+                file_id: decode_u64(&row, 2, "decode transcript file id")?,
+            }))
+        }
+        Err(error) if sqlite_missing_column(&error, "file_id") => {
+            let mut legacy_rows = conn
+                .query(
+                    "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
+                    params![path],
+                )
+                .await
+                .map_err(|error| {
+                    TranscriptPersistenceError::storage("read transcript parse offset", error)
+                })?;
+            let Some(row) = legacy_rows.next().await.map_err(|error| {
+                TranscriptPersistenceError::storage("read transcript parse offset", error)
+            })?
+            else {
+                return Ok(None);
+            };
+            Ok(Some(ParseOffset {
+                byte_offset: decode_u64(&row, 0, "decode transcript byte offset")?,
+                mtime: decode_u64(&row, 1, "decode transcript mtime")?,
+                file_id: 0,
+            }))
+        }
+        Err(error) => Err(TranscriptPersistenceError::storage(
+            "read transcript parse offset",
+            error,
+        )),
+    }
+}
+
+fn sqlite_missing_column(error: &tracedecay_runtime_core::db::engine::Error, column: &str) -> bool {
+    match error {
+        tracedecay_runtime_core::db::engine::Error::Sqlite { message, .. } => {
+            message.contains(&format!("no such column: {column}"))
+        }
+        _ => false,
+    }
 }
 
 fn decode_u64(
@@ -119,9 +136,14 @@ fn decode_u64(
     index: i32,
     operation: &'static str,
 ) -> Result<u64, TranscriptPersistenceError> {
-    row.get::<i64>(index)
-        .map(|value| value as u64)
-        .map_err(|error| TranscriptPersistenceError::storage(operation, error))
+    let value = row
+        .get::<i64>(index)
+        .map_err(|error| TranscriptPersistenceError::storage(operation, error))?;
+    u64::try_from(value).map_err(|error| TranscriptPersistenceError::storage(operation, error))
+}
+
+fn encode_i64(value: u64, operation: &'static str) -> Result<i64, TranscriptPersistenceError> {
+    i64::try_from(value).map_err(|error| TranscriptPersistenceError::storage(operation, error))
 }
 
 pub(super) async fn require_expected_offset(
@@ -151,9 +173,9 @@ pub(super) async fn set_parse_offset(
             file_id = excluded.file_id",
         params![
             path,
-            offset.byte_offset as i64,
-            offset.mtime as i64,
-            offset.file_id as i64
+            encode_i64(offset.byte_offset, "encode transcript byte offset")?,
+            encode_i64(offset.mtime, "encode transcript mtime")?,
+            encode_i64(offset.file_id, "encode transcript file id")?
         ],
     )
     .await
@@ -665,9 +687,12 @@ impl RegisteredGlobalDb {
                         AND excluded.byte_offset >= parse_offsets.byte_offset)",
             params![
                 path,
-                offset.byte_offset as i64,
-                offset.mtime as i64,
-                offset.file_id as i64
+                i64::try_from(offset.byte_offset)
+                    .map_err(|error| format!("encode transcript byte offset: {error}"))?,
+                i64::try_from(offset.mtime)
+                    .map_err(|error| format!("encode transcript mtime: {error}"))?,
+                i64::try_from(offset.file_id)
+                    .map_err(|error| format!("encode transcript file id: {error}"))?
             ],
         )
         .await

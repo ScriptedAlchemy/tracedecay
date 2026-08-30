@@ -9,9 +9,29 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::tracedecay::TraceDecay;
+use tracedecay_application::{
+    ProfileIdentityReadPort, SessionTemporalRefreshWakePort,
+    remote::status::RemoteOperationalStatusReadPort,
+};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_usecases::session::SessionProjectionServingStatusPort;
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
+
+fn wrap_profile_identity(
+    identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+) -> Arc<dyn ProfileIdentityReadPort> {
+    Arc::new(identity)
+}
+
+fn wrap_refresh_wake(
+    wake: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+) -> (
+    Arc<dyn SessionTemporalRefreshWakePort>,
+    Arc<dyn SessionProjectionServingStatusPort>,
+) {
+    (Arc::new(wake.clone()), Arc::new(wake))
+}
 
 /// Updates daemon ownership routing after this server changes physical graph DB.
 /// Implementations must not call back into this `McpServer`: reconciliation is
@@ -82,8 +102,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) cg: Arc<TraceDecay>,
     pub(crate) scope_prefix: Option<String>,
     pub(crate) profile_root: Option<PathBuf>,
-    pub(crate) profile_identity:
-        Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    pub(crate) profile_identity: Option<Arc<dyn ProfileIdentityReadPort>>,
     pub(crate) global_db: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) accounting_db: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) registry_db: Option<RegisteredGlobalDbLeaseV1>,
@@ -94,29 +113,29 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
-    pub(crate) project_session_refresh_wake:
-        Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
-    pub(crate) user_session_refresh_wake:
-        Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
+    pub(crate) project_session_refresh_wake: Option<Arc<dyn SessionTemporalRefreshWakePort>>,
+    pub(crate) user_session_refresh_wake: Option<Arc<dyn SessionTemporalRefreshWakePort>>,
+    pub(crate) project_session_refresh_serving: Option<Arc<dyn SessionProjectionServingStatusPort>>,
+    pub(crate) user_session_refresh_serving: Option<Arc<dyn SessionProjectionServingStatusPort>>,
     /// When true (daemon-owned project servers), spawn a cancellable worker that
     /// continues bounded host-admission replay passes until idle.
     pub(crate) own_project_host_admission_replay: bool,
     pub(crate) startup_catch_up_enabled: bool,
     pub(crate) automation_scheduler_reconciler:
-        Option<crate::dashboard::AutomationSchedulerReconciler>,
+        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
-    pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    pub(crate) dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     /// Live Remote Brain operational read composed from the mounted remote
     /// authorities. Daemon-owned servers install it; direct servers leave it
     /// absent and remote operator surfaces report typed unavailable.
-    pub(crate) remote_operational_status:
-        Option<crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1>,
-    pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    pub(crate) remote_operational_status: Option<Arc<dyn RemoteOperationalStatusReadPort>>,
+    pub(crate) dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
-        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
-    pub(crate) dashboard_explorer_semantic_reader: Option<crate::dashboard::ExplorerSemanticReader>,
+        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub(crate) dashboard_explorer_semantic_reader:
+        Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub(crate) dashboard_feedback_status_reader:
-        Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
+        Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
@@ -147,7 +166,7 @@ pub(crate) struct McpServerConstructionContext {
 }
 
 pub(crate) struct McpServerWriters {
-    dashboard_automation: crate::dashboard::DashboardAutomationWriter,
+    dashboard_automation: tracedecay_dashboard_api::DashboardAutomationWriter,
     background_refresh: BackgroundRefreshWriter,
 }
 
@@ -190,7 +209,7 @@ pub(crate) struct McpServerDaemonCoreAuthority {
 
 impl McpServerWriters {
     pub(crate) fn daemon_owned(
-        dashboard_automation: crate::dashboard::DashboardAutomationWriter,
+        dashboard_automation: tracedecay_dashboard_api::DashboardAutomationWriter,
         background_refresh: BackgroundRefreshWriter,
     ) -> Self {
         Self {
@@ -218,11 +237,14 @@ impl McpServerConstructionContext {
             host_admission_broker: None,
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
+            project_session_refresh_serving: None,
+            user_session_refresh_serving: None,
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
-            dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
+            dashboard_automation_writer:
+                tracedecay_dashboard_api::standalone_dashboard_automation_writer(),
             remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
@@ -276,7 +298,7 @@ impl McpServerConstructionContext {
         profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
     ) -> Self {
         self.profile_root = Some(profile_identity.profile_root().to_path_buf());
-        self.profile_identity = Some(profile_identity);
+        self.profile_identity = Some(wrap_profile_identity(profile_identity));
         self
     }
 
@@ -300,11 +322,15 @@ impl McpServerConstructionContext {
         } = authority;
         let profile_root = profile_identity.profile_root().to_path_buf();
         let registry = databases.registry;
+        let (project_session_refresh_wake, project_session_refresh_serving) =
+            wrap_refresh_wake(project_session_refresh_wake);
+        let (user_session_refresh_wake, user_session_refresh_serving) =
+            wrap_refresh_wake(user_session_refresh_wake);
         Self {
             cg: cg.into(),
             scope_prefix,
             profile_root: Some(profile_root),
-            profile_identity: Some(profile_identity),
+            profile_identity: Some(wrap_profile_identity(profile_identity)),
             global_db: Some(registry.clone()),
             accounting_db: databases.accounting,
             registry_db: Some(registry),
@@ -316,6 +342,8 @@ impl McpServerConstructionContext {
             host_admission_broker,
             project_session_refresh_wake: Some(project_session_refresh_wake),
             user_session_refresh_wake: Some(user_session_refresh_wake),
+            project_session_refresh_serving: Some(project_session_refresh_serving),
+            user_session_refresh_serving: Some(user_session_refresh_serving),
             own_project_host_admission_replay: true,
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
@@ -368,7 +396,7 @@ impl McpServerConstructionContext {
             cg: cg.into(),
             scope_prefix,
             profile_root: Some(profile_root),
-            profile_identity: Some(profile_identity),
+            profile_identity: Some(wrap_profile_identity(profile_identity)),
             global_db: Some(registry.clone()),
             accounting_db: accounting,
             registry_db: Some(registry),
@@ -380,6 +408,8 @@ impl McpServerConstructionContext {
             host_admission_broker: None,
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
+            project_session_refresh_serving: None,
+            user_session_refresh_serving: None,
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: false,
             automation_scheduler_reconciler: None,
@@ -524,7 +554,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_automation_scheduler_reconciler(
         mut self,
-        reconciler: crate::dashboard::AutomationSchedulerReconciler,
+        reconciler: tracedecay_dashboard_api::AutomationSchedulerReconciler,
     ) -> Self {
         self.automation_scheduler_reconciler = Some(reconciler);
         self
@@ -537,7 +567,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_dashboard_doctor_report_reader(
         mut self,
-        reader: crate::dashboard::DoctorReportReader,
+        reader: tracedecay_dashboard_api::DoctorReportReader,
     ) -> Self {
         self.dashboard_doctor_report_reader = Some(reader);
         self
@@ -545,7 +575,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_remote_operational_status(
         mut self,
-        provider: crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1,
+        provider: Arc<dyn RemoteOperationalStatusReadPort>,
     ) -> Self {
         self.remote_operational_status = Some(provider);
         self
@@ -553,7 +583,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_dashboard_code_index_freshness_reader(
         mut self,
-        reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
+        reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
     ) -> Self {
         self.dashboard_code_index_freshness_reader = Some(reader);
         self
@@ -561,7 +591,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_dashboard_explorer_semantic_reader(
         mut self,
-        reader: crate::dashboard::ExplorerSemanticReader,
+        reader: tracedecay_dashboard_api::ExplorerSemanticReader,
     ) -> Self {
         self.dashboard_explorer_semantic_reader = Some(reader);
         self
@@ -569,7 +599,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_dashboard_feedback_status_reader(
         mut self,
-        reader: crate::dashboard::feedback_api::FeedbackStatusReader,
+        reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
     ) -> Self {
         self.dashboard_feedback_status_reader = Some(reader);
         self

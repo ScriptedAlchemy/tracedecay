@@ -106,7 +106,7 @@ fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
     let record = finalizer
         .record_at(
             outcome,
-            std::time::UNIX_EPOCH + std::time::Duration::from_micros(2_500_000),
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(2500),
         )
         .expect("fresh terminal clock");
     assert_eq!(record.completed_at, "2");

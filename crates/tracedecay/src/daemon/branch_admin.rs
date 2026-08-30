@@ -725,7 +725,7 @@ impl StoreAdministration {
     pub(super) async fn registered_project_session_database(
         &self,
         project_root: &Path,
-        store_layout: &crate::storage::StoreLayout,
+        store_layout: &tracedecay_runtime_core::storage::StoreLayout,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let project_id = store_layout
             .identity
@@ -1311,7 +1311,7 @@ impl StoreAdministration {
     pub(super) async fn reconcile_cached_automation_for_profile(
         &self,
         profile_root: &Path,
-    ) -> Result<Vec<crate::dashboard::AutomationSchedulerOwnerReconcileOutcome>> {
+    ) -> Result<Vec<tracedecay_dashboard_api::AutomationSchedulerOwnerReconcileOutcome>> {
         self.ensure_account_active().await?;
         let profile_root = authority::canonical_identity_path(profile_root)?;
         let servers = {
@@ -1325,13 +1325,15 @@ impl StoreAdministration {
         };
         let mut outcomes = Vec::with_capacity(servers.len());
         for (key, server) in servers {
-            outcomes.push(crate::dashboard::AutomationSchedulerOwnerReconcileOutcome {
-                project_id: key.owner.project_id,
-                store_root: key.owner.store_root,
-                graph_db_path: key.owner.graph_db_path,
-                scope_prefix: key.scope_prefix,
-                outcome: server.reconcile_automation_scheduler().await,
-            });
+            outcomes.push(
+                tracedecay_dashboard_api::AutomationSchedulerOwnerReconcileOutcome {
+                    project_id: key.owner.project_id,
+                    store_root: key.owner.store_root,
+                    graph_db_path: key.owner.graph_db_path,
+                    scope_prefix: key.scope_prefix,
+                    outcome: server.reconcile_automation_scheduler().await,
+                },
+            );
         }
         Ok(outcomes)
     }
@@ -1395,8 +1397,8 @@ impl StoreAdministration {
         &self,
         schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         handshake: &DaemonHandshake,
-        action: crate::branch::BranchAdminAction,
-    ) -> Result<crate::branch::BranchAdminReport> {
+        action: tracedecay_runtime_core::branch::BranchAdminAction,
+    ) -> Result<tracedecay_runtime_core::branch::BranchAdminReport> {
         let project_root =
             handshake
                 .project_path
@@ -1404,7 +1406,7 @@ impl StoreAdministration {
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "branch administration requires a project path".to_string(),
                 })?;
-        let layout = crate::storage::resolve_persisted_layout(
+        let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(
             project_root,
             &handshake.client_identity.profile_root,
         )?
@@ -1456,11 +1458,11 @@ impl StoreAdministration {
         schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: &Path,
         data_root: &Path,
-        action: crate::branch::BranchAdminAction,
+        action: tracedecay_runtime_core::branch::BranchAdminAction,
         branch_gc_days: u64,
         orphan_db_gc_days: u64,
-    ) -> Result<crate::branch::BranchAdminReport> {
-        let prepared = crate::branch::prepare_branch_admin_mutation(
+    ) -> Result<tracedecay_runtime_core::branch::BranchAdminReport> {
+        let prepared = tracedecay_runtime_core::branch::prepare_branch_admin_mutation(
             project_root,
             data_root,
             action,
@@ -1555,7 +1557,7 @@ impl StoreAdministration {
 #[hotpath::measure(label = "daemon.branch_admin.acquire_retirement_leases")]
 fn acquire_manual_branch_retirement_leases(
     data_root: &Path,
-    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+    retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
 ) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
     retirements
         .iter()
@@ -1576,7 +1578,7 @@ async fn cleanup_manual_branch_retirements(
     project_root: &Path,
     data_root: &Path,
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+    retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
     lifecycle_leases: Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>,
 ) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
     if retirements.len() != lifecycle_leases.len() {
@@ -1609,7 +1611,8 @@ async fn cleanup_manual_branch_retirements(
 
 pub(super) struct BranchAdminRequest {
     pub(super) id: serde_json::Value,
-    pub(super) action: std::result::Result<crate::branch::BranchAdminAction, String>,
+    pub(super) action:
+        std::result::Result<tracedecay_runtime_core::branch::BranchAdminAction, String>,
 }
 
 pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminRequest> {
@@ -1692,7 +1695,7 @@ fn destructive_reservation_error(
 }
 
 fn branch_admin_tool_result(
-    report: &crate::branch::BranchAdminReport,
+    report: &tracedecay_runtime_core::branch::BranchAdminReport,
 ) -> Result<serde_json::Value> {
     Ok(json!({
         "content": [{
@@ -1723,7 +1726,7 @@ fn branch_admin_error_response(id: serde_json::Value, error: &TraceDecayError) -
 pub(super) async fn write_branch_admin_response(
     transport: &mut impl McpTransport,
     request: BranchAdminRequest,
-    result: Result<crate::branch::BranchAdminReport>,
+    result: Result<tracedecay_runtime_core::branch::BranchAdminReport>,
 ) -> Result<()> {
     let response = match (request.action, result) {
         (Err(message), _) => JsonRpcResponse::error(request.id, ErrorCode::InvalidParams, message),
@@ -1889,39 +1892,47 @@ mod tests {
     #[tokio::test]
     async fn profile_bootstrap_preserves_future_spool_reset_without_retry_mapping() {
         let temp = tempfile::tempdir().unwrap();
+        // The profile identity root must be a directory `load_or_create`
+        // creates (and restricts to 0700) itself; a umask-default tempdir
+        // trips the fail-closed private-root validation.
+        let profile_root = temp.path().join("profile");
         let profile_identity =
-            crate::daemon::profile_identity::load_or_create(temp.path()).unwrap();
-        let database_path = tracedecay_sessions::runtime::user_sessions_db_path(temp.path());
+            crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+        let database_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (meta_path, bytes_before) = write_future_spool_metadata(&database_path);
         let administration = StoreAdministration::default().with_profile_identity(profile_identity);
 
         administration
-            .ensure_profile_host_admission_bootstrap(temp.path())
+            .ensure_profile_host_admission_bootstrap(&profile_root)
             .await
             .unwrap();
+        // The worker performs a real session-runtime-registry open before it
+        // can surface the spool error, so give it a generous (still bounded)
+        // wait; completion notifies immediately, so a healthy run never
+        // sleeps this long.
         assert!(
             administration
                 .profile_host_admission_replay
-                .wait_bootstrap_completed(temp.path(), Duration::from_secs(1))
+                .wait_bootstrap_completed(&profile_root, Duration::from_secs(60))
                 .await,
             "production bootstrap worker must publish its terminal state"
         );
         assert_eq!(
             administration
                 .profile_host_admission_replay
-                .bootstrap_attempt_count(temp.path())
+                .bootstrap_attempt_count(&profile_root)
                 .await,
             1
         );
         assert_eq!(
             administration
                 .profile_host_admission_replay
-                .bootstrap_backoff_count(temp.path())
+                .bootstrap_backoff_count(&profile_root)
                 .await,
             0
         );
         let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) = administration
-            .profile_host_admission_bootstrap_status(temp.path())
+            .profile_host_admission_bootstrap_status(&profile_root)
             .await
             .unwrap()
         else {
@@ -1937,8 +1948,8 @@ mod tests {
         assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
 
         let client_identity = tracedecay_daemon_protocol::DaemonClientIdentity {
-            profile_root: temp.path().to_path_buf(),
-            global_db_path: temp.path().join("global.db"),
+            profile_root: profile_root.clone(),
+            global_db_path: profile_root.join("global.db"),
         };
         let Some(ProfileHostAdmissionBootstrapStatus::Terminal(observed_error)) =
             super::super::project_server_lifecycle::schedule_user_profile_host_admission_replay_for_identity(
@@ -1956,7 +1967,7 @@ mod tests {
         assert_eq!(
             administration
                 .profile_host_admission_replay
-                .bootstrap_attempt_count(temp.path())
+                .bootstrap_attempt_count(&profile_root)
                 .await,
             1,
             "reading cached terminal status must not start another attempt"
@@ -2145,7 +2156,7 @@ mod tests {
         assert_eq!(request.id, json!(7));
         assert_eq!(
             request.action.expect("valid action"),
-            crate::branch::BranchAdminAction::Remove {
+            tracedecay_runtime_core::branch::BranchAdminAction::Remove {
                 branch: "feature/a".to_string()
             }
         );

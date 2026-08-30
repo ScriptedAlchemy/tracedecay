@@ -972,16 +972,11 @@ fn stable_jsonl_file_id(
     }
     #[cfg(windows)]
     {
-        if let Ok(information) = tracedecay_private_fs::windows_file::information(file) {
-            hasher.update(information.volume_serial_number.to_le_bytes());
-            hasher.update(information.file_index.to_le_bytes());
-        } else {
-            // Some virtual file systems do not expose native handle
-            // identity. Keep creation time plus the head fingerprint as
-            // the deterministic fallback used before native IDs existed.
-            hasher.update(0_u32.to_le_bytes());
-            hasher.update(0_u64.to_le_bytes());
-        }
+        // Match `jsonl_native_file_identity`: a native-handle miss is typed,
+        // never a fabricated 0/0 identity that would collide across files.
+        let information = tracedecay_private_fs::windows_file::information(file)?;
+        hasher.update(information.volume_serial_number.to_le_bytes());
+        hasher.update(information.file_index.to_le_bytes());
         hasher.update(meta.creation_time().to_le_bytes());
     }
     #[cfg(not(any(unix, windows)))]

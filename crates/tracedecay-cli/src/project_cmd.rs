@@ -1,7 +1,9 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use tracedecay::project_registry::{ProjectRegistryView, render_project_registry_view};
+use tracedecay_dashboard_api::project_registry::{
+    ProjectRegistryView, render_project_registry_view,
+};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
@@ -224,7 +226,7 @@ fn render_project_context_text(context: &ProjectRegistryContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay::project_registry::PublicProjectRegistryContext;
+    use tracedecay_dashboard_api::project_registry::PublicProjectRegistryContext;
     use tracedecay_global_db::{
         CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectStoreContext,
         StoreArtifactRecord, StoreInstanceRecord,

@@ -44,6 +44,8 @@ mod projection_drain;
 mod replay;
 mod runtime;
 mod schedule;
+/// Session-ingest authority composition over one registered database.
+pub mod session_ingest_authority;
 mod spool;
 
 pub use replay::{

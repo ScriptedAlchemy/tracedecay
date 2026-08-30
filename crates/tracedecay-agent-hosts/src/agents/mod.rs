@@ -32,13 +32,15 @@ pub mod opencode;
 pub mod plugin_bundle;
 pub mod prompt_rules;
 mod text_file_transaction;
-use text_file_transaction::lock_host_file_write;
-pub(crate) use text_file_transaction::{TextFileMutation, update_text_file_transactionally};
+pub(crate) use text_file_transaction::{
+    TextFileMutation, update_config_file_transactionally, update_text_file_transactionally,
+};
 pub(crate) mod retired_memory_digest;
 pub mod roo_code;
 pub mod vibe;
 pub mod zed;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
@@ -769,6 +771,38 @@ pub fn load_json_file(path: &Path) -> serde_json::Value {
     }
 }
 
+/// Dialect of a JSON-shaped host config, binding the strict content parser
+/// used on write paths. Read-only probes keep the lenient [`load_json_file`]
+/// / [`load_jsonc_file`] loaders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsonConfigDialect {
+    Json,
+    Jsonc,
+}
+
+impl JsonConfigDialect {
+    /// Strict parse of already-observed config contents for a write path.
+    /// Missing or blank content is a fresh `{}`; anything unparseable is a
+    /// typed error so a transform never runs against fabricated state.
+    fn parse_for_edit(self, path: &Path, contents: &str) -> Result<serde_json::Value> {
+        if contents.trim().is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        let (dialect_label, parseable) = match self {
+            Self::Json => ("JSON", Cow::Borrowed(contents)),
+            Self::Jsonc => ("JSONC", Cow::Owned(strip_jsonc_comments(contents))),
+        };
+        serde_json::from_str(&parseable).map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "cannot parse {} as {dialect_label}: {e}\n  \
+                 Hint: fix the JSON syntax manually and re-run the command,\n  \
+                 or delete the file to start fresh",
+                path.display()
+            ),
+        })
+    }
+}
+
 /// Load a JSON file for **editing**. Unlike [`load_json_file`], this returns
 /// an error if the file exists but cannot be parsed, preventing silent data
 /// loss when the modified value is written back.
@@ -787,17 +821,7 @@ pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
     let contents = std::fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
         message: format!("cannot read {}: {e}", path.display()),
     })?;
-    if contents.trim().is_empty() {
-        return Ok(serde_json::json!({}));
-    }
-    serde_json::from_str(&contents).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "cannot parse {} as JSON: {e}\n  \
-             Hint: fix the JSON syntax manually and re-run the command,\n  \
-             or delete the file to start fresh",
-            path.display()
-        ),
-    })
+    JsonConfigDialect::Json.parse_for_edit(path, &contents)
 }
 
 pub fn config_backup_path(path: &Path) -> PathBuf {
@@ -934,6 +958,13 @@ pub fn safe_write_json_file(
     value: &serde_json::Value,
     backup: Option<&Path>,
 ) -> Result<()> {
+    let content = render_json_config(path, value)?;
+    safe_write_bytes_file(path, content.as_bytes(), backup)
+}
+
+/// Serialize a JSON config value for publication: pretty-printed, re-parse
+/// validated, trailing newline.
+fn render_json_config(path: &Path, value: &serde_json::Value) -> Result<String> {
     let pretty = serde_json::to_string_pretty(value).map_err(|e| TraceDecayError::Config {
         message: format!("failed to serialize JSON for {}: {e}", path.display()),
     })?;
@@ -949,8 +980,53 @@ pub fn safe_write_json_file(
         });
     }
 
-    let content = format!("{pretty}\n");
-    safe_write_bytes_file(path, content.as_bytes(), backup)
+    Ok(format!("{pretty}\n"))
+}
+
+/// Value-level mutation for [`update_json_config_transactionally`].
+pub(crate) enum JsonConfigMutation {
+    Unchanged,
+    Write(serde_json::Value),
+    Remove,
+}
+
+/// Read-under-lock → transform → publish-from-snapshot for a JSON-shaped host
+/// config. The transform sees the value parsed strictly from the exact bytes
+/// the write lock observed, so a concurrent writer can no longer slip between
+/// load and publish, and a corrupt config is a typed error instead of a
+/// silently-empty object. Rewrites and removals of an existing file leave a
+/// `.bak` (issue #63).
+pub(crate) fn update_json_config_transactionally<T>(
+    path: &Path,
+    dialect: JsonConfigDialect,
+    update: impl FnOnce(serde_json::Value) -> Result<(T, JsonConfigMutation)>,
+) -> Result<T> {
+    update_config_file_transactionally(path, |existing| {
+        let settings = dialect.parse_for_edit(path, existing)?;
+        let (output, mutation) = update(settings)?;
+        let mutation = match mutation {
+            JsonConfigMutation::Unchanged => TextFileMutation::Unchanged,
+            JsonConfigMutation::Write(value) => {
+                TextFileMutation::Write(render_json_config(path, &value)?)
+            }
+            JsonConfigMutation::Remove => TextFileMutation::Remove,
+        };
+        Ok((output, mutation))
+    })
+}
+
+/// TOML sibling of [`update_json_config_transactionally`]. The transform
+/// returns the serialized replacement text itself because TOML publication
+/// may need post-serialization shaping (Codex's explicit `[hooks.state]`
+/// parent table).
+pub(crate) fn update_toml_config_transactionally<T>(
+    path: &Path,
+    update: impl FnOnce(toml::Value) -> Result<(T, TextFileMutation)>,
+) -> Result<T> {
+    update_config_file_transactionally(path, |existing| {
+        let value = parse_toml_config(path, existing)?;
+        update(value)
+    })
 }
 
 /// Write text to a file via atomic sibling rename.
@@ -1072,172 +1148,7 @@ pub fn safe_write_bytes_file_with_metadata(
     backup: Option<&Path>,
     replacement_metadata: Option<&HostFileMetadataIdentityV1>,
 ) -> Result<()> {
-    safe_write_bytes_file_guarded(path, contents, backup, replacement_metadata)
-}
-
-#[cfg(unix)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct HostFileObjectIdentity {
-    device: u64,
-    inode: u64,
-    mode: u32,
-    links: u64,
-    uid: u32,
-    gid: u32,
-    device_type: u64,
-    size: u64,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
-    changed_seconds: i64,
-    changed_nanoseconds: i64,
-}
-
-#[cfg(unix)]
-fn host_file_object_identity(metadata: &std::fs::Metadata) -> HostFileObjectIdentity {
-    use std::os::unix::fs::MetadataExt;
-
-    HostFileObjectIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        mode: metadata.mode(),
-        links: metadata.nlink(),
-        uid: metadata.uid(),
-        gid: metadata.gid(),
-        device_type: metadata.rdev(),
-        size: metadata.size(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds: metadata.mtime_nsec(),
-        changed_seconds: metadata.ctime(),
-        changed_nanoseconds: metadata.ctime_nsec(),
-    }
-}
-
-#[cfg(unix)]
-impl HostFileObjectIdentity {
-    fn same_after_move(&self, other: &Self) -> bool {
-        self.device == other.device
-            && self.inode == other.inode
-            && self.mode == other.mode
-            && self.links == other.links
-            && self.uid == other.uid
-            && self.gid == other.gid
-            && self.device_type == other.device_type
-            && self.size == other.size
-            && self.modified_seconds == other.modified_seconds
-            && self.modified_nanoseconds == other.modified_nanoseconds
-    }
-}
-
-#[cfg(not(unix))]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct HostFileObjectIdentity {
-    size: u64,
-    readonly: bool,
-    modified: std::time::SystemTime,
-}
-
-#[cfg(not(unix))]
-fn host_file_object_identity(
-    metadata: &std::fs::Metadata,
-) -> std::io::Result<HostFileObjectIdentity> {
-    Ok(HostFileObjectIdentity {
-        size: metadata.len(),
-        readonly: metadata.permissions().readonly(),
-        modified: metadata.modified()?,
-    })
-}
-
-#[cfg(not(unix))]
-impl HostFileObjectIdentity {
-    fn same_after_move(&self, other: &Self) -> bool {
-        self == other
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum HostFileSnapshot {
-    Missing,
-    Present {
-        contents: Vec<u8>,
-        metadata: HostFileMetadataIdentityV1,
-        object: HostFileObjectIdentity,
-    },
-}
-
-impl HostFileSnapshot {
-    fn metadata(&self) -> Option<&HostFileMetadataIdentityV1> {
-        match self {
-            Self::Missing => None,
-            Self::Present { metadata, .. } => Some(metadata),
-        }
-    }
-
-    fn same_after_move(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Missing, Self::Missing) => true,
-            (
-                Self::Present {
-                    contents,
-                    metadata,
-                    object,
-                },
-                Self::Present {
-                    contents: other_contents,
-                    metadata: other_metadata,
-                    object: other_object,
-                },
-            ) => {
-                contents == other_contents
-                    && metadata == other_metadata
-                    && object.same_after_move(other_object)
-            }
-            _ => false,
-        }
-    }
-}
-
-fn capture_host_file_snapshot(path: &Path) -> std::io::Result<HostFileSnapshot> {
-    let before = match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => metadata,
-        Ok(_) => {
-            return Err(std::io::Error::other(format!(
-                "unsafe host metadata path: {}",
-                path.display()
-            )));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(HostFileSnapshot::Missing);
-        }
-        Err(error) => return Err(error),
-    };
-    #[cfg(unix)]
-    let before_object = host_file_object_identity(&before);
-    #[cfg(not(unix))]
-    let before_object = host_file_object_identity(&before)?;
-    let contents = std::fs::read(path)?;
-    let metadata = capture_host_file_metadata(path)?;
-    let after = std::fs::symlink_metadata(path)?;
-    if !after.file_type().is_file() {
-        return Err(std::io::Error::other(format!(
-            "unsafe host metadata path: {}",
-            path.display()
-        )));
-    }
-    #[cfg(unix)]
-    let after_object = host_file_object_identity(&after);
-    #[cfg(not(unix))]
-    let after_object = host_file_object_identity(&after)?;
-    if before_object != after_object {
-        return Err(std::io::Error::other(format!(
-            "host config changed while it was read: {}",
-            path.display()
-        )));
-    }
-    Ok(HostFileSnapshot::Present {
-        contents,
-        metadata,
-        object: after_object,
-    })
+    text_file_transaction::write_bytes_file_locked(path, contents, backup, replacement_metadata)
 }
 
 #[cfg(test)]
@@ -1372,108 +1283,6 @@ fn test_pause_host_config_write(path: &Path, boundary: TestHostConfigWriteBounda
     while !state.1 {
         state = pause.changed.wait(state).expect("host write pause wait");
     }
-}
-
-fn verify_host_file_snapshot(path: &Path, expected: &HostFileSnapshot) -> std::io::Result<()> {
-    let observed = capture_host_file_snapshot(path)?;
-    if &observed == expected {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "host config changed since it was read: {}",
-            path.display()
-        )))
-    }
-}
-
-fn safe_write_bytes_file_guarded(
-    path: &Path,
-    contents: &[u8],
-    backup: Option<&Path>,
-    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
-) -> Result<()> {
-    let _lock = lock_host_file_write(path)?;
-    let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to capture metadata for {}: {error}", path.display()),
-    })?;
-    safe_write_bytes_file_from_snapshot(path, contents, backup, replacement_metadata, &observed)
-}
-
-fn safe_write_bytes_file_from_snapshot(
-    path: &Path,
-    contents: &[u8],
-    backup: Option<&Path>,
-    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
-    observed: &HostFileSnapshot,
-) -> Result<()> {
-    let publish_metadata = replacement_metadata.or(observed.metadata());
-    let staged_snapshot = RefCell::new(None);
-    let publish_expectation = match observed {
-        HostFileSnapshot::Missing => {
-            tracedecay_private_fs::framed_log::ConditionalPublishExpectation::Missing
-        }
-        HostFileSnapshot::Present { .. } => {
-            tracedecay_private_fs::framed_log::ConditionalPublishExpectation::Present
-        }
-    };
-    if let Err(e) = tracedecay_private_fs::framed_log::atomic_write_prepared_conditionally(
-        path,
-        "host-config",
-        contents,
-        publish_expectation,
-        tracedecay_private_fs::framed_log::ConditionalPublishCallbacks {
-            prepare: |temporary: &Path| {
-                if let Some(metadata) = publish_metadata {
-                    restore_host_file_metadata(temporary, metadata)?;
-                }
-                let expected_metadata = capture_host_file_metadata(temporary)?;
-                staged_snapshot.replace(Some(capture_host_file_snapshot(temporary)?));
-                persist_host_config_write_intent(path, contents, Some(&expected_metadata))
-                    .map_err(std::io::Error::other)?;
-                verify_host_file_snapshot(path, observed)?;
-                #[cfg(test)]
-                test_pause_host_config_write(path, TestHostConfigWriteBoundary::Validation);
-                verify_host_file_snapshot(path, observed)?;
-                Ok(())
-            },
-            before_publish: || {
-                #[cfg(test)]
-                test_pause_host_config_write(path, TestHostConfigWriteBoundary::Publication);
-            },
-            after_publish: || {
-                #[cfg(test)]
-                test_pause_host_config_write(path, TestHostConfigWriteBoundary::Published);
-            },
-            verify_displaced: |displaced: &Path| {
-                let displaced = capture_host_file_snapshot(displaced)?;
-                Ok(displaced.same_after_move(observed))
-            },
-            verify_published: |rolled_back_published: &Path| {
-                let rolled_back = capture_host_file_snapshot(rolled_back_published)?;
-                let staged = staged_snapshot.borrow();
-                Ok(staged
-                    .as_ref()
-                    .is_some_and(|staged| rolled_back.same_after_move(staged)))
-            },
-        },
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
-    ) {
-        let hint = if let Some(b) = backup {
-            format!(
-                "\n  Backup is at: {}\n  \
-                 The original file was NOT modified.",
-                b.display()
-            )
-        } else {
-            "\n  The original file was NOT modified.".to_string()
-        };
-        return Err(TraceDecayError::Config {
-            message: format!("failed to atomically replace {}: {e}{hint}", path.display()),
-        });
-    }
-    #[cfg(feature = "test-transport")]
-    test_abort_after_host_config_write(path);
-    Ok(())
 }
 
 /// Crash-injection point for host-config durability acceptance tests: abort
@@ -1642,19 +1451,6 @@ pub fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort "back up and write" for uninstall paths.
-///
-/// Mirrors the install pattern (`backup_config_file` then
-/// `safe_write_json_file`) but swallows errors so the rest of the uninstall
-/// can continue. Returns `true` when the new content reached disk.
-///
-/// Issue #63: every config rewrite must leave a `.bak` so the user can
-/// recover if anything goes wrong.
-pub fn backup_and_write_json(path: &Path, value: &serde_json::Value) -> bool {
-    let backup = backup_config_file(path).ok().flatten();
-    safe_write_json_file(path, value, backup.as_deref()).is_ok()
-}
-
 // ---------------------------------------------------------------------------
 // Shared MCP server registration
 // ---------------------------------------------------------------------------
@@ -1667,17 +1463,17 @@ pub fn backup_and_write_json(path: &Path, value: &serde_json::Value) -> bool {
 
 /// Register the tracedecay MCP entry under `root_key` in a host config.
 ///
-/// `load_for_edit` is the host's strict loader ([`load_json_file_strict`] or
-/// [`load_jsonc_file_strict`]): a config that exists but cannot be parsed is
-/// an error rather than a silent overwrite. `agent_label` names the host in
-/// the directory-creation error.
+/// The config is read, transformed, and published under the host-file write
+/// lock; a config that exists but cannot be parsed for `dialect` is a typed
+/// error rather than a silent overwrite. `agent_label` names the host in the
+/// directory-creation error.
 #[hotpath::measure(label = "agent_hosts.agents.mcp.install")]
 pub fn install_mcp_server_entry(
     config_path: &Path,
     root_key: &str,
     entry: serde_json::Value,
     agent_label: &str,
-    load_for_edit: fn(&Path) -> Result<serde_json::Value>,
+    dialect: JsonConfigDialect,
 ) -> Result<()> {
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
@@ -1688,32 +1484,23 @@ pub fn install_mcp_server_entry(
         })?;
     }
 
-    let backup = backup_config_file(config_path)?;
-    let mut settings = match load_for_edit(config_path) {
-        Ok(settings) => settings,
-        Err(error) => {
-            if let Some(ref backup) = backup {
-                eprintln!("  Backup preserved at: {}", backup.display());
-            }
-            return Err(error);
+    update_json_config_transactionally(config_path, dialect, |mut settings| {
+        if !settings.is_object() {
+            return Err(TraceDecayError::Config {
+                message: format!("{} must contain a JSON object", config_path.display()),
+            });
         }
-    };
-    if !settings.is_object() {
-        return Err(TraceDecayError::Config {
-            message: format!("{} must contain a JSON object", config_path.display()),
-        });
-    }
-    if settings
-        .get(root_key)
-        .is_some_and(|value| !value.is_object())
-    {
-        return Err(TraceDecayError::Config {
-            message: format!("{}.{root_key} must be a JSON object", config_path.display()),
-        });
-    }
-    settings[root_key]["tracedecay"] = entry;
-
-    safe_write_json_file(config_path, &settings, backup.as_deref())?;
+        if settings
+            .get(root_key)
+            .is_some_and(|value| !value.is_object())
+        {
+            return Err(TraceDecayError::Config {
+                message: format!("{}.{root_key} must be a JSON object", config_path.display()),
+            });
+        }
+        settings[root_key]["tracedecay"] = entry;
+        Ok(((), JsonConfigMutation::Write(settings)))
+    })?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
         config_path.display()
@@ -1728,26 +1515,29 @@ pub struct McpUninstallPolicy {
     pub prune_empty_root: bool,
     /// Delete the config file when an empty MCP root is all that is left.
     pub remove_empty_file: bool,
-    /// Backup, atomically remove, and sync the parent directory when deleting
-    /// an emptied config. Kiro's workspace `mcp.json` uses this so a crash
-    /// mid-remove cannot leave a half-deleted host file.
-    pub durable_remove: bool,
+}
+
+/// Result of the uninstall transform, reported after publication.
+enum McpUninstallOutcome {
+    NoEntry,
+    RemovedEntry,
+    RemovedFile,
 }
 
 /// Remove the tracedecay MCP entry under `root_key` from a host config.
 ///
-/// Best effort by default: uninstall must keep going across the remaining
-/// hosts when one config is unreadable or unwritable, so `load` is the host's
-/// lenient loader ([`load_json_file`] or [`load_jsonc_file`]). Ordinary
-/// rewrites go through [`backup_and_write_json`], so a `.bak` is always left
-/// behind (issue #63). [`McpUninstallPolicy::durable_remove`] is the fail-closed
-/// exception (Kiro workspace `mcp.json`): backup, atomic remove/rewrite, and
-/// parent-directory sync errors propagate.
+/// Runs under the host-file write lock like [`install_mcp_server_entry`]. A
+/// config that exists but cannot be parsed is a typed error — reporting a
+/// clean uninstall over a corrupt config would fabricate state — and callers
+/// decide whether to keep going across the remaining hosts. Every rewrite or
+/// removal of the existing file leaves a `.bak` (issue #63) and publishes
+/// through the durable conditional write/remove shared by every host-file
+/// transaction.
 #[hotpath::measure(label = "agent_hosts.agents.mcp.uninstall")]
 pub fn uninstall_mcp_server_entry(
     config_path: &Path,
     root_key: &str,
-    load: fn(&Path) -> serde_json::Value,
+    dialect: JsonConfigDialect,
     policy: McpUninstallPolicy,
 ) -> Result<()> {
     if !config_path.exists() {
@@ -1755,78 +1545,45 @@ pub fn uninstall_mcp_server_entry(
         return Ok(());
     }
 
-    let mut settings = load(config_path);
-    let Some(servers) = settings.get_mut(root_key).and_then(|v| v.as_object_mut()) else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        );
-        return Ok(());
-    };
-    if servers.remove("tracedecay").is_none() {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        );
-        return Ok(());
-    }
-    let root_is_empty = servers.is_empty();
-
-    if policy.prune_empty_root
-        && root_is_empty
-        && let Some(object) = settings.as_object_mut()
-    {
-        object.remove(root_key);
-    }
-
-    if policy.remove_empty_file && config_holds_only_empty_root(&settings, root_key) {
-        if policy.durable_remove {
-            remove_emptied_mcp_config_durably(config_path)?;
-        } else {
-            std::fs::remove_file(config_path).ok();
+    let outcome = update_json_config_transactionally(config_path, dialect, |mut settings| {
+        let Some(servers) = settings.get_mut(root_key).and_then(|v| v.as_object_mut()) else {
+            return Ok((McpUninstallOutcome::NoEntry, JsonConfigMutation::Unchanged));
+        };
+        if servers.remove("tracedecay").is_none() {
+            return Ok((McpUninstallOutcome::NoEntry, JsonConfigMutation::Unchanged));
         }
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            config_path.display()
-        );
-        return Ok(());
-    }
+        let root_is_empty = servers.is_empty();
 
-    if policy.durable_remove {
-        let backup = backup_config_file(config_path)?;
-        safe_write_json_file(config_path, &settings, backup.as_deref())?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            config_path.display()
-        );
-        return Ok(());
-    }
+        if policy.prune_empty_root
+            && root_is_empty
+            && let Some(object) = settings.as_object_mut()
+        {
+            object.remove(root_key);
+        }
 
-    if backup_and_write_json(config_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            config_path.display()
-        );
-    }
-    Ok(())
-}
-
-/// Kiro's workspace uninstall: backup, atomically remove, then sync the parent.
-fn remove_emptied_mcp_config_durably(config_path: &Path) -> Result<()> {
-    backup_config_file(config_path)?;
-    safe_remove_host_file(config_path).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to remove {}: {error}", config_path.display()),
+        if policy.remove_empty_file && config_holds_only_empty_root(&settings, root_key) {
+            return Ok((McpUninstallOutcome::RemovedFile, JsonConfigMutation::Remove));
+        }
+        Ok((
+            McpUninstallOutcome::RemovedEntry,
+            JsonConfigMutation::Write(settings),
+        ))
     })?;
-    tracedecay_private_fs::framed_log::sync_parent_directory(
-        config_path,
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "failed to durably remove {}: {error}",
+    match outcome {
+        McpUninstallOutcome::NoEntry => eprintln!(
+            "  No tracedecay MCP server in {}, skipping",
             config_path.display()
         ),
-    })
+        McpUninstallOutcome::RemovedEntry => eprintln!(
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
+            config_path.display()
+        ),
+        McpUninstallOutcome::RemovedFile => eprintln!(
+            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
+            config_path.display()
+        ),
+    }
+    Ok(())
 }
 
 /// True when nothing survives in `settings` except an empty MCP root.
@@ -2536,18 +2293,7 @@ pub fn load_jsonc_file_strict(path: &Path) -> Result<serde_json::Value> {
     let contents = std::fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
         message: format!("cannot read {}: {e}", path.display()),
     })?;
-    if contents.trim().is_empty() {
-        return Ok(serde_json::json!({}));
-    }
-    let stripped = strip_jsonc_comments(&contents);
-    serde_json::from_str(&stripped).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "cannot parse {} as JSONC: {e}\n  \
-             Hint: fix the JSON syntax manually and re-run the command,\n  \
-             or delete the file to start fresh",
-            path.display()
-        ),
-    })
+    JsonConfigDialect::Jsonc.parse_for_edit(path, &contents)
 }
 
 /// Returns the VS Code user data directory, platform-specific.
@@ -2665,13 +2411,19 @@ pub fn load_toml_file(path: &Path) -> Result<toml::Value> {
     let contents = std::fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
         message: format!("failed to read {}: {e}", path.display()),
     })?;
+    parse_toml_config(path, &contents)
+}
+
+/// Strict parse of already-observed TOML config contents for a write path;
+/// blank content is an empty document.
+fn parse_toml_config(path: &Path, contents: &str) -> Result<toml::Value> {
     if contents.trim().is_empty() {
         return Ok(toml::Value::Table(toml::map::Map::new()));
     }
     // NOTE: `str.parse::<toml::Value>()` parses a single TOML value in toml v1,
     // not a document — using it here would treat any well-formed config.toml as
     // unparseable and silently drop its contents. Use `toml::from_str` instead.
-    let table: toml::Table = toml::from_str(&contents).map_err(|e| TraceDecayError::Config {
+    let table: toml::Table = toml::from_str(contents).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to parse {} as TOML: {e}. Refusing to overwrite — fix the file or remove it manually.",
             path.display()

@@ -40,7 +40,9 @@ async fn ingest_for_project(
     project_root: &Path,
 ) -> TranscriptIngestStats {
     let admission = runtime.runtime().facade();
-    ingest_for_project_with_id(&admission, project_root, runtime.project_id().clone()).await
+    ingest_for_project_with_id(&admission, project_root, runtime.project_id().clone())
+        .await
+        .expect("hermes home")
 }
 
 async fn ingest_homes(

@@ -20,11 +20,11 @@ pub trait ProjectRuntime: Send + Sync {
     fn project_memory_owner(&self) -> Result<FactOwnerV1>;
     fn profile_id(&self) -> &UserProfileId;
     fn profile_database(&self) -> &RegisteredGlobalDbLeaseV1;
-    fn project_sessions<'a>(
-        &'a self,
+    fn project_sessions(
+        &self,
         project_id: ProjectId,
         roots: Vec<PathBuf>,
-    ) -> RuntimeFuture<'a, RegisteredGlobalDbLeaseV1>;
+    ) -> RuntimeFuture<'_, RegisteredGlobalDbLeaseV1>;
     fn open_project_store_db(&self) -> RuntimeFuture<'_, Database>;
 }
 

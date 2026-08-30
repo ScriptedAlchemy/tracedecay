@@ -9,7 +9,7 @@ use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::history::SessionHistoricalIngestOutcome;
-use crate::store::SessionRefreshRecoveryV1;
+use tracedecay_session_temporal_store::SessionRefreshRecoveryV1;
 use tracedecay_usecases::session::{
     SessionProjectionServingState, SessionProjectionServingStatus,
     SessionProjectionServingStatusPort, SessionProjectionStaleReason,
@@ -842,6 +842,25 @@ impl SessionTemporalRefreshWake {
             .map_or_else(SessionTemporalRefreshWorkerStatus::missing, |state| {
                 state.status()
             })
+    }
+}
+
+impl tracedecay_application::SessionTemporalRefreshWakePort for SessionTemporalRefreshWake {
+    fn wake(&self) -> bool {
+        SessionTemporalRefreshWake::wake(self)
+    }
+
+    fn is_unavailable(&self) -> bool {
+        self.status().unavailable_reason.is_some()
+    }
+
+    fn wake_and_wait_until_idle(
+        &self,
+        timeout: std::time::Duration,
+    ) -> tracedecay_application::SessionTemporalRefreshWakeFuture<'_> {
+        Box::pin(SessionTemporalRefreshWake::wake_and_wait_until_idle(
+            self, timeout,
+        ))
     }
 }
 

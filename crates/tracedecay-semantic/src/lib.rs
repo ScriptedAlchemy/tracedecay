@@ -249,7 +249,7 @@ impl LoadedSemanticArtifactV1 {
             manifest.privacy_key_epoch,
             resources,
         )
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Artifact)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::artifact)?;
         Ok(Self(Arc::new(authority)))
     }
 
@@ -282,9 +282,11 @@ impl LoadedSemanticArtifactV1 {
             key.privacy_key_epoch,
             resources,
         )
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Artifact)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::artifact)?;
         if authority.projection() != projection {
-            return Err(SemanticRuntimeScheduleFailureV1::Artifact);
+            return Err(SemanticRuntimeScheduleFailureV1::artifact(
+                "loaded lifecycle artifact does not match the requested projection",
+            ));
         }
         Ok(Self(Arc::new(authority)))
     }
@@ -319,7 +321,7 @@ impl LoadedSemanticArtifactV1 {
             manifest.privacy_key_epoch,
             resources,
         )
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Artifact)
+        .map_err(SemanticRuntimeScheduleFailureV1::artifact)
     }
 
     pub fn projection(&self) -> &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
@@ -963,7 +965,8 @@ impl DaemonSemanticRuntimeHandleV1 {
                 prior_generation,
             } => (
                 Some(match reason {
-                    SemanticRuntimeScheduleFailureV1::Artifact => {
+                    SemanticRuntimeScheduleFailureV1::Artifact
+                    | SemanticRuntimeScheduleFailureV1::ArtifactDetail(_) => {
                         SemanticFallbackReasonV1::ArtifactUnavailable
                     }
                     SemanticRuntimeScheduleFailureV1::Runtime
@@ -1154,7 +1157,9 @@ where
         if vectors.len() != 1 {
             return Err("semantic projector returned a non-unit vector batch".to_owned());
         }
-        Ok(vectors.pop().unwrap_or_else(|| panic!("unit vector batch")))
+        vectors
+            .pop()
+            .ok_or_else(|| "semantic projector returned a non-unit vector batch".to_owned())
     }
 
     #[hotpath::measure(label = "semantic.embed.encode")]
@@ -1877,6 +1882,23 @@ mod scheduling_tests {
         assert_ne!(
             handle.current().map(|pointer| pointer.generation),
             Some(old)
+        );
+    }
+
+    #[test]
+    fn artifact_schedule_failure_carries_source_error_text() {
+        let failure = SemanticRuntimeScheduleFailureV1::artifact(
+            "cataloged lifecycle install is missing a required member",
+        );
+        assert_eq!(
+            failure,
+            SemanticRuntimeScheduleFailureV1::ArtifactDetail(
+                "cataloged lifecycle install is missing a required member".to_owned()
+            )
+        );
+        assert_eq!(
+            failure.to_string(),
+            "Artifact: cataloged lifecycle install is missing a required member"
         );
     }
 }

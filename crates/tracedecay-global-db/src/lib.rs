@@ -25,6 +25,7 @@ pub mod configuration;
 #[cfg(test)]
 mod delivery_settlement_tests;
 mod discovery_queue;
+mod git_correlation_adapter;
 mod git_index_transactions;
 mod git_topology_anchor;
 mod hotpath_observe;
@@ -34,6 +35,7 @@ pub mod observation;
 mod observation_adapter;
 mod observation_projection;
 mod registered_maintenance;
+mod workflow_adapter;
 pub use registered_maintenance::{
     REGISTERED_WAL_RECLAIM_TRIGGER_BYTES, RegisteredWalCheckpointReceiptV1, RegisteredWalReclaimV1,
 };
@@ -42,6 +44,7 @@ mod registered_provider_usage;
 mod stack_delivery_tests;
 mod support;
 pub use discovery_queue::HostDiscoveryQueueEntry;
+pub use git_correlation_adapter::GlobalDbGitCorrelationStore;
 pub use git_topology_anchor::RegisteredGitTopologyAnchorAuthorityV2;
 pub use observability_rollup::{
     ObservabilityRollupCompactionCandidateV1, ObservabilityRollupCompactionReceiptV1,
@@ -59,6 +62,7 @@ pub use observation_projection::{
 #[cfg(test)]
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 pub use tracedecay_domain::CoverageStateV1;
+pub use workflow_adapter::GlobalDbWorkflowStore;
 mod observation_store;
 mod project_registry;
 mod registered;
@@ -104,6 +108,7 @@ pub fn register_test_schema_installer() {
 
 mod session_temporal_handle;
 mod session_temporal_schema;
+mod sqlite_persist;
 mod transcript;
 
 pub use git_index_transactions::{

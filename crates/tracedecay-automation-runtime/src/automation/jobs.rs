@@ -118,7 +118,7 @@ pub struct UserJobRunOptions {
     /// Project root used as cwd for optional pre-run commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_root: Option<PathBuf>,
-    /// Latest scheduler-effectful terminal run_id visible in the ledger
+    /// Latest scheduler-effectful terminal `run_id` visible in the ledger
     /// snapshot the caller minted `run_id` from. Scheduler-triggered runs that
     /// record a diagnostic (currently the lock-contention skip) must scan back
     /// to this anchor rather than to one re-derived from a later read, or a

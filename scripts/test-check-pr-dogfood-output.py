@@ -31,7 +31,27 @@ class PrDogfoodOutputTests(unittest.TestCase):
             "merge_base": "merge-base-oid",
             "files_changed": 1,
             "changes": [{"path": "src/lib.rs", "status": "modified"}],
-            "analysis_coverage": {"complete": False},
+            "graph_generation": None,
+            "next_cursor": None,
+            "symbol_page": {
+                "limit": 200,
+                "returned": 0,
+                "has_more": False,
+                "complete": False,
+                "selection": "unavailable",
+                "continuation_available": False,
+            },
+            "analysis_coverage": {
+                "seed_symbols_analyzed": 0,
+                "symbols_returned": 0,
+                "symbols_complete": False,
+                "impact_nodes_admitted": 0,
+                "impact_nodes_returned": 0,
+                "direct_call_edges_admitted": 0,
+                "impact_bytes_admitted": 0,
+                "impact_partial": True,
+                "complete": False,
+            },
             "verified_graph_evidence": {
                 "status": "unavailable",
                 "reason_code": "code-graph-unavailable",
@@ -47,6 +67,15 @@ class PrDogfoodOutputTests(unittest.TestCase):
             expected_merge_base="merge-base-oid",
         )
 
+    def validate_strict(self, payload: dict[str, object]) -> None:
+        self.checker.validate_pr_context(
+            payload,
+            expected_base_oid="base-oid",
+            expected_head_oid="head-oid",
+            expected_merge_base="merge-base-oid",
+            strict=True,
+        )
+
     def test_accepts_exact_partial_warmup_evidence(self) -> None:
         self.validate(self.payload)
 
@@ -55,6 +84,36 @@ class PrDogfoodOutputTests(unittest.TestCase):
         del self.payload["verified_graph_evidence"]
         self.payload["analysis_coverage"] = {"complete": True}
         self.validate(self.payload)
+
+    def test_strict_accepts_graph_ready_bounded_prefix_with_more_symbols(self) -> None:
+        del self.payload["status"]
+        del self.payload["verified_graph_evidence"]
+        self.payload["graph_generation"] = "code-graph:sha256:ready-generation"
+        self.payload["next_cursor"] = "pr-context.cursor.next"
+        self.payload["symbol_page"] = {
+            "limit": 500,
+            "returned": 500,
+            "has_more": True,
+            "complete": False,
+            "selection": "stable_prefix",
+            "continuation_available": True,
+        }
+        self.payload["analysis_coverage"] = {
+            "seed_symbols_analyzed": 500,
+            "symbols_returned": 500,
+            "symbols_complete": False,
+            "impact_nodes_admitted": 700,
+            "impact_nodes_returned": 700,
+            "direct_call_edges_admitted": 900,
+            "impact_bytes_admitted": 65536,
+            "impact_partial": True,
+            "complete": False,
+        }
+        self.validate_strict(self.payload)
+
+    def test_strict_rejects_partial_graph_unavailability(self) -> None:
+        with self.assertRaisesRegex(ValueError, "strict.*unavailable graph"):
+            self.validate_strict(self.payload)
 
     def test_rejects_evidence_for_a_different_head(self) -> None:
         self.payload["head_oid"] = "wrong-head"
@@ -79,6 +138,103 @@ class PrDogfoodOutputTests(unittest.TestCase):
         del self.payload["verified_graph_evidence"]
         with self.assertRaisesRegex(ValueError, "graph evidence"):
             self.validate(self.payload)
+
+
+class StrictReadinessOutputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.checker = load_checker()
+
+    def test_strict_status_accepts_current_text_and_observed_graph(self) -> None:
+        self.checker.validate_status(
+            {
+                "code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "coverage": "complete",
+                        "staleness_state": "fresh",
+                        "latest_generation_id": "generation.ready",
+                    },
+                },
+                "graph_statistics": {
+                    "state": "observed",
+                    "generation_id": "generation.ready",
+                    "symbol_count": 12,
+                    "edge_count": 9,
+                },
+            },
+            strict=True,
+        )
+
+    def test_strict_status_rejects_live_exact_scope_graph_degradation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exact_scope_generation_not_ready"):
+            self.checker.validate_status(
+                {
+                    "code_index_freshness": {
+                        "status": "current",
+                        "worktree": {
+                            "coverage": "complete",
+                            "staleness_state": "fresh",
+                            "latest_generation_id": "generation.text-only",
+                        },
+                    },
+                    "graph_statistics": {
+                        "state": "unavailable",
+                        "reason": "exact_scope_generation_not_ready",
+                    },
+                },
+                strict=True,
+            )
+
+    def test_structural_status_still_accepts_degraded_typed_output(self) -> None:
+        self.checker.validate_status(
+            {
+                "graph_statistics": {
+                    "state": "unavailable",
+                    "reason": "exact_scope_generation_not_ready",
+                }
+            }
+        )
+
+    def test_strict_context_accepts_lexical_and_graph_symbol_evidence(self) -> None:
+        self.checker.validate_context(
+            {
+                "coverage": {
+                    "exact": "complete",
+                    "lexical": "complete",
+                    "graph": "complete",
+                    "semantic": {"status": "unavailable", "reason": "disabled"},
+                    "recall": "partial",
+                },
+                "search_matches": [{"file": "src/main.rs"}],
+                "symbols": [{"node_id": "symbol:main"}],
+            },
+            strict=True,
+        )
+
+    def test_strict_context_rejects_lexical_only_evidence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "graph symbol evidence"):
+            self.checker.validate_context(
+                {
+                    "coverage": {
+                        "exact": "complete",
+                        "lexical": "complete",
+                        "graph": {
+                            "status": "unavailable",
+                            "reason": "verified_code_graph_not_ready",
+                        },
+                        "semantic": {"status": "unavailable", "reason": "warming"},
+                        "recall": "partial",
+                    },
+                    "search_matches": [{"file": "src/main.rs"}],
+                    "symbols": [],
+                    "verified_graph_evidence": {
+                        "status": "unavailable",
+                        "reason_code": "verified-code-graph-read-unavailable",
+                        "retryable": True,
+                    },
+                },
+                strict=True,
+            )
 
 
 if __name__ == "__main__":

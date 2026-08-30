@@ -277,7 +277,7 @@ fn enter_test_daemon_database_scope(
 async fn initialize_test_project(
     project_root: &std::path::Path,
     client_identity: &DaemonClientIdentity,
-) -> crate::storage::StoreLayout {
+) -> tracedecay_runtime_core::storage::StoreLayout {
     prepare_test_profile_root(&client_identity.profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &client_identity.profile_root,

@@ -16,7 +16,7 @@ use crate::mcp::tools::{
     ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
     ProjectRegistryReadPort, ProjectRegistrySelector,
 };
-use crate::project_registry::{PublicCodeProject, build_project_registry_view};
+use tracedecay_dashboard_api::project_registry::{PublicCodeProject, build_project_registry_view};
 use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::errors::Result;
 

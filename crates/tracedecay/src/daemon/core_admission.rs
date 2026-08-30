@@ -15,9 +15,9 @@ use super::{
     log_daemon_event, parse_daemon_invocation_request, read_line_handling_wire_oversized,
     write_json_rpc_response,
 };
-use crate::support::weak_registry::WeakRegistry;
 use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 use tracedecay_mcp::ErrorCode;
+use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
 pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
 pub(crate) const RESERVED_DAEMON_CONTROL_CLIENTS: usize = 4;
@@ -31,32 +31,34 @@ pub(crate) const DAEMON_SATURATION_RESPONSE_DEADLINE: Duration = Duration::from_
 /// cancels the in-flight stage rather than starting a fresh Duration clock.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DaemonClientDeadline {
+    started: Instant,
     deadline: Instant,
 }
 
 impl DaemonClientDeadline {
     pub(crate) fn until(deadline: Instant) -> Result<Self> {
-        if Instant::now() >= deadline {
-            return Err(TraceDecayError::Config {
-                message: "daemon client deadline already elapsed".to_string(),
-            });
+        let started = Instant::now();
+        if started >= deadline {
+            return Err(tracedecay_daemon_protocol::daemon_response_stalled(
+                Duration::ZERO,
+            ));
         }
-        Ok(Self { deadline })
+        Ok(Self { started, deadline })
     }
 
     pub(crate) fn remaining(&self) -> Result<Duration> {
         self.deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "daemon client deadline already elapsed".to_string(),
+            .ok_or_else(|| {
+                tracedecay_daemon_protocol::daemon_response_stalled(self.started.elapsed())
             })
     }
 
     pub(crate) async fn run<F, T>(
         &self,
-        stage: &'static str,
-        request_label: &str,
+        _stage: &'static str,
+        _request_label: &str,
         fut: F,
     ) -> Result<T>
     where
@@ -64,11 +66,9 @@ impl DaemonClientDeadline {
     {
         match timeout_at(self.deadline, fut).await {
             Ok(result) => result,
-            Err(_) => Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon {request_label} timed out during {stage} before deadline; request outcome may be unknown"
-                ),
-            }),
+            Err(_) => Err(tracedecay_daemon_protocol::daemon_response_stalled(
+                self.started.elapsed(),
+            )),
         }
     }
 }
@@ -669,7 +669,7 @@ pub(crate) async fn reject_saturated_daemon_client(
 
 pub(super) fn coordinated_dashboard_automation_writer(
     administration: StoreAdministration,
-) -> crate::dashboard::DashboardAutomationWriter {
+) -> tracedecay_dashboard_api::DashboardAutomationWriter {
     Arc::new(move |operation| {
         let administration = administration.clone();
         Box::pin(async move { administration.with_writer(operation).await })
@@ -686,7 +686,7 @@ pub(super) fn coordinated_background_refresh_writer(
                 .project_root
                 .canonicalize()
                 .unwrap_or_else(|_| request.project_root.clone());
-            let active_branch = crate::branch::current_branch(&canonical_root);
+            let active_branch = tracedecay_runtime_core::branch::current_branch(&canonical_root);
             let graph = administration
                 .mounted_project_graphs()
                 .await

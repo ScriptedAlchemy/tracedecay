@@ -16,9 +16,9 @@ use crate::application_surface::{
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
     resolve_application_surface_dispatch,
 };
-use crate::display::format_token_count;
 use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::RequestedOutputFormat;
+use tracedecay_runtime_core::text::format_token_count;
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 // Consumed by the unix-only daemon git-watch maintenance path; on other
@@ -452,7 +452,7 @@ fn report_daemon_diagnostics_unavailable(
 
 fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
     if let Ok(Some(layout)) =
-        crate::storage::resolve_enrolled_layout_for_current_profile(project_path)
+        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(project_path)
     {
         return Some(layout.graph_db_path);
     }
@@ -469,7 +469,7 @@ fn database_recovery_guidance(db_path: &Path) -> String {
     graph_dirty.push(".dirty");
     let graph_dirty = PathBuf::from(graph_dirty);
     let legacy_dirty = data_root.join("dirty");
-    let sessions_path = data_root.join(crate::storage::SESSIONS_DB_FILENAME);
+    let sessions_path = data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
 
     format!(
         "First stop all TraceDecay daemon and MCP processes. No files were changed.\n\

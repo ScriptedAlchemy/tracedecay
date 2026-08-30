@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay_runtime_core::worktree::GitRepoIdentityOutcome;
+use tracedecay_runtime_core::git_discovery::{
+    GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
+};
 
 use crate::runtime::SessionMessageRecord;
 pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
@@ -195,7 +197,7 @@ impl ProjectMembership {
 
 /// Resolver for a path's git repository identity, injectable so tests can fake
 /// bounded-timeout (`Unknown`) outcomes without a real blocking repository.
-pub type GitIdentityResolver = fn(&Path) -> GitRepoIdentityOutcome;
+pub type GitIdentityResolver = fn(&Path) -> GitRepositoryIdentityOutcome;
 
 /// How long an `Unknown` (timed-out) identity resolution is served from cache
 /// before the next lookup retries the underlying git discovery.
@@ -203,7 +205,7 @@ const LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN: Duration = Duration::from_secs(3
 
 #[derive(Debug, Default)]
 struct LocationWorktreeCacheEntry {
-    outcome: OnceLock<GitRepoIdentityOutcome>,
+    outcome: OnceLock<GitRepositoryIdentityOutcome>,
     unknown_retry_after: Mutex<Option<Instant>>,
 }
 
@@ -221,7 +223,7 @@ struct ProjectRootMatcherCacheEntry {
 #[derive(Debug)]
 pub struct ProjectRootMatcher {
     root: PathBuf,
-    identity: GitRepoIdentityOutcome,
+    identity: GitRepositoryIdentityOutcome,
     identity_resolver: GitIdentityResolver,
     path_membership: Mutex<HashMap<PathBuf, bool>>,
 }
@@ -229,10 +231,7 @@ pub struct ProjectRootMatcher {
 impl ProjectRootMatcher {
     /// Resolve the fixed project-side git identity once.
     pub fn new(project_root: &Path) -> Self {
-        Self::new_with_identity_resolver(
-            project_root,
-            tracedecay_runtime_core::worktree::git_repo_identity_outcome,
-        )
+        Self::new_with_identity_resolver(project_root, discover_repository_identity_cli_first)
     }
 
     #[hotpath::measure(label = "sessions.shared.matcher_new")]
@@ -289,21 +288,21 @@ impl ProjectRootMatcher {
     fn contains_uncached_with(
         &self,
         path: &Path,
-        identity_resolver: impl FnOnce(&Path) -> GitRepoIdentityOutcome,
+        identity_resolver: impl FnOnce(&Path) -> GitRepositoryIdentityOutcome,
         discover_project_root: impl FnOnce(&Path) -> Option<PathBuf>,
     ) -> ProjectMembership {
         if paths_equal(path, &self.root) {
             return ProjectMembership::Match;
         }
-        if self.identity == GitRepoIdentityOutcome::Unknown {
+        if self.identity.is_unknown() {
             return ProjectMembership::Unknown;
         }
 
         let path_identity = identity_resolver(path);
         match (&self.identity, path_identity) {
             (
-                GitRepoIdentityOutcome::Resolved(project_identity),
-                GitRepoIdentityOutcome::Resolved(path_identity),
+                GitRepositoryIdentityOutcome::Resolved(project_identity),
+                GitRepositoryIdentityOutcome::Resolved(path_identity),
             ) => {
                 if paths_equal(
                     &path_identity.worktree_root,
@@ -316,7 +315,7 @@ impl ProjectRootMatcher {
                     &project_identity.common_dir,
                 ));
             }
-            (GitRepoIdentityOutcome::Unknown, _) | (_, GitRepoIdentityOutcome::Unknown) => {
+            (project, path) if project.is_unknown() || path.is_unknown() => {
                 return ProjectMembership::Unknown;
             }
             _ => {}
@@ -349,7 +348,7 @@ impl Default for ProjectRootMatcherCache {
         Self {
             matchers: Arc::default(),
             location_worktrees: Arc::default(),
-            identity_resolver: tracedecay_runtime_core::worktree::git_repo_identity_outcome,
+            identity_resolver: discover_repository_identity_cli_first,
         }
     }
 }
@@ -387,7 +386,7 @@ impl ProjectRootMatcherCache {
                     })
                 })
                 .clone();
-            if entry.matcher.identity != GitRepoIdentityOutcome::Unknown {
+            if !entry.matcher.identity.is_unknown() {
                 return entry.matcher.clone();
             }
 
@@ -442,14 +441,11 @@ impl ProjectRootMatcherCache {
     ///
     /// Location metadata is added per message, so one transcript can otherwise
     /// repeat git discovery thousands of times for the same cwd. Keep this
-    /// source-lifetime like the project matchers and use the bounded CLI-first
-    /// identity path instead of opening the repository object database.
+    /// source-lifetime like the project matchers and use
+    /// [`discover_repository_identity_cli_first`] instead of opening the
+    /// repository object database.
     pub fn git_worktree_root(&self, cwd: &Path) -> Option<PathBuf> {
-        self.git_worktree_root_at(
-            cwd,
-            Instant::now(),
-            &tracedecay_runtime_core::worktree::git_repo_identity_outcome,
-        )
+        self.git_worktree_root_at(cwd, Instant::now(), &discover_repository_identity_cli_first)
     }
 
     #[hotpath::measure(label = "sessions.shared.git_worktree")]
@@ -457,7 +453,7 @@ impl ProjectRootMatcherCache {
         &self,
         cwd: &Path,
         now: Instant,
-        identity_resolver: &impl Fn(&Path) -> GitRepoIdentityOutcome,
+        identity_resolver: &impl Fn(&Path) -> GitRepositoryIdentityOutcome,
     ) -> Option<PathBuf> {
         loop {
             let resolution = self
@@ -472,11 +468,14 @@ impl ProjectRootMatcherCache {
                 .get_or_init(|| identity_resolver(cwd))
                 .clone()
             {
-                GitRepoIdentityOutcome::Resolved(identity) => {
+                GitRepositoryIdentityOutcome::Resolved(identity) => {
                     return Some(identity.worktree_root);
                 }
-                GitRepoIdentityOutcome::NotFound => return None,
-                GitRepoIdentityOutcome::Unknown => {
+                GitRepositoryIdentityOutcome::NotRepository => return None,
+                GitRepositoryIdentityOutcome::Unknown(_) => {
+                    // Location metadata is best-effort: this Option surface
+                    // cannot spell uncertainty, so a still-cooling Unknown
+                    // omits the worktree path rather than inventing one.
                     let should_retry = {
                         let mut retry_after = resolution
                             .unknown_retry_after
@@ -1011,7 +1010,9 @@ mod tests {
 
     use serde_json::{Value, json};
     use tempfile::TempDir;
-    use tracedecay_runtime_core::worktree::{GitRepoIdentity, GitRepoIdentityOutcome};
+    use tracedecay_runtime_core::git_discovery::{
+        GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
+    };
 
     use super::LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN;
     use super::ProjectMembership;
@@ -1025,24 +1026,26 @@ mod tests {
 
     static MATCHER_CACHE_RESOLVER_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    fn unknown_then_resolved_identity(path: &Path) -> GitRepoIdentityOutcome {
+    fn unknown_then_resolved_identity(path: &Path) -> GitRepositoryIdentityOutcome {
         if MATCHER_CACHE_RESOLVER_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
-            GitRepoIdentityOutcome::Unknown
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
         } else {
-            GitRepoIdentityOutcome::Resolved(GitRepoIdentity {
+            GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
                 worktree_root: path.to_path_buf(),
+                git_dir: path.join(".git"),
                 common_dir: path.join(".git"),
             })
         }
     }
 
-    fn resolved_test_identity(path: &Path) -> GitRepoIdentityOutcome {
+    fn resolved_test_identity(path: &Path) -> GitRepositoryIdentityOutcome {
         let root = path
             .ancestors()
             .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
             .unwrap_or(path);
-        GitRepoIdentityOutcome::Resolved(GitRepoIdentity {
+        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
             worktree_root: root.to_path_buf(),
+            git_dir: root.join(".git"),
             common_dir: root.join(".git"),
         })
     }
@@ -1058,7 +1061,7 @@ mod tests {
 
         let membership = matcher.contains_uncached_with(
             &nested_cwd,
-            |_| GitRepoIdentityOutcome::Unknown,
+            |_| GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded),
             |_| panic!("timeout must not fall through to project discovery"),
         );
 
@@ -1091,14 +1094,17 @@ mod tests {
             cache.get_at(&root, now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN / 2);
 
         assert!(Arc::ptr_eq(&first, &during_cooldown));
-        assert_eq!(first.identity, GitRepoIdentityOutcome::Unknown);
+        assert_eq!(
+            first.identity,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
         assert_eq!(MATCHER_CACHE_RESOLVER_CALLS.load(Ordering::SeqCst), 1);
 
         let retried = cache.get_at(&root, now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN);
         assert!(!Arc::ptr_eq(&first, &retried));
         assert!(matches!(
             retried.identity,
-            GitRepoIdentityOutcome::Resolved(_)
+            GitRepositoryIdentityOutcome::Resolved(_)
         ));
         assert_eq!(MATCHER_CACHE_RESOLVER_CALLS.load(Ordering::SeqCst), 2);
     }
@@ -1113,10 +1119,11 @@ mod tests {
         let now = Instant::now();
         let resolver = |path: &Path| {
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                GitRepoIdentityOutcome::Unknown
+                GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
             } else {
-                GitRepoIdentityOutcome::Resolved(GitRepoIdentity {
+                GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
                     worktree_root: path.to_path_buf(),
+                    git_dir: path.join(".git"),
                     common_dir: path.join(".git"),
                 })
             }

@@ -1,6 +1,5 @@
 use std::io::Write;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tracedecay_domain::{FactEventId, FactOwnerV1, UtcMicros, canonical_sha256};
@@ -309,7 +308,11 @@ fn build_read_request(
         },
         OperationPriorityV1::Foreground,
         serialized_admission_bytes(&command, operation_name)?,
-        request_control(suffix, runtime_now(), operation_name)?,
+        request_control(
+            suffix,
+            crate::tracedecay::saturating_utc_now(),
+            operation_name,
+        )?,
     )
     .map_err(|error| runtime_error(operation_name, error.to_string()))
 }
@@ -321,7 +324,7 @@ fn build_submit_request(
     command_digest: &str,
     idempotency_key: &str,
 ) -> FactStoreResult<RuntimeSubmitRequestV1> {
-    let admitted_at = runtime_now();
+    let admitted_at = crate::tracedecay::saturating_utc_now();
     let suffix = digest_suffix(command_digest, COMMIT_OPERATION)?;
     let metadata = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!("operation.memory-fact.{suffix}"))
@@ -428,14 +431,6 @@ fn digest_suffix<'digest>(
     digest
         .strip_prefix("sha256:")
         .ok_or_else(|| runtime_error(operation, "canonical SHA-256 digest prefix missing"))
-}
-
-fn runtime_now() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
 enum RuntimeFactProbeMode {

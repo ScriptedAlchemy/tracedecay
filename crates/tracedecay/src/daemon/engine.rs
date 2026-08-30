@@ -256,17 +256,22 @@ impl DaemonEngine {
     pub(super) async fn execute_branch_admin(
         &self,
         handshake: &DaemonHandshake,
-        action: crate::branch::BranchAdminAction,
-    ) -> Result<crate::branch::BranchAdminReport> {
+        action: tracedecay_runtime_core::branch::BranchAdminAction,
+    ) -> Result<tracedecay_runtime_core::branch::BranchAdminReport> {
         self.execute_branch_admin_inner(handshake, action).await
     }
 
     fn execute_branch_admin_inner<'a>(
         &'a self,
         handshake: &'a DaemonHandshake,
-        action: crate::branch::BranchAdminAction,
+        action: tracedecay_runtime_core::branch::BranchAdminAction,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<crate::branch::BranchAdminReport>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<
+                    Output = Result<tracedecay_runtime_core::branch::BranchAdminReport>,
+                > + Send
+                + 'a,
+        >,
     > {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
@@ -922,7 +927,7 @@ impl DaemonEngine {
                 .await;
             if matches!(
                 automation_outcome,
-                crate::dashboard::AutomationSchedulerReconcileOutcome::Retiring
+                tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Retiring
             ) {
                 MaintenanceRekeyOutcome::Retiring
             } else {

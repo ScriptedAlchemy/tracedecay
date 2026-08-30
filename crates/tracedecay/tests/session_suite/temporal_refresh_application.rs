@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
-use tracedecay::store::GlobalDbSessionTemporalStore;
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
@@ -13,6 +12,7 @@ use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     TemporalModeV1, UtcMicros, WorktreeId,
 };
+use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
     SessionRefreshProgressV1, SessionRefreshStore, SessionTemporalProjectionBatchV1,
@@ -38,7 +38,9 @@ const DIGEST: [u8; 32] = [0x6b; 32];
 const PROJECTOR_VERSION: &str = "session-temporal-projector.v1";
 const CONFIG_VERSION: &str = "session-refresh-config.v1";
 
-fn session_temporal_store(db: &LcmTestRuntime) -> GlobalDbSessionTemporalStore<'_> {
+fn session_temporal_store(
+    db: &LcmTestRuntime,
+) -> GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb> {
     db.session_temporal_store()
         .expect("registered profile session-temporal store")
 }
@@ -356,7 +358,7 @@ fn zero_coverage() -> TemporalCoverageCountsV1 {
 }
 
 async fn persist_initial_progress(
-    store: &GlobalDbSessionTemporalStore<'_>,
+    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     session_id: &SessionId,
 ) -> SessionRefreshProgressV1 {
     let recovery = store

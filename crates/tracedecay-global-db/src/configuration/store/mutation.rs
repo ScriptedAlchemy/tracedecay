@@ -389,7 +389,7 @@ pub(super) fn map_store_error(error: ConfigurationStoreError) -> ConfigurationEr
         ConfigurationStoreError::InvalidData(reason) => {
             ConfigurationError::ResetRequired { reason }
         }
-        ConfigurationStoreError::Unavailable => ConfigurationError::Unavailable,
+        ConfigurationStoreError::Unavailable(_) => ConfigurationError::Unavailable,
     }
 }
 

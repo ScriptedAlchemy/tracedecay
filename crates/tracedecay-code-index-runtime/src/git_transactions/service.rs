@@ -915,7 +915,7 @@ fn map_store_error(error: GitIndexTransactionStoreError) -> GitIndexTransactionP
         GitIndexTransactionStoreError::RepositoryQuarantined => {
             GitIndexTransactionPortError::RecoveryRequired
         }
-        GitIndexTransactionStoreError::Unavailable => {
+        GitIndexTransactionStoreError::Unavailable(_) => {
             GitIndexTransactionPortError::DaemonUnavailable
         }
         GitIndexTransactionStoreError::PreviewInputTooLarge => {

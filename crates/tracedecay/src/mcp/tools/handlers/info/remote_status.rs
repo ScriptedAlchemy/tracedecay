@@ -5,8 +5,8 @@ use std::path::Path;
 use serde_json::Value;
 use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
 
-use crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1;
 use crate::mcp::tools::ToolResult;
+use tracedecay_application::remote::status::RemoteOperationalStatusReadPort;
 use tracedecay_runtime_core::errors::Result;
 
 use super::super::support::tool_json;
@@ -19,10 +19,10 @@ use super::super::support::tool_json;
 pub(crate) fn handle_remote_status(
     project_root: &Path,
     args: &Value,
-    provider: Option<&RemoteOperationalStatusProviderV1>,
+    provider: Option<&dyn RemoteOperationalStatusReadPort>,
 ) -> Result<ToolResult> {
     let status = match provider {
-        Some(provider) => provider(),
+        Some(provider) => provider.read(),
         None => RemoteOperationalStatusReadV1::Unavailable,
     };
     let value = serde_json::to_value(&status)?;
@@ -48,7 +48,6 @@ mod tests {
 
     use super::handle_remote_status;
     use crate::config::lock_user_data_dir_test_env;
-    use crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1;
     use crate::mcp::tools::ToolResult;
     use crate::mcp::tools::binding::{McpToolDispatchGroup, dispatch_group_for_tool};
     use crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv;
@@ -119,14 +118,14 @@ mod tests {
     #[test]
     fn handler_returns_observed_json_when_provider_is_installed() {
         let expected = observed_fixture();
-        let provider: RemoteOperationalStatusProviderV1 = {
+        let provider = {
             let expected = expected.clone();
             Arc::new(move || expected.clone())
         };
         let result = handle_remote_status(
             Path::new("."),
             &json!({ "format": "json" }),
-            Some(&provider),
+            Some(provider.as_ref()),
         )
         .expect("observed remote status serializes");
         assert_eq!(
@@ -155,7 +154,7 @@ mod tests {
         // authority root; a fixture that splits them exercises a different
         // (cross-authority) dispatch shape than the one under test.
         let canonical_root = dir.path().canonicalize().unwrap();
-        let profile_root = crate::storage::default_profile_root().unwrap();
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
         assert!(
             profile_root.starts_with(&canonical_root),
             "hermetic profile authority {} must live under the fixture root {}",
@@ -173,7 +172,7 @@ mod tests {
         .unwrap();
 
         let expected = observed_fixture();
-        let provider: RemoteOperationalStatusProviderV1 = {
+        let provider = {
             let expected = expected.clone();
             Arc::new(move || expected.clone())
         };

@@ -625,9 +625,7 @@ async fn seed_user_duplicate_facts(
     for content in [
         "General conversations belong in user memory.",
         "General conversations belong in user memory!",
-    ]
-    .into_iter()
-    {
+    ] {
         let preflight = memory
             .preflight_project_memory_fact_add(
                 ProjectMemoryFactAddRequest {

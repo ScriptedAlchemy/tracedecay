@@ -737,14 +737,17 @@ impl<'a> ProjectProviderRun<'a> {
 
     #[hotpath::measure(label = "sessions.ingest.project.hermes", future = true)]
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let outcome = hermes::ingest_for_project_capped_with_admission_and_cancellation(
+        let Some(outcome) = hermes::ingest_for_project_capped_with_admission_and_cancellation(
             self.project_root,
             self.project_id.clone(),
             self.facade,
             Some(self.max_new_bytes),
             self.cancellation,
         )
-        .await;
+        .await
+        else {
+            return ProviderRunOutcome::skipped();
+        };
         ProviderRunOutcome::bounded(
             outcome.stats,
             outcome.bytes_consumed,

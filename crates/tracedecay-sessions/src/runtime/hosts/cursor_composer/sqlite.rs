@@ -85,16 +85,21 @@ pub(super) struct ReadOnlyDb {
 /// Open a `SQLite` file strictly read-only and immutable (no locking, no
 /// `-wal`/`-shm` writes) via a `file:…?immutable=1&mode=ro` URI. The runtime
 /// helper also pins `busy_timeout = 0` and verifies `query_only = ON`.
-pub(super) async fn open_readonly_immutable(db_path: &Path) -> Option<ReadOnlyDb> {
+///
+/// Missing paths and unreadable files are typed `Err` — callers that already
+/// proved the path is a regular file must defer, not treat this as a no-op.
+pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb, String> {
     let path = db_path.to_path_buf();
-    let conn = tokio::task::spawn_blocking(move || {
-        tracedecay_rusqlite_runtime::open_immutable_reader(&path).ok()
+    let opened = tokio::task::spawn_blocking(move || {
+        tracedecay_rusqlite_runtime::open_immutable_reader(&path)
     })
     .await
-    .ok()??;
-    Some(ReadOnlyDb {
-        conn: CursorConn::new(conn),
-    })
+    .map_err(|error| format!("could not open '{}' read-only: {error}", db_path.display()))?;
+    opened
+        .map(|conn| ReadOnlyDb {
+            conn: CursorConn::new(conn),
+        })
+        .map_err(|error| format!("could not open '{}' read-only: {error}", db_path.display()))
 }
 
 /// One keyset page of `composerData:` keys with their value byte lengths.

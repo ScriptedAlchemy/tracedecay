@@ -677,7 +677,10 @@ fn initialize_fixture_repository_identity(
             });
         }
     }
-    if !tracedecay::storage::write_repository_identity_marker(project_root, project_id.as_str())? {
+    if !tracedecay_runtime_core::storage::write_repository_identity_marker(
+        project_root,
+        project_id.as_str(),
+    )? {
         return Err(TraceDecayError::Config {
             message: format!(
                 "dashboard fixture repository identity marker was not written for '{}'",

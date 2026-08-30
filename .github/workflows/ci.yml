@@ -82,8 +82,10 @@ jobs:
       - name: Build checked-out TraceDecay CLI
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
-      - name: Test dogfood output validation
-        run: python3 scripts/test-check-pr-dogfood-output.py
+      - name: Test dogfood harnesses
+        run: |
+          python3 scripts/test-check-pr-dogfood-output.py
+          python3 scripts/test-pr-dogfood-portability.py
 
       - name: Initialize checkout and exercise CLI tools
         run: scripts/ci-pr-dogfood-smoke.sh
@@ -357,7 +359,7 @@ jobs:
           echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --locked --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --locked --features tracedecay/test-helpers --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload nextest archive
         uses: actions/upload-artifact@v4

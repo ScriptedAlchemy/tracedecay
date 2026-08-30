@@ -24,7 +24,7 @@ use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionGenerationV1,
     CodeGenerationRetentionReceiptV1, CodeGenerationRetentionTransactionV1, GENERATIONS_DIRECTORY,
     MAX_TRANSACTION_BYTES, QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY,
-    TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel, read_active_pointer, storage,
+    TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel, read_optional_active_pointer, storage,
     sync_directory, total_bytes, validate_generation_file,
 };
 
@@ -82,15 +82,18 @@ pub(super) fn validate_transaction(
             "retention transaction receipt digest is not a SHA-256 file component".to_owned(),
         ));
     }
-    validate_generation_file(&transaction.active_pointer.generation_file)?;
-    let pointer_generation = CodeGenerationId::new(
-        transaction.active_pointer.generation_id.clone(),
-    )
-    .map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "retention transaction active generation id is invalid: {error}"
-        ))
-    })?;
+    let pointer_generation = transaction
+        .active_pointer
+        .as_ref()
+        .map(|pointer| {
+            validate_generation_file(&pointer.generation_file)?;
+            CodeGenerationId::new(pointer.generation_id.clone()).map_err(|error| {
+                CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "retention transaction active generation id is invalid: {error}"
+                ))
+            })
+        })
+        .transpose()?;
     if pointer_generation != transaction.receipt.active_generation_id {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "retention transaction active pointer does not match its receipt".to_owned(),
@@ -109,7 +112,11 @@ pub(super) fn validate_transaction(
         }
     }
     if generation_ids.is_empty()
-        || generation_ids.contains(&transaction.receipt.active_generation_id)
+        || transaction
+            .receipt
+            .active_generation_id
+            .as_ref()
+            .is_some_and(|active| generation_ids.contains(active))
         || !transaction
             .receipt
             .vector_readable_sources
@@ -736,27 +743,38 @@ pub(super) fn ensure_transaction_liveness(
     transaction: &CodeGenerationRetentionTransactionV1,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let current = read_active_pointer(store_root)?;
-    let current_generation =
-        CodeGenerationId::new(current.generation_id.clone()).map_err(|error| {
-            CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "current active generation id is invalid during retention recovery: {error}"
-            ))
-        })?;
+    // Liveness is proven against the *current* pointer, not the journaled
+    // snapshot: a publish may have landed since the transaction was staged
+    // (including the first publish into a previously unpublished store), and
+    // the current active generation must never be removed by recovery.
+    let current = read_optional_active_pointer(store_root)?;
     let deleted_ids = transaction
         .receipt
         .deleted_generations
         .iter()
         .map(|generation| generation.generation_id.clone())
         .collect::<BTreeSet<_>>();
-    if deleted_ids.contains(&current_generation)
-        || transaction
-            .receipt
-            .deleted_generations
-            .iter()
-            .any(|generation| generation.generation_file == current.generation_file)
-        || !deleted_ids.is_disjoint(vector_readable_sources)
-    {
+    if let Some(current) = current.as_ref() {
+        let current_generation =
+            CodeGenerationId::new(current.generation_id.clone()).map_err(|error| {
+                CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "current active generation id is invalid during retention recovery: {error}"
+                ))
+            })?;
+        if deleted_ids.contains(&current_generation)
+            || transaction
+                .receipt
+                .deleted_generations
+                .iter()
+                .any(|generation| generation.generation_file == current.generation_file)
+        {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "retention recovery would remove an active or vector-readable generation"
+                    .to_owned(),
+            ));
+        }
+    }
+    if !deleted_ids.is_disjoint(vector_readable_sources) {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "retention recovery would remove an active or vector-readable generation".to_owned(),
         ));

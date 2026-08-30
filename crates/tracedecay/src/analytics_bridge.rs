@@ -1,58 +1,24 @@
-//! Bridges hook telemetry into the durable `analytics_events` table.
+//! Daemon-side analytics diagnostics composition.
 //!
-//! Hooks append JSONL rows to `hook_analytics.jsonl` (project store when the
-//! hook can resolve a project root, user-level profile root otherwise), while
-//! the MCP server writes `mcp_tool_call` / `hook_route` rows straight into the
-//! user-level global DB. This module imports the JSONL side into
-//! `analytics_events` so one durable table answers adoption questions, using
-//! per-file byte cursors in `parse_offsets` to stay idempotent across runs.
+//! The durable hook-JSONL importer and sync entry point live in
+//! `tracedecay_usecases::analytics_bridge`; the `tracedecay analytics …` CLI
+//! wrappers live in `tracedecay-cli`. What stays here is the diagnostics
+//! summary assembly, because it reads through the root crate's dashboard
+//! analytics API (hook JSONL rows, durable event rows, summary shaping).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_domain::ObservationScopeV1;
 use tracedecay_store::StoreShardScopeV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
-
-// The shared hook-analytics core (durable JSONL importer plus its data types)
-// lives in `tracedecay-usecases`. The root binary keeps only the CLI/daemon
-// orchestration below, plus the `Vec`-by-value `import_hook_analytics` wrapper
-// whose owned argument keeps the spawned startup catch-up future `Send`.
-use tracedecay_usecases::analytics_bridge::import_source;
-pub use tracedecay_usecases::analytics_bridge::{
-    HookImportOutcome, HookImportSource, HookImportSourceOutcome, hook_import_sources,
-};
-
-/// Imports new hook JSONL rows into `analytics_events`, advancing a byte
-/// cursor per source file so re-runs only ingest the appended tail.
-// Takes the source list by value: a borrowed slice iterator held across the
-// per-source awaits trips rustc's higher-ranked Send leak check when this
-// future runs inside the spawned startup catch-up task.
-#[hotpath::measure(label = "analytics.import")]
-pub(crate) async fn import_hook_analytics(
-    gdb: &RegisteredGlobalDb,
-    sources: Vec<HookImportSource>,
-) -> HookImportOutcome {
-    let mut outcome = HookImportOutcome::default();
-    for source in sources {
-        outcome.sources.push(import_source(gdb, &source).await);
-    }
-    outcome
-}
-
-// ── CLI entry points (`tracedecay analytics …`) ────────────────────────
+use tracedecay_usecases::analytics_bridge::analytics_sync_with_db;
 
 fn cli_error(message: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
     tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: message.to_string(),
     }
-}
-
-fn cli_project_root() -> Option<PathBuf> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|cwd| crate::config::discover_project_root(&cwd))
 }
 
 #[hotpath::measure(label = "analytics.messages")]
@@ -72,63 +38,6 @@ async fn registered_diagnostics_message_count(
         total += database.session_message_count().await.map_err(cli_error)?;
     }
     Ok(total)
-}
-
-/// `tracedecay analytics sync`: import hook JSONL rows into the durable
-/// `analytics_events` table and print what happened.
-#[hotpath::measure(label = "analytics.sync_cli")]
-pub async fn run_analytics_sync() -> tracedecay_runtime_core::errors::Result<()> {
-    let project_root = cli_project_root();
-    let outcome = call_admin_cli(project_root, json!({ "action": "analytics_sync" })).await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&outcome).unwrap_or_default()
-    );
-    Ok(())
-}
-
-/// `tracedecay analytics diagnostics`: the CLI wrapper around the dashboard
-/// diagnostics summary — durable `analytics_events` plus merged hook JSONL.
-#[hotpath::measure(label = "analytics.diagnostics_cli")]
-pub async fn run_analytics_diagnostics(
-    all_projects: bool,
-    no_sync: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    let project_root = cli_project_root();
-    let summary = call_admin_cli(
-        project_root,
-        json!({
-            "action": "analytics_diagnostics",
-            "all": all_projects,
-            "no_sync": no_sync,
-        }),
-    )
-    .await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&summary).unwrap_or_default()
-    );
-    Ok(())
-}
-
-#[hotpath::measure(label = "analytics.admin")]
-async fn call_admin_cli(
-    project_root: Option<PathBuf>,
-    arguments: Value,
-) -> tracedecay_runtime_core::errors::Result<Value> {
-    let handshake = crate::daemon::handshake_for_current_client(project_root, None, false, false)?;
-    let result =
-        crate::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments).await?;
-    crate::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
-}
-
-#[hotpath::measure(label = "analytics.sync")]
-pub(crate) async fn analytics_sync_with_db(
-    gdb: &RegisteredGlobalDb,
-    project_root: Option<&Path>,
-) -> Value {
-    let sources = hook_import_sources(project_root);
-    import_hook_analytics(gdb, sources).await.as_json()
 }
 
 #[hotpath::measure(label = "analytics.diagnostics")]
@@ -204,18 +113,18 @@ pub(crate) async fn analytics_diagnostics_with_db(
     });
     let event_rows: Vec<Value> = events
         .iter()
-        .map(crate::dashboard::analytics_api::durable_analytics_event_row)
+        .map(tracedecay_dashboard_api::analytics_api::durable_analytics_event_row)
         .collect();
 
     let store_root = project_root.and_then(|root| {
-        crate::storage::resolve_layout_for_current_profile(root)
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root)
             .ok()
             .map(|layout| layout.data_root)
     });
     let hook_filter_root = if all_projects { None } else { project_root };
     let hook_analytics = hotpath::measure_block!(
         "analytics.hooks",
-        crate::dashboard::analytics_api::read_hook_analytics_rows_at(
+        tracedecay_dashboard_api::analytics_api::read_hook_analytics_rows_at(
             store_root.as_deref(),
             hook_filter_root,
         )
@@ -231,7 +140,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     };
     let mut summary = hotpath::measure_block!(
         "analytics.assemble",
-        crate::dashboard::analytics_api::diagnostics_summary_from_parts(
+        tracedecay_dashboard_api::analytics_api::diagnostics_summary_from_parts(
             message_count,
             &hook_analytics,
             durable,
@@ -260,60 +169,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
-    use tracedecay_usecases::analytics_bridge::hook_row_to_analytics_event;
-
     use super::analytics_diagnostics_with_db;
-
-    #[test]
-    fn maps_hook_invoked_row_with_attribution() {
-        let line = r#"{"agent":"claude","event":"hook_invoked","hook_name":"preToolUse","project_root":"/repo","session_id":"s1","tool_name":"Agent","ts_unix_ms":1783000000000}"#;
-        let Some(event) = hook_row_to_analytics_event(line, None) else {
-            panic!("row should map");
-        };
-        assert_eq!(event.provider, "hook_claude");
-        assert_eq!(event.event_kind, "hook_invoked");
-        assert_eq!(event.hook_name.as_deref(), Some("preToolUse"));
-        assert_eq!(event.session_id.as_deref(), Some("s1"));
-        assert_eq!(event.timestamp, 1_783_000_000);
-        assert!(event.project_id.ends_with("repo"));
-    }
-
-    #[test]
-    fn maps_hint_row_with_hint_id() {
-        let line = r#"{"agent":"cursor","event":"hint_emitted","category":"search","hint_id":"h-abc","project_root":"/repo","session_id":"s1","ts_unix_ms":1783000000000}"#;
-        let Some(event) = hook_row_to_analytics_event(line, None) else {
-            panic!("row should map");
-        };
-        assert_eq!(event.hint_category.as_deref(), Some("search"));
-        assert_eq!(event.hint_id.as_deref(), Some("h-abc"));
-
-        let line = r#"{"agent":"cursor","event":"hint_emitted","category":"search","project_root":"/repo","session_id":"s1","ts_unix_ms":1783000000000}"#;
-        let Some(event) = hook_row_to_analytics_event(line, None) else {
-            panic!("row should map");
-        };
-        assert!(event.hint_id.is_none());
-    }
-
-    #[test]
-    fn unattributed_row_falls_back_to_default_project() {
-        let line = r#"{"agent":"cursor","event":"hook_invoked","hook_name":"postToolUse","ts_unix_ms":1783000000000}"#;
-        let Some(event) = hook_row_to_analytics_event(line, Some(Path::new("/repo"))) else {
-            panic!("row should map");
-        };
-        assert!(event.project_id.ends_with("repo"));
-        let Some(event) = hook_row_to_analytics_event(line, None) else {
-            panic!("row should map");
-        };
-        assert_eq!(event.project_id, "");
-    }
-
-    #[test]
-    fn rows_without_event_field_are_skipped() {
-        assert!(hook_row_to_analytics_event("{}", None).is_none());
-        assert!(hook_row_to_analytics_event("not json", None).is_none());
-    }
 
     #[tokio::test]
     async fn cli_diagnostics_exposes_canonical_observatory_and_costs_coverage() {

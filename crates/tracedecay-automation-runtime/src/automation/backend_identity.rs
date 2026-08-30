@@ -285,10 +285,10 @@ fn digest_opened_file(file: &mut File) -> std::io::Result<String> {
 /// configuration.
 ///
 /// Only [`AgentTaskFailureClass::Permanent`] stands as identity suppress.
-/// Unavailable, Denied, Disconnected, MalformedOutput, Timeout, and Retryable
-/// can change without a backend or configuration revision (installation,
-/// credentials, provider policy, load), so they keep the ordinary failure
-/// cooldown.
+/// `Unavailable`, `Denied`, `Disconnected`, `MalformedOutput`, `Timeout`, and
+/// `Retryable` can change without a backend or configuration revision
+/// (installation, credentials, provider policy, load), so they keep the
+/// ordinary failure cooldown.
 #[must_use]
 pub fn is_deterministic_failure_class(class: AgentTaskFailureClass) -> bool {
     matches!(class, AgentTaskFailureClass::Permanent)
