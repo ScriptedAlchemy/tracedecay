@@ -302,6 +302,12 @@ pub enum DaemonInvocationError {
     Cancelled { stage: CancellationStage },
     TimedOut { stage: CancellationStage },
     Unavailable,
+    /// The connect phase failed after the restart grace: no daemon accepted
+    /// at the endpoint, so the request was never sent. Kept distinct from
+    /// [`Self::Unavailable`] because re-dispatching the same request in-process
+    /// cannot succeed until a daemon is back — callers fail fast with the
+    /// typed connect diagnostic instead of retrying to their deadline.
+    Unreachable { reason_code: String, detail: String },
 }
 
 impl DaemonInvocationError {
@@ -321,6 +327,12 @@ impl DaemonInvocationError {
                 code: "daemon_unavailable".to_owned(),
                 message: "The owning TraceDecay daemon is unavailable".to_owned(),
             }),
+            Self::Unreachable { reason_code, detail } => {
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: reason_code,
+                    message: detail,
+                })
+            }
         }
     }
 }
@@ -1143,6 +1155,13 @@ pub fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
         DaemonInvocationError::Cancelled { .. } => InvocationError::Cancelled,
         DaemonInvocationError::TimedOut { .. } => InvocationError::DeadlineExceeded,
         DaemonInvocationError::Unavailable => InvocationError::Unavailable,
+        DaemonInvocationError::Unreachable {
+            reason_code,
+            detail,
+        } => InvocationError::Unreachable {
+            reason_code,
+            detail,
+        },
     }
 }
 

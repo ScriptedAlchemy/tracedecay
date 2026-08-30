@@ -422,8 +422,17 @@ fn dispatch_cli_application_surface_inner(
                 Some(&client),
             )
             .await
-            .map_err(|error| TraceDecayError::Config {
-                message: error.to_string(),
+            .map_err(|error| match error {
+                // The same typed connect failure the compatibility tool path
+                // returns: one restart grace, then fail fast — never another
+                // dispatch attempt against a dead socket.
+                ApplicationSurfaceAdapterError::DaemonUnreachable {
+                    reason_code,
+                    detail,
+                } => TraceDecayError::project_route(reason_code, true, detail),
+                error => TraceDecayError::Config {
+                    message: error.to_string(),
+                },
             })?;
             let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) else {
                 break result;
