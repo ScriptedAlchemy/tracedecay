@@ -488,7 +488,11 @@ async fn handle_project_open_source_edit_tool_call(
 ) -> tracedecay_runtime_core::errors::Result<ToolResult> {
     let graph = Box::pin(TraceDecay::open(cg.project_root())).await?;
     let server = Box::pin(McpServer::new(graph, None)).await;
-    server
+    // `false` means this direct server has no production code-graph
+    // projection port, so the source-edit authority cannot mount; the
+    // dispatch boundary below is still the production path, and an actual
+    // edit reports its typed executor-unavailable refusal.
+    let _authority_mounted = server
         .install_project_open_source_edit_authority_for_test()
         .await?;
 

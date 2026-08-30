@@ -554,8 +554,11 @@ async fn test_recursion() {
 #[tokio::test]
 async fn test_changelog_no_git() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    // The temp dir is not a git repo, so this should return a structured git
-    // error in the tool payload rather than success-looking prose.
+    // Fixture enrollment pins a repository identity, which initializes an
+    // empty git repository with an unborn HEAD and no commits. The tree diff
+    // must surface a structured git error naming the unresolvable ref in the
+    // tool payload rather than success-looking prose (a project that is not a
+    // repository at all is covered by the git shell's own open refusal test).
     let result = handle_tool_call(
         &cg,
         "tracedecay_changelog",
@@ -573,7 +576,8 @@ async fn test_changelog_no_git() {
         output["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("failed to open git repo")
+            .contains("cannot resolve 'HEAD~1'"),
+        "the unborn-HEAD refusal must name the unresolvable ref: {output}"
     );
 }
 
