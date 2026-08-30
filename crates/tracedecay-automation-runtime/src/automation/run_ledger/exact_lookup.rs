@@ -544,7 +544,7 @@ pub(super) struct ReverseJsonlScanner<'a> {
     next_end: u64,
     buffer_start: u64,
     buffer_len: usize,
-    buffer: [u8; JSON_SCAN_BUFFER_BYTES],
+    buffer: Vec<u8>,
     #[cfg(test)]
     chunks_read: usize,
 }
@@ -563,7 +563,7 @@ impl<'a> ReverseJsonlScanner<'a> {
             next_end: file_len,
             buffer_start: 0,
             buffer_len: 0,
-            buffer: [0_u8; JSON_SCAN_BUFFER_BYTES],
+            buffer: vec![0_u8; JSON_SCAN_BUFFER_BYTES],
             #[cfg(test)]
             chunks_read: 0,
         })
@@ -724,7 +724,7 @@ pub(super) struct ForwardJsonlScanner<'a> {
     search_offset: u64,
     buffer_start: u64,
     buffer_len: usize,
-    buffer: [u8; JSON_SCAN_BUFFER_BYTES],
+    buffer: Vec<u8>,
     #[cfg(test)]
     chunks_read: usize,
 }
@@ -761,7 +761,7 @@ impl<'a> ForwardJsonlScanner<'a> {
             search_offset: 0,
             buffer_start: 0,
             buffer_len: 0,
-            buffer: [0_u8; JSON_SCAN_BUFFER_BYTES],
+            buffer: vec![0_u8; JSON_SCAN_BUFFER_BYTES],
             #[cfg(test)]
             chunks_read: 0,
         })
@@ -842,7 +842,7 @@ fn require_committed_jsonl_eof(file: &std::fs::File, path: &Path, file_len: u64)
 fn digest_span(file: &std::fs::File, path: &Path, span: &Range<u64>) -> Result<ManifestDigest> {
     let mut hasher = Sha256::new();
     let mut offset = span.start;
-    let mut buffer = [0_u8; JSON_SCAN_BUFFER_BYTES];
+    let mut buffer = vec![0_u8; JSON_SCAN_BUFFER_BYTES];
     while offset < span.end {
         let chunk_len = usize::try_from((span.end - offset).min(JSON_SCAN_BUFFER_BYTES as u64))
             .map_err(|_| config_error("automation digest chunk is not representable"))?;
@@ -883,7 +883,7 @@ pub(super) fn span_matches_bytes(
     }
     let mut offset = span.start;
     let mut compared = 0_usize;
-    let mut buffer = [0_u8; JSON_SCAN_BUFFER_BYTES];
+    let mut buffer = vec![0_u8; JSON_SCAN_BUFFER_BYTES];
     while compared < expected.len() {
         let chunk_len = (expected.len() - compared).min(JSON_SCAN_BUFFER_BYTES);
         let mut handle = file;
@@ -925,8 +925,8 @@ pub(super) fn spans_match(
         return Ok(false);
     }
     let mut compared = 0_u64;
-    let mut left_buffer = [0_u8; JSON_SCAN_BUFFER_BYTES];
-    let mut right_buffer = [0_u8; JSON_SCAN_BUFFER_BYTES];
+    let mut left_buffer = vec![0_u8; JSON_SCAN_BUFFER_BYTES];
+    let mut right_buffer = vec![0_u8; JSON_SCAN_BUFFER_BYTES];
     while compared < left_len {
         let take = usize::try_from((left_len - compared).min(JSON_SCAN_BUFFER_BYTES as u64))
             .map_err(|_| config_error("automation row comparison chunk is not representable"))?;
@@ -1026,7 +1026,7 @@ struct JsonRangeReader<'a> {
     position: u64,
     buffer_start: u64,
     buffer_len: usize,
-    buffer: [u8; JSON_SCAN_BUFFER_BYTES],
+    buffer: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -1229,7 +1229,7 @@ impl<'a> JsonRangeReader<'a> {
             position: span.start,
             buffer_start: span.start,
             buffer_len: 0,
-            buffer: [0_u8; JSON_SCAN_BUFFER_BYTES],
+            buffer: vec![0_u8; JSON_SCAN_BUFFER_BYTES],
         }
     }
 
@@ -2229,11 +2229,11 @@ impl<'a> JsonRangeReader<'a> {
             if !(0xdc00..=0xdfff).contains(&second) {
                 return self.fail("invalid low surrogate in JSON string");
             }
-            0x1_0000 + (((first as u32 - 0xd800) << 10) | (second as u32 - 0xdc00))
+            0x1_0000 + (((u32::from(first) - 0xd800) << 10) | (u32::from(second) - 0xdc00))
         } else if (0xdc00..=0xdfff).contains(&first) {
             return self.fail("unexpected low surrogate in JSON string");
         } else {
-            first as u32
+            u32::from(first)
         };
         char::from_u32(scalar).ok_or_else(|| config_error("invalid Unicode scalar in JSON string"))
     }
@@ -2245,9 +2245,9 @@ impl<'a> JsonRangeReader<'a> {
                 .next_byte()?
                 .ok_or_else(|| config_error("unexpected EOF in Unicode escape"))?;
             let digit = match byte {
-                b'0'..=b'9' => (byte - b'0') as u16,
-                b'a'..=b'f' => (byte - b'a' + 10) as u16,
-                b'A'..=b'F' => (byte - b'A' + 10) as u16,
+                b'0'..=b'9' => u16::from(byte - b'0'),
+                b'a'..=b'f' => u16::from(byte - b'a' + 10),
+                b'A'..=b'F' => u16::from(byte - b'A' + 10),
                 _ => return self.fail("invalid hexadecimal digit in Unicode escape"),
             };
             value = (value << 4) | digit;
@@ -2257,9 +2257,9 @@ impl<'a> JsonRangeReader<'a> {
 
     fn read_utf8_scalar(&mut self, first: u8) -> Result<char> {
         let (continuations, minimum, mut scalar) = match first {
-            0xc2..=0xdf => (1, 0x80, (first & 0x1f) as u32),
-            0xe0..=0xef => (2, 0x800, (first & 0x0f) as u32),
-            0xf0..=0xf4 => (3, 0x1_0000, (first & 0x07) as u32),
+            0xc2..=0xdf => (1, 0x80, u32::from(first & 0x1f)),
+            0xe0..=0xef => (2, 0x800, u32::from(first & 0x0f)),
+            0xf0..=0xf4 => (3, 0x1_0000, u32::from(first & 0x07)),
             _ => return self.fail("invalid UTF-8 lead byte in JSON string"),
         };
         for _ in 0..continuations {
@@ -2269,7 +2269,7 @@ impl<'a> JsonRangeReader<'a> {
             if !matches!(byte, 0x80..=0xbf) {
                 return self.fail("invalid UTF-8 continuation byte in JSON string");
             }
-            scalar = (scalar << 6) | (byte & 0x3f) as u32;
+            scalar = (scalar << 6) | u32::from(byte & 0x3f);
         }
         if scalar < minimum || scalar > 0x10_ffff || (0xd800..=0xdfff).contains(&scalar) {
             return self.fail("invalid UTF-8 scalar in JSON string");

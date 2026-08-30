@@ -603,7 +603,7 @@ enum BackendFailureStanding {
 ///
 /// 1. The failure class is deterministic under a fixed backend and
 ///    configuration — typed Permanent only. Unavailable, Denied,
-///    Disconnected, MalformedOutput, Timeout, and Retryable keep the
+///    Disconnected, `MalformedOutput`, Timeout, and Retryable keep the
 ///    ordinary failure cooldown.
 /// 2. Every attempt the backend made failed that same way. A class that got
 ///    its retries and reproduced them all is settled; one that recovered
