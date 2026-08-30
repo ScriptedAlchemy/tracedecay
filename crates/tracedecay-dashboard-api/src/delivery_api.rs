@@ -11,13 +11,13 @@ use axum::extract::State;
 use axum::{Extension, Json};
 use schemars::JsonSchema;
 use serde::Serialize;
+use tracedecay_application::git::GitReadRequestV1;
 use tracedecay_domain::CommitId;
 use tracedecay_domain::feedback::{
     CiFailureKindV1, GitHubReviewAuthorClassV1, GitHubReviewCoverageV1,
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewLifecycleV1, GitHubReviewReadOperationV1,
     GitHubReviewStateV1,
 };
-use tracedecay_application::git::GitReadRequestV1;
 use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1, GitOperationStateV1};
 use tracedecay_usecases::advisory::GitHubReleaseV1;
 use tracedecay_usecases::delivery::{

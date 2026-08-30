@@ -8,7 +8,8 @@ use tokio::sync::{Mutex, RwLock};
 use tracedecay_application::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
     ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1, ContextScoutFeedbackV1,
-    ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1, ContextScoutWorkV1,
+    ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
+    ContextScoutWorkV1,
 };
 use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use tracedecay_domain::UtcMicros;
@@ -522,8 +523,7 @@ impl ProjectContextScoutOwnerV1 {
             && !matches!(
                 status.last_model_outcome,
                 None | Some(
-                    ContextScoutModelOutcomeV1::Disabled
-                        | ContextScoutModelOutcomeV1::Unavailable
+                    ContextScoutModelOutcomeV1::Disabled | ContextScoutModelOutcomeV1::Unavailable
                 )
             );
         Ok(ContextScoutCapabilityStateV1 {

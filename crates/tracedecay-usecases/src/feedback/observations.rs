@@ -837,9 +837,9 @@ mod tests {
     };
     use tracedecay_domain::feedback::{
         CiFailureSourceDegradationV1, FeedbackActorContextV1, FeedbackBudgetV1,
-        FeedbackContentIdentityV1, FeedbackCycleId,
-        FeedbackCycleObservationV1, FeedbackCycleRequestV1, FeedbackEvaluationInputV1,
-        FeedbackObservationKindV1, FeedbackScopeV1, FeedbackTargetV1, FeedbackTriggerV1,
+        FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleObservationV1,
+        FeedbackCycleRequestV1, FeedbackEvaluationInputV1, FeedbackObservationKindV1,
+        FeedbackScopeV1, FeedbackTargetV1, FeedbackTriggerV1,
     };
     use tracedecay_domain::{
         CodeGenerationId, CommitId, FileOccurrenceId, HostInstanceId, ManifestDigest, ProjectId,

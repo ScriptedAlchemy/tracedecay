@@ -331,13 +331,11 @@ pub(super) async fn execute_git_read(
                 );
             }
         };
-        *daemon_binding = Some(
-            tracedecay_application::git::DaemonGitHunkPreviewBindingV1 {
-                preview_id,
-                snapshot_digest,
-                expires_at,
-            },
-        );
+        *daemon_binding = Some(tracedecay_application::git::DaemonGitHunkPreviewBindingV1 {
+            preview_id,
+            snapshot_digest,
+            expires_at,
+        });
         Some((operation, snapshot))
     } else {
         None

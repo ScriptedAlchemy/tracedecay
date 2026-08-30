@@ -2250,10 +2250,7 @@ mod tests {
         let decoded = decode_observation_ledger(&encoded).unwrap();
         assert_eq!(decoded.retained_incomplete_boots, 1);
         let model = project_observation_ledger(&decoded).unwrap();
-        assert_eq!(
-            model.coverage,
-            super::FeedbackCoverageV1::Unknown
-        );
+        assert_eq!(model.coverage, super::FeedbackCoverageV1::Unknown);
         assert_eq!(model.denominators.retention_dropped, 1);
         assert_eq!(model.denominators.incomplete_boots, 1);
         assert_eq!(model.watermark.producer_boot_id, Some(latest_boot));

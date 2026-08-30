@@ -237,12 +237,15 @@ impl SemanticAnnServingIndexV1 {
             .matches
             .into_iter()
             .map(|found| {
-                self.chunks_by_entity.get(&found.entity).cloned().ok_or_else(|| {
-                    VectorGenerationStoreErrorV1::Corrupt(
-                        "semantic vector index returned an entity that is not a serving row"
-                            .to_owned(),
-                    )
-                })
+                self.chunks_by_entity
+                    .get(&found.entity)
+                    .cloned()
+                    .ok_or_else(|| {
+                        VectorGenerationStoreErrorV1::Corrupt(
+                            "semantic vector index returned an entity that is not a serving row"
+                                .to_owned(),
+                        )
+                    })
             })
             .collect()
     }
@@ -778,8 +781,8 @@ impl GraphVectorGenerationStoreV1 {
         };
         let identity = snapshot.projection().clone();
         let property = search_vector_property(generation_id)?;
-        let dimension = usize::try_from(embedding_key.embedding_key().dimensions)
-            .map_err(storage_error)?;
+        let dimension =
+            usize::try_from(embedding_key.embedding_key().dimensions).map_err(storage_error)?;
         let metric = vector_metric(embedding_key.embedding_key().metric);
         let status = snapshot
             .vector_index_status(GraphVectorIndexRequest {

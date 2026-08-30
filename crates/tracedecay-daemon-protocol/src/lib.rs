@@ -40,15 +40,13 @@ pub use client::{
     CatalogBindingResolver, DaemonInvocationClient, DaemonInvocationError,
     DaemonInvocationExecutor, DaemonInvocationExecutorFuture, DaemonLspSessionClient,
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
-    InvocationControls, ResolvedBinding,
-    SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
+    InvocationControls, ResolvedBinding, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
     SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS, ScopeSelector,
     SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
     application_delivery_route, application_response, deadline_remaining, invocation_now_micros,
     map_invocation_error, resolve_dispatch, wait_for_cancellation,
 };
 pub use client_identity::DaemonClientIdentity;
-pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use connection::{
     DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_TOOL_REQUEST_DEADLINE,
@@ -73,6 +71,7 @@ pub use contract::{
 pub use handshake::{
     DaemonHandshake, MovedStoreAdoption, client_version_skew, version_skew_action,
 };
+pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use surface::{
     ApplicationSurfaceOperation, ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,

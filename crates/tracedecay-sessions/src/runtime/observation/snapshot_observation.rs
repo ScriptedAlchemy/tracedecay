@@ -12,11 +12,11 @@ use tracedecay_domain::{
 };
 
 use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
-use tracedecay_daemon_protocol::wire::{WireReadOutcome, read_bounded_to_string};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
 };
+use tracedecay_daemon_protocol::wire::{WireReadOutcome, read_bounded_to_string};
 use tracedecay_runtime_core::privacy::ObservationRecordParseErrorV1;
 
 mod admission;

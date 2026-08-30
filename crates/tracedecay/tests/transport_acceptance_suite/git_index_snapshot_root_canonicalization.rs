@@ -2,7 +2,6 @@
 //! symlink aliases (macOS `/tmp` → `/private/tmp` and Linux fixtures) agree
 //! with the daemon owner's mounted root. Exact CAS is preserved.
 
-
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
