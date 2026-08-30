@@ -1892,39 +1892,47 @@ mod tests {
     #[tokio::test]
     async fn profile_bootstrap_preserves_future_spool_reset_without_retry_mapping() {
         let temp = tempfile::tempdir().unwrap();
+        // The profile identity root must be a directory `load_or_create`
+        // creates (and restricts to 0700) itself; a umask-default tempdir
+        // trips the fail-closed private-root validation.
+        let profile_root = temp.path().join("profile");
         let profile_identity =
-            crate::daemon::profile_identity::load_or_create(temp.path()).unwrap();
-        let database_path = tracedecay_sessions::runtime::user_sessions_db_path(temp.path());
+            crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+        let database_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (meta_path, bytes_before) = write_future_spool_metadata(&database_path);
         let administration = StoreAdministration::default().with_profile_identity(profile_identity);
 
         administration
-            .ensure_profile_host_admission_bootstrap(temp.path())
+            .ensure_profile_host_admission_bootstrap(&profile_root)
             .await
             .unwrap();
+        // The worker performs a real session-runtime-registry open before it
+        // can surface the spool error, so give it a generous (still bounded)
+        // wait; completion notifies immediately, so a healthy run never
+        // sleeps this long.
         assert!(
             administration
                 .profile_host_admission_replay
-                .wait_bootstrap_completed(temp.path(), Duration::from_secs(1))
+                .wait_bootstrap_completed(&profile_root, Duration::from_secs(60))
                 .await,
             "production bootstrap worker must publish its terminal state"
         );
         assert_eq!(
             administration
                 .profile_host_admission_replay
-                .bootstrap_attempt_count(temp.path())
+                .bootstrap_attempt_count(&profile_root)
                 .await,
             1
         );
         assert_eq!(
             administration
                 .profile_host_admission_replay
-                .bootstrap_backoff_count(temp.path())
+                .bootstrap_backoff_count(&profile_root)
                 .await,
             0
         );
         let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) = administration
-            .profile_host_admission_bootstrap_status(temp.path())
+            .profile_host_admission_bootstrap_status(&profile_root)
             .await
             .unwrap()
         else {
@@ -1940,8 +1948,8 @@ mod tests {
         assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
 
         let client_identity = tracedecay_daemon_protocol::DaemonClientIdentity {
-            profile_root: temp.path().to_path_buf(),
-            global_db_path: temp.path().join("global.db"),
+            profile_root: profile_root.clone(),
+            global_db_path: profile_root.join("global.db"),
         };
         let Some(ProfileHostAdmissionBootstrapStatus::Terminal(observed_error)) =
             super::super::project_server_lifecycle::schedule_user_profile_host_admission_replay_for_identity(
@@ -1959,7 +1967,7 @@ mod tests {
         assert_eq!(
             administration
                 .profile_host_admission_replay
-                .bootstrap_attempt_count(temp.path())
+                .bootstrap_attempt_count(&profile_root)
                 .await,
             1,
             "reading cached terminal status must not start another attempt"
