@@ -7,7 +7,6 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationProblem, ApplicationProblemKind, AuthorityReceipt,
     CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
-    SafeDiagnostic,
 };
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
@@ -591,7 +590,7 @@ mod tests {
         );
 
         let routed = tracedecay_usecases::graph::map_code_graph_read_runtime_error(read_error);
-        let tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
+        let tracedecay_domain::errors::TraceDecayError::ProjectRoute {
             reason_code,
             retryable,
             ..
