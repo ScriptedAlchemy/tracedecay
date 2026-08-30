@@ -19,11 +19,6 @@ use super::service::invocation::{
     DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
 };
 use crate::application_surface::ApplicationSurfaceOperation;
-use crate::dashboard::{
-    DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
-    DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
-    DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
-};
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationWireRequestV1,
@@ -31,6 +26,11 @@ use tracedecay_application::{
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_daemon_protocol::invocation_now_micros;
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
+use tracedecay_dashboard_api::{
+    DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
+    DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
+    DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
+};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const CONFIGURATION_REQUEST_DEADLINE_MICROS: i64 = 15_000_000;
@@ -152,7 +152,7 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
         &self,
         control: DashboardHttpRequestControlV1,
         transaction_id: tracedecay_domain::NativeIntegrationTransactionId,
-    ) -> crate::dashboard::DashboardNativeIntegrationStatusFuture<'_> {
+    ) -> tracedecay_dashboard_api::DashboardNativeIntegrationStatusFuture<'_> {
         Box::pin(async move {
             crate::mcp::tools::handlers::dashboard::dashboard_native_integration_status(
                 self,
@@ -279,7 +279,7 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> Result<(
     Arc<dyn DashboardApplicationRuntime>,
-    Arc<dyn crate::dashboard::DashboardProfileCodeIndexWorkerSettingsPort>,
+    Arc<dyn tracedecay_dashboard_api::DashboardProfileCodeIndexWorkerSettingsPort>,
 )> {
     let project_root = cg.project_root().canonicalize()?;
     let project_id = cg

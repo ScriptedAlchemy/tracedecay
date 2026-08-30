@@ -63,7 +63,7 @@ pub(crate) async fn handle_outline(
 fn ast_grep_outline(abs_path: &Path) -> Result<Value> {
     ensure_ast_grep_outline_available()?;
 
-    let output = crate::external_tools::ast_grep_command()
+    let output = tracedecay_mcp::host_cli::ast_grep_command()
         .args([
             "outline",
             "--json=compact",

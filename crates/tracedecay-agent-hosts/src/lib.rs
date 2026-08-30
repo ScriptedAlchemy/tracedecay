@@ -56,6 +56,7 @@ pub mod native_integration;
 pub mod ports;
 pub mod product_version;
 pub mod shell;
+pub mod task_classifier;
 pub mod tool_name;
 
 pub use product_version::PRODUCT_VERSION;

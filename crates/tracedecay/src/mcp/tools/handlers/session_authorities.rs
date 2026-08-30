@@ -1,14 +1,14 @@
+use tracedecay_application::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 /// Database authorities retained by the owning MCP server for its lifetime.
 /// Hook and LCM handlers borrow these capabilities; they never rediscover or
 /// reopen a session database while dispatching an action.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct SessionAuthorities<'a> {
     pub(crate) project: Option<&'a RegisteredGlobalDbLeaseV1>,
     pub(crate) user: Option<&'a RegisteredGlobalDbLeaseV1>,
-    pub(crate) profile_identity:
-        Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    pub(crate) profile_identity: Option<std::sync::Arc<dyn ProfileIdentityReadPort>>,
     pub(crate) profile_retained_authority:
         Option<&'a crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
     pub(crate) project_registered: Option<&'a RegisteredGlobalDbLeaseV1>,
@@ -44,11 +44,9 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
-    pub(crate) const fn with_profile_identity(
+    pub(crate) fn with_profile_identity(
         mut self,
-        profile_identity: Option<
-            &'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
-        >,
+        profile_identity: Option<std::sync::Arc<dyn ProfileIdentityReadPort>>,
     ) -> Self {
         self.profile_identity = profile_identity;
         self

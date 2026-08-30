@@ -708,9 +708,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
     let generations_root = store_root.join(GENERATIONS_DIRECTORY);
     let entries = match std::fs::read_dir(&generations_root) {
         Ok(entries) => Some(entries),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound && active_pointer.is_none() =>
-        {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && active_pointer.is_none() => {
             None
         }
         Err(error) => return Err(storage(error)),
@@ -779,17 +777,15 @@ fn plan_code_generation_retention_with_verification_cancellable(
     if let Some(pointer) = active_pointer.as_ref() {
         if active_state_digest.as_deref() != Some(pointer.state_digest.as_str()) {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-                "active generation file is missing or does not match the pointer digest"
-                    .to_owned(),
+                "active generation file is missing or does not match the pointer digest".to_owned(),
             ));
         }
         pointer_generations = pointer
             .generation_index
             .iter()
             .map(|entry| {
-                CodeGenerationId::new(entry.generation_id.clone()).map_err(|error| {
-                    CodeGenerationRetentionErrorV1::UnsafeState(error.to_string())
-                })
+                CodeGenerationId::new(entry.generation_id.clone())
+                    .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
         let missing_pointer_generations = pointer_generations

@@ -225,7 +225,7 @@ impl DaemonSessionRetrievalRoot {
                 )
                 .unwrap_or_else(|error| panic!("test worktree identity: {error}")),
                 BranchId::new(
-                    crate::branch::current_branch(&project_root)
+                    tracedecay_runtime_core::branch::current_branch(&project_root)
                         .unwrap_or_else(|| "detached".to_owned()),
                 )
                 .unwrap_or_else(|error| panic!("test branch identity: {error}")),
@@ -287,7 +287,7 @@ impl DaemonSessionRetrievalRoot {
 
     pub(crate) fn with_project_runtime_shard(
         self,
-        profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+        profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
     ) -> Option<Self> {
         self.with_project_runtime_identity(
             profile_identity.brain_id().clone(),
@@ -322,7 +322,7 @@ impl DaemonSessionRetrievalRoot {
 
     pub(crate) fn with_profile_runtime_shard(
         self,
-        profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+        profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
     ) -> Option<Self> {
         self.with_profile_runtime_identity(
             profile_identity.brain_id().clone(),
@@ -421,6 +421,19 @@ impl DaemonSessionRetrievalService {
         root: DaemonSessionRetrievalRoot,
         refresh_status: Option<SessionTemporalRefreshWake>,
     ) -> Option<Self> {
+        Self::new_with_serving_port(
+            database,
+            root,
+            refresh_status
+                .map(|status| Arc::new(status) as Arc<dyn SessionProjectionServingStatusPort>),
+        )
+    }
+
+    pub(crate) fn new_with_serving_port(
+        database: RegisteredGlobalDbLeaseV1,
+        root: DaemonSessionRetrievalRoot,
+        refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
+    ) -> Option<Self> {
         Some(Self {
             database,
             root,
@@ -429,8 +442,7 @@ impl DaemonSessionRetrievalService {
                 MESSAGE_SEARCH_RANKING_VERSION,
             )
             .ok()?,
-            refresh_status: refresh_status
-                .map(|status| Arc::new(status) as Arc<dyn SessionProjectionServingStatusPort>),
+            refresh_status,
         })
     }
 
@@ -439,6 +451,21 @@ impl DaemonSessionRetrievalService {
         registered_database: RegisteredGlobalDbLeaseV1,
         root: DaemonSessionRetrievalRoot,
         refresh_status: Option<SessionTemporalRefreshWake>,
+    ) -> Option<Self> {
+        Self::new_registered_with_serving_port(
+            database,
+            registered_database,
+            root,
+            refresh_status
+                .map(|status| Arc::new(status) as Arc<dyn SessionProjectionServingStatusPort>),
+        )
+    }
+
+    pub(crate) fn new_registered_with_serving_port(
+        database: RegisteredGlobalDbLeaseV1,
+        registered_database: RegisteredGlobalDbLeaseV1,
+        root: DaemonSessionRetrievalRoot,
+        refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
     ) -> Option<Self> {
         let expected = root.expected_runtime_shard.as_ref()?;
         if &registered_database.binding().shard_id != expected {
@@ -455,8 +482,7 @@ impl DaemonSessionRetrievalService {
                 MESSAGE_SEARCH_RANKING_VERSION,
             )
             .ok()?,
-            refresh_status: refresh_status
-                .map(|status| Arc::new(status) as Arc<dyn SessionProjectionServingStatusPort>),
+            refresh_status,
         })
     }
 

@@ -65,7 +65,7 @@ impl TranscriptPayloadRouteV1 {
 }
 
 /// Everything a capture kernel may borrow for one ingest pass.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct TranscriptCaptureContext<'a> {
     pub(super) cg: Option<&'a TraceDecay>,
     pub(super) args: &'a Value,
@@ -97,7 +97,10 @@ impl<'a> TranscriptCaptureContext<'a> {
 
 /// Registered project roots as seen by the daemon session registry.
 async fn registered_project_roots(global_db: &RegisteredGlobalDb) -> Result<Vec<PathBuf>> {
-    let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
+    let registry_authority =
+        tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(
+            global_db,
+        );
     tracedecay_sessions::runtime::registered_project_roots_from(&registry_authority)
         .await
         .ok_or_else(|| config_error("daemon project registry is unavailable"))

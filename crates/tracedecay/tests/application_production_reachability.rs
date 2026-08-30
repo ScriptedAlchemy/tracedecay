@@ -23,7 +23,6 @@ use tracedecay_application::{
     ApplicationEnvelope, ApplicationOutcome, LegalAction, OpaqueCursor, OperationTermination,
     ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
 };
-use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
 
 /// Every surface pins its page size to ten rows, so a query with more matches

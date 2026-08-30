@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
-use crate::types::NodeKind;
+use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub(super) const INFO_SYMBOL_CENSUS_LIMIT: usize = 500_000;
@@ -52,7 +52,7 @@ pub(super) async fn indexed_files(
         let mut files = counts
             .into_iter()
             .map(|(path, node_count)| {
-                let project_path = crate::storage::ProjectPath::resolve(
+                let project_path = tracedecay_runtime_core::storage::ProjectPath::resolve(
                     &project_root,
                     std::path::Path::new(&path),
                 )?;

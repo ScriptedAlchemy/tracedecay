@@ -5,8 +5,8 @@ use tempfile::TempDir;
 use tracedecay::mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
-use tracedecay::storage::resolve_response_handle_root;
 use tracedecay::tracedecay::{TraceDecay, current_timestamp};
+use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
 mod initialize_routing;
 
@@ -1962,7 +1962,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // rewrite it (the version-gate fast path and the per-process ensured
     // flag both leave the row untouched).
     let project_id = project_id_of(&TraceDecay::open(dir.path()).await.unwrap());
-    let profile_root = tracedecay::storage::default_profile_root().unwrap();
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
         &profile_root,
         dir.path(),
@@ -1992,7 +1992,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // means migrations re-ran, and the stats below distinguish "the same
     // store file was recreated" (created/length drift on one path) from "a
     // different store file answered" (the seeded file left untouched).
-    let sessions_db = tracedecay::storage::resolve_project_session_db_path(dir.path())
+    let sessions_db = tracedecay_runtime_core::storage::resolve_project_session_db_path(dir.path())
         .expect("resolve the project's sessions db path");
     let stat_sessions_db = |label: &str| match std::fs::metadata(&sessions_db) {
         Ok(meta) => format!(

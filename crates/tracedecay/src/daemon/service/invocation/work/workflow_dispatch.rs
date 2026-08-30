@@ -85,7 +85,9 @@ pub(in crate::daemon::service::invocation) async fn execute_workflow_application
             );
         }
     };
-    let services = match registered.database.workflow_application_services() {
+    let services = match tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
+        &registered.database,
+    ) {
         Ok(services) => services,
         Err(error) => {
             return DaemonInvocationResponse::problem(request_id, workflow_storage_problem(&error));

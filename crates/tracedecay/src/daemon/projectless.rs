@@ -9,6 +9,19 @@ use tracedecay_runtime_core::errors::Result;
 
 use super::*;
 
+type ProjectlessPhaseFutureV1<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+#[inline(never)]
+fn boxed_projectless_phase<'a, T>(
+    future: impl std::future::Future<Output = T> + Send + 'a,
+) -> ProjectlessPhaseFutureV1<'a, T>
+where
+    T: Send + 'a,
+{
+    Box::pin(future)
+}
+
 /// Authenticated durable identity pinned once for a projectless connection.
 /// Request grants are issued only after the adapter supplies exact controls.
 struct ProjectlessConnectionStateV1 {
@@ -62,7 +75,14 @@ pub(super) async fn serve_projectless_client(
             break;
         };
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => projectless_response(&request, &connection, store_administration).await,
+            Ok(request) => {
+                boxed_projectless_phase(projectless_response(
+                    &request,
+                    &connection,
+                    store_administration,
+                ))
+                .await
+            }
             Err(e) => Some(JsonRpcResponse::error(
                 json!(null),
                 ErrorCode::ParseError,
@@ -102,12 +122,12 @@ async fn projectless_response(
             }),
         )),
         "tools/call" => Some(
-            projectless_tools_call_response_with_connection(
+            boxed_projectless_phase(projectless_tools_call_response_with_connection(
                 id,
                 request.params.as_ref(),
                 connection,
                 store_administration,
-            )
+            ))
             .await,
         ),
         "ping" | "logging/setLevel" => Some(JsonRpcResponse::success(id, json!({}))),
@@ -171,7 +191,7 @@ async fn projectless_tools_call_response_with_connection(
         #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
         enum ProjectlessAdminProjectAction {
             AutomationReconcile {
-                scope: crate::dashboard::AutomationReconcileScope,
+                scope: tracedecay_dashboard_api::AutomationReconcileScope,
             },
         }
 
@@ -186,7 +206,7 @@ async fn projectless_tools_call_response_with_connection(
             }
         };
         let ProjectlessAdminProjectAction::AutomationReconcile { scope } = request;
-        if scope != crate::dashboard::AutomationReconcileScope::Profile {
+        if scope != tracedecay_dashboard_api::AutomationReconcileScope::Profile {
             return JsonRpcResponse::error(
                 id,
                 ErrorCode::InvalidParams,
@@ -202,12 +222,12 @@ async fn projectless_tools_call_response_with_connection(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        let report = crate::dashboard::ProfileAutomationReconcileReport {
+        let report = tracedecay_dashboard_api::ProfileAutomationReconcileReport {
             scope,
             cached_owners: outcomes.len(),
             outcomes,
             uncached_projects:
-                crate::dashboard::UncachedProjectReconcileOutcome::DeferredUntilProjectStartup,
+                tracedecay_dashboard_api::UncachedProjectReconcileOutcome::DeferredUntilProjectStartup,
         };
         return JsonRpcResponse::success(
             id,
@@ -271,7 +291,7 @@ async fn projectless_tools_call_response_with_connection(
             session_runtime_registry,
             global_db.as_ref(),
             crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
-                .with_profile_identity(Some(profile_identity))
+                .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
                 .with_registered_databases(None, Some(&user_session_db)),
             host_admission_broker,
         )

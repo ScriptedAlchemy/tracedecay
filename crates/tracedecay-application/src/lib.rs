@@ -44,6 +44,7 @@ mod identity;
 pub mod invocation;
 pub mod lsp_context_catalog;
 mod mcp_catalog;
+pub mod mcp_construction;
 pub mod memory;
 pub mod multi_root;
 pub mod observability;
@@ -222,6 +223,10 @@ pub use invocation::{
 };
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
 pub use mcp_catalog::mcp_executable_binding_registry;
+pub use mcp_construction::{
+    ProfileIdentityReadPort, SessionTemporalRefreshWakeFuture, SessionTemporalRefreshWakePort,
+    UnavailableSessionTemporalRefreshWake,
+};
 pub use multi_root::{
     AuthorizedMultiRootQueryService, AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSet,
     AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootCollectionResolutionV1,
@@ -243,6 +248,7 @@ pub use policy::{
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1,
     RegisteredPolicyCapabilityV1,
 };
+pub use remote::status::RemoteOperationalStatusReadPort;
 pub use result::{
     APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationExecutionFailureClassV1,
     ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,

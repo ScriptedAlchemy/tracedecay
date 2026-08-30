@@ -44,10 +44,7 @@ pub(super) fn log_code_generation_retention_degraded(failure: &str) {
 /// proved undiagnosable in production: `graph_replay_release_failed` recurred
 /// on every retention tick with no way to tell an unregistered graph shard
 /// from a pool-lock deadline from a conflict.
-fn log_code_generation_retention_degraded_with_error(
-    failure: &str,
-    error: &dyn std::fmt::Debug,
-) {
+fn log_code_generation_retention_degraded_with_error(failure: &str, error: &dyn std::fmt::Debug) {
     log_daemon_event(
         "retention_degraded",
         &[

@@ -12,6 +12,7 @@ use super::process::{read_optional_file, run_command_with_stdin, worktree_mode};
 use super::{FixedGitIndexRunner, NativeGitIndexError};
 
 impl FixedGitIndexRunner {
+    #[hotpath::measure(label = "daemon.git.index_tx.tracked_worktree")]
     pub fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let head_paths = match self.head_state()? {
             GitHeadStateV1::Unborn { .. } => Vec::new(),

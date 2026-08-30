@@ -119,9 +119,9 @@ fn job_scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
         Some("scheduler_non_retryable_failure")
     );
 
-    records
-        .iter_mut()
-        .for_each(|record| record.completed_at_micros = Some(100_000_100));
+    for record in &mut records {
+        record.completed_at_micros = Some(100_000_100);
+    }
     assert_eq!(
         job_schedule_decision(&job, &records, 150),
         Some("scheduler_non_retryable_failure")
@@ -367,7 +367,7 @@ fn interval_job() -> AutomationJob {
         delivery: JobDelivery::default(),
         created_at: 0,
         updated_at: 0,
-        extra: Default::default(),
+        extra: std::collections::BTreeMap::default(),
     }
 }
 

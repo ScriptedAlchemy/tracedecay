@@ -100,6 +100,7 @@ pub mod provider_pricing;
 pub mod provider_usage;
 pub mod request_identity;
 pub mod response_handles;
+pub mod runtime_telemetry;
 pub mod semantic_runtime;
 pub mod session;
 pub mod settings_control;
@@ -108,6 +109,7 @@ pub mod stack_coordinator;
 pub mod store;
 pub mod tracedecay;
 pub mod user_config;
+pub mod work;
 
 pub use lsp_support::analyzer_runtime_config_error;
 pub use source_authorization::{

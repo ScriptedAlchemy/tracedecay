@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::SystemTime;
 
-use crate::storage::{self, StoreLayout};
 use crate::tracedecay::current_timestamp;
 use tracedecay_global_db::{
     GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::TraceDecay;
 
@@ -102,7 +102,7 @@ impl TraceDecay {
                 // happens to touch the project last pin its canonical_root /
                 // display_root to a transient worktree path. Redirect registration
                 // to the primary checkout when one is detected and still exists.
-                let primary_root = crate::project_registry::primary_checkout_root(
+                let primary_root = tracedecay_runtime_core::worktree::primary_checkout_root(
                     &self.project_root,
                     git_common_dir.as_deref(),
                 );

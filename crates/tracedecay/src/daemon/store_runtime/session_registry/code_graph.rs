@@ -1810,7 +1810,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.ensure_code_graph_shard_attached(&project_shard).await;
         let authority = self
             .registry
-            .retain_graph_store(StoreRuntimeKey::new(project_shard.clone(), self.incarnation))
+            .retain_graph_store(StoreRuntimeKey::new(
+                project_shard.clone(),
+                self.incarnation,
+            ))
             .await
             .map_err(|error| GraphDbError::unavailable(format!("{error:?}")))?;
         // The graph leases below key the registry by this lease's binding, not

@@ -191,7 +191,7 @@ async fn native_provider_usage_survives_production_admission() {
 
 fn hook_completed_rows(project: &Path, home: &Path, provider: &str) -> Vec<Value> {
     let mut paths = vec![
-        tracedecay::storage::resolve_layout_for_current_profile(project)
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project)
             .expect("resolve host fixture storage")
             .data_root
             .join("hook_analytics.jsonl"),
@@ -577,8 +577,11 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             .success()
     );
     assert!(
-        tracedecay::storage::write_repository_identity_marker(&project, project_id.as_str())
-            .unwrap()
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project,
+            project_id.as_str()
+        )
+        .unwrap()
     );
     let runtime = HostAdmissionTestRuntimeV1::project(
         tmp.path().join("profile"),
@@ -1026,7 +1029,7 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
     );
     let project_id = ProjectId::new("project.canonical-worktree").unwrap();
     assert!(
-        tracedecay::storage::write_repository_identity_marker(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
             project_tmp.path(),
             project_id.as_str()
         )

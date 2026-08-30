@@ -64,7 +64,10 @@ pub(super) async fn open_project_for_handshake(
     // the registry registration below is its durable home. TraceDecay never
     // creates files inside a project's working tree.
     if first_touch {
-        crate::storage::write_repository_identity_marker(project_path, project_id)?;
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project_path,
+            project_id,
+        )?;
     }
     let configuration_database = store_administration
         .registered_project_session_database(project_path, &store_layout)

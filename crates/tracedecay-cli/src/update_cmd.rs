@@ -698,7 +698,7 @@ async fn run_post_update_mutations(
 /// a real, host-loadable `SKILL.md`. Fork-protected and best-effort: a failure
 /// here never fails the update.
 fn reconcile_materialized_managed_skills_after_update() {
-    let Ok(profile_root) = tracedecay::storage::default_profile_root() else {
+    let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
         return;
     };
     let start = std::env::current_dir()

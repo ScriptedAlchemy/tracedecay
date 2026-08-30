@@ -521,6 +521,49 @@ fn text_artifact_retention_preserves_references_and_collects_orphans() {
 }
 
 #[test]
+fn text_artifact_retention_collects_staging_database_sidecars_with_their_owner() {
+    let (store, _generations) = fixture_store(1);
+    let artifacts_root = code_text_artifacts_root(store.path());
+    std::fs::create_dir_all(&artifacts_root).expect("create artifact root");
+    let staging_name = format!(".text-artifact-{}.staging", "c".repeat(64));
+    let paths = [
+        artifacts_root.join(&staging_name),
+        artifacts_root.join(format!("{staging_name}-journal")),
+        artifacts_root.join(format!("{staging_name}-wal")),
+        artifacts_root.join(format!("{staging_name}-shm")),
+    ];
+    for (path, bytes) in paths
+        .iter()
+        .zip([b"stage".as_slice(), b"journal", b"wal", b"shm"])
+    {
+        std::fs::write(path, bytes).expect("write staging database evidence");
+    }
+
+    let plan = plan_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("plan staging database retention");
+    assert_eq!(plan.collectable_text_artifacts.len(), 4);
+
+    let report = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(11),
+        None,
+    )
+    .expect("collect staging database and sidecars");
+
+    assert_eq!(report.deleted_text_artifacts.len(), 4);
+    assert!(
+        paths.iter().all(|path| !path.exists()),
+        "the staging database and every SQLite sidecar must be collected together"
+    );
+}
+
+#[test]
 fn cancellable_artifact_apply_stops_rehash_before_quarantine_and_retries() {
     let (store, generations) = fixture_store(1);
     let active = generations.last().expect("active generation");
@@ -906,6 +949,38 @@ fn next_retention_plan_limits_collection_to_one_generation() {
 }
 
 #[test]
+fn unpublished_store_collects_sealed_crash_debris_under_the_absent_pointer() {
+    let (store, generations) = fixture_store(2);
+    std::fs::remove_file(store.path().join(ACTIVE_POINTER_FILE))
+        .expect("remove publication pointer to model an interrupted first publish");
+
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), 0)
+        .expect("plan unpublished crash-debris retention");
+    assert_eq!(plan.collectable_generations.len(), 2);
+
+    let report = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(98),
+        None,
+    )
+    .expect("collect unpublished sealed generations");
+
+    assert_eq!(report.deleted_generations.len(), 2);
+    let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+    assert!(
+        generations
+            .iter()
+            .all(|generation| { !generations_root.join(&generation.file).exists() })
+    );
+    assert!(
+        !store.path().join(ACTIVE_POINTER_FILE).exists(),
+        "retention must not fabricate a publication pointer"
+    );
+}
+
+#[test]
 fn idle_maintenance_preparation_stays_metadata_only() {
     let (store, _generations) = fixture_store(1);
 
@@ -1003,7 +1078,7 @@ fn apply_preserves_collectable_generations_when_receipt_commit_fails() {
     let collectable = plan.collectable_generations[0].clone();
     let active_file = plan
         .active_generation_file()
-        .expect("published fixture store has an active file")
+        .expect("published fixture has an active generation")
         .to_owned();
     let rollback_files = plan
         .superseded_generations
@@ -1356,7 +1431,7 @@ fn plan_keeps_active_vector_pinned_and_rollback_generations() {
         plan_code_generation_retention(store.path(), &vector_readable_sources, TEST_ROLLBACK_FLOOR)
             .expect("plan retention");
 
-    assert_eq!(plan.active_generation_id.as_ref(), Some(&generations[6].id));
+    assert_eq!(plan.active_generation_id, Some(generations[6].id.clone()));
     assert!(
         plan.collectable_generations
             .iter()
@@ -1898,8 +1973,7 @@ fn applied_retention_refuses_a_metadata_only_plan() {
 #[test]
 fn unpublished_store_retention_reclaims_orphaned_partial_generations() {
     let (store, generations) = fixture_store(2);
-    std::fs::remove_file(store.path().join(ACTIVE_POINTER_FILE))
-        .expect("sever the active pointer");
+    std::fs::remove_file(store.path().join(ACTIVE_POINTER_FILE)).expect("sever the active pointer");
     let artifacts_root = code_text_artifacts_root(store.path());
     let orphan = text_artifact_for_bytes(&generations[0].id, b"orphan completed bytes");
     let orphan_path = write_text_artifact(&store, &orphan, b"orphan completed bytes");

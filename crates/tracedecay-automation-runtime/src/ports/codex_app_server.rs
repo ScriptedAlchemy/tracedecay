@@ -35,7 +35,7 @@ impl Default for SummaryConfig {
         Self {
             codex_bin: "codex".to_string(),
             model: None,
-            timeout: Duration::from_secs(120),
+            timeout: Duration::from_mins(2),
         }
     }
 }

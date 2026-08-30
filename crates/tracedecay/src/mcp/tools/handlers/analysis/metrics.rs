@@ -9,7 +9,7 @@ pub(crate) async fn handle_rank(
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    use crate::types::EdgeKind;
+    use tracedecay_domain::code_intelligence::EdgeKind;
     require_object_args(&args, "tracedecay_rank")?;
 
     let edge_kind_str = args

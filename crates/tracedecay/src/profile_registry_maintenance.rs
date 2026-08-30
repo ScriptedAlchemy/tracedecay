@@ -73,9 +73,11 @@ impl ProfileRegistryMaintenanceRuntime {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> tracedecay_runtime_core::errors::Result<crate::storage::ProjectStorageLocation> {
-        let location = crate::storage::classify_project_storage(project_root);
-        if location.status != crate::storage::ProjectStorageStatus::Stale {
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_runtime_core::storage::ProjectStorageLocation,
+    > {
+        let location = tracedecay_runtime_core::storage::classify_project_storage(project_root);
+        if location.status != tracedecay_runtime_core::storage::ProjectStorageStatus::Stale {
             return Ok(location);
         }
         let Some(store) = self
@@ -85,10 +87,9 @@ impl ProfileRegistryMaintenanceRuntime {
         else {
             return Ok(location);
         };
-        Ok(
-            crate::storage::classify_registry_storage(project_root, profile_root, &store)
-                .unwrap_or(location),
-        )
+        Ok(store
+            .classify_storage(project_root, profile_root)
+            .unwrap_or(location))
     }
 
     pub fn canonical_project_key(project_root: &Path) -> String {

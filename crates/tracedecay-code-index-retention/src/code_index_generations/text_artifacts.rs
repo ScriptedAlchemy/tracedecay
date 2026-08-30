@@ -29,10 +29,9 @@ use super::{
     TEXT_ARTIFACT_TRANSACTION_SCHEMA, code_text_artifacts_root, durable_generation_index_digest,
     generation_file_digest, observe_cancel, open_file_sha256_hex_cancellable,
     path_still_names_open_file, read_active_pointer, read_optional_active_pointer,
-    regular_file_exists, remove_empty_stage_root,
-    retain_bounded_generation_index_with_text_head, sha256_file_component, storage, sync_directory,
-    validate_durable_generation_index, validate_sealed_generation_identity,
-    validate_text_artifact_descriptor,
+    regular_file_exists, remove_empty_stage_root, retain_bounded_generation_index_with_text_head,
+    sha256_file_component, storage, sync_directory, validate_durable_generation_index,
+    validate_sealed_generation_identity, validate_text_artifact_descriptor,
 };
 
 const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<

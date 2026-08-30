@@ -13,7 +13,9 @@ use tracedecay_tool_catalog::UseCaseId;
 use tracedecay_usecases::observability::BoundedObservabilityProducerV1;
 
 use tracedecay_daemon_protocol::{DaemonInvocationResponse, WorkApplicationOutcomeV1};
-use tracedecay_global_db::RegisteredWorkApplicationServicesV1;
+use tracedecay_usecases::work::{
+    RegisteredWorkApplicationServicesV1, RegisteredWorkProductServicesV1,
+};
 
 use super::super::work_attempt_exec::{WorkAttemptProcessRegistryV1, spawn_attempt_execution};
 use super::preparation;
@@ -45,9 +47,7 @@ pub(super) fn start_attempt(
         .run_control()
         .admit_reservation(context, &command.task_id, &command.run_id)
         .and_then(|()| {
-            registered
-                .database
-                .work_product_services(binding.clone())
+            RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
                 .map_err(|_| {
                     work_product_problem(
                         tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
@@ -116,9 +116,7 @@ pub(super) fn synthesize(
         .run_control()
         .admit_reservation(context, &command.start.task_id, &command.start.run_id)
         .and_then(|()| {
-            registered
-                .database
-                .work_product_services(binding.clone())
+            RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
                 .map_err(|_| {
                     work_product_problem(
                         tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
@@ -264,9 +262,7 @@ pub(super) fn retry_attempt(
                 command.original_attempt.run_id(),
             )
             .and_then(|()| {
-                registered
-                    .database
-                    .work_product_services(binding.clone())
+                RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
                     .map_err(|_| {
                         work_product_problem(
                             tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,

@@ -1,18 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::graph::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
-use crate::types::NodeKind;
 use tracedecay_application::RequestContext;
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
     CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::errors::Result;
+use tracedecay_usecases::graph::queries::GraphQueryManager;
 use tracedecay_usecases::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
     CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,

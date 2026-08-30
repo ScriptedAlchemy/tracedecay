@@ -46,7 +46,7 @@ fn publish_queue_gauges() {
 pub(crate) struct RunningGuard;
 
 impl RunningGuard {
-    #[inline(always)]
+    #[inline]
     pub(crate) fn enter() -> Self {
         #[cfg(feature = "hotpath")]
         {
@@ -58,13 +58,15 @@ impl RunningGuard {
     }
 }
 
-#[cfg(feature = "hotpath")]
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        let _ = RUNNING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            Some(value.saturating_sub(1))
-        });
-        publish_queue_gauges();
+        #[cfg(feature = "hotpath")]
+        {
+            let _ = RUNNING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_sub(1))
+            });
+            publish_queue_gauges();
+        }
     }
 }
 
@@ -84,7 +86,7 @@ pub(crate) enum DurationKind {
 }
 
 impl DurationGuard {
-    #[inline(always)]
+    #[inline]
     pub(crate) fn backend_startup() -> Self {
         #[cfg(feature = "hotpath")]
         {
@@ -99,7 +101,7 @@ impl DurationGuard {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     pub(crate) fn run() -> Self {
         #[cfg(feature = "hotpath")]
         {
@@ -115,16 +117,18 @@ impl DurationGuard {
     }
 }
 
-#[cfg(feature = "hotpath")]
 impl Drop for DurationGuard {
     fn drop(&mut self) {
-        let ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        match self.kind {
-            DurationKind::BackendStartup => {
-                hotpath::gauge!("automation.backend.startup_ms").set(ms);
-            }
-            DurationKind::Run => {
-                hotpath::gauge!("automation.run_ms").set(ms);
+        #[cfg(feature = "hotpath")]
+        {
+            let ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            match self.kind {
+                DurationKind::BackendStartup => {
+                    hotpath::gauge!("automation.backend.startup_ms").set(ms);
+                }
+                DurationKind::Run => {
+                    hotpath::gauge!("automation.run_ms").set(ms);
+                }
             }
         }
     }
@@ -133,11 +137,11 @@ impl Drop for DurationGuard {
 /// Counts one constructed run terminal per status. Failed and skipped
 /// terminals are counted alongside successes because a success-only counter
 /// hides exactly the waste an automation stall/skip diagnosis needs.
-#[inline(always)]
-pub(crate) fn observe_run_terminal(status: AutomationRunStatus) {
+#[inline]
+pub(crate) fn observe_run_terminal(_status: AutomationRunStatus) {
     #[cfg(feature = "hotpath")]
     {
-        match status {
+        match _status {
             AutomationRunStatus::Succeeded => {
                 hotpath::gauge!("automation.runs.succeeded_total").inc(1_u64);
             }
@@ -150,10 +154,6 @@ pub(crate) fn observe_run_terminal(status: AutomationRunStatus) {
             // Non-terminal statuses never reach terminal-record construction.
             AutomationRunStatus::Queued | AutomationRunStatus::Running => {}
         }
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = status;
     }
 }
 
@@ -203,7 +203,7 @@ fn count_skip_reason(reason: &str) {
     }
 }
 
-#[inline(always)]
+#[inline]
 pub(crate) fn observe_due() {
     #[cfg(feature = "hotpath")]
     {
@@ -215,12 +215,12 @@ pub(crate) fn observe_due() {
     }
 }
 
-#[inline(always)]
-pub(crate) fn observe_skip_reason(reason: &str) {
+#[inline]
+pub(crate) fn observe_skip_reason(_reason: &str) {
     #[cfg(feature = "hotpath")]
     {
-        count_skip_reason(reason);
-        match reason {
+        count_skip_reason(_reason);
+        match _reason {
             "scheduler_lock_active" => {
                 hotpath::val!("automation.schedule_state").set(&STATE_QUEUED);
                 QUEUED.store(1, Ordering::Relaxed);
@@ -237,9 +237,5 @@ pub(crate) fn observe_skip_reason(reason: &str) {
             }
         }
         publish_queue_gauges();
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = reason;
     }
 }

@@ -100,9 +100,9 @@ fn initialize_project(home: &Path, project: &Path, marker: &str) {
 /// with an extra, unexpected table, so every later open sees a shape that is
 /// not the exact final shape this binary creates.
 fn make_store_reset_required(home: &Path, project: &Path) {
-    let data_root = tracedecay::storage::profile_sharded_data_root(
+    let data_root = tracedecay_runtime_core::storage::profile_sharded_data_root(
         &home.join(".tracedecay"),
-        &tracedecay::storage::default_profile_project_id(project),
+        &tracedecay_runtime_core::storage::default_profile_project_id(project),
     );
     let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
     assert!(

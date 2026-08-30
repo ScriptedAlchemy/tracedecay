@@ -25,13 +25,7 @@ pub(crate) async fn handle_test_risk(
         .unwrap_or(false);
 
     let report = hotpath::future!(
-        crate::graph::health::test_risk::analyze_test_risk(
-            cg,
-            graph,
-            path_prefix,
-            include_tested,
-            limit
-        ),
+        crate::graph::test_risk::analyze_test_risk(cg, graph, path_prefix, include_tested, limit),
         label = "mcp.health.test_risk.graph"
     )
     .await?;
@@ -82,7 +76,7 @@ pub(crate) async fn handle_test_map(
                 message: "missing required parameter: 'file' or 'node_id'".to_string(),
             });
         };
-        let test_evidence = crate::graph::health::test_risk::verified_test_evidence(graph)?;
+        let test_evidence = crate::graph::test_risk::verified_test_evidence(graph)?;
         (source_nodes, test_evidence)
     });
 
@@ -94,7 +88,7 @@ pub(crate) async fn handle_test_map(
 
             for node in &source_nodes {
                 let (metadata, source_file) =
-                    crate::graph::health::test_risk::verified_test_symbol_parts(node)?;
+                    crate::graph::test_risk::verified_test_symbol_parts(node)?;
                 if !NodeKind::from_str(&metadata.kind).is_some_and(|kind| kind.is_callable_kind()) {
                     continue;
                 }
@@ -116,9 +110,7 @@ pub(crate) async fn handle_test_map(
                         continue;
                     }
                     let (caller_metadata, caller_file) =
-                        crate::graph::health::test_risk::verified_test_symbol_parts(
-                            &caller.summary,
-                        )?;
+                        crate::graph::test_risk::verified_test_symbol_parts(&caller.summary)?;
                     if !crate::tracedecay::is_test_file(caller_file)
                         && !test_evidence
                             .test_annotated
@@ -169,7 +161,7 @@ pub(crate) async fn handle_test_map(
 
     let touched_files = source_nodes
         .iter()
-        .map(crate::graph::health::test_risk::verified_test_symbol_parts)
+        .map(crate::graph::test_risk::verified_test_symbol_parts)
         .collect::<Result<Vec<_>>>()?;
     let touched_files = unique_file_paths(touched_files.into_iter().map(|(_, file)| file));
     Ok(generic_tool_result(

@@ -18,17 +18,21 @@ use std::process::ExitCode;
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod agent_cmd;
+mod analytics_cmd;
 mod automation_cli;
 mod cli;
 mod commands;
 mod cost_cmd;
+mod display;
 mod git_cmd;
 mod global;
 mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
+mod monitor_cmd;
 mod project_cmd;
 mod remote_command;
+mod serve_cmd;
 mod sessions_cmd;
 mod status_cmd;
 mod tool_command;
@@ -38,8 +42,6 @@ mod work_cli;
 mod work_command;
 mod workflow_cli;
 mod workflow_command;
-
-pub use tracedecay::serve;
 
 use cli::*;
 use tracedecay::daemon::StderrTracingDefault;
@@ -1175,7 +1177,7 @@ async fn dispatch_runtime_command(
             // structured-row backfill sweep; one-shot CLI/hook processes never
             // do (they would drop the sweep mid-parse on exit).
             tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
-            hotpath::future!(serve::run_serve(path, timings), label = "cli.serve.run").await?;
+            hotpath::future!(serve_cmd::run_serve(path, timings), label = "cli.serve.run").await?;
         }
         Commands::Daemon { action } => {
             dispatch_daemon_command(action).await?;
@@ -1658,7 +1660,7 @@ async fn dispatch_diagnostics_command(
             commands::handle_gain(all, history, &range, json).await?;
         }
         Commands::Monitor => {
-            hotpath::measure_block!("cli.monitor.run", tracedecay::monitor::run())?;
+            hotpath::measure_block!("cli.monitor.run", monitor_cmd::run())?;
         }
         _ => unreachable!("non-diagnostics command passed to diagnostics dispatcher"),
     }
@@ -1678,14 +1680,14 @@ async fn dispatch_knowledge_command(
         Commands::Analytics { action } => match action {
             AnalyticsAction::Diagnostics { all, no_sync, .. } => {
                 hotpath::future!(
-                    tracedecay::analytics_bridge::run_analytics_diagnostics(all, no_sync),
+                    analytics_cmd::run_analytics_diagnostics(all, no_sync),
                     label = "cli.analytics.diagnostics"
                 )
                 .await?;
             }
             AnalyticsAction::Sync => {
                 hotpath::future!(
-                    tracedecay::analytics_bridge::run_analytics_sync(),
+                    analytics_cmd::run_analytics_sync(),
                     label = "cli.analytics.sync"
                 )
                 .await?;

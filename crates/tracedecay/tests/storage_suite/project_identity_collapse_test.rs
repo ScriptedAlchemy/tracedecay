@@ -17,9 +17,11 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::project_registry::ReapEntryKind;
-use tracedecay::storage::{default_profile_project_id, repository_identity_path, resolve_layout};
+use tracedecay_global_db::ReapEntryKind;
 use tracedecay_global_db::StoreInstanceUpsert;
+use tracedecay_runtime_core::storage::{
+    default_profile_project_id, repository_identity_path, resolve_layout,
+};
 
 fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -195,7 +197,7 @@ async fn ephemeral_project_root_cannot_enter_a_durable_registry() {
     });
     assert_eq!(
         reason_code,
-        tracedecay::project_registry::EPHEMERAL_PROJECT_ROOT_REASON_CODE,
+        tracedecay_global_db::EPHEMERAL_PROJECT_ROOT_REASON_CODE,
         "the refusal must name the ephemeral-root policy, not a generic failure"
     );
     assert!(

@@ -1316,7 +1316,7 @@ pub struct SemanticEvaluationPublicationResultV1 {
     pub project_id: String,
     pub profile_digest: String,
     pub report_digest: String,
-    pub report: tracedecay_search_eval::DirectEvaluationReportV1,
+    pub report: serde_json::Value,
     pub source_generation: String,
     pub snapshot_digest: String,
 }
@@ -1498,36 +1498,35 @@ mod tests {
             project_id: "project-1".to_owned(),
             profile_digest: format!("sha256:{}", "1".repeat(64)),
             report_digest: format!("sha256:{}", "2".repeat(64)),
-            report: tracedecay_search_eval::DirectEvaluationReportV1 {
-                command: "compare".to_owned(),
-                status: tracedecay_search_eval::DirectEvaluationStatusV1::Pass,
-                workload_digest: format!("sha256:{}", "3".repeat(64)),
-                corpus_digest: format!("sha256:{}", "4".repeat(64)),
-                fixture_source_repository_commit: "fixture-commit".to_owned(),
-                fixture_source_repository_tree: "fixture-tree".to_owned(),
-                execution_contract: tracedecay_search_eval::EvaluationExecutionContractV1 {
-                    exact_file_count: 0,
-                    exact_corpus_bytes: 0,
-                    exact_eligible_chunks_current: 0,
-                    exact_eligible_chunks_10x: 0,
-                    exact_query_count: 0,
-                    model_revision: "model.serialization-test.v1".to_owned(),
-                    projection_revision: "projection.serialization-test.v1".to_owned(),
-                    fusion_revision: "fusion.serialization-test.v1".to_owned(),
-                    runtime_revision: "runtime.serialization-test.v1".to_owned(),
-                    cache_state: "empty".to_owned(),
-                    concurrency:
-                        tracedecay_search_eval::candidate_output::EvaluationConcurrencyContractV1 {
-                            query_workers: 1,
-                            projection_workers: 1,
-                            query_execution: "serial".to_owned(),
-                        },
+            report: serde_json::json!({
+                "command": "compare",
+                "status": "pass",
+                "workload_digest": format!("sha256:{}", "3".repeat(64)),
+                "corpus_digest": format!("sha256:{}", "4".repeat(64)),
+                "fixture_source_repository_commit": "fixture-commit",
+                "fixture_source_repository_tree": "fixture-tree",
+                "execution_contract": {
+                    "exact_file_count": 0,
+                    "exact_corpus_bytes": 0,
+                    "exact_eligible_chunks_current": 0,
+                    "exact_eligible_chunks_10x": 0,
+                    "exact_query_count": 0,
+                    "model_revision": "model.serialization-test.v1",
+                    "projection_revision": "projection.serialization-test.v1",
+                    "fusion_revision": "fusion.serialization-test.v1",
+                    "runtime_revision": "runtime.serialization-test.v1",
+                    "cache_state": "empty",
+                    "concurrency": {
+                        "query_workers": 1,
+                        "projection_workers": 1,
+                        "query_execution": "serial"
+                    }
                 },
-                profile_material_digests: std::collections::BTreeMap::new(),
-                raw_output_digest: format!("sha256:{}", "6".repeat(64)),
-                raw_outputs: Vec::new(),
-                profiles: Vec::new(),
-            },
+                "profile_material_digests": {},
+                "raw_output_digest": format!("sha256:{}", "6".repeat(64)),
+                "raw_outputs": [],
+                "profiles": []
+            }),
             source_generation: "generation-1".to_owned(),
             snapshot_digest: format!("sha256:{}", "5".repeat(64)),
         };
