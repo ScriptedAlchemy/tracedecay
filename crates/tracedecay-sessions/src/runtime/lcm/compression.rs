@@ -37,6 +37,7 @@ struct IngestedActiveMessages {
 /// Per-message state resolved before the ingest loop so the loop does not
 /// issue one round trip per message.
 struct PreparedActiveMessage {
+    source_index: usize,
     role: String,
     original_content: Value,
     storage_text: String,
@@ -1832,13 +1833,15 @@ async fn ingest_active_messages(
         async {
             let mut replay_messages = Vec::with_capacity(messages.len());
             let mut rewritten_message_ids = HashSet::new();
-            for (message, prepared) in messages.iter().zip(prepared) {
+            for prepared in prepared {
                 let PreparedActiveMessage {
+                    source_index,
                     role,
                     original_content,
                     storage_text,
                     message_id,
                 } = prepared;
+                let message = &messages[source_index];
                 let Some(message_id) = message_id else {
                     let mut replay = message.clone();
                     replay["role"] = Value::String(role);
@@ -1959,6 +1962,7 @@ async fn prepare_active_messages(
     compiled_ignore_patterns: &security::CompiledPatternSet,
 ) -> Result<Vec<PreparedActiveMessage>, LcmError> {
     struct DraftActiveMessage {
+        source_index: usize,
         role: String,
         original_content: Value,
         storage_text: String,
@@ -1969,12 +1973,11 @@ async fn prepare_active_messages(
 
     let mut drafts = Vec::with_capacity(messages.len());
     let mut lookup_store_ids = Vec::new();
-    for message in messages {
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("user")
-            .to_string();
+    for (source_index, message) in messages.iter().enumerate() {
+        let Some(role) = active_message_role(message) else {
+            continue;
+        };
+        let role = role.to_string();
         let original_content = message_content_value(message);
         let storage_text = message_storage_text(&original_content);
         let search_text = crate::lcm::lcm_message_visible_text(message);
@@ -2004,6 +2007,7 @@ async fn prepare_active_messages(
             lookup_store_ids.push(store_id);
         }
         drafts.push(DraftActiveMessage {
+            source_index,
             role,
             original_content,
             storage_text,
@@ -2016,7 +2020,7 @@ async fn prepare_active_messages(
     let stored_message_ids =
         message_ids_for_store_ids(conn, provider, session_id, &lookup_store_ids).await?;
     let mut prepared = Vec::with_capacity(drafts.len());
-    for (idx, draft) in drafts.into_iter().enumerate() {
+    for draft in drafts {
         let message_id = (!draft.replay_as_is).then(|| {
             draft
                 .explicit_message_id
@@ -2029,13 +2033,14 @@ async fn prepare_active_messages(
                     deterministic_message_id(
                         provider,
                         session_id,
-                        idx,
+                        draft.source_index,
                         &draft.role,
                         &draft.storage_text,
                     )
                 })
         });
         prepared.push(PreparedActiveMessage {
+            source_index: draft.source_index,
             role: draft.role,
             original_content: draft.original_content,
             storage_text: draft.storage_text,
@@ -2073,6 +2078,15 @@ async fn message_ids_for_store_ids(
         }
     }
     Ok(message_ids)
+}
+
+/// Stored LCM rows require a real role. Missing or empty role is a typed skip
+/// — never a fabricated `"user"` that would persist and enter identity hashes.
+fn active_message_role(message: &Value) -> Option<&str> {
+    message
+        .get("role")
+        .and_then(Value::as_str)
+        .filter(|role| !role.is_empty())
 }
 
 fn message_content_value(message: &Value) -> Value {
@@ -2376,6 +2390,19 @@ fn debt_from_db(
 mod authority_tests {
     use super::*;
     use crate::runtime::lcm::LcmSummarizerMode;
+
+    #[test]
+    fn missing_or_empty_role_is_a_typed_skip() {
+        assert_eq!(active_message_role(&json!({"content": "hi"})), None);
+        assert_eq!(
+            active_message_role(&json!({"role": "", "content": "hi"})),
+            None
+        );
+        assert_eq!(
+            active_message_role(&json!({"role": "assistant", "content": "hi"})),
+            Some("assistant")
+        );
+    }
 
     #[test]
     fn replay_budget_matches_policy_for_object_with_text() {
