@@ -57,7 +57,6 @@ pub mod git_watch;
 pub(crate) mod logging;
 pub mod mcp_admission;
 pub(crate) mod ports;
-pub(crate) mod runtime_telemetry;
 pub mod semantic_activation_reconciler;
 pub(crate) mod semantic_code;
 pub mod semantic_evaluation;
