@@ -62,7 +62,17 @@ pub(super) async fn serve_projectless_client(
             break;
         };
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => projectless_response(&request, &connection, store_administration).await,
+            // Heap-allocate the per-request future: inlined it dominates this
+            // state machine's poll frame (measured 15.8MiB on the daemon's
+            // 16MiB worker stacks, which overflowed on the first request).
+            Ok(request) => {
+                Box::pin(projectless_response(
+                    &request,
+                    &connection,
+                    store_administration,
+                ))
+                .await
+            }
             Err(e) => Some(JsonRpcResponse::error(
                 json!(null),
                 ErrorCode::ParseError,
@@ -102,12 +112,14 @@ async fn projectless_response(
             }),
         )),
         "tools/call" => Some(
-            projectless_tools_call_response_with_connection(
+            // Boxed for future layout: the tool dispatch below embeds the
+            // application-layer tool futures and measures in the megabytes.
+            Box::pin(projectless_tools_call_response_with_connection(
                 id,
                 request.params.as_ref(),
                 connection,
                 store_administration,
-            )
+            ))
             .await,
         ),
         "ping" | "logging/setLevel" => Some(JsonRpcResponse::success(id, json!({}))),
@@ -265,7 +277,9 @@ async fn projectless_tools_call_response_with_connection(
                 user_session_db.clone(),
             )
             .await;
-        return match crate::mcp::tools::handle_projectless_hook_runtime(
+        // Boxed for future layout: the hook-runtime handler inlines the
+        // session admission machinery and dominates this poll frame.
+        return match Box::pin(crate::mcp::tools::handle_projectless_hook_runtime(
             arguments.clone(),
             &connection.client_identity.profile_root,
             session_runtime_registry,
@@ -274,7 +288,7 @@ async fn projectless_tools_call_response_with_connection(
                 .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
                 .with_registered_databases(None, Some(&user_session_db)),
             host_admission_broker,
-        )
+        ))
         .await
         {
             Ok(result) if crate::mcp::server::tool_result_has_semantic_error(&result) => {
@@ -314,12 +328,13 @@ async fn projectless_tools_call_response_with_connection(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        return match crate::mcp::tools::handle_projectless_admin_cli(
+        // Boxed for future layout, like the hook-runtime handler above.
+        return match Box::pin(crate::mcp::tools::handle_projectless_admin_cli(
             arguments,
             &global_db,
             tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
             &connection.client_identity.profile_root,
-        )
+        ))
         .await
         {
             Ok(result) => JsonRpcResponse::success(id, result.value),
@@ -327,14 +342,16 @@ async fn projectless_tools_call_response_with_connection(
         };
     }
     if let Some(operation) = crate::mcp::tools::retained_mcp_operation(tool_name, &arguments) {
-        return projectless_profile_retained_response(
+        // Boxed for future layout: the retained dispatch embeds the LCM and
+        // memory tool futures (measured ~4MiB inlined).
+        return Box::pin(projectless_profile_retained_response(
             id,
             tool_name,
             operation,
             arguments,
             connection,
             store_administration,
-        )
+        ))
         .await;
     }
     JsonRpcResponse::error(
@@ -371,11 +388,12 @@ async fn projectless_profile_retained_response(
             "projectless retained dispatch requires an explicit user scope".to_string(),
         );
     }
+    // Boxed for future layout: the replay await alone measures ~2MiB inlined.
     if is_lcm
-        && let Err(error) = await_user_profile_host_admission_replay_for_identity(
+        && let Err(error) = Box::pin(await_user_profile_host_admission_replay_for_identity(
             store_administration,
             &connection.client_identity,
-        )
+        ))
         .await
     {
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
@@ -386,7 +404,9 @@ async fn projectless_profile_retained_response(
             return crate::mcp::server::tool_error_response(id, tool_name, &error);
         }
     };
-    let result = crate::mcp::tools::execute_profile_retained_mcp_tool(
+    // Boxed for future layout: this is the largest inlined layer of the
+    // projectless request path.
+    let result = Box::pin(crate::mcp::tools::execute_profile_retained_mcp_tool(
         operation,
         tool_name,
         arguments,
@@ -397,7 +417,7 @@ async fn projectless_profile_retained_response(
         None,
         None,
         None,
-    )
+    ))
     .await;
     match result {
         Ok(result) => JsonRpcResponse::success(id, result.value),
