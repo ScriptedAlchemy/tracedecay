@@ -27,6 +27,7 @@ use tracedecay_application::feedback::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
     FeedbackDiagnosticsReadRequestV1,
 };
+use tracedecay_application::retrieval::PrimitiveRequest;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_application::{ApplicationEnvelope, IdempotencyKey};
 use tracedecay_application::{
@@ -66,7 +67,6 @@ use tracedecay_usecases::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
     OperationKind, OperationStreamConfig,
 };
-use tracedecay_application::retrieval::PrimitiveRequest;
 use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 static DASHBOARD_CONFIGURATION_TEST_LOCK: tokio::sync::Mutex<()> =

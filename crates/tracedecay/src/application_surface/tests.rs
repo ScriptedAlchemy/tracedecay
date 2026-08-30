@@ -34,16 +34,16 @@ use super::{
     resolve_application_binding, resolve_application_surface_dispatch,
     resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
-use tracedecay_daemon_protocol::RequestedOutputFormat;
+use tracedecay_application::context_scout::ContextScoutAddressV1;
 use tracedecay_application::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1,
     FeedbackSseLifecycleV1,
 };
+use tracedecay_application::retrieval::PrimitiveRequest;
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_usecases::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
 };
-use tracedecay_application::context_scout::ContextScoutAddressV1;
-use tracedecay_application::retrieval::PrimitiveRequest;
 use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 fn operation_context(project_id: &ProjectId) -> RequestContext {
@@ -1312,11 +1312,7 @@ fn sse_item_maps_to_content_free_delivery_lifecycle() {
     let event = StreamEvent::item(7, "content-is-not-observed").expect("stream item");
     assert_eq!(
         feedback_sse_stream_event(&event),
-        Some((
-            FeedbackSseLifecycleV1::EventDelivered,
-            1,
-            false,
-        ))
+        Some((FeedbackSseLifecycleV1::EventDelivered, 1, false,))
     );
 }
 

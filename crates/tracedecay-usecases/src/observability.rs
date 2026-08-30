@@ -101,9 +101,8 @@ use tracedecay_application::{
 use tracedecay_domain::CoverageStateV1;
 
 use crate::feedback::observations::{
-    FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1,
-    FeedbackSystemMetricKindV1, FeedbackSystemMetricUnavailableReasonV1,
-    FeedbackSystemMetricUnitV1,
+    FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1, FeedbackSystemMetricKindV1,
+    FeedbackSystemMetricUnavailableReasonV1, FeedbackSystemMetricUnitV1,
 };
 use tracedecay_application::feedback::observations::FeedbackCoverageV1;
 

@@ -116,10 +116,9 @@ fn semantic_stage_maintains_generation_hnsw_index_across_reopen() {
         ))
     ))
     .unwrap();
-    let vector_property = semantic_vector_native::vector_property(
-        plan.semantic_generation_id.as_digest().as_str(),
-    )
-    .unwrap();
+    let vector_property =
+        semantic_vector_native::vector_property(plan.semantic_generation_id.as_digest().as_str())
+            .unwrap();
     let index_request = |namespace: GraphNamespace| GraphVectorIndexRequest {
         namespace,
         projection: projection.clone(),

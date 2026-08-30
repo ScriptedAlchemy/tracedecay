@@ -7,11 +7,11 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::RequestId;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use crate::RequestId;
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

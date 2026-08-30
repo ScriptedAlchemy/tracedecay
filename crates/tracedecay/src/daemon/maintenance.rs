@@ -21,8 +21,8 @@ use tracedecay_application::{
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use super::branch_admin::StoreAdministration;
-use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
 
 pub(super) mod generation;
 

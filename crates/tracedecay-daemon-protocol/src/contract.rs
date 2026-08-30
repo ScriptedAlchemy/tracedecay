@@ -1721,11 +1721,13 @@ impl DaemonInvocationRequest {
         }
     }
 
+    #[must_use]
     pub fn with_delivery_route(mut self, route: FeedbackDeliveryRouteV1) -> Self {
         self.delivery_route = Some(route);
         self
     }
 
+    #[must_use]
     pub fn with_resolved_scope(mut self, scope: Option<ResolvedScope>) -> Self {
         match &mut self.payload {
             DaemonInvocationPayload::FeedbackGet { resolved_scope, .. }

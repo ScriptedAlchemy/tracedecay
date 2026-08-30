@@ -6,11 +6,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::context_scout::ContextScoutDeliveryOutcomeV1;
+use tracedecay_application::feedback::observations::{
+    FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
+};
 use tracedecay_application::feedback::{
     FeedbackRuntimeStatePort, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
 };
-use tracedecay_application::context_scout::ContextScoutDeliveryOutcomeV1;
 use tracedecay_application::{
     ApplicationProblem, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, SafeDiagnostic, now_micros,
@@ -58,9 +61,6 @@ use tracedecay_usecases::delivery::{
 };
 use tracedecay_usecases::feedback::concrete::FeedbackRuntime;
 use tracedecay_usecases::feedback::observations::FeedbackObservationEmitterV1;
-use tracedecay_application::feedback::observations::{
-    FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
-};
 use tracedecay_usecases::feedback::{
     FeedbackCycleInvocation, FeedbackCycleLspInput, FeedbackCycleRuntime,
     ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
@@ -80,8 +80,8 @@ use crate::agents::context_scout_ports::{
     ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
 };
 use crate::agents::context_scout_v2::{
-    ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1,
-    ContextScoutServiceStateV1, ContextScoutTriggerV1,
+    ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1, ContextScoutServiceStateV1,
+    ContextScoutTriggerV1,
 };
 use crate::daemon::context_scout_lifecycle::{
     AuthorityRegistrationV1, register_context_scout_lifecycle_authority,

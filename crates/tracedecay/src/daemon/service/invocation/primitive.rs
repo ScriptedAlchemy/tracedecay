@@ -915,20 +915,12 @@ async fn reconcile_context_scout_configuration(
         .map_err(|_| ContextScoutActivationReconciliationError::ObservationUnavailable)
 }
 
-const fn context_scout_store_outcome(
-    outcome: ContextScoutDurableStoreOutcomeV1,
-) -> &'static str {
+const fn context_scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1) -> &'static str {
     match outcome {
         ContextScoutDurableStoreOutcomeV1::Stored => "stored",
-        ContextScoutDurableStoreOutcomeV1::Duplicate => {
-            "duplicate"
-        }
-        ContextScoutDurableStoreOutcomeV1::Superseded => {
-            "superseded"
-        }
-        ContextScoutDurableStoreOutcomeV1::Unavailable => {
-            "unavailable"
-        }
+        ContextScoutDurableStoreOutcomeV1::Duplicate => "duplicate",
+        ContextScoutDurableStoreOutcomeV1::Superseded => "superseded",
+        ContextScoutDurableStoreOutcomeV1::Unavailable => "unavailable",
     }
 }
 

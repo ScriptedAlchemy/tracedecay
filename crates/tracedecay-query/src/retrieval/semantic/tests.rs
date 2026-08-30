@@ -2132,12 +2132,11 @@ fn ann_candidates_are_exact_rescored_into_the_flat_scans_top_k() {
     let flat_vectors = FakeVectorReadPort::new(&flat_request, ann_fixture_rows(&flat_request));
     let flat_control = FixedExecutionControl::default();
     let flat = SemanticCodeRetriever::new(&flat_embedder, &flat_vectors, &flat_control);
-    let RetrieverOutcome::Complete(flat_batch) =
-        Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
-            &flat, &flat_request,
-        )
-        .expect("flat retrieval succeeds")
-    else {
+    let RetrieverOutcome::Complete(flat_batch) = Retriever::<
+        SemanticRetrievalRequestV1<'_>,
+        CodeSemanticEvidenceV1,
+    >::retrieve(&flat, &flat_request)
+    .expect("flat retrieval succeeds") else {
         panic!("expected a complete flat batch");
     };
 
@@ -2149,18 +2148,20 @@ fn ann_candidates_are_exact_rescored_into_the_flat_scans_top_k() {
     vectors.ann = Some(FakeAnnBehavior::CandidateIndices(vec![1, 3, 0, 2]));
     let control = FixedExecutionControl::default();
     let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
-    let RetrieverOutcome::Complete(batch) =
-        Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
-            &retriever,
-            &ann_request,
-        )
-        .expect("ann retrieval succeeds")
-    else {
+    let RetrieverOutcome::Complete(batch) = Retriever::<
+        SemanticRetrievalRequestV1<'_>,
+        CodeSemanticEvidenceV1,
+    >::retrieve(&retriever, &ann_request)
+    .expect("ann retrieval succeeds") else {
         panic!("expected a complete ann batch");
     };
 
     assert_eq!(vectors.ann_calls.get(), 1);
-    assert_eq!(vectors.scans.get(), 0, "no flat scan on the served ann path");
+    assert_eq!(
+        vectors.scans.get(),
+        0,
+        "no flat scan on the served ann path"
+    );
 
     // Top-k identity: same occurrences, same order, bit-identical scores.
     assert_eq!(
@@ -2175,23 +2176,20 @@ fn ann_candidates_are_exact_rescored_into_the_flat_scans_top_k() {
         batch
             .candidates
             .iter()
-            .map(|candidate| (
-                candidate.source_occurrence_id.as_str(),
-                candidate.raw_score
-            ))
+            .map(|candidate| (candidate.source_occurrence_id.as_str(), candidate.raw_score))
             .collect::<Vec<_>>(),
         flat_batch
             .candidates
             .iter()
-            .map(|candidate| (
-                candidate.source_occurrence_id.as_str(),
-                candidate.raw_score
-            ))
+            .map(|candidate| (candidate.source_occurrence_id.as_str(), candidate.raw_score))
             .collect::<Vec<_>>(),
         "ann exact rescore must publish the flat scan's exact scores"
     );
     for (occurrence, evidence) in &batch.evidence_by_occurrence {
-        assert_eq!(evidence.search_kind, SemanticSearchKindV1::AnnHnswExactRescore);
+        assert_eq!(
+            evidence.search_kind,
+            SemanticSearchKindV1::AnnHnswExactRescore
+        );
         let flat_evidence = flat_batch
             .evidence_by_occurrence
             .get(occurrence)
@@ -2233,12 +2231,11 @@ fn ann_unavailability_falls_back_to_the_exact_flat_scan() {
         vectors.ann = Some(FakeAnnBehavior::Unavailable(state));
         let control = FixedExecutionControl::default();
         let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
-        let RetrieverOutcome::Complete(batch) =
-            Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
-                &retriever, &request,
-            )
-            .expect("fallback retrieval succeeds")
-        else {
+        let RetrieverOutcome::Complete(batch) = Retriever::<
+            SemanticRetrievalRequestV1<'_>,
+            CodeSemanticEvidenceV1,
+        >::retrieve(&retriever, &request)
+        .expect("fallback retrieval succeeds") else {
             panic!("expected a complete fallback batch for {state:?}");
         };
         assert_eq!(vectors.ann_calls.get(), 1, "index consulted for {state:?}");
@@ -2278,7 +2275,11 @@ fn ann_candidate_overrun_is_a_contract_error() {
         .retrieve_semantic(&request)
         .expect_err("an over-limit candidate set is a port contract violation");
     assert!(matches!(error, RetrievalPortError::Contract(_)));
-    assert_eq!(vectors.scans.get(), 0, "contract violations must not fall back");
+    assert_eq!(
+        vectors.scans.get(),
+        0,
+        "contract violations must not fall back"
+    );
 }
 
 #[test]
@@ -2295,5 +2296,9 @@ fn ann_duplicate_occurrences_are_a_contract_error() {
         .retrieve_semantic(&request)
         .expect_err("duplicate ann occurrences are a port contract violation");
     assert!(matches!(error, RetrievalPortError::Contract(_)));
-    assert_eq!(vectors.scans.get(), 0, "contract violations must not fall back");
+    assert_eq!(
+        vectors.scans.get(),
+        0,
+        "contract violations must not fall back"
+    );
 }

@@ -1497,6 +1497,77 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
     restarted.shutdown().await;
 }
 
+/// A restart over a dirty checkout must seat the retained complete generation
+/// before the successor rebuild finishes. Waiting for that rebuild left remount
+/// serving empty (`last_reconcile_micros` unset, no seated publication) while
+/// a sealed artifact was already on disk.
+#[tokio::test]
+async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let first = CodeIndexSchedulerRegistryV1::new(1);
+    first
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let sealed = wait_for_live_complete_generation(&first, fixture.path()).await;
+    let sealed_id = sealed.generation().manifest().generation_id.clone();
+    first.shutdown().await;
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+
+    let restarted = CodeIndexSchedulerRegistryV1::new(1);
+    restarted
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("remount worktree over a dirty checkout");
+    let seated = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = restarted
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+            {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("dirty remount must seat the retained generation before the successor rebuild");
+    assert_eq!(
+        seated.generation().manifest().generation_id,
+        sealed_id,
+        "the empty serving slot takes the retained generation, not the in-flight rebuild"
+    );
+
+    let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(latest) = restarted
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+                && latest.generation().manifest().generation_id != sealed_id
+            {
+                break latest.generation().manifest().generation_id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("dirty remount must still publish the successor generation");
+    assert_ne!(rebuilt, sealed_id, "the dirty checkout must rebuild");
+    restarted.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -1822,7 +1893,7 @@ fn duplicate_save_and_overflow_equals_clean_scan() {
         hinted_publish.snapshot_content_identity,
         clean_publish.snapshot_content_identity
     );
-    assert_eq!(hinted_publish._lane_digest, clean_publish._lane_digest);
+    assert_eq!(hinted_publish.lane_digest, clean_publish.lane_digest);
     assert!(hinted_publish.overflow_reconciled);
 }
 
@@ -1875,7 +1946,7 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         second_publish.snapshot_content_identity
     );
     assert_ne!(
-        first_publish._file_occurrence_ids, second_publish._file_occurrence_ids,
+        first_publish.file_occurrence_ids, second_publish.file_occurrence_ids,
         "shared artifacts must never alias worktree occurrence identity"
     );
     assert_ne!(first_publish.generation_id, second_publish.generation_id);
@@ -2312,7 +2383,7 @@ fn superseding_notifies_publish_only_latest_content() {
         superseded.snapshot_content_identity, expected.snapshot_content_identity,
         "fair supersession must publish only the latest reconciled content"
     );
-    assert_eq!(superseded._lane_digest, expected._lane_digest);
+    assert_eq!(superseded.lane_digest, expected.lane_digest);
     assert!(superseded.overflow_reconciled);
 }
 
@@ -7927,7 +7998,7 @@ fn rename_reconciliation_matches_clean_scan() {
         "rename reconciliation must capture the same final tree as a clean scan"
     );
     assert_eq!(
-        renamed._lane_digest, clean._lane_digest,
+        renamed.lane_digest, clean.lane_digest,
         "rename reconciliation must publish byte-identical code lanes"
     );
     let latest = incremental.latest_complete().expect("renamed generation");
@@ -7991,7 +8062,7 @@ fn index_only_reconciliation_matches_clean_scan() {
         "staged-only reconciliation must capture the same final tree as a clean scan"
     );
     assert_eq!(
-        staged._lane_digest, clean._lane_digest,
+        staged.lane_digest, clean.lane_digest,
         "staged-only reconciliation must publish byte-identical code lanes"
     );
 }
@@ -8039,7 +8110,7 @@ fn deleting_a_file_tombstones_its_prior_chunks() {
     );
     assert!(
         !after
-            ._file_occurrence_ids
+            .file_occurrence_ids
             .iter()
             .any(|occurrence| gone_occurrences.contains(occurrence)),
         "the deleted file's occurrence must be absent from the new generation"
@@ -8321,7 +8392,7 @@ fn reparse_matches_full_parse_chunks() {
         "identical final content yields identical snapshot identity"
     );
     assert_eq!(
-        second._lane_digest, full_publish._lane_digest,
+        second.lane_digest, full_publish.lane_digest,
         "sequential-edit and fresh-store reconcile produce byte-identical chunk lanes"
     );
 }
@@ -9660,7 +9731,7 @@ fn real_branch_switch_reconcile_matches_clean_scan() {
         switched.snapshot_content_identity,
         clean_publish.snapshot_content_identity
     );
-    assert_eq!(switched._lane_digest, clean_publish._lane_digest);
+    assert_eq!(switched.lane_digest, clean_publish.lane_digest);
     assert_eq!(
         main_snapshot.reference.as_ref().map(RefId::as_str),
         Some("refs/heads/main")
@@ -9736,7 +9807,7 @@ fn real_rebase_reconcile_matches_clean_scan() {
         rebased.snapshot_content_identity,
         clean_publish.snapshot_content_identity
     );
-    assert_eq!(rebased._lane_digest, clean_publish._lane_digest);
+    assert_eq!(rebased.lane_digest, clean_publish.lane_digest);
     assert_eq!(
         rebased_generation
             .generation()

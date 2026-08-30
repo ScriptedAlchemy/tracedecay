@@ -2829,6 +2829,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
+                let serving_empty = worker_serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_none();
                 let retained_text_metadata =
                     retained_text.as_ref().map(|text| text.metadata().clone());
                 let shutting_down = Arc::clone(&worker_shutting_down);
@@ -2850,8 +2854,22 @@ impl CodeIndexSchedulerRegistryV1 {
                         {
                             return Ok(outcome);
                         }
+                        // An empty serving slot must publish the retained
+                        // complete generation before a dirty-tree rebuild.
+                        // Restart remounts otherwise stay warming through the
+                        // successor extract with no seated generation.
+                        if serving_empty
+                            && text_serving_ready
+                            && let Some(outcome) =
+                                scheduler.seat_retained_generation_on_empty_serving()?
+                        {
+                            return Ok(outcome);
+                        }
                         if let Some(metadata) = retained_text_metadata {
-                            match scheduler.reconcile_retained_text_generation(&metadata) {
+                            match scheduler.reconcile_retained_text_generation_with(
+                                &metadata,
+                                !graph_activation_enabled,
+                            ) {
                                 Ok(Some(outcome)) => Ok(outcome),
                                 Ok(None) if graph_activation_enabled => {
                                     scheduler.activate_or_reconcile()
@@ -3789,7 +3807,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 &prepared_redundancy,
                 false,
             );
-            return Err(CodeIndexSchedulerErrorV1::Identity(error.to_string()));
+            return Err(CodeIndexSchedulerErrorV1::Identity(error.clone()));
         }
         tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
             project_root.clone(),

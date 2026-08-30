@@ -274,7 +274,8 @@ pub const RECONCILE_CAPACITY_RETRY_FLOOR: Duration = if cfg!(any(test, feature =
 } else {
     Duration::from_secs(2)
 };
-pub const RECONCILE_CAPACITY_RETRY_CEILING: Duration = if cfg!(any(test, feature = "test-helpers")) {
+pub const RECONCILE_CAPACITY_RETRY_CEILING: Duration = if cfg!(any(test, feature = "test-helpers"))
+{
     Duration::from_millis(320)
 } else {
     Duration::from_mins(1)
