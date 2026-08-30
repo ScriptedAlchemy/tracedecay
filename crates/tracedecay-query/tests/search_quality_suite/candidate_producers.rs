@@ -1933,6 +1933,14 @@ fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation
         .query_row("SELECT COUNT(*) FROM term_postings", [], |row| row.get(0))
         .expect("count refused term rows");
     assert_eq!(refused_term_rows, 0);
+    let refused_exact_rows: i64 = rusqlite::Connection::open(&refused_path)
+        .expect("open refused posting plans artifact for exact rows")
+        .query_row("SELECT COUNT(*) FROM exact_postings", [], |row| row.get(0))
+        .expect("count refused exact rows");
+    assert_eq!(
+        refused_exact_rows, 0,
+        "memory refusal must not write exact postings"
+    );
     drop(refused);
 
     let interrupted_path = directory.path().join("posting-plans-interrupted.sqlite");
