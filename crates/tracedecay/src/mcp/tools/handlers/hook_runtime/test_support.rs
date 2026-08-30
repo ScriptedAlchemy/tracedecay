@@ -1,5 +1,23 @@
 use serde_json::{Value, json};
-use tracedecay_domain::UtcMicros;
+use crate::agents::context_scout_v2::ContextScoutEvidenceEnvelopeExt;
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+    ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
+    ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
+    ContextScoutEvidenceSourceReceiptV1, ContextScoutLeaseV1, ContextScoutModelOutcomeV1,
+    ContextScoutRedactionReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
+    ContextScoutWorkV1,
+};
+use tracedecay_application::{
+    AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
+    EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
+    TemporalState,
+};
+use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
+use tracedecay_domain::{
+    CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId, TemporalModeV1,
+    UtcMicros,
+};
 
 pub(super) fn admission_test_envelope(
     event_id: u8,
@@ -48,28 +66,7 @@ pub(super) fn admission_test_binding(epoch: u64) -> tracedecay_hooks::HookScopeB
     }
 }
 
-pub(super) fn retained_claim(
-    id: u8,
-) -> crate::agents::context_scout_v2::ContextScoutDurableClaimV1 {
-    use crate::agents::context_scout_v2::{
-        ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
-        ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
-        ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
-        ContextScoutEvidenceSourceReceiptV1, ContextScoutLeaseV1, ContextScoutModelRunOutcomeV1,
-        ContextScoutRedactionReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
-        ContextScoutWorkV1,
-    };
-    use tracedecay_application::{
-        AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass,
-        EvidenceCoverage, EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope,
-        RetrieverContributionState, TemporalState,
-    };
-    use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
-    use tracedecay_domain::{
-        CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId,
-        TemporalModeV1,
-    };
-
+pub(super) fn retained_claim(id: u8) -> ContextScoutDurableClaimV1 {
     fn typed_id<T>(value: &str) -> T
     where
         T: TryFrom<String>,
@@ -189,7 +186,7 @@ pub(super) fn retained_claim(
                 input_watermark,
             },
             route: ContextScoutRouteV1::Deterministic,
-            model_outcome: ContextScoutModelRunOutcomeV1::NotRequested,
+            model_outcome: ContextScoutModelOutcomeV1::NotRequested,
             model_receipt: None,
             envelope,
         },
@@ -253,7 +250,7 @@ pub(super) fn hermes_turn_completed_event(session_id: &str, watermark: &str) -> 
 }
 
 pub(super) fn valid_hermes_terminal_receipt_payload(session_id: &str, watermark: &str) -> Vec<u8> {
-    let plan = crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt {
+    let plan = tracedecay_mcp::hook_events::HookEventPlan::RecordTerminalReceipt {
         route: Some(tracedecay_hooks::core_events::HookRouteMetadata {
             session_id: Some(session_id.to_string()),
             thread_id: None,
@@ -269,5 +266,5 @@ pub(super) fn valid_hermes_terminal_receipt_payload(session_id: &str, watermark:
             transcript_watermark: Some(watermark.to_string()),
         },
     };
-    crate::mcp::hook_events::encode_durable_hook_event_plan(&plan).unwrap()
+    tracedecay_mcp::hook_events::encode_durable_hook_event_plan(&plan).unwrap()
 }

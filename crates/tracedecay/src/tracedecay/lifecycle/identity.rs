@@ -390,8 +390,14 @@ impl TraceDecay {
     ) -> Result<()> {
         let profile_root = open_options.resolved_profile_root()?;
         let selected_id = selected.identity.project_id.as_deref();
-        let (candidates, _, _) =
+        let (candidates, _, candidates_match_exact_root) =
             storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
+        // Sibling worktree manifests share a git common dir but name a
+        // different checkout path. They are not a second identity for this
+        // exact root and must not fail a registered exact-root resolution.
+        if !candidates_match_exact_root {
+            return Ok(());
+        }
         let Some(legacy) = candidates
             .into_iter()
             .find(|layout| layout.graph_db_path.is_file())

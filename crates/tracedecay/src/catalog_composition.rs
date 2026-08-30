@@ -351,13 +351,13 @@ fn unique_routing_fixture_utterance(
 mod tests {
     use super::*;
     use crate::mcp::tools::{
-        ToolRegistryMode, default_catalog_discovery_authority,
-        get_catalog_filtered_tool_definitions_with_budget, project_catalog_discovery_scope,
+        default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
     };
     use tracedecay_application::handlers::CanonicalApplicationDispatcher;
     use tracedecay_application::{
         ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
     };
+    use tracedecay_mcp::{ToolRegistryMode, project_catalog_discovery_scope};
     use tracedecay_tool_catalog::SurfaceOperationName;
 
     // Growth tripwire only, not an MCP client or protocol limit. The complete
@@ -637,7 +637,7 @@ mod tests {
 
         let definitions = get_catalog_filtered_tool_definitions_with_budget(
             0,
-            crate::mcp::tools::explore_call_budget(0),
+            tracedecay_mcp::explore_call_budget(0),
             &default_profile_id,
             &default_catalog_discovery_authority().expect("default discovery authority"),
             &project_catalog_discovery_scope(),

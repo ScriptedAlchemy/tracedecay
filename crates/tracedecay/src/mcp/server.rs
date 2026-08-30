@@ -12,13 +12,15 @@ use serde_json::{Value, json};
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
-use crate::mcp::response_handles::{cleanup_expired_response_handles, response_handle_stats_json};
 use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
+use tracedecay_mcp::response_handles::{
+    cleanup_expired_response_handles, response_handle_stats_json,
+};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionStatus, is_wire_oversized_io_error,
@@ -27,14 +29,16 @@ use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
-use tracedecay_usecases::request_identity::McpConnectionIdentityAuthority;
+use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
 
-use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
-    ProjectRegistryReadPort, SessionRefreshServicePort, ToolRegistryMode,
-    default_catalog_discovery_authority, explore_call_budget, project_catalog_discovery_scope,
+    ProjectRegistryReadPort, SessionRefreshServicePort, default_catalog_discovery_authority,
 };
-use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
+use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
+use tracedecay_mcp::{
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
+    project_catalog_discovery_scope,
+};
 
 mod connection;
 mod construction;
@@ -54,7 +58,6 @@ mod routing;
 mod session_refresh;
 mod staleness;
 mod status_resource;
-mod tool_errors;
 mod workflow_index;
 
 pub(crate) use project_registry::DaemonProjectRegistryReadService;
@@ -80,7 +83,10 @@ pub(crate) use rmcp::{
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
-pub(crate) use tool_errors::*;
+pub(crate) use tracedecay_mcp::{
+    mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
+    tool_error_response, tool_result_has_semantic_error,
+};
 
 pub struct ServerStats {
     started_at: Instant,
@@ -100,7 +106,7 @@ impl ServerStats {
     }
 }
 
-use super::transport::write_wire_oversized_rejection;
+use tracedecay_mcp::transport::write_wire_oversized_rejection;
 
 /// Future returned by a [`CodeIndexHookSink`] invocation. Resolves to `true`
 /// when a mounted worktree scheduler accepted the touched paths.
@@ -652,60 +658,61 @@ impl McpServer {
         let resolver_slot = Arc::clone(&active_server_slot);
         let active_root =
             tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&retained_root);
-        let resolver: RetainedProjectServerResolver = Arc::new(move |request| {
-            let retained_servers = retained_servers.clone();
-            let resolver_slot = Arc::clone(&resolver_slot);
-            let active_root = active_root.clone();
-            Box::pin(async move {
-                let requested = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                    &request.requested_worktree_root,
-                );
-                let registered = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                    &request.registered_root,
-                );
-                let project_id = request
-                    .owner
-                    .as_ref()
-                    .map(|owner| owner.project.project_id.as_str());
-                let mut matches = Vec::new();
-                for server in &retained_servers {
-                    let graph = server.cg_snapshot().await;
-                    let root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                        graph.project_root(),
+        let resolver: RetainedProjectServerResolver =
+            install_retained_project_server_resolver(move |request| {
+                let retained_servers = retained_servers.clone();
+                let resolver_slot = Arc::clone(&resolver_slot);
+                let active_root = active_root.clone();
+                Box::pin(async move {
+                    let requested = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                        &request.requested_worktree_root,
                     );
+                    let registered =
+                        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                            &request.registered_root,
+                        );
+                    let project_id = request
+                        .owner
+                        .as_ref()
+                        .map(|owner| owner.project.project_id.as_str());
+                    let mut matches = Vec::new();
+                    for server in &retained_servers {
+                        let graph = server.cg_snapshot().await;
+                        let root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                            graph.project_root(),
+                        );
+                        let identity_matches = project_id.is_none_or(|project_id| {
+                            graph.store_layout().identity.project_id.as_deref() == Some(project_id)
+                        });
+                        if (root == requested || root == registered) && identity_matches {
+                            matches.push(Arc::clone(server));
+                        }
+                    }
+                    if matches.len() == 1 {
+                        return Ok(matches.pop());
+                    }
+                    if !matches.is_empty() {
+                        return Err(
+                            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                                "project_route_ambiguous",
+                                false,
+                                "multiple retained test servers match one registered project route",
+                            ),
+                        );
+                    }
+                    let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
+                    let Some(active) = active else {
+                        return Ok(None);
+                    };
+                    let graph = active.cg_snapshot().await;
                     let identity_matches = project_id.is_none_or(|project_id| {
                         graph.store_layout().identity.project_id.as_deref() == Some(project_id)
                     });
-                    if (root == requested || root == registered) && identity_matches {
-                        matches.push(Arc::clone(server));
-                    }
-                }
-                if matches.len() == 1 {
-                    return Ok(matches.pop());
-                }
-                if !matches.is_empty() {
-                    return Err(
-                        tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                            "project_route_ambiguous",
-                            false,
-                            "multiple retained test servers match one registered project route",
-                        ),
-                    );
-                }
-                let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
-                let Some(active) = active else {
-                    return Ok(None);
-                };
-                let graph = active.cg_snapshot().await;
-                let identity_matches = project_id.is_none_or(|project_id| {
-                    graph.store_layout().identity.project_id.as_deref() == Some(project_id)
-                });
-                Ok(
-                    ((active_root == requested || active_root == registered) && identity_matches)
-                        .then_some(active),
-                )
-            })
-        });
+                    Ok(((active_root == requested || active_root == registered)
+                        && identity_matches)
+                        .then_some(active))
+                })
+            });
         context = context.with_retained_project_server_resolver(resolver);
         let server = Self::new_with_context(context).await;
         // Registered test servers exercise real completion without consulting
@@ -805,10 +812,20 @@ impl McpServer {
             }
         };
         // Register this project in the global DB with its current tokens.
-        // A failed read must not upsert 0 as if the project saved nothing.
+        // A failed read must not upsert 0 as if the project saved nothing,
+        // and a failed write is named here instead of dissolving silently —
+        // the server still starts, since the ledger is an optional sink.
         if let Some(gdb) = accounting_db.as_ref() {
-            if let Some(persisted) = persisted_tokens_saved {
-                gdb.upsert(cg.project_root(), persisted).await;
+            if let Some(persisted) = persisted_tokens_saved
+                && let Err(error) = gdb
+                    .try_upsert_project_tokens(cg.project_root(), persisted)
+                    .await
+            {
+                tracing::warn!(
+                    project_root = %cg.project_root().display(),
+                    %error,
+                    "startup token-accounting registration failed; the global ledger misses this baseline"
+                );
             }
         } else if global_db.is_none() {
             // Name the gap where it is created. Every later savings and
@@ -1343,20 +1360,25 @@ impl McpServer {
             "approx_tokens_saved": self.tokens_saved.as_ref().map(|tokens| tokens.load(Ordering::Relaxed)),
         });
 
+        // Status stays available when the optional global ledger read fails,
+        // but the failure is reported in place of the number — an unreadable
+        // ledger is not "no global savings".
         let local_tokens_saved = self
             .tokens_saved
             .as_ref()
             .map(|tokens| tokens.load(Ordering::Relaxed));
+        let stats_accounting_db = self.accounting_db.as_ref().or(self.global_db.as_ref());
         if let Some(local) = local_tokens_saved
-            && let Some(ref gdb) = self.accounting_db
-            && let Some(global_total) = gdb.global_tokens_saved().await
+            && let Some(gdb) = stats_accounting_db
         {
-            stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
-        } else if let Some(local) = local_tokens_saved
-            && let Some(ref gdb) = self.global_db
-            && let Some(global_total) = gdb.global_tokens_saved().await
-        {
-            stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
+            match gdb.try_global_tokens_saved().await {
+                Ok(global_total) => {
+                    stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
+                }
+                Err(error) => {
+                    stats["global_tokens_saved_error"] = json!(error);
+                }
+            }
         }
 
         let cg = self.cg_snapshot().await;
@@ -1386,7 +1408,7 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 }
 
 fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
-    tracedecay_usecases::request_identity::mcp_connection_request_id(id, connection_scope)
+    tracedecay_application::request_identity::mcp_connection_request_id(id, connection_scope)
         .map(|request_id| request_id.as_str().to_owned())
 }
 

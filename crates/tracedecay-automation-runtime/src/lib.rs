@@ -63,7 +63,7 @@ pub(crate) use tracedecay_runtime_core::{
     config, db, errors, memory, privacy, runtime_identity, storage, store, worktree,
 };
 pub(crate) use tracedecay_usecases as application;
-pub(crate) use tracedecay_usecases::request_identity;
+pub(crate) use tracedecay_application::request_identity;
 
 /// Kernel-owned timestamp plus the project-runtime port historically reached
 /// as `crate::tracedecay`.

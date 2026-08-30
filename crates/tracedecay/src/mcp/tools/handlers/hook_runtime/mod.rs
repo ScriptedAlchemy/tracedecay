@@ -1,5 +1,4 @@
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -7,6 +6,7 @@ use std::sync::Arc;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::SharedHostAdmissionBroker;
+use tracedecay_mcp::ToolResult;
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 
@@ -30,7 +30,6 @@ pub(crate) use admission::{
     HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, hook_v2_pending_work_envelopes,
 };
 pub(crate) use envelope::daemon_mint_hook_v2_file_id;
-pub(crate) use errors::structured_hook_error_data;
 pub(crate) use hermes::replay_projectless_hermes_host_admission;
 
 use admission::{hook_v2_admit, hook_v2_profile_admit};

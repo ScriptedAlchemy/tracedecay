@@ -4,14 +4,7 @@ use super::*;
 use futures_util::FutureExt;
 use tracedecay_application::RegisteredRootLocatorV1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum HookOrchestrationAdmissionV1 {
-    Enqueued,
-    Backpressured,
-    UnsupportedTrigger,
-    Unavailable,
-}
+pub(crate) use tracedecay_application::HookOrchestrationAdmissionV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HookOrchestrationTriggerV1 {
@@ -469,6 +462,9 @@ pub(crate) fn unregister_hook_orchestration_runtime(
     }
 }
 
+/// Production hook-orchestration entry. Returns the portable
+/// [`HookOrchestrationAdmissionV1`] so MCP handlers do not name daemon
+/// admission types.
 pub(crate) fn admit_registered_hook_orchestration(
     envelope: HookEventEnvelopeV2,
     binding: HookScopeBindingV1,

@@ -18,7 +18,7 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
@@ -139,7 +139,7 @@ pub(super) async fn handle_application_surface(
     protocol_request_id: Option<RequestId>,
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
-) -> Result<crate::mcp::tools::ToolResult> {
+) -> Result<tracedecay_mcp::ToolResult> {
     let NormalizedApplicationToolArgs {
         request: request_args,
         requested_format,
@@ -231,14 +231,14 @@ fn application_surface_dispatch_error(
 fn render_result(
     cg: &TraceDecay,
     result: ApplicationSurfaceInvocationResult,
-) -> Result<crate::mcp::tools::ToolResult> {
+) -> Result<tracedecay_mcp::ToolResult> {
     render_result_for_root(Some(cg.project_root()), result)
 }
 
 fn render_result_for_root(
     project_root: Option<&std::path::Path>,
     result: ApplicationSurfaceInvocationResult,
-) -> Result<crate::mcp::tools::ToolResult> {
+) -> Result<tracedecay_mcp::ToolResult> {
     render_result_parts(
         project_root,
         result.operation.as_str(),
@@ -254,7 +254,7 @@ fn render_result_parts(
     binding_id: &BindingId,
     result: &ApplicationResult<Value>,
     requested_format: RequestedOutputFormat,
-) -> Result<crate::mcp::tools::ToolResult> {
+) -> Result<tracedecay_mcp::ToolResult> {
     let (value, failure_message) = match result {
         Ok(application) => (serde_json::to_value(application)?, None),
         Err(problem) => {
@@ -274,10 +274,12 @@ fn render_result_parts(
             Some(render_canonical_markdown(operation, binding_id, result)?)
         }
     };
-    let text =
-        super::super::render::finalize_with_format(project_root, requested_format, &value, || {
-            markdown.unwrap_or_default()
-        });
+    let text = tracedecay_mcp::tools::render::finalize_with_format(
+        project_root,
+        requested_format,
+        &value,
+        || markdown.unwrap_or_default(),
+    );
     let mut rendered = super::text_tool_result(&text);
     if let Err(problem) = result {
         // Keep the typed problem machine-readable in every presentation
@@ -309,7 +311,7 @@ pub(super) fn render_retained_result(
     binding_id: BindingId,
     result: ApplicationResult<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1>,
     requested_format: RequestedOutputFormat,
-) -> Result<crate::mcp::tools::ToolResult> {
+) -> Result<tracedecay_mcp::ToolResult> {
     let result = crate::application_surface::retained::result_value(result).map_err(|error| {
         TraceDecayError::Config {
             message: format!("invalid retained application result: {error}"),

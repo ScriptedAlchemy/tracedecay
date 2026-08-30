@@ -52,6 +52,7 @@ pub mod observatory_surface;
 pub mod policy;
 pub mod remote;
 pub mod result;
+pub mod request_identity;
 pub mod retained_surfaces;
 pub mod retrieval;
 pub mod sdk_catalog;
@@ -224,8 +225,8 @@ pub use invocation::{
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
 pub use mcp_catalog::mcp_executable_binding_registry;
 pub use mcp_construction::{
-    ProfileIdentityReadPort, SessionTemporalRefreshWakeFuture, SessionTemporalRefreshWakePort,
-    UnavailableSessionTemporalRefreshWake,
+    HookOrchestrationAdmissionV1, ProfileIdentityReadPort, SessionTemporalRefreshWakeFuture,
+    SessionTemporalRefreshWakePort, UnavailableSessionTemporalRefreshWake,
 };
 pub use multi_root::{
     AuthorizedMultiRootQueryService, AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSet,

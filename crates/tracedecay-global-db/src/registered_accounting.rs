@@ -8,15 +8,6 @@ use super::{
 };
 
 impl RegisteredGlobalDb {
-    pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
-        if let Err(error) = self
-            .try_upsert_project_tokens(project_path, tokens_saved)
-            .await
-        {
-            self.report_optional_accounting_failure("update project token total", &error);
-        }
-    }
-
     #[hotpath::measure(future = true, label = "global_db.registered.accounting.upsert")]
     pub async fn try_upsert_project_tokens(
         &self,
@@ -48,10 +39,6 @@ impl RegisteredGlobalDb {
         self.try_tokens_saved(Some(project_path), "project").await
     }
 
-    pub async fn get_project_tokens(&self, project_path: &Path) -> Option<u64> {
-        self.try_get_project_tokens(project_path).await.ok()
-    }
-
     pub async fn try_global_tokens_saved(&self) -> Result<u64, String> {
         self.try_tokens_saved(None, "global").await
     }
@@ -81,32 +68,6 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode {scope} tokens saved: {error}"))?;
         u64::try_from(total)
             .map_err(|_| format!("{scope} tokens saved cannot be negative: {total}"))
-    }
-
-    pub async fn global_tokens_saved(&self) -> Option<u64> {
-        self.try_global_tokens_saved().await.ok()
-    }
-
-    pub async fn record_savings(
-        &self,
-        project_path: &str,
-        tool_name: &str,
-        before_tokens: u64,
-        after_tokens: u64,
-        timestamp: i64,
-    ) {
-        if let Err(error) = self
-            .try_record_savings(
-                project_path,
-                tool_name,
-                before_tokens,
-                after_tokens,
-                timestamp,
-            )
-            .await
-        {
-            self.report_optional_accounting_failure("append savings ledger entry", &error);
-        }
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.accounting.record")]
@@ -142,20 +103,13 @@ impl RegisteredGlobalDb {
             .map_err(|error| global_db_operation_error("commit savings ledger entry", error))
     }
 
-    fn report_optional_accounting_failure(
+    /// Sums settled savings-ledger rows for an optional project path.
+    /// A failed read stays an error instead of becoming a trustworthy zero.
+    pub async fn sum_savings(
         &self,
-        operation: &'static str,
-        error: &tracedecay_runtime_core::errors::TraceDecayError,
-    ) {
-        tracing::error!(
-            database = %self.db_path().display(),
-            operation,
-            error = %error,
-            "optional global database accounting write failed"
-        );
-    }
-
-    pub async fn sum_savings(&self, project: Option<&str>, since: i64) -> SavingsTotal {
+        project: Option<&str>,
+        since: i64,
+    ) -> Result<SavingsTotal, String> {
         let project =
             project.map(|path| RegisteredGlobalDb::canonical_project_key(Path::new(path)));
         self.sum_savings_by_project_id(project.as_deref(), since)
@@ -165,21 +119,6 @@ impl RegisteredGlobalDb {
     /// Same aggregation for an already-resolved canonical project identity.
     /// Application read models use this to avoid reinterpreting identity as a path.
     pub async fn sum_savings_by_project_id(
-        &self,
-        project_id: Option<&str>,
-        since: i64,
-    ) -> SavingsTotal {
-        self.sum_savings_by_project_id_checked(project_id, since)
-            .await
-            .unwrap_or(SavingsTotal {
-                saved_tokens: 0,
-                calls: 0,
-            })
-    }
-
-    /// Checked form used by denominator-safe read models. A failed read must
-    /// remain unavailable instead of becoming a trustworthy zero.
-    pub async fn sum_savings_by_project_id_checked(
         &self,
         project_id: Option<&str>,
         since: i64,
@@ -236,12 +175,20 @@ impl RegisteredGlobalDb {
         ))
     }
 
-    pub async fn savings_history(&self, project: Option<&str>, since: i64) -> Vec<SavingsDay> {
+    /// Per-day savings-ledger aggregation, newest day first. `Ok(vec![])` is
+    /// the truthful "no settled rows in range"; snapshot, query, and decode
+    /// failures stay errors instead of an empty history.
+    pub async fn savings_history(
+        &self,
+        project: Option<&str>,
+        since: i64,
+    ) -> Result<Vec<SavingsDay>, String> {
         let project =
             project.map(|path| RegisteredGlobalDb::canonical_project_key(Path::new(path)));
-        let Ok(snapshot) = self.read_snapshot().await else {
-            return Vec::new();
-        };
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to begin savings history snapshot: {error}"))?;
         let (mut sql, values) = savings_scope_query(
             "SELECT (ts / 86400) * 86400 AS day,
                     COALESCE(SUM(CASE
@@ -254,18 +201,33 @@ impl RegisteredGlobalDb {
             since,
         );
         sql.push_str(" GROUP BY day ORDER BY day DESC");
-        let Ok(mut rows) = snapshot.query(&sql, values).await else {
-            return Vec::new();
-        };
+        let mut rows = snapshot
+            .query(&sql, values)
+            .await
+            .map_err(|error| format!("failed to query savings history: {error}"))?;
         let mut history = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read savings history row: {error}"))?
+        {
             history.push(SavingsDay {
-                day: row.get::<i64>(0).unwrap_or(0),
-                saved_tokens: row.get::<i64>(1).unwrap_or(0).max(0) as u64,
-                calls: row.get::<i64>(2).unwrap_or(0).max(0) as u64,
+                day: row
+                    .get::<i64>(0)
+                    .map_err(|error| format!("failed to decode savings history day: {error}"))?,
+                saved_tokens: row
+                    .get::<i64>(1)
+                    .map_err(|error| {
+                        format!("failed to decode savings history saved tokens: {error}")
+                    })?
+                    .max(0) as u64,
+                calls: row
+                    .get::<i64>(2)
+                    .map_err(|error| format!("failed to decode savings history calls: {error}"))?
+                    .max(0) as u64,
             });
         }
-        history
+        Ok(history)
     }
 }
 

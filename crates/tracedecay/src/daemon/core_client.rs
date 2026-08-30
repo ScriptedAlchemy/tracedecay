@@ -446,9 +446,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
     {
         params.insert(
             "_meta".to_owned(),
-            crate::mcp::tool_call_deadline::tool_call_deadline_meta(wire_request_deadline_micros(
-                deadline,
-            )),
+            tracedecay_mcp::tool_call_deadline_meta(wire_request_deadline_micros(deadline)),
         );
     }
     let request = JsonRpcRequest {

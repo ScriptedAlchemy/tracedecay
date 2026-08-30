@@ -10,7 +10,8 @@ use tracedecay_domain::{
     RejectedArgumentNameV1, RejectedArgumentSurfaceV1,
 };
 
-use crate::feedback::observations::{FeedbackCoverageV1, FeedbackObservationReadModelV1};
+use crate::feedback::observations::FeedbackObservationReadModelV1;
+use tracedecay_application::feedback::observations::FeedbackCoverageV1;
 
 const PROJECTOR_REVISION: &str = "observatory-rejected-argument-projector.v1";
 const RATE_SUPPORT_FLOOR: u64 = 20;

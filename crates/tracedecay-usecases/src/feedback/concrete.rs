@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::task::JoinHandle;
+use tracedecay_application::feedback::observations::{
+    FeedbackAnchorOperationV1, FeedbackCoverageV1, FeedbackObservationDeliveryV1,
+    FeedbackObservationEnvelopeV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
+};
 use tracedecay_application::feedback::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_EXPAND_USE_CASE_ID_V1,
@@ -43,9 +47,8 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use super::concrete_evidence::{complete, interruption, unavailable};
 use super::observations::{
     DurableFeedbackObservationQueueAdapterV1, DurableFeedbackObservationSinkV1,
-    FeedbackAnchorOperationV1, FeedbackObservationAdapter, FeedbackObservationEmitterV1,
-    FeedbackObservationEnvelopeV1, FeedbackObservationReadModelV1, FeedbackObservationSinkOutcome,
-    FeedbackOutcomeV1, FeedbackSourceEventV1,
+    FeedbackObservationAdapter, FeedbackObservationEmitterV1, FeedbackObservationReadModelV1,
+    FeedbackObservationSinkOutcome,
 };
 use super::owner::{
     AuthorizedFeedbackReadRequestV1, CanonicalFeedbackReadOwnerV1, DaemonFeedbackReadOwnerV1,
@@ -339,7 +342,7 @@ impl ProjectFeedbackObservationSinkV1 {
                 .assign_delivery(
                     self.boot_id.clone(),
                     sequence,
-                    super::observations::FeedbackObservationDeliveryV1::delivered(dropped),
+                    FeedbackObservationDeliveryV1::delivered(dropped),
                 )
                 .ok_or(FeedbackRuntimeError::Corrupt)?;
             if self
@@ -397,7 +400,7 @@ impl DurableFeedbackObservationSinkV1 for ProjectFeedbackObservationSinkV1 {
             .assign_delivery(
                 self.boot_id.clone(),
                 sequence,
-                super::observations::FeedbackObservationDeliveryV1::delivered(dropped),
+                FeedbackObservationDeliveryV1::delivered(dropped),
             )
             .is_none()
         {
@@ -1526,7 +1529,7 @@ fn project_observation_ledger(
         model.watermark.observed_through = boot.last_observed_at;
         if ledger.observations.is_empty() && ledger.retention_dropped == 0 && incomplete_boots == 0
         {
-            model.coverage = super::observations::FeedbackCoverageV1::Known;
+            model.coverage = FeedbackCoverageV1::Known;
         }
     }
     Ok(model)
@@ -1849,7 +1852,7 @@ fn apply_pending_worker_drops(
     let pending = dropped_count.swap(0, Ordering::Relaxed);
     envelope.delivery.dropped = envelope.delivery.dropped.saturating_add(pending);
     if envelope.delivery.dropped > 0 {
-        envelope.delivery.coverage = super::observations::FeedbackCoverageV1::Partial;
+        envelope.delivery.coverage = FeedbackCoverageV1::Partial;
     }
     envelope.delivery.dropped
 }
@@ -2051,7 +2054,7 @@ mod tests {
             .assign_delivery(
                 boot_id.clone(),
                 sequence,
-                super::super::observations::FeedbackObservationDeliveryV1::delivered(0),
+                super::FeedbackObservationDeliveryV1::delivered(0),
             )
             .unwrap();
         envelope
@@ -2248,7 +2251,7 @@ mod tests {
         let model = project_observation_ledger(&decoded).unwrap();
         assert_eq!(
             model.coverage,
-            super::super::observations::FeedbackCoverageV1::Unknown
+            super::FeedbackCoverageV1::Unknown
         );
         assert_eq!(model.denominators.retention_dropped, 1);
         assert_eq!(model.denominators.incomplete_boots, 1);
@@ -2261,14 +2264,14 @@ mod tests {
     fn worker_persistence_drops_are_carried_into_the_next_envelope() {
         let boot_id = canonical_sha256(&"feedback-worker-drop-boot").unwrap();
         let mut envelope = sequenced_source_envelope(&boot_id, 1);
-        envelope.delivery = super::super::observations::FeedbackObservationDeliveryV1::delivered(2);
+        envelope.delivery = super::FeedbackObservationDeliveryV1::delivered(2);
         let dropped_count = AtomicU64::new(3);
 
         assert_eq!(apply_pending_worker_drops(&mut envelope, &dropped_count), 5);
         assert_eq!(dropped_count.load(Ordering::Relaxed), 0);
         assert_eq!(
             envelope.delivery.coverage,
-            super::super::observations::FeedbackCoverageV1::Partial
+            super::FeedbackCoverageV1::Partial
         );
 
         saturating_add(&dropped_count, envelope.delivery.dropped.saturating_add(1));

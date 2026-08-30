@@ -73,7 +73,7 @@ use crate::operation_stream::{
     ManagedTestRunSnapshot, ManagedTestRunStaleReason, ManagedTestRunUnavailableReason,
     operation_event_authority,
 };
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::response_handles::{
     ResponseHandleLookup, micros_to_seconds, retrieve_response_handle, store_response_handle,
 };

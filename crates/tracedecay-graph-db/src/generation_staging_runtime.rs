@@ -152,9 +152,15 @@ impl GraphDb {
         }
         check()?;
         let mut state = self.state_write_guard()?;
+        // Staged semantic vectors maintain their per-generation HNSW index
+        // inline: the pinned grafeo persists index topology at checkpoint and
+        // restores it on open, so the index built here is the one the serving
+        // generation searches after any number of reopens. `apply_locked`
+        // creates the index on the first vector-carrying batch of the fresh
+        // physical namespace and refreshes it for every committed vector row.
         let commit = hotpath::measure_block!(
             "graph_db.generation.stage.batch.apply_locked",
-            self.apply_locked_without_vector_index_maintenance(
+            self.apply_locked(
                 database,
                 &mut state,
                 batch,

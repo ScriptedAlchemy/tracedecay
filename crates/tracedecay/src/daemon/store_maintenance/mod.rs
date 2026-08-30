@@ -552,8 +552,18 @@ async fn apply_code_generation_retention(
             log_code_generation_retention_degraded("retention_cancelled");
             return false;
         }
-        Ok(Err(_)) => {
-            log_code_generation_retention_degraded("retention_plan_failed");
+        Ok(Err(error)) => {
+            // The bare label proved undiagnosable on a live profile: without
+            // the typed error, a pointer CAS loss under rebuild churn is
+            // indistinguishable from unrecognized-file or storage failures.
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "code_generations".to_string()),
+                    ("failure", "retention_plan_failed".to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
             return false;
         }
         Err(_) => {
@@ -724,7 +734,11 @@ async fn apply_code_generation_retention(
         log_code_generation_retention_degraded("retention_cancelled");
         return false;
     }
-    let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
+    // `current_timestamp()` counts seconds; wrapping it in `UtcMicros` stamped
+    // every deletion receipt with a seconds value in a micros-typed field
+    // (live receipts read as 1970). The receipt is durable journal evidence,
+    // so it takes the canonical micros clock.
+    let completed_at = tracedecay_application::clock::now_micros();
     let execution_root = store_root.clone();
     let execution_pool_root = graph_replay_pool_root.clone();
     let execution_cancellation = cancellation.clone();
@@ -791,8 +805,18 @@ async fn apply_code_generation_retention(
             log_code_generation_retention_degraded("retention_cancelled");
             false
         }
-        Ok(Err(_)) => {
-            log_code_generation_retention_degraded("retention_pass_failed");
+        Ok(Err(error)) => {
+            // Same diagnosability contract as the plan failure above: the
+            // apply step's typed error names the exact refusal (CAS loss,
+            // unsafe state, storage) instead of a bare retry label.
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "code_generations".to_string()),
+                    ("failure", "retention_pass_failed".to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
             false
         }
         Err(_) => {
@@ -1261,7 +1285,9 @@ pub(super) async fn run_code_index_scope_reconciliation(
             return false;
         }
     };
-    let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
+    // Same micros-typed receipt contract as the code-generation pass above:
+    // `current_timestamp()` is a seconds clock and must not be stored as micros.
+    let completed_at = tracedecay_application::clock::now_micros();
     let Some(vector_runtime) =
         tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
             graph.project_root(),

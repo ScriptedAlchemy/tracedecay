@@ -12,9 +12,6 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use tracedecay::application_output::json::json_line as canonical_json_line;
-use tracedecay::application_output::markdown::render as render_markdown;
-use tracedecay::application_output::view::CanonicalHumanView;
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
     FeedbackSurfaceRequest, execute_application_surface, http_application_router,
@@ -24,7 +21,6 @@ use tracedecay::application_surface::{
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay::application_surface::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay::daemon::{DaemonHandshake, call_default_tool};
-use tracedecay::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_api::sse_response;
 use tracedecay_application::feedback::{
@@ -56,6 +52,10 @@ use tracedecay_domain::{
     GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
 };
 use tracedecay_lsp::{FramePoll, FrameSend, TRACEDECAY_CONTEXT_REVISION};
+use tracedecay_mcp::application_output::json::json_line as canonical_json_line;
+use tracedecay_mcp::application_output::markdown::render as render_markdown;
+use tracedecay_mcp::application_output::view::CanonicalHumanView;
+use tracedecay_mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
@@ -66,7 +66,8 @@ use tracedecay_usecases::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
     OperationKind, OperationStreamConfig,
 };
-use tracedecay_usecases::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
+use tracedecay_application::retrieval::PrimitiveRequest;
+use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 static DASHBOARD_CONFIGURATION_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());

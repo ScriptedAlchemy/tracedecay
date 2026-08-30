@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
-use tracedecay::mcp::ToolResult;
+use tracedecay_mcp::ToolResult;
 
 /// A pricing crate whose caller shares the target's module, so both declaration
 /// and call are extraction-attested by the production graph. The nested module

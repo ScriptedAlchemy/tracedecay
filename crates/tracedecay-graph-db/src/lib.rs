@@ -146,14 +146,7 @@ pub fn take_graph_db_verification_counters() -> GraphDbVerificationCounters {
 pub use traversal::{
     GraphRelationTarget, GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit,
 };
-#[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
-pub(crate) use vector::{GraphVectorIndexRequest, GraphVectorIndexStatus};
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 pub use vector::{
     GraphVectorIndexRequest, GraphVectorIndexStatus, MAX_VECTOR_SEARCH_LIMIT, VectorMatch,
     VectorMetric, VectorSearchRequest, VectorSearchResult,
-};
-#[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
-pub use vector::{
-    MAX_VECTOR_SEARCH_LIMIT, VectorMatch, VectorMetric, VectorSearchRequest, VectorSearchResult,
 };

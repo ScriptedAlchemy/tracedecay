@@ -47,7 +47,9 @@ fn graph_scope_location_drift_requires_the_same_immutable_owner() {
 /// directly because `upsert_code_project` refuses an ephemeral root, and the
 /// row's provenance is irrelevant to what collection must do with it.
 async fn register_both_generations(db: &RegisteredGlobalDb, project: &Path) {
-    db.upsert(project, TOKENS).await;
+    db.try_upsert_project_tokens(project, TOKENS)
+        .await
+        .expect("seed project token total");
     let transaction = db
         .begin_write_transaction()
         .await
@@ -104,8 +106,8 @@ async fn registry_gc_deletes_both_registry_generations_in_one_commit() {
     assert_eq!(deleted, (1, 1));
     assert!(!code_project_registered(&harness.registered).await);
     assert_eq!(
-        harness.registered.get_project_tokens(&project).await,
-        Some(0)
+        harness.registered.try_get_project_tokens(&project).await,
+        Ok(0)
     );
 }
 
@@ -154,8 +156,8 @@ async fn registry_gc_rolls_back_both_generations_when_one_delete_fails() {
         "a failed sweep must not leave the code registry generation deleted"
     );
     assert_eq!(
-        harness.registered.get_project_tokens(&project).await,
-        Some(TOKENS)
+        harness.registered.try_get_project_tokens(&project).await,
+        Ok(TOKENS)
     );
 }
 
@@ -186,8 +188,14 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let refresh = tokio::spawn(async move {
         let _ = started_tx.send(());
-        concurrent_db.upsert(&concurrent_project, 22).await;
-        concurrent_db.get_project_tokens(&concurrent_project).await
+        concurrent_db
+            .try_upsert_project_tokens(&concurrent_project, 22)
+            .await
+            .expect("concurrent refresh upsert");
+        concurrent_db
+            .try_get_project_tokens(&concurrent_project)
+            .await
+            .expect("concurrent refresh read")
     });
     started_rx.await.unwrap();
     tokio::task::yield_now().await;
@@ -211,8 +219,7 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
         .expect("the concurrent refresh must resume once the sweep commits")
         .expect("the concurrent refresh task must complete");
     assert_eq!(
-        refreshed,
-        Some(22),
+        refreshed, 22,
         "the refresh lands whole after the sweep rather than interleaving with it"
     );
 }

@@ -16,9 +16,9 @@ use crate::mcp::server::{
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
-use super::super::render;
 use super::support::{generic_tool_result, rendered_tool_result};
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render;
 
 fn missing_required_param(name: &str) -> TraceDecayError {
     TraceDecayError::Config {

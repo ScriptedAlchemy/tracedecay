@@ -7,8 +7,8 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::super::ToolResult;
 use super::{ToolCallRegistryOptions, analytics};
+use tracedecay_mcp::ToolResult;
 
 fn admitted_control(
     options: &ToolCallRegistryOptions<'_>,

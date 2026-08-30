@@ -10,6 +10,9 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
+use tracedecay_application::context_scout::ContextScoutDeliveryReceiptV1;
+#[cfg(test)]
+use tracedecay_application::context_scout::ContextScoutFeedbackV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HookAdmissionFutureV1,
@@ -17,6 +20,8 @@ use tracedecay_hooks::{
     HookImmediateAdmissionV1, HookReadyGuidanceV1, HookSynchronousDeadlineV1,
     HookTransportDispositionV1,
 };
+
+use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
 
 use super::analytics::HookTimingSpan;
 use super::dispatch::NativeContextScoutLifecycleV1;
@@ -288,7 +293,7 @@ impl<'a> DaemonDeliveryReceiptPort<'a> {
 
     pub(crate) async fn post_receipt(
         &self,
-        receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+        receipt: &ContextScoutDeliveryReceiptV1,
         deadline: HookSynchronousDeadlineV1,
     ) -> HookFeedbackDeliveryOutcomeV1 {
         timed_daemon_hook_action(
@@ -304,22 +309,22 @@ impl<'a> DaemonDeliveryReceiptPort<'a> {
     }
 }
 
-impl AsyncHookFeedbackDeliveryPortV1<crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1>
+impl AsyncHookFeedbackDeliveryPortV1<ContextScoutDeliveryReceiptHookV1>
     for DaemonDeliveryReceiptPort<'_>
 {
     fn deliver_hook_v2<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        feedback: &'a crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+        feedback: &'a ContextScoutDeliveryReceiptHookV1,
         deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
-        Box::pin(async move { self.post_receipt(feedback, deadline).await })
+        Box::pin(async move { self.post_receipt(&feedback.receipt, deadline).await })
     }
 
     fn deliver_legacy<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+        _feedback: &'a ContextScoutDeliveryReceiptHookV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
@@ -330,8 +335,8 @@ impl AsyncHookFeedbackDeliveryPortV1<crate::agents::context_scout_v2::ContextSco
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ContextScoutFeedbackCommitV1 {
-    pub receipt: crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
-    pub feedback: crate::agents::context_scout_v2::ContextScoutFeedbackV1,
+    pub receipt: ContextScoutDeliveryReceiptV1,
+    pub feedback: ContextScoutFeedbackV1,
 }
 
 /// Daemon-backed Context Scout explicit-feedback commit.
@@ -348,8 +353,8 @@ impl<'a> DaemonContextScoutFeedbackPort<'a> {
 
     pub(crate) async fn post_feedback(
         &self,
-        receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
-        feedback: &crate::agents::context_scout_v2::ContextScoutFeedbackV1,
+        receipt: &ContextScoutDeliveryReceiptV1,
+        feedback: &ContextScoutFeedbackV1,
         deadline: HookSynchronousDeadlineV1,
     ) -> HookFeedbackDeliveryOutcomeV1 {
         timed_daemon_hook_action(

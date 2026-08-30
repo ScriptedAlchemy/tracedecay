@@ -15,10 +15,9 @@ use tracedecay_application::{AuthorizedScopeSet, ResolvedScope};
 use tracedecay_code_index::git_projection::{
     GitTopologyProjectionStore, git_topology_namespace, git_topology_projection_identity,
 };
-use tracedecay_domain::git::GitDiffScopeV1;
 use tracedecay_domain::{
-    GitIndexPreviewId, ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1,
-    ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UtcMicros,
+    ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1, ScopeSetId,
+    ScopeSetRevision, ScopeUnavailableReasonV1,
 };
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 use tracedecay_graph_db::{GraphCancellation, GraphDbError};
@@ -30,73 +29,16 @@ use crate::git_query::{
     GenerationBoundGitQueryV1, GenerationGitJoinV1, GitQueryBounds, GitQueryEngine,
     GitQueryEnvelopeV1, GitQueryError,
 };
-use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest, GitIntelligenceError};
+use tracedecay_application::git::{
+    GitBlameRequest, GitHistoryRequest, GitHunkPreviewEntryV1, GitHunkPreviewInputV1,
+    GitIntelligenceError, GitReadRequestV1,
+};
 use tracedecay_application::historical_query::{
     HistoricalGitQueryAdapter, HistoricalQueryRequestV1, HistoricalSourceAuthorizationV1,
 };
 pub use tracedecay_application::historical_query::{
     HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
 };
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "query", rename_all = "snake_case")]
-pub enum GitReadRequestV1 {
-    Status,
-    Diff {
-        scope: GitDiffScopeV1,
-    },
-    History {
-        max_count: u32,
-        path: Option<String>,
-        follow: bool,
-        first_parent: bool,
-    },
-    Blame {
-        path: String,
-        follow_renames: bool,
-    },
-    Hunks {
-        scope: GitDiffScopeV1,
-        #[serde(skip)]
-        daemon_binding: Option<DaemonGitHunkPreviewBindingV1>,
-    },
-}
-
-/// Daemon-private binding injected only after exact native snapshot capture.
-#[doc(hidden)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DaemonGitHunkPreviewBindingV1 {
-    pub preview_id: GitIndexPreviewId,
-    pub snapshot_digest: ManifestDigest,
-    pub expires_at: UtcMicros,
-}
-
-// The minted hunk preview payloads are canonical public wire contracts owned
-// by the application crate (`git::public_wire`), shared with SDK schema
-// generation.
-pub use tracedecay_application::git::{GitHunkPreviewEntryV1, GitHunkPreviewInputV1};
-
-impl GitReadRequestV1 {
-    pub fn capability_id(&self) -> &'static str {
-        match self {
-            Self::Status => "capability.application.git.status",
-            Self::Diff { .. } => "capability.application.git.diff",
-            Self::History { .. } => "capability.application.git.history",
-            Self::Blame { .. } => "capability.application.git.blame",
-            Self::Hunks { .. } => "capability.application.git.hunks",
-        }
-    }
-
-    pub fn use_case_id(&self) -> &'static str {
-        match self {
-            Self::Status => "use-case.application.git.status",
-            Self::Diff { .. } => "use-case.application.git.diff",
-            Self::History { .. } => "use-case.application.git.history",
-            Self::Blame { .. } => "use-case.application.git.blame",
-            Self::Hunks { .. } => "use-case.application.git.hunks",
-        }
-    }
-}
 
 // The typed read payload enum is a canonical public wire contract owned by
 // the application crate (`git::public_wire`), shared with SDK schema
@@ -601,13 +543,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
+    use tracedecay_application::git::DaemonGitHunkPreviewBindingV1;
     use tracedecay_application::{
         AuthorizedScopeSetAuthority, CancellationContext, CapabilityGrantId,
         CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId,
     };
     use tracedecay_domain::{
-        ActorId, GitCoverageV1, ProjectId, RepositoryId, ScopeOutcome, ScopeSetId,
-        ScopeSetRevision, UtcMicros, WorktreeId,
+        ActorId, GitCoverageV1, GitIndexPreviewId, ProjectId, RepositoryId, ScopeOutcome,
+        ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeId,
     };
     use tracedecay_runtime_core::cancellation::CancellationToken;
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};

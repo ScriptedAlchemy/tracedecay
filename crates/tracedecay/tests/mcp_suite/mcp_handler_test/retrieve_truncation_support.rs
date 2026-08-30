@@ -9,7 +9,7 @@ pub(super) async fn call_production_tool(
     fixture: &crate::support::ProductionCompositionFixture,
     tool_name: &str,
     arguments: Value,
-) -> tracedecay::mcp::ToolResult {
+) -> tracedecay_mcp::ToolResult {
     let response = fixture
         .harness
         .call_tool(&fixture.project_root, tool_name, arguments)
@@ -20,7 +20,7 @@ pub(super) async fn call_production_tool(
         "{tool_name} returned a production MCP error: {:?}",
         response.error.as_ref().map(|error| &error.message)
     );
-    tracedecay::mcp::ToolResult::new(
+    tracedecay_mcp::ToolResult::new(
         response
             .result
             .unwrap_or_else(|| panic!("{tool_name} returned no production MCP result")),
