@@ -272,6 +272,8 @@ pub(super) async fn evaluate_native_profile(
             report,
             ..
         } => {
+            let report: crate::search_eval::DirectEvaluationReportV1 =
+                serde_json::from_value(report).expect("direct evaluation report wire");
             assert_eq!(
                 report.status,
                 crate::search_eval::DirectEvaluationStatusV1::Pass,
