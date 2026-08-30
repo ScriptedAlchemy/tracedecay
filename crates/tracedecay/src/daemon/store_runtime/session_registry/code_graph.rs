@@ -1798,11 +1798,34 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.profile_id().clone(),
             project_id,
         );
+        // Same self-heal as `retain_code_graph_runtime`: this reconcile leases
+        // the shared project shard through the lease-only path, so once the
+        // shard's graph map-owner attachment has been retired (capacity-driven
+        // project reclaim, or a crash-era restart that never re-attached it),
+        // every `graph_registry` resolve below fails permanently with
+        // "graph runtime is not registered" and nothing else ever re-attaches.
+        // That exact failure surfaced on every retention tick as
+        // `graph_replay_release_failed`, which blocked the code-generation
+        // pass and let superseded sealed generations accumulate without bound.
+        self.ensure_code_graph_shard_attached(&project_shard).await;
         let authority = self
             .registry
-            .retain_graph_store(StoreRuntimeKey::new(project_shard, self.incarnation))
+            .retain_graph_store(StoreRuntimeKey::new(project_shard.clone(), self.incarnation))
             .await
             .map_err(|error| GraphDbError::unavailable(format!("{error:?}")))?;
+        // The graph leases below key the registry by this lease's binding, not
+        // the reconstructed project shard; heal the exact key the lookups use
+        // when the two diverge (preserved profiles, prior-run publication rows).
+        let bound_shard = authority.binding().shard_id.clone();
+        if bound_shard != project_shard {
+            tracing::warn!(
+                event = "code_graph_lease_binding_shard_diverged",
+                probed = ?project_shard,
+                bound = ?bound_shard,
+                "graph replay reconcile lease binding names a different shard than the reconstructed project shard"
+            );
+            self.ensure_code_graph_shard_attached(&bound_shard).await;
+        }
         let pool_deadline = Instant::now() + GRAPH_OPERATION_DEADLINE;
         let pool_check = || {
             if cancellation.is_cancelled() {

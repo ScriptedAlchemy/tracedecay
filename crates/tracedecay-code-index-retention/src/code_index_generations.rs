@@ -393,7 +393,12 @@ pub struct CodeTextArtifactRetentionCandidateV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeGenerationRetentionPlanV1 {
-    pub active_generation_id: CodeGenerationId,
+    /// `None` plans an unpublished store: sealed files exist but no active
+    /// publication pointer was ever written. The sealer holds the store lock
+    /// across the sealed-file write and the pointer write, so under that same
+    /// lock this state is crash debris from an interrupted publish, never a
+    /// mid-flight seal.
+    pub active_generation_id: Option<CodeGenerationId>,
     pub vector_readable_sources: BTreeSet<CodeGenerationId>,
     pub rollback_floor: usize,
     pub superseded_generations: Vec<CodeGenerationRetentionGenerationV1>,
@@ -410,13 +415,18 @@ pub struct CodeGenerationRetentionPlanV1 {
     /// How thoroughly this plan proved generation integrity. Apply-mode
     /// execution refuses anything but [`GenerationDigestVerificationV1::Full`].
     pub verification: GenerationDigestVerificationV1,
-    active_pointer: DurablePublicationPointerV1,
+    /// Present exactly when [`Self::active_generation_id`] is present; the
+    /// execute-time compare-and-swap re-reads the pointer under the store
+    /// lock and requires this exact value (including "still absent").
+    active_pointer: Option<DurablePublicationPointerV1>,
 }
 
 impl CodeGenerationRetentionPlanV1 {
     #[must_use]
-    pub fn active_generation_file(&self) -> &str {
-        &self.active_pointer.generation_file
+    pub fn active_generation_file(&self) -> Option<&str> {
+        self.active_pointer
+            .as_ref()
+            .map(|pointer| pointer.generation_file.as_str())
     }
 
     #[must_use]
@@ -440,7 +450,11 @@ impl CodeGenerationRetentionPlanV1 {
 pub struct CodeGenerationRetentionReceiptV1 {
     pub schema: String,
     pub receipt_digest: String,
-    pub active_generation_id: CodeGenerationId,
+    /// `None` records an unpublished-store sweep (crash debris collected from
+    /// a store whose pointer was never written). Canonical serialization is
+    /// transparent over `Some`, so receipts written before this field became
+    /// optional keep their exact digests.
+    pub active_generation_id: Option<CodeGenerationId>,
     pub vector_readable_sources: BTreeSet<CodeGenerationId>,
     pub rollback_floor: usize,
     pub deleted_generations: Vec<CodeGenerationRetentionGenerationV1>,
@@ -456,8 +470,10 @@ pub struct CodeGenerationRetentionReceiptV1 {
 pub struct CodeTextArtifactRetentionReceiptV1 {
     schema: String,
     receipt_digest: String,
-    active_generation_id: CodeGenerationId,
-    active_generation_index_digest: String,
+    /// Both are `None` exactly when the sweep ran against an unpublished
+    /// store (no active pointer, so no durable index digest exists).
+    active_generation_id: Option<CodeGenerationId>,
+    active_generation_index_digest: Option<String>,
     deleted_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
     inventory_bytes_before_collection: u64,
     pub reclaimed_bytes: u64,
@@ -467,7 +483,7 @@ pub struct CodeTextArtifactRetentionReceiptV1 {
 #[derive(Serialize)]
 struct CodeGenerationRetentionReceiptMaterialV1<'a> {
     schema: &'static str,
-    active_generation_id: &'a CodeGenerationId,
+    active_generation_id: Option<&'a CodeGenerationId>,
     vector_readable_sources: &'a BTreeSet<CodeGenerationId>,
     rollback_floor: usize,
     deleted_generations: &'a [CodeGenerationRetentionGenerationV1],
@@ -479,15 +495,17 @@ struct CodeGenerationRetentionReceiptMaterialV1<'a> {
 #[serde(deny_unknown_fields)]
 struct CodeGenerationRetentionTransactionV1 {
     schema: String,
-    active_pointer: DurablePublicationPointerV1,
+    /// `None` journals an unpublished-store sweep; recovery re-proves the
+    /// pointer is still absent before completing or rolling back.
+    active_pointer: Option<DurablePublicationPointerV1>,
     receipt: CodeGenerationRetentionReceiptV1,
 }
 
 #[derive(Serialize)]
 struct CodeTextArtifactRetentionReceiptMaterialV1<'a> {
     schema: &'static str,
-    active_generation_id: &'a CodeGenerationId,
-    active_generation_index_digest: &'a str,
+    active_generation_id: Option<&'a CodeGenerationId>,
+    active_generation_index_digest: Option<&'a str>,
     deleted_artifacts: &'a [CodeTextArtifactRetentionCandidateV1],
     inventory_bytes_before_collection: u64,
     reclaimed_bytes: u64,
@@ -498,7 +516,9 @@ struct CodeTextArtifactRetentionReceiptMaterialV1<'a> {
 #[serde(deny_unknown_fields)]
 struct CodeTextArtifactRetentionTransactionV1 {
     schema: String,
-    active_pointer: DurablePublicationPointerV1,
+    /// `None` journals an unpublished-store sweep; recovery re-proves the
+    /// pointer is still absent before completing or rolling back.
+    active_pointer: Option<DurablePublicationPointerV1>,
     receipt: CodeTextArtifactRetentionReceiptV1,
 }
 
@@ -670,17 +690,35 @@ fn plan_code_generation_retention_with_verification_cancellable(
             "code-generation retention recovery is pending".to_owned(),
         ));
     }
-    let active_pointer = read_active_pointer(store_root)?;
-    validate_generation_file(&active_pointer.generation_file)?;
-    let active_generation_id = CodeGenerationId::new(active_pointer.generation_id.clone())
-        .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-    validate_durable_generation_index(&active_pointer)?;
+    // An absent pointer is a typed unpublished store, not an error: the
+    // sealer writes the sealed file and the pointer under one store-lock
+    // hold, so a store with sealed bytes and no pointer is crash debris from
+    // an interrupted publish and everything in it is collectable (modulo
+    // vector pins, which are re-proven below like any other plan).
+    let active_pointer = read_optional_active_pointer(store_root)?;
+    let active_generation_id = active_pointer
+        .as_ref()
+        .map(|pointer| {
+            validate_generation_file(&pointer.generation_file)?;
+            validate_durable_generation_index(pointer)?;
+            CodeGenerationId::new(pointer.generation_id.clone())
+                .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))
+        })
+        .transpose()?;
     let generations_root = store_root.join(GENERATIONS_DIRECTORY);
-    let entries = std::fs::read_dir(&generations_root).map_err(storage)?;
+    let entries = match std::fs::read_dir(&generations_root) {
+        Ok(entries) => Some(entries),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && active_pointer.is_none() =>
+        {
+            None
+        }
+        Err(error) => return Err(storage(error)),
+    };
     let mut generations = BTreeMap::new();
     let mut active_state_digest = None;
 
-    for entry in entries {
+    for entry in entries.into_iter().flatten() {
         if observe_cancel(is_cancelled) {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
@@ -725,9 +763,11 @@ fn plan_code_generation_retention_with_verification_cancellable(
                 generation_id.as_str()
             )));
         }
-        if file_name == active_pointer.generation_file {
+        if let Some(pointer) = active_pointer.as_ref()
+            && file_name == pointer.generation_file
+        {
             active_state_digest = Some(raw_state_digest);
-            if generation_id != active_generation_id {
+            if Some(&generation_id) != active_generation_id.as_ref() {
                 return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                     "active pointer generation id does not match its sealed file".to_owned(),
                 ));
@@ -735,41 +775,46 @@ fn plan_code_generation_retention_with_verification_cancellable(
         }
     }
 
-    if active_state_digest.as_deref() != Some(active_pointer.state_digest.as_str()) {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "active generation file is missing or does not match the pointer digest".to_owned(),
-        ));
-    }
-    let pointer_generations = active_pointer
-        .generation_index
-        .iter()
-        .map(|entry| {
-            CodeGenerationId::new(entry.generation_id.clone())
-                .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    let missing_pointer_generations = pointer_generations
-        .iter()
-        .filter(|generation| !generations.contains_key(*generation))
-        .map(CodeGenerationId::as_str)
-        .collect::<Vec<_>>();
-    if !missing_pointer_generations.is_empty() {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "publication-pointer generations are missing: {}",
-            missing_pointer_generations.join(", ")
-        )));
-    }
-    for entry in &active_pointer.generation_index {
-        let generation_id = CodeGenerationId::new(entry.generation_id.clone())
-            .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-        let Some(generation) = generations.get(&generation_id) else {
-            continue;
-        };
-        if generation.size_bytes != entry.size_bytes {
+    let mut pointer_generations = BTreeSet::new();
+    if let Some(pointer) = active_pointer.as_ref() {
+        if active_state_digest.as_deref() != Some(pointer.state_digest.as_str()) {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "active generation file is missing or does not match the pointer digest"
+                    .to_owned(),
+            ));
+        }
+        pointer_generations = pointer
+            .generation_index
+            .iter()
+            .map(|entry| {
+                CodeGenerationId::new(entry.generation_id.clone()).map_err(|error| {
+                    CodeGenerationRetentionErrorV1::UnsafeState(error.to_string())
+                })
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let missing_pointer_generations = pointer_generations
+            .iter()
+            .filter(|generation| !generations.contains_key(*generation))
+            .map(CodeGenerationId::as_str)
+            .collect::<Vec<_>>();
+        if !missing_pointer_generations.is_empty() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "publication-pointer generation '{}' has a mismatched byte size",
-                generation_id.as_str()
+                "publication-pointer generations are missing: {}",
+                missing_pointer_generations.join(", ")
             )));
+        }
+        for entry in &pointer.generation_index {
+            let generation_id = CodeGenerationId::new(entry.generation_id.clone())
+                .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
+            let Some(generation) = generations.get(&generation_id) else {
+                continue;
+            };
+            if generation.size_bytes != entry.size_bytes {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "publication-pointer generation '{}' has a mismatched byte size",
+                    generation_id.as_str()
+                )));
+            }
         }
     }
     let missing_sources = vector_readable_sources
@@ -786,7 +831,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
 
     let mut superseded_generations = generations
         .into_values()
-        .filter(|generation| generation.generation_id != active_generation_id)
+        .filter(|generation| Some(&generation.generation_id) != active_generation_id.as_ref())
         .collect::<Vec<_>>();
     superseded_generations.sort_by(|left, right| {
         right
@@ -803,7 +848,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
     // reserve.
     let mut marked = pointer_generations;
     marked.extend(vector_readable_sources.iter().cloned());
-    marked.insert(active_generation_id.clone());
+    marked.extend(active_generation_id.clone());
     marked.extend(
         superseded_generations
             .iter()
@@ -818,7 +863,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
         .collect::<Vec<_>>();
     let text_artifact_inventory = plan_collectable_text_artifacts_cancellable(
         store_root,
-        &active_pointer,
+        active_pointer.as_ref(),
         verification,
         is_cancelled,
     )?;
@@ -939,7 +984,7 @@ pub fn execute_code_generation_retention_cancellable(
             text_artifact_receipt: None,
         });
     }
-    if read_active_pointer(store_root)? != plan.active_pointer {
+    if read_optional_active_pointer(store_root)? != plan.active_pointer {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "active generation changed after the retention mark phase".to_owned(),
         ));
@@ -977,7 +1022,7 @@ pub fn execute_code_generation_retention_cancellable(
 
         let result = (|| {
             stage_collectable_generations(store_root, &transaction)?;
-            if read_active_pointer(store_root)? != transaction.active_pointer {
+            if read_optional_active_pointer(store_root)? != transaction.active_pointer {
                 return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                     "active generation changed while retention candidates were quarantined"
                         .to_owned(),
@@ -1170,23 +1215,21 @@ fn run_code_generation_retention_cancellable(
 pub fn observe_code_generation_retention(
     store_root: &Path,
 ) -> Result<CodeGenerationRetentionObservationV1, CodeGenerationRetentionErrorV1> {
-    // A store without a publication pointer has nothing to observe; that is a
-    // typed empty observation, not an error. Every present pointer goes
-    // through the one canonical reader so corruption reporting cannot drift.
-    let active_path = store_root.join(ACTIVE_POINTER_FILE);
-    match std::fs::symlink_metadata(&active_path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(CodeGenerationRetentionObservationV1::default());
-        }
-        Err(error) => return Err(storage(error)),
+    // A store without a publication pointer is a typed unpublished store, not
+    // an error: every sealed file in it is crash debris and counts as
+    // superseded. Every present pointer goes through the one canonical reader
+    // so corruption reporting cannot drift.
+    let active_pointer = read_optional_active_pointer(store_root)?;
+    if let Some(pointer) = active_pointer.as_ref() {
+        validate_generation_file(&pointer.generation_file)?;
     }
-    let active_pointer = read_active_pointer(store_root)?;
-    validate_generation_file(&active_pointer.generation_file)?;
     let generations_root = store_root.join(GENERATIONS_DIRECTORY);
     let entries = match std::fs::read_dir(&generations_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if active_pointer.is_none() {
+                return Ok(CodeGenerationRetentionObservationV1::default());
+            }
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                 "active pointer exists without a generation directory".to_owned(),
             ));
@@ -1206,7 +1249,9 @@ pub fn observe_code_generation_retention(
         let Some(file_name) = generation_file_name(&path) else {
             continue;
         };
-        if file_name == active_pointer.generation_file {
+        if let Some(pointer) = active_pointer.as_ref()
+            && file_name == pointer.generation_file
+        {
             active_present = true;
             continue;
         }
@@ -1216,7 +1261,7 @@ pub fn observe_code_generation_retention(
             .superseded_generation_bytes
             .saturating_add(entry.metadata().map_err(storage)?.len());
     }
-    if !active_present {
+    if active_pointer.is_some() && !active_present {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "active pointer target is missing from the generation directory".to_owned(),
         ));
@@ -1257,6 +1302,19 @@ fn read_active_pointer(
             path.display()
         ))
     })
+}
+
+/// The one reader that distinguishes "no pointer was ever published" from a
+/// readable pointer. Every other failure (corruption, permissions) stays an
+/// error; only `NotFound` is the typed unpublished state.
+fn read_optional_active_pointer(
+    store_root: &Path,
+) -> Result<Option<DurablePublicationPointerV1>, CodeGenerationRetentionErrorV1> {
+    match std::fs::symlink_metadata(store_root.join(ACTIVE_POINTER_FILE)) {
+        Ok(_) => read_active_pointer(store_root).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(storage(error)),
+    }
 }
 
 fn validate_durable_generation_index(
@@ -1417,7 +1475,7 @@ fn build_receipt(
     let reclaimed_bytes = total_bytes(&deleted_generations);
     let material = CodeGenerationRetentionReceiptMaterialV1 {
         schema: RECEIPT_SCHEMA,
-        active_generation_id: &plan.active_generation_id,
+        active_generation_id: plan.active_generation_id.as_ref(),
         vector_readable_sources: &plan.vector_readable_sources,
         rollback_floor: plan.rollback_floor,
         deleted_generations: &deleted_generations,

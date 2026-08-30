@@ -534,8 +534,14 @@ async fn handle_storage_report(
         println!(
             "  code-index retention dry run for {}: active {} ({}), rollback floor {}",
             retention.project_id,
-            retention.active_generation_id,
-            retention.active_generation_file,
+            retention
+                .active_generation_id
+                .as_deref()
+                .unwrap_or("<unpublished store>"),
+            retention
+                .active_generation_file
+                .as_deref()
+                .unwrap_or("<no pointer>"),
             retention.rollback_floor
         );
         println!(

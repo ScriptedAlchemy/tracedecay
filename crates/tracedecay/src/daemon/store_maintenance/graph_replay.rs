@@ -40,6 +40,24 @@ pub(super) fn log_code_generation_retention_degraded(failure: &str) {
     );
 }
 
+/// The degraded event with the typed error attached. A bare failure label
+/// proved undiagnosable in production: `graph_replay_release_failed` recurred
+/// on every retention tick with no way to tell an unregistered graph shard
+/// from a pool-lock deadline from a conflict.
+fn log_code_generation_retention_degraded_with_error(
+    failure: &str,
+    error: &dyn std::fmt::Debug,
+) {
+    log_daemon_event(
+        "retention_degraded",
+        &[
+            ("pass", "code_generations".to_string()),
+            ("failure", failure.to_string()),
+            ("error", format!("{error:?}")),
+        ],
+    );
+}
+
 pub(super) async fn reconcile_graph_replay_releases(
     graph: &TraceDecay,
     store_root: &Path,
@@ -61,8 +79,11 @@ pub(super) async fn reconcile_graph_replay_releases(
     loop {
         let page = match code_generation_graph_replay_release_page(store_root, after.as_deref()) {
             Ok(page) => page,
-            Err(_) => {
-                log_code_generation_retention_degraded("graph_replay_release_evidence_invalid");
+            Err(error) => {
+                log_code_generation_retention_degraded_with_error(
+                    "graph_replay_release_evidence_invalid",
+                    &error,
+                );
                 return ReconcileOutcome::Failed;
             }
         };
@@ -109,8 +130,11 @@ pub(super) async fn reconcile_graph_replay_releases(
                     }
                 }
                 Ok(false) => retained = true,
-                Err(_) => {
-                    log_code_generation_retention_degraded("graph_replay_release_failed");
+                Err(error) => {
+                    log_code_generation_retention_degraded_with_error(
+                        "graph_replay_release_failed",
+                        &error,
+                    );
                     return ReconcileOutcome::Failed;
                 }
             }
