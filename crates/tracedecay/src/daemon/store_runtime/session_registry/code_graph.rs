@@ -4,9 +4,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use tracedecay_domain::{
-    CodeGenerationId, RefId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
-};
+use tracedecay_domain::{CodeGenerationId, RefId, RepositoryId, WorktreeId, canonical_sha256};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1,
     GraphDbRegistration, GraphGenerationDependency, GraphGenerationManifest, GraphIdempotencyKey,
@@ -454,7 +452,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            requested_at: tracedecay_application::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -524,7 +522,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let publish_control = RuntimeRequestControlV1 {
-                requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+                requested_at: tracedecay_application::clock::now_micros(),
                 deadline: publish_deadline_identity.clone(),
                 cancellation: publish_cancellation_identity.clone(),
             };
@@ -689,7 +687,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            requested_at: tracedecay_application::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -897,7 +895,7 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            requested_at: tracedecay_application::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -1089,7 +1087,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
-                requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+                requested_at: tracedecay_application::clock::now_micros(),
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };
@@ -1576,7 +1574,7 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            requested_at: tracedecay_application::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -1881,7 +1879,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
-                requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+                requested_at: tracedecay_application::clock::now_micros(),
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };
@@ -1971,7 +1969,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
-                requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+                requested_at: tracedecay_application::clock::now_micros(),
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };

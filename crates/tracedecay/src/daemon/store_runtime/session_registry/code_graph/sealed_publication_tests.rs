@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
-use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{ProjectId, canonical_sha256};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphProjectorRevision, SealedCodeGenerationReplay,
 };
@@ -82,10 +82,17 @@ fn with_publication_context<T>(
         deadline_warned: AtomicBool::new(false),
     };
     let control = RuntimeRequestControlV1 {
-        requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+        requested_at: tracedecay_application::clock::now_micros(),
         deadline,
         cancellation,
     };
+    // 2020-01-01T00:00:00Z in micros. A seconds-scale stamp (~1.8e9) fails
+    // this bound — the 1970-era seconds-as-micros regression this pins.
+    assert!(
+        control.requested_at.0 > 1_577_836_800_000_000,
+        "requested_at must be micros-scale, got {}",
+        control.requested_at.0
+    );
     let context = GraphPublicationOperationContextV1::new(&control, &probe)
         .expect("test publication context");
     operation(&context)
