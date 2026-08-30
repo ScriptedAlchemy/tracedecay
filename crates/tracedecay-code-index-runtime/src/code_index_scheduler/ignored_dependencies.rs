@@ -735,8 +735,8 @@ fn publication_evidence(
         generation_id: generation.manifest().generation_id.clone(),
         repository_id: generation.snapshot().repository.clone(),
         snapshot_content_identity: generation.snapshot().content_identity.clone(),
-        _lane_digest: lane_digest,
-        _file_occurrence_ids: generation
+        lane_digest,
+        file_occurrence_ids: generation
             .snapshot()
             .files
             .iter()
