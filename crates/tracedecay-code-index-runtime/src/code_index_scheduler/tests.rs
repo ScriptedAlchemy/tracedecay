@@ -5778,6 +5778,12 @@ async fn dashboard_freshness_projects_the_mounted_scheduler_generation() {
     );
     assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
     assert_eq!(projected.coverage, "complete");
+    assert_eq!(
+        projected.code_graph_serving,
+        Some(
+            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+        )
+    );
 }
 
 #[tokio::test]
@@ -11901,6 +11907,13 @@ async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() 
         freshness.staleness_state.as_deref(),
         Some("fresh"),
         "dashboard must not claim a terminal generation while native graph activation is still held: {freshness:?}"
+    );
+    assert_eq!(
+        freshness.code_graph_serving,
+        Some(
+            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
+        ),
+        "a sealed text generation must not imply graph-serving readiness while activation is held"
     );
     activation_gate.release();
 

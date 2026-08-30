@@ -21,7 +21,9 @@ use std::{
 use std::sync::Condvar;
 
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
-use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexConvergenceParkedV1;
+use tracedecay_dashboard_api::code_index_freshness_api::{
+    CodeGraphServingReadinessV1, CodeIndexConvergenceParkedV1,
+};
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::LspRuntimeFailure;
@@ -695,21 +697,49 @@ fn dashboard_freshness_identity(
     identity
 }
 
+/// Project the graph-serving state without warming any serving derivation.
+fn dashboard_code_graph_serving(
+    latest: Option<&LatestCompleteCodeIndexV1>,
+    text_generation_present: bool,
+    graph_activation_enabled: bool,
+) -> Option<CodeGraphServingReadinessV1> {
+    if !graph_activation_enabled {
+        return Some(CodeGraphServingReadinessV1::Unavailable {
+            reason: "graph_activation_disabled".to_owned(),
+        });
+    }
+    let Some(latest) = latest else {
+        return Some(if text_generation_present {
+            CodeGraphServingReadinessV1::Pending
+        } else {
+            CodeGraphServingReadinessV1::Unavailable {
+                reason: "generation_unavailable".to_owned(),
+            }
+        });
+    };
+    Some(latest.code_graph_serving_readiness())
+}
+
 /// Whether status may report this worktree as terminal (`fresh` / `current`).
 ///
-/// Exact and lexical serve from the text owner while native graph activation
-/// is still in flight. Search on that text-only path reports
-/// `retriever_unavailable` for the graph lane. Dashboard `current` must wait
-/// for the seated serving generation whose graph is Ready or Refused so a
-/// terminal receipt is one search can actually complete. Graph-off worktrees
-/// keep the text-owner receipt.
+/// Refused graph activation remains terminal for text serving, preserving the
+/// existing status behavior; strict dogfood can distinguish it from Ready via
+/// the separate typed projection.
 fn dashboard_generation_is_ready(
     latest: Option<&LatestCompleteCodeIndexV1>,
     text_ready: bool,
     graph_activation_enabled: bool,
+    code_graph_serving: &Option<CodeGraphServingReadinessV1>,
 ) -> bool {
     if graph_activation_enabled {
-        latest.is_some_and(|latest| !latest.graph_activation_is_pending())
+        latest.is_some()
+            && matches!(
+                code_graph_serving,
+                Some(
+                    CodeGraphServingReadinessV1::Ready
+                        | CodeGraphServingReadinessV1::Refused { .. }
+                )
+            )
     } else {
         latest.is_some() || text_ready
     }
@@ -4551,10 +4581,16 @@ impl CodeIndexSchedulerRegistryV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .count();
+                    let code_graph_serving = dashboard_code_graph_serving(
+                        latest.as_ref(),
+                        text.is_some(),
+                        graph_activation_enabled,
+                    );
                     let ready = dashboard_generation_is_ready(
                         latest.as_ref(),
                         text_ready,
                         graph_activation_enabled,
+                        &code_graph_serving,
                     );
                     let stale = hook_hint_count != Some(0);
                     let last_reconcile_micros = match last_reconciled_at_micros
@@ -4565,6 +4601,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     };
                     return tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
+                        code_graph_serving,
                         last_reconcile_micros,
                         staleness_state: Some(
                             if parked.is_some() && !ready {
@@ -4613,10 +4650,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 .as_ref()
                 .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
             let hook_hint_count = scheduler.pending_hint_count();
+            let code_graph_serving =
+                dashboard_code_graph_serving(latest.as_ref(), text.is_some(), graph_activation_enabled);
             let ready = dashboard_generation_is_ready(
                 latest.as_ref(),
                 text_ready,
                 graph_activation_enabled,
+                &code_graph_serving,
             );
             let staleness_state = if parked.is_some() && !ready {
                 "parked"
@@ -4644,6 +4684,7 @@ impl CodeIndexSchedulerRegistryV1 {
             };
             tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
+                code_graph_serving,
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
                 staleness_state: Some(staleness_state.to_owned()),
                 hook_hint_count,

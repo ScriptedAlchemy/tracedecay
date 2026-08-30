@@ -494,7 +494,7 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                       if [[ "${FAKE_NEVER_READY:-0}" == "1" || "$count" -lt 3 ]]; then
                         echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.text-only"}},"graph_statistics":{"state":"unavailable","reason":"exact_scope_generation_not_ready"}}'
                       else
-                        echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.ready"}},"graph_statistics":{"state":"observed","generation_id":"generation.ready","symbol_count":2,"edge_count":1}}'
+                        echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.ready","code_graph_serving":{"state":"ready"}}},"graph_statistics":{"state":"observed","generation_id":"generation.ready","symbol_count":2,"edge_count":1}}'
                       fi
                     elif [[ "${1:-} ${2:-}" == "tool context" ]]; then
                       echo '{"coverage":{"exact":"complete","lexical":"complete","graph":"complete","semantic":{"status":"unavailable","reason":"disabled"},"recall":"partial"},"search_matches":[{"file":"src/main.rs"}],"symbols":[{"node_id":"symbol:main"}]}'
