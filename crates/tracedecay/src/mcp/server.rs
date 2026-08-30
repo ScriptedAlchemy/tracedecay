@@ -16,19 +16,19 @@ use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use crate::tracedecay::TraceDecay;
+use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
+use tracedecay_daemon_protocol::wire::is_wire_oversized_io_error;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
 use tracedecay_mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_daemon_protocol::wire::is_wire_oversized_io_error;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
-use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
 
 use super::tools::{
     ProjectRegistryReadPort, SessionRefreshServicePort, default_catalog_discovery_authority,

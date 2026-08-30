@@ -2038,7 +2038,8 @@ mod tests {
             boot_id.clone(),
             UtcMicros(sequence.try_into().unwrap()),
             FeedbackSourceEventV1::ArgumentRejected {
-                operation: tracedecay_application::feedback::observations::FeedbackOperationV1::FeedbackGet,
+                operation:
+                    tracedecay_application::feedback::observations::FeedbackOperationV1::FeedbackGet,
                 outcome: FeedbackOutcomeV1::Rejected,
             },
         )

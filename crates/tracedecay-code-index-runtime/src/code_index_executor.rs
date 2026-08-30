@@ -531,7 +531,7 @@ where
                     .resolved_scope_for_project(&request.project_root, &project_id)
                 {
                     Ok(scope) => scope,
-                    Err(crate::mcp_admission::CodeIndexScopeUnresolvedV1) => {
+                    Err(crate::mcp_admission::CodeIndexScopeUnavailableV1) => {
                         return code_index_scope_unavailable();
                     }
                 };

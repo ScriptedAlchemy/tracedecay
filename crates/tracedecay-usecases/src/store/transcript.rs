@@ -200,66 +200,60 @@ impl<D> TranscriptIngestStore for GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
+    #[hotpath::measure(
+        label = "usecases.transcript_store.replace_parse_offset_pair",
+        future = true
+    )]
     async fn replace_parse_offset_pair(
         &self,
         first: (&Path, ParseOffset, ParseOffset),
         second: (&Path, ParseOffset, ParseOffset),
     ) -> TranscriptStoreResult<()> {
-        hotpath::future!(
-            async move {
-                let first_path = Self::path_text(first.0);
-                let second_path = Self::path_text(second.0);
-                self.db()
-                    .replace_parse_offset_pair_result(
-                        (&first_path, first.1, first.2),
-                        (&second_path, second.1, second.2),
-                    )
-                    .await
-                    .map_err(|error| Self::persistence_error(first.0, error))
-            },
-            label = "usecases.transcript_store.replace_parse_offset_pair"
-        )
-        .await
+        let first_path = Self::path_text(first.0);
+        let second_path = Self::path_text(second.0);
+        self.db()
+            .replace_parse_offset_pair_result(
+                (&first_path, first.1, first.2),
+                (&second_path, second.1, second.2),
+            )
+            .await
+            .map_err(|error| Self::persistence_error(first.0, error))
     }
 
+    #[hotpath::measure(
+        label = "usecases.transcript_store.advance_parse_offset",
+        future = true
+    )]
     async fn advance_parse_offset_monotonic(
         &self,
         cursor_path: &Path,
         offset: ParseOffset,
     ) -> TranscriptStoreResult<()> {
-        hotpath::future!(
-            async move {
-                self.db()
-                    .advance_parse_offset_result(&Self::path_text(cursor_path), offset)
-                    .await
-                    .map_err(|error| Self::persistence_error(cursor_path, error))
-            },
-            label = "usecases.transcript_store.advance_parse_offset"
-        )
-        .await
+        self.db()
+            .advance_parse_offset_result(&Self::path_text(cursor_path), offset)
+            .await
+            .map_err(|error| Self::persistence_error(cursor_path, error))
     }
 
+    #[hotpath::measure(
+        label = "usecases.transcript_store.record_session_ingest_activity",
+        future = true
+    )]
     async fn record_session_ingest_activity(
         &self,
         project_root: &Path,
         units: u64,
         provider: &'static str,
     ) {
-        hotpath::future!(
-            async move {
-                crate::event_lane::publish(
-                    self.db(),
-                    crate::event_lane::ActivityFamilyV1::SessionIngest,
-                    project_root,
-                    None,
-                    units,
-                    Some(provider),
-                )
-                .await;
-            },
-            label = "usecases.transcript_store.record_session_ingest_activity"
+        crate::event_lane::publish(
+            self.db(),
+            crate::event_lane::ActivityFamilyV1::SessionIngest,
+            project_root,
+            None,
+            units,
+            Some(provider),
         )
-        .await
+        .await;
     }
 
     #[hotpath::measure(label = "usecases.transcript_store.get_session", future = true)]

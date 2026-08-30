@@ -229,9 +229,18 @@ pub enum DurableHookEventDecodeError {
     UnsupportedVersion,
 }
 
-/// Encoding a runtime hook plan for durable spool failed.
+/// The runtime plan violated durable-envelope bounds (oversized or
+/// control-character identifiers) and cannot be persisted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DurableHookEventEncodeError;
+
+impl std::fmt::Display for DurableHookEventEncodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("hook event plan exceeds durable envelope bounds")
+    }
+}
+
+impl std::error::Error for DurableHookEventEncodeError {}
 
 fn durable_bound_optional_str(value: Option<&str>, max_bytes: usize) -> Result<Option<String>, ()> {
     match value {

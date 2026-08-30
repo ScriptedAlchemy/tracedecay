@@ -71,9 +71,7 @@ pub use context_headings::{
     CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
 };
 pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport};
-pub use lifecycle::{
-    McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity,
-};
+pub use lifecycle::{McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity};
 pub use project_access::registered_project_reader_tool_names;
 pub use tool_call_deadline::{
     TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, tool_call_deadline_meta,

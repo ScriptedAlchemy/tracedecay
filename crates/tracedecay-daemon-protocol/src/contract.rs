@@ -67,9 +67,11 @@ use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
 use crate::surface::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
 use tracedecay_application::ConfigurationWireRequestV1;
+use tracedecay_application::feedback::observations::{
+    FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
+};
 use tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
 use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay_application::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 use tracedecay_application::retrieval::PrimitiveRequest;
 
 /// Request-field character rules. The contract accepts opaque handles and ids

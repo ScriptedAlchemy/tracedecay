@@ -27,7 +27,9 @@ use tracedecay_store::{
     SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit, build_source_projection,
 };
 
-use tracedecay_application::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
+use tracedecay_application::request_identity::{
+    LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
+};
 use tracedecay_runtime_core::db::DatabaseRuntimeClientV1;
 
 #[derive(Debug, Error)]

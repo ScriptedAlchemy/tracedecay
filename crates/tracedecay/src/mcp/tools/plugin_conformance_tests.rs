@@ -9,10 +9,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use tracedecay_mcp::{ToolDefinition, get_tool_definitions};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use tracedecay_agent_hosts::agents::plugin_bundle;
+use tracedecay_mcp::{ToolDefinition, get_tool_definitions};
 
 /// The Cursor plugin deploy set from the shared bundle authority.
 fn embedded_plugin_files() -> Vec<(&'static str, &'static str)> {

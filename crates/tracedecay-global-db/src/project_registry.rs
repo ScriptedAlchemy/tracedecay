@@ -1333,11 +1333,11 @@ impl RegisteredGlobalDb {
                     project_id: project_id.to_string(),
                 });
             }
-            1 => stores.pop().ok_or_else(|| {
-                ProjectStoreResolutionError::StoreNotRegistered {
+            1 => stores
+                .pop()
+                .ok_or_else(|| ProjectStoreResolutionError::StoreNotRegistered {
                     project_id: project_id.to_string(),
-                }
-            })?,
+                })?,
             _ => {
                 let mut store_ids = stores
                     .into_iter()

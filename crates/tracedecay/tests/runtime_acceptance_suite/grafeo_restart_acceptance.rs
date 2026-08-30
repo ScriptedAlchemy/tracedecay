@@ -9,9 +9,9 @@ use tracedecay::application_surface::{ApplicationSurfaceOperation, ApplicationSu
 use tracedecay::daemon::{DaemonHandshake, call_default_tool};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_application::retained_surfaces::RetainedSurfaceResultV1;
+use tracedecay_application::retrieval::PrimitiveRequest;
 use tracedecay_application::{ApplicationEnvelope, RequestId};
 use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
-use tracedecay_application::retrieval::PrimitiveRequest;
 use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 fn initialize_project(home: &Path, project: &Path) {

@@ -68,7 +68,9 @@ const CONTEXT_SCOUT_SPECS: [ContextScoutOperationSpec; 11] = [
 /// The daemon converts this transport-neutral address into its runtime value
 /// only after catalog admission. Keeping the public wire here makes CLI, MCP,
 /// HTTP, and both SDKs share one generated schema authority.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutAddressV1 {
     pub profile_id: [u8; 16],
@@ -98,7 +100,9 @@ pub enum ContextScoutDeliveryWindowV1 {
     Suppressed,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutCategoryV1 {
     Retrieval,
