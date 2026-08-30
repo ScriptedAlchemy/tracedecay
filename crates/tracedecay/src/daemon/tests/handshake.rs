@@ -293,6 +293,116 @@ fn client_version_skew_flags_only_real_mismatches() {
     );
 }
 
+/// A client whose handshake this daemon cannot decode (wire drift between
+/// build revisions) must read one typed refusal frame and a clean EOF —
+/// never a raw `Connection reset by peer` from a dropped socket.
+#[cfg(unix)]
+#[tokio::test]
+async fn wire_drifted_handshake_reads_typed_refusal_then_clean_eof() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&client_identity.profile_root, "handshake-refusal-test");
+
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+
+    let (reader, mut writer) = client.into_split();
+    // Valid JSON that is not this daemon's handshake shape, followed by the
+    // pipelined first request a real client writes before it starts reading.
+    writer
+        .write_all(b"{\"handshake_revision\":99,\"client\":\"future-build\"}\n")
+        .await
+        .expect("write drifted handshake");
+    writer
+        .write_all(
+            b"{\"protocol\":\"tracedecay.daemon.invocation\",\"revision\":1,\
+              \"request_id\":\"request.after-drifted-handshake\",\
+              \"operation\":\"semantic_evaluate_and_publish\"}\n",
+        )
+        .await
+        .expect("write pipelined request");
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let refusal_line = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        lines.next_line(),
+    )
+    .await
+    .expect("refusal must arrive before the read deadline")
+    .expect("the refusal read must not fail with a transport reset")
+    .expect("the daemon must answer a drifted handshake with a refusal line");
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
+        .expect("the refusal line must parse as the typed refusal frame");
+    assert_eq!(
+        refusal.refusal,
+        tracedecay_daemon_protocol::DaemonHandshakeRefusalReason::UnsupportedRevision
+    );
+    assert!(
+        !refusal.daemon_version.is_empty(),
+        "the refusal must advertise the daemon version so the client can name the skew"
+    );
+
+    let eof = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("connection close must arrive before the read deadline")
+        .expect("the close must be a clean EOF, not a connection reset");
+    assert_eq!(eof, None, "no frames follow the refusal");
+
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("a refused handshake is a served connection, not a serve error");
+}
+
+/// Garbage that is not even JSON refuses as `invalid_handshake`; the daemon
+/// still answers instead of resetting.
+#[cfg(unix)]
+#[tokio::test]
+async fn non_json_handshake_reads_invalid_handshake_refusal() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "handshake-invalid-refusal-test",
+    );
+
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+
+    let (reader, mut writer) = client.into_split();
+    writer
+        .write_all(b"GET / HTTP/1.1\n")
+        .await
+        .expect("write non-json handshake");
+    writer.shutdown().await.expect("shutdown writer");
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let refusal_line = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        lines.next_line(),
+    )
+    .await
+    .expect("refusal must arrive before the read deadline")
+    .expect("the refusal read must not fail with a transport reset")
+    .expect("the daemon must answer a non-json handshake with a refusal line");
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
+        .expect("the refusal line must parse as the typed refusal frame");
+    assert_eq!(
+        refusal.refusal,
+        tracedecay_daemon_protocol::DaemonHandshakeRefusalReason::InvalidHandshake
+    );
+
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("a refused handshake is a served connection, not a serve error");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn daemon_engine_logs_version_skew_once_per_client_version() {

@@ -161,6 +161,49 @@ fn is_mcp_initialize_request(line: &str) -> bool {
         .is_ok_and(|request| request.method == "initialize")
 }
 
+/// Answer an unparseable handshake with one typed refusal frame and drain
+/// the input the client already pipelined, then let the connection close.
+///
+/// Propagating the parse failure with `?` here drops the socket while the
+/// client's first request is still unread, which the kernel reports to the
+/// client as `Connection reset by peer` — a raw transport error that hides
+/// wire-revision skew. The refusal frame plus a drained receive buffer turns
+/// that into a readable typed refusal followed by a clean EOF.
+async fn refuse_unparseable_handshake(
+    transport: &mut (impl tracedecay_mcp::McpTransport + Send),
+    handshake_line: &str,
+) {
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_unparseable_handshake(
+        handshake_line,
+        binary_version(),
+    );
+    hotpath::gauge!("daemon.engine.handshake.refused").inc(1_u64);
+    log_daemon_event(
+        "daemon_handshake_refused",
+        &[
+            ("refusal", format!("{:?}", refusal.refusal)),
+            ("daemon_version", refusal.daemon_version.clone()),
+        ],
+    );
+    // Best effort: a peer that already vanished cannot read a refusal.
+    if let Ok(line) = refusal.to_line() {
+        let _ = transport.write_line(&line).await;
+        let _ = transport.write_line("\n").await;
+        let _ = transport.flush().await;
+    }
+    for _ in 0..4 {
+        match tokio::time::timeout(
+            Duration::from_millis(100),
+            read_line_handling_wire_oversized(transport),
+        )
+        .await
+        {
+            Ok(Ok(Some(_))) => {}
+            _ => break,
+        }
+    }
+}
+
 const MAX_PENDING_PROJECT_OPEN_LINES: usize = 64;
 const PROJECT_OWNER_HALF_CLOSE_GRACE: Duration = Duration::from_millis(750);
 
@@ -646,7 +689,14 @@ fn serve_broker_socket_client_inner(
         let Some(setup_activity) = engine.lifecycle.try_enter() else {
             return Ok(None);
         };
-        let mut handshake = DaemonHandshake::from_line(&line)?;
+        let mut handshake = match DaemonHandshake::from_line(&line) {
+            Ok(handshake) => handshake,
+            Err(_) => {
+                drop(setup_activity);
+                refuse_unparseable_handshake(&mut transport, &line).await;
+                return Ok(None);
+            }
+        };
         let peer_full_close = transport.peer_fully_closed_after_eof();
         tokio::pin!(peer_full_close);
         let store_administration = tokio::select! {
@@ -1339,7 +1389,14 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let Some(setup_activity) = lifecycle.try_enter() else {
         return Ok(());
     };
-    let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
+    let mut handshake = match DaemonHandshake::from_line(&handshake_line) {
+        Ok(handshake) => handshake,
+        Err(_) => {
+            drop(setup_activity);
+            refuse_unparseable_handshake(&mut transport, &handshake_line).await;
+            return Ok(());
+        }
+    };
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };

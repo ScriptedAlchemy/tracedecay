@@ -2532,8 +2532,20 @@ pub fn parse_daemon_invocation_request(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    // A frame that names this protocol but no longer deserializes is either
+    // a foreign revision (explicitly, or as same-revision wire drift between
+    // build versions) or a malformed request. Answer the former as the typed
+    // revision refusal so a skewed client never has to guess from
+    // `invalid_request` whether its own request was wrong.
+    let envelope_revision = value.get("revision").and_then(serde_json::Value::as_u64);
     Some(serde_json::from_value(value).map_err(|_| {
-        DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::InvalidRequest)
+        let problem = match envelope_revision {
+            Some(revision) if revision != u64::from(DAEMON_INVOCATION_REVISION) => {
+                DaemonInvocationProblem::UnsupportedRevision
+            }
+            _ => DaemonInvocationProblem::InvalidRequest,
+        };
+        DaemonInvocationResponse::problem(request_id, problem)
     }))
 }
 
@@ -2719,6 +2731,47 @@ pub enum DaemonInvocationProblem {
     ResetRequired,
     ApplicationContractViolation,
     Unavailable,
+}
+
+#[cfg(test)]
+mod invocation_wire_revision_tests {
+    use super::{
+        DAEMON_INVOCATION_PROTOCOL, DaemonInvocationOutcome, DaemonInvocationProblem,
+        parse_daemon_invocation_request,
+    };
+
+    fn parse_problem(line: &str) -> DaemonInvocationProblem {
+        let response = parse_daemon_invocation_request(line)
+            .expect("frames naming the invocation protocol must be answered")
+            .expect_err("undecodable frames must produce a typed response");
+        match response.outcome {
+            DaemonInvocationOutcome::Problem { problem } => problem,
+            outcome => panic!("expected a typed problem response, got {outcome:?}"),
+        }
+    }
+
+    #[test]
+    fn foreign_revision_frames_refuse_as_unsupported_revision() {
+        let line = format!(
+            r#"{{"protocol":"{DAEMON_INVOCATION_PROTOCOL}","revision":2,"request_id":"request.future","operation":"semantic_activate_v3"}}"#
+        );
+        assert_eq!(
+            parse_problem(&line),
+            DaemonInvocationProblem::UnsupportedRevision,
+            "a frame from a different wire revision is a revision refusal, not a caller mistake"
+        );
+    }
+
+    #[test]
+    fn same_revision_malformed_frames_stay_invalid_request() {
+        let line = format!(
+            r#"{{"protocol":"{DAEMON_INVOCATION_PROTOCOL}","revision":1,"request_id":"request.same","operation":"no_such_operation"}}"#
+        );
+        assert_eq!(
+            parse_problem(&line),
+            DaemonInvocationProblem::InvalidRequest,
+        );
+    }
 }
 
 #[cfg(test)]
