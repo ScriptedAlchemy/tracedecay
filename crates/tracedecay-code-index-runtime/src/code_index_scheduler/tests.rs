@@ -5035,6 +5035,60 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
     registry.shutdown().await;
 }
 
+/// A seated graph generation is already the decoded serving authority. Root
+/// graph/status reads must not ask the publication decoder cache to prove that
+/// fact again: the cache may be temporarily claimed by unrelated activation
+/// work while the immutable serving handle remains fully usable.
+#[tokio::test]
+async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let serving = registry
+        .latest_complete_serving_for_scope(&scope)
+        .await
+        .expect("mounted graph generation serves");
+    serving
+        .production_graph_serving()
+        .expect("the serving generation has activated its graph lane");
+    let generation_id = serving.generation().manifest().generation_id.clone();
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let held_decode = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hold_active_decode();
+
+    let ready = tokio::time::timeout(
+        Duration::from_secs(30),
+        registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope),
+    )
+    .await
+    .expect("root graph readiness must not wait for the decode cache")
+    .expect("the seated graph generation remains ready");
+    assert_eq!(
+        ready.generation().manifest().generation_id,
+        generation_id,
+        "the exact seated generation remains authoritative"
+    );
+    assert_eq!(
+        held_decode.waiter_count(),
+        0,
+        "root graph readiness must not join the publication decode flight"
+    );
+
+    drop(held_decode);
+    registry.shutdown().await;
+}
+
 /// Fail-closed: the fallback serves a *retained complete* generation, never a
 /// missing one. With no mounted worktree neither resolver can produce one, and
 /// the typed fail-fast is preserved rather than degraded into an empty answer.
