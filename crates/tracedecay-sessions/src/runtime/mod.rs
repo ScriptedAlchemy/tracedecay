@@ -18,8 +18,10 @@ mod observation;
 pub use observation::snapshot_observation;
 pub(in crate::runtime) use observation::{ingest_byte_budget, jsonl_observation_admission};
 mod pipeline_metrics;
+pub mod registered_db;
 pub mod shared;
 pub mod source;
+pub mod store_access;
 pub mod store_port;
 mod workflow;
 pub use workflow::{workflow_index, workflow_ingest, workflow_state};
@@ -38,9 +40,16 @@ pub use ingest::{
     try_ingest_user_codex_sessions_with_db_and_admission, with_transcript_source_home,
 };
 pub use ingest::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
+pub use registered_db::{
+    SessionExec, SessionQuery, SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn,
+};
 pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
 /// Public because the snapshot capture entry points that return it are public.
 pub use snapshot_observation::SnapshotCaptureOutcome;
+pub use store_access::{
+    SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
+    TranscriptBatch, TranscriptPersistenceError,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMessageSearchResult {
