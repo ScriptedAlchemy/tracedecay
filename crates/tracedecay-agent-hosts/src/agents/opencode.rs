@@ -21,9 +21,9 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    backup_config_file, load_json_file, load_json_file_strict, safe_write_json_file,
-    safe_write_text_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    TextFileMutation, UpdatePluginOutcome, load_json_file, render_json_config,
+    safe_write_text_file, update_config_file_transactionally, update_text_file_transactionally,
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
@@ -656,19 +656,44 @@ fn install_registration_entries(
     if !install_mcp && !install_lsp {
         return Ok(());
     }
-    let backup = preserve_backup
-        .then(|| backup_config_file(config_path))
-        .transpose()?
-        .flatten();
-    let mut config = match load_json_file_strict(config_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
+    let merge = |existing: &str| {
+        let config = merge_registration_entries(
+            config_path,
+            existing,
+            tracedecay_bin,
+            install_mcp,
+            install_lsp,
+        )?;
+        Ok((
+            (),
+            TextFileMutation::Write(render_json_config(config_path, &config)?),
+        ))
     };
+    // Component-set transactions (`preserve_backup: false`) already stage
+    // exact registration backups, so only the direct install path leaves the
+    // user-facing `.bak`.
+    if preserve_backup {
+        update_config_file_transactionally(config_path, merge)?;
+    } else {
+        update_text_file_transactionally(config_path, merge)?;
+    }
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
+        config_path.display()
+    );
+    Ok(())
+}
+
+/// Merge TraceDecay's registrations into the config bytes observed under the
+/// write lock, returning the replacement value.
+fn merge_registration_entries(
+    config_path: &Path,
+    existing: &str,
+    tracedecay_bin: &str,
+    install_mcp: bool,
+    install_lsp: bool,
+) -> Result<serde_json::Value> {
+    let mut config = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
     // Snapshot the host-recorded plugin registration before touching anything,
     // so the write below can be proven not to have created, altered, or
     // dropped the key `opencode plugin` owns.
@@ -677,10 +702,7 @@ fn install_registration_entries(
     let has_tracedecay =
         config.pointer("/mcp/tracedecay").is_some() || config.pointer("/lsp/tracedecay").is_some();
     if !has_tracedecay && config_path.is_file() && !original_path.exists() {
-        let original = std::fs::read(config_path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to snapshot {}: {error}", config_path.display()),
-        })?;
-        super::safe_write_bytes_file(&original_path, &original, None)?;
+        super::safe_write_bytes_file(&original_path, existing.as_bytes(), None)?;
     }
 
     let config_object = config
@@ -777,12 +799,7 @@ fn install_registration_entries(
         &config,
         config_path,
     )?;
-    safe_write_json_file(config_path, &config, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        config_path.display()
-    );
-    Ok(())
+    Ok(config)
 }
 
 /// Install-or-refresh prompt rules in AGENTS.md.
@@ -812,6 +829,14 @@ fn uninstall_mcp_server(config_path: &Path) {
     }
 }
 
+/// Outcome of the uninstall transform, reported after publication.
+enum OpenCodeRegistrationRemoval {
+    NoEntry,
+    RestoredOriginal,
+    RemovedFile,
+    Rewritten,
+}
+
 fn remove_registration_entries(
     config_path: &Path,
     remove_mcp: bool,
@@ -821,7 +846,59 @@ fn remove_registration_entries(
     if !config_path.exists() {
         return Ok(());
     }
-    let mut config = load_json_file_strict(config_path)?;
+    let original_path = opencode_original_config_path(config_path);
+    let strip = |existing: &str| {
+        strip_registration_entries(config_path, &original_path, existing, remove_mcp, remove_lsp)
+    };
+    // Component-set transactions (`preserve_backup: false`) already stage
+    // exact registration backups, so only the direct uninstall path leaves
+    // the user-facing `.bak`.
+    let outcome = if preserve_backup {
+        update_config_file_transactionally(config_path, strip)?
+    } else {
+        update_text_file_transactionally(config_path, strip)?
+    };
+    match outcome {
+        OpenCodeRegistrationRemoval::NoEntry => {
+            eprintln!(
+                "  No tracedecay MCP/LSP registration in {}, skipping",
+                config_path.display()
+            );
+        }
+        OpenCodeRegistrationRemoval::RestoredOriginal => {
+            super::safe_remove_host_file(&original_path).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("failed to remove {}: {error}", original_path.display()),
+                }
+            })?;
+        }
+        OpenCodeRegistrationRemoval::RemovedFile => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Removed {} (was empty)",
+                config_path.display()
+            );
+        }
+        OpenCodeRegistrationRemoval::Rewritten => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
+                config_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Strip TraceDecay's registrations from the config bytes observed under the
+/// write lock, deciding between a byte-exact pre-install restore, a rewrite,
+/// and removal of an emptied file.
+fn strip_registration_entries(
+    config_path: &Path,
+    original_path: &Path,
+    existing: &str,
+    remove_mcp: bool,
+    remove_lsp: bool,
+) -> Result<(OpenCodeRegistrationRemoval, TextFileMutation)> {
+    let mut config = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
     // Uninstall drops only what TraceDecay wrote. A plugin registration the
     // host recorded through `opencode plugin` is not ours to remove — and
     // OpenCode ships no removal command we could drive instead, which is one
@@ -854,48 +931,41 @@ fn remove_registration_entries(
         config.as_object_mut().map(|object| object.remove("lsp"));
     }
     if !removed_mcp && !removed_lsp {
-        eprintln!(
-            "  No tracedecay MCP/LSP registration in {}, skipping",
-            config_path.display()
-        );
-        return Ok(());
+        return Ok((
+            OpenCodeRegistrationRemoval::NoEntry,
+            TextFileMutation::Unchanged,
+        ));
     }
-    let original_path = opencode_original_config_path(config_path);
-    if let Ok(original) = std::fs::read(&original_path)
+    if let Ok(original) = std::fs::read(original_path)
         && serde_json::from_slice::<serde_json::Value>(&original).ok() == Some(config.clone())
     {
-        super::safe_write_bytes_file(config_path, &original, None)?;
-        super::safe_remove_host_file(&original_path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to remove {}: {error}", original_path.display()),
+        let original = String::from_utf8(original).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "{} is not valid UTF-8: {error}",
+                original_path.display()
+            ),
         })?;
-        return Ok(());
+        return Ok((
+            OpenCodeRegistrationRemoval::RestoredOriginal,
+            TextFileMutation::Write(original),
+        ));
     }
     plugin_cli::ensure_host_owned_plugin_registration_untouched(
         host_plugin_before.as_ref(),
         &config,
         config_path,
     )?;
-    let backup = preserve_backup
-        .then(|| backup_config_file(config_path))
-        .transpose()?
-        .flatten();
-    let is_empty = config.as_object().is_some_and(serde_json::Map::is_empty);
-    if is_empty {
-        super::safe_remove_host_file(config_path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to remove {}: {error}", config_path.display()),
-        })?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            config_path.display()
-        );
+    if config.as_object().is_some_and(serde_json::Map::is_empty) {
+        Ok((
+            OpenCodeRegistrationRemoval::RemovedFile,
+            TextFileMutation::Remove,
+        ))
     } else {
-        safe_write_json_file(config_path, &config, backup.as_deref())?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            config_path.display()
-        );
+        Ok((
+            OpenCodeRegistrationRemoval::Rewritten,
+            TextFileMutation::Write(render_json_config(config_path, &config)?),
+        ))
     }
-    Ok(())
 }
 
 fn opencode_original_config_path(config_path: &Path) -> PathBuf {
@@ -903,23 +973,7 @@ fn opencode_original_config_path(config_path: &Path) -> PathBuf {
 }
 
 fn uninstall_prompt_rules(prompt_path: &Path) -> Result<()> {
-    super::prompt_rules::remove_prompt_rules_with(prompt_path, |contents| {
-        if !contents.contains("tracedecay") {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        }
-        let Some(new_contents) =
-            super::prompt_rules::strip_heading_block(contents, PROMPT_RULE_MARKER)
-        else {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        };
-        if new_contents.is_empty() {
-            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
-        } else {
-            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
-                "{new_contents}\n"
-            )))
-        }
-    })
+    super::prompt_rules::remove_standard_prompt_rules(prompt_path)
 }
 
 // ---------------------------------------------------------------------------
@@ -1104,7 +1158,7 @@ mod tests {
 
         install_mcp_server(&config_path, "/usr/bin/tracedecay").unwrap();
 
-        let config = load_json_file_strict(&config_path).unwrap();
+        let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert_eq!(
             config["lsp"]["tracedecay"]["initialization"]["tracedecay"]["analyzerOwnership"]["mode"],
             "projection_only"

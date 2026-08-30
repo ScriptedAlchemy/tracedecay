@@ -22,8 +22,9 @@ use crate::errors::{Result, TraceDecayError};
 pub(super) use super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER;
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
-    NonInteractiveInstallOutcome, UpdatePluginOutcome, backup_config_file, expected_tool_perms,
-    load_json_file, load_json_file_strict, safe_write_json_file, safe_write_text_file,
+    JsonConfigDialect, JsonConfigMutation, NonInteractiveInstallOutcome, UpdatePluginOutcome,
+    expected_tool_perms, load_json_file, safe_write_text_file,
+    update_json_config_transactionally,
 };
 
 pub struct ClaudeIntegration;
@@ -699,8 +700,8 @@ fn plugin_wildcard_perm() -> String {
 
 /// Add the one documented plugin-namespace allow rule without replacing any
 /// other Claude setting. The receipt-backed lifecycle snapshots settings.json
-/// before this registration effect, while this writer also leaves the normal
-/// recoverable `.bak` used by every shared-config edit.
+/// before this registration effect, while the config transaction also leaves
+/// the normal recoverable `.bak` used by every shared-config edit.
 fn ensure_claude_plugin_permission(home: &Path) -> Result<()> {
     let settings_path = home.join(".claude/settings.json");
     ensure_claude_dir(
@@ -710,51 +711,52 @@ fn ensure_claude_plugin_permission(home: &Path) -> Result<()> {
                 message: format!("{} has no parent directory", settings_path.display()),
             })?,
     )?;
-    let mut settings = load_json_file_strict(&settings_path)?;
-    let settings = settings
-        .as_object_mut()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!("{} must contain a JSON object", settings_path.display()),
-        })?;
-    let permissions = settings
-        .entry("permissions")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!(
-                "permissions in {} must contain a JSON object",
-                settings_path.display()
-            ),
-        })?;
-    let allow = permissions
-        .entry("allow")
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!(
-                "permissions.allow in {} must contain a JSON array",
-                settings_path.display()
-            ),
-        })?;
-    let wildcard = plugin_wildcard_perm();
-    if allow
-        .iter()
-        .any(|entry| entry.as_str() == Some(wildcard.as_str()))
-    {
-        return Ok(());
-    }
-    allow.push(json!(wildcard));
-
-    let backup = backup_config_file(&settings_path)?;
-    safe_write_json_file(
+    let added = update_json_config_transactionally(
         &settings_path,
-        &serde_json::Value::Object(settings.clone()),
-        backup.as_deref(),
+        JsonConfigDialect::Json,
+        |mut settings| {
+            let object = settings
+                .as_object_mut()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!("{} must contain a JSON object", settings_path.display()),
+                })?;
+            let permissions = object
+                .entry("permissions")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!(
+                        "permissions in {} must contain a JSON object",
+                        settings_path.display()
+                    ),
+                })?;
+            let allow = permissions
+                .entry("allow")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!(
+                        "permissions.allow in {} must contain a JSON array",
+                        settings_path.display()
+                    ),
+                })?;
+            let wildcard = plugin_wildcard_perm();
+            if allow
+                .iter()
+                .any(|entry| entry.as_str() == Some(wildcard.as_str()))
+            {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            }
+            allow.push(json!(wildcard));
+            Ok((true, JsonConfigMutation::Write(settings)))
+        },
     )?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Allowed tracedecay plugin tools in {}",
-        settings_path.display()
-    );
+    if added {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Allowed tracedecay plugin tools in {}",
+            settings_path.display()
+        );
+    }
     Ok(())
 }
 

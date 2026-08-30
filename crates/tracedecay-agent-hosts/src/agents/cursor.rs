@@ -11,9 +11,10 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
-    UpdatePluginOutcome, backup_and_write_json, load_json_file, load_jsonc_file_strict,
-    mcp_config_has_tracedecay, safe_write_text_file, uninstall_mcp_server_entry,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    JsonConfigMutation, McpUninstallPolicy, UpdatePluginOutcome, load_json_file,
+    load_jsonc_file_strict, mcp_config_has_tracedecay, safe_write_text_file,
+    uninstall_mcp_server_entry, update_json_config_transactionally,
 };
 
 pub struct CursorIntegration;
@@ -703,11 +704,10 @@ fn sweep_legacy_project_artifacts(project_path: &Path) -> Result<()> {
         uninstall_mcp_server_entry(
             &mcp_path,
             "mcpServers",
-            load_json_file,
+            JsonConfigDialect::Json,
             McpUninstallPolicy {
                 prune_empty_root: true,
                 remove_empty_file: true,
-                durable_remove: false,
             },
         )?;
     }
@@ -781,37 +781,40 @@ fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
     if !hooks_path.exists() {
         return Ok(());
     }
-    let mut hooks = load_jsonc_file_strict(hooks_path)?;
-    let Some(events) = hooks
-        .get_mut("hooks")
-        .and_then(|value| value.as_object_mut())
-    else {
-        return Ok(());
-    };
+    let removed = update_json_config_transactionally(
+        hooks_path,
+        JsonConfigDialect::Jsonc,
+        |mut hooks| {
+            let Some(events) = hooks
+                .get_mut("hooks")
+                .and_then(|value| value.as_object_mut())
+            else {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            };
 
-    let mut removed = false;
-    for value in events.values_mut() {
-        let Some(entries) = value.as_array_mut() else {
-            continue;
-        };
-        let before = entries.len();
-        entries.retain(|entry| !is_legacy_tracedecay_hook(entry));
-        removed |= entries.len() != before;
-    }
-    events.retain(|_, value| value.as_array().is_none_or(|entries| !entries.is_empty()));
+            let mut removed = false;
+            for value in events.values_mut() {
+                let Some(entries) = value.as_array_mut() else {
+                    continue;
+                };
+                let before = entries.len();
+                entries.retain(|entry| !is_legacy_tracedecay_hook(entry));
+                removed |= entries.len() != before;
+            }
+            events
+                .retain(|_, value| value.as_array().is_none_or(|entries| !entries.is_empty()));
 
-    if !removed {
-        return Ok(());
-    }
-    if events.is_empty() {
-        std::fs::remove_file(hooks_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", hooks_path.display()),
-        })?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed legacy Cursor hooks from {}",
-            hooks_path.display()
-        );
-    } else if backup_and_write_json(hooks_path, &hooks) {
+            if !removed {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            }
+            if events.is_empty() {
+                Ok((true, JsonConfigMutation::Remove))
+            } else {
+                Ok((true, JsonConfigMutation::Write(hooks)))
+            }
+        },
+    )?;
+    if removed {
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed legacy Cursor hooks from {}",
             hooks_path.display()

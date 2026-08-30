@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
-    McpUninstallPolicy, config_backup_path, install_mcp_server_entry, load_json_file,
-    load_json_file_strict, mcp_servers_registration_state, report_mcp_registration,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    McpDoctorLabels, McpUninstallPolicy, config_backup_path, install_mcp_server_entry,
+    load_json_file, mcp_servers_registration_state, report_mcp_registration,
     uninstall_mcp_server_entry,
 };
 
@@ -112,7 +112,7 @@ impl AgentIntegration for ClineIntegration {
                     "autoApprove": []
                 }),
                 "Cline",
-                load_json_file_strict,
+                JsonConfigDialect::Json,
             )?;
         }
         Ok(())
@@ -127,7 +127,7 @@ impl AgentIntegration for ClineIntegration {
             uninstall_mcp_server_entry(
                 &cline_mcp_settings_path(&ctx.home),
                 "mcpServers",
-                load_json_file,
+                JsonConfigDialect::Json,
                 McpUninstallPolicy::default(),
             )?;
         }
