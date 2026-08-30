@@ -147,3 +147,30 @@ pub enum FactSearchGraphCoverageV1 {
         reason: FactSearchGraphDegradationV1,
     },
 }
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FactRetrievalTelemetryDegradationV1 {
+    Unavailable,
+    Saturated,
+}
+
+/// Whether an explicit search recorded retrieval telemetry for its hits.
+///
+/// The telemetry write is recall bookkeeping, not part of the returned
+/// evidence: when only that lane is unavailable the search still delivers its
+/// result and reports the degradation here instead of refusing the read.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FactRetrievalTelemetryV1 {
+    /// The result had no hits, so there was nothing to record.
+    NotApplicable,
+    /// The selected store is mounted read-only; recording is never attempted.
+    ReadOnly,
+    Recorded {
+        fact_count: usize,
+    },
+    Degraded {
+        reason: FactRetrievalTelemetryDegradationV1,
+    },
+}

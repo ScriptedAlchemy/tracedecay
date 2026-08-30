@@ -900,6 +900,97 @@ async fn fact_store_reason_requires_an_entity_selection() {
     close_test_graph(cg).await;
 }
 
+/// A closed-vocabulary rejection must name the admitted values: the decode
+/// error is the caller's only feedback loop on the MCP and CLI routes.
+#[tokio::test]
+async fn fact_store_add_rejection_names_the_admitted_categories() {
+    let cg = setup_project().await;
+
+    let result = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({
+            "content": "Category outside the closed vocabulary must be rejected",
+            "category": "pitfall"
+        }),
+    )
+    .await;
+    let message = result.expect_err("an unknown category must be rejected").to_string();
+    assert!(
+        message.contains("pitfall"),
+        "the rejection must echo the offending category: {message}"
+    );
+    for admitted in [
+        "general",
+        "user_pref",
+        "project",
+        "tool",
+        "decision",
+        "code_area",
+    ] {
+        assert!(
+            message.contains(admitted),
+            "the rejection must name admitted category `{admitted}`: {message}"
+        );
+    }
+    close_test_graph(cg).await;
+}
+
+/// Explicit search reports its retrieval-telemetry lane as a typed state on
+/// the wire: recorded for tracked hits, not-applicable for a zero-hit result.
+#[tokio::test]
+async fn fact_search_reports_typed_retrieval_telemetry() {
+    let cg = setup_project().await;
+    invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({
+            "content": "Telemetry lane state is part of the search contract",
+            "entities": ["Telemetry Entity"]
+        }),
+    )
+    .await
+    .unwrap();
+
+    let hit_page = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_search",
+        json!({"query": "telemetry lane state contract", "limit": 5, "min_trust": 0.0}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !hit_page["hits"].as_array().unwrap().is_empty(),
+        "the fixture fact must be retrievable: {hit_page}"
+    );
+    assert_eq!(
+        hit_page["retrieval_telemetry"]["kind"], "recorded",
+        "tracked hits must report recorded telemetry: {hit_page}"
+    );
+    assert_eq!(
+        hit_page["retrieval_telemetry"]["fact_count"].as_u64(),
+        Some(hit_page["hits"].as_array().unwrap().len() as u64),
+        "recorded telemetry must count the tracked hits: {hit_page}"
+    );
+
+    let empty_page = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_search",
+        json!({"query": "zzz nothing matches this query zzz", "limit": 5}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        empty_page["hits"].as_array().unwrap().is_empty(),
+        "the control query must return no hits: {empty_page}"
+    );
+    assert_eq!(
+        empty_page["retrieval_telemetry"]["kind"], "not_applicable",
+        "a zero-hit search records nothing: {empty_page}"
+    );
+    close_test_graph(cg).await;
+}
+
 #[tokio::test]
 async fn fact_store_add_rejects_out_of_range_trust() {
     let cg = setup_project().await;
