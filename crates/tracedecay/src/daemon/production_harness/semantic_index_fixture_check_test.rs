@@ -75,7 +75,7 @@ fn member_matches_pin(path: &Path, length: u64, sha256: &str) -> bool {
 
 fn pending_reason(
     cache: &Path,
-    model: &crate::semantic_code::CatalogedFastEmbedModelV1,
+    model: &tracedecay_semantic::CatalogedFastEmbedModelV1,
 ) -> Option<String> {
     model.members.iter().find_map(|(role, member)| {
         (!member_matches_pin(&cache.join(&member.path), member.length, &member.sha256)).then(|| {
@@ -109,9 +109,9 @@ fn copy_fixture_tree(source: &Path, destination: &Path) {
 async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
     let fixture_source = workspace_root().join("tests/fixtures/semantic_index");
     let cache = model_cache_dir();
-    let catalog = crate::semantic_code::production_fastembed_catalog();
+    let catalog = tracedecay_semantic::production_fastembed_catalog();
     let model = catalog
-        .get(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID)
+        .get(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID)
         .expect("production catalog contains the default model");
     if let Some(reason) = pending_reason(&cache, model) {
         eprintln!(
@@ -135,12 +135,12 @@ async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
     // hub; the production install path re-verifies each SHA-256 pin before
     // the atomic install.
     let lifecycle_root =
-        crate::semantic_code::default_lifecycle_root().expect("isolated lifecycle root");
+        tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
     let lifecycle =
-        crate::semantic_code::shared_lifecycle_owner().expect("production lifecycle owner");
+        tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
     seed_distribution_fixture(&lifecycle_root, &cache, &lifecycle);
     lifecycle
-        .select_model(Some(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID), true)
+        .select_model(Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select the default semantic model");
     lifecycle
         .acquire_blocking_for_tests()

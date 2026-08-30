@@ -4,13 +4,8 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
-fn evaluator_bin() -> &'static str {
-    option_env!("CARGO_BIN_EXE_tracedecay-search-eval")
-        .expect("Cargo must build tracedecay-search-eval")
-}
-
 fn run(args: &[&str]) -> Output {
-    Command::new(evaluator_bin())
+    Command::new(common::search_eval_bin("tracedecay-search-eval"))
         .current_dir(common::repository_root())
         .args(args)
         .output()

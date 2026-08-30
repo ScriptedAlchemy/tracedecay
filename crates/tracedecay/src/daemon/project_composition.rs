@@ -498,7 +498,7 @@ async fn production_project_server_inner(
                         .ok()
                     });
                 let status = Some(
-                    crate::semantic_code::resolve_project_semantic_runtime_status(
+                    tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
                         Some(&project_root),
                         configuration,
                     ),
@@ -688,7 +688,7 @@ async fn production_project_server_inner(
         tokio::spawn(async move {
             let started = Instant::now();
             let selected = tokio::task::spawn_blocking(move || {
-                crate::semantic_code::apply_config_selection(
+                tracedecay_semantic::apply_default_config_selection(
                     semantic_startup_selection.as_deref(),
                     semantic_auto_download_enabled,
                 )
@@ -1257,8 +1257,8 @@ fn cached_project_composition(
 /// Semantic-code choices this route resolves once from its authoritative
 /// runtime configuration.
 struct SemanticProjectRuntime {
-    handle: crate::semantic_code::DaemonSemanticRuntimeHandleV1,
-    lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
+    handle: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
+    lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     resources: crate::config::SemanticResourceCeilings,
     auto_download_enabled: bool,
     startup_selection: Option<String>,
@@ -1276,7 +1276,7 @@ fn semantic_project_runtime(
     // The configured ceiling still caps concurrency; this only narrows it to
     // what the serving reservation leaves room for and adds one slot so an
     // interactive query keeps a warm session while a rebuild holds the rest.
-    let handle = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
+    let handle = tracedecay_semantic::DaemonSemanticRuntimeHandleV1::new(
         tracedecay_semantic::embedding_parallelism::embedding_pool_sessions(
             semantic_resources.max_threads,
             semantic_resources.max_concurrent_sessions,
@@ -1291,7 +1291,7 @@ fn semantic_project_runtime(
     })?;
     Ok(SemanticProjectRuntime {
         handle,
-        lifecycle: crate::semantic_code::shared_lifecycle_owner(),
+        lifecycle: tracedecay_semantic::default_shared_lifecycle_owner(),
         resources: *semantic_resources,
         auto_download_enabled: semantic_config.auto_download && runtime.semantic_auto_download(),
         startup_selection: semantic_config.selected_model.clone(),

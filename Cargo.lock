@@ -6029,6 +6029,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracedecay-domain",
@@ -6469,8 +6470,10 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-runtime-core",
  "tracedecay-tool-catalog",
  "url",
+ "walkdir",
 ]
 
 [[package]]
@@ -6656,6 +6659,7 @@ dependencies = [
 name = "tracedecay-search-eval"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "flate2",
  "gix",
  "hex",
@@ -6665,13 +6669,17 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
  "tracedecay-application",
  "tracedecay-capture",
  "tracedecay-code-index",
+ "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-private-fs",
  "tracedecay-query",
+ "tracedecay-runtime-core",
  "tracedecay-search-eval",
+ "tracedecay-sessions",
 ]
 
 [[package]]
@@ -6700,6 +6708,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-private-fs",
  "tracedecay-query",
+ "tracedecay-runtime-core",
  "tracing",
  "url",
 ]

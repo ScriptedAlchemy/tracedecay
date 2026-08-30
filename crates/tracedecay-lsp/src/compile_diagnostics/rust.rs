@@ -19,7 +19,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use crate::diagnostics::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
+use super::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 /// Driver for Rust projects. Probes for `Cargo.toml` at the project root.
@@ -108,7 +108,7 @@ impl Driver for CargoDriver {
 
                 Ok(diagnostics)
             },
-            label = "diagnostics.rust.cargo_check"
+            label = "compile_diagnostics.rust.cargo_check"
         ))
     }
 }

@@ -993,13 +993,13 @@ impl DaemonSemanticRuntimeRegistrar {
     pub(crate) async fn register(
         &self,
         project_root: PathBuf,
-        handle: crate::semantic_code::DaemonSemanticRuntimeHandleV1,
+        handle: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
     ) -> Result<(), DaemonSemanticRuntimeRegistrationError> {
         self.service
             .project_runtimes
             .register_or_reconcile(
                 project_root.clone(),
-                |_: &mut crate::semantic_code::DaemonSemanticRuntimeHandleV1| {
+                |_: &mut tracedecay_semantic::DaemonSemanticRuntimeHandleV1| {
                     Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered)
                 },
                 || {

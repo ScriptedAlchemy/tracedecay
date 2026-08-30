@@ -207,8 +207,7 @@ const PROJECTION_AUDIT_INVALIDATION: &[Trigger] = &[
             AFTER UPDATE ON session_messages
             WHEN EXISTS (
                 SELECT 1 FROM observation_projection_provenance
-                WHERE projector_version = 'claude-session-message-v4'
-                  AND output_provider = OLD.provider
+                WHERE output_provider = OLD.provider
                   AND output_message_id = OLD.message_id
             ) BEGIN
                 DELETE FROM authority_audit_checkpoints
@@ -222,8 +221,7 @@ const PROJECTION_AUDIT_INVALIDATION: &[Trigger] = &[
             AFTER DELETE ON session_messages
             WHEN EXISTS (
                 SELECT 1 FROM observation_projection_provenance
-                WHERE projector_version = 'claude-session-message-v4'
-                  AND output_provider = OLD.provider
+                WHERE output_provider = OLD.provider
                   AND output_message_id = OLD.message_id
             ) BEGIN
                 DELETE FROM authority_audit_checkpoints

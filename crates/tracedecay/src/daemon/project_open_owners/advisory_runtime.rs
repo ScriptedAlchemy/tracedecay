@@ -1660,7 +1660,7 @@ async fn resolve_github_stack_observability(
             "GitHub stack observability lane is not mounted"
         );
     };
-    let topology_policy = match crate::config::topology::resolved_work_topology_policy(
+    let topology_policy = match tracedecay_usecases::config::topology::resolved_work_topology_policy(
         &state.scout_configuration.snapshot,
     ) {
         Ok(policy) => policy.clone(),

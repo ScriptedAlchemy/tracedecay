@@ -16,6 +16,7 @@ hotpath = [
     "tracedecay-application/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-code-extraction/hotpath",
+    "tracedecay-runtime-core/hotpath",
     "tracedecay-tool-catalog/hotpath",
 ]
 hotpath-alloc = [
@@ -25,6 +26,7 @@ hotpath-alloc = [
     "tracedecay-application/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
 ]
 hotpath-cpu = [
@@ -34,6 +36,7 @@ hotpath-cpu = [
     "tracedecay-application/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
 ]
 
@@ -51,8 +54,10 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false, features = ["lite"] }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 url = "2"
+walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"

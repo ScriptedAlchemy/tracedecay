@@ -1,10 +1,7 @@
 //! Daemon-side analytics diagnostics composition.
 //!
-//! The durable hook-JSONL importer and sync entry point live in
-//! `tracedecay_usecases::analytics_bridge`; the `tracedecay analytics …` CLI
-//! wrappers live in `tracedecay-cli`. What stays here is the diagnostics
-//! summary assembly, because it reads through the root crate's dashboard
-//! analytics API (hook JSONL rows, durable event rows, summary shaping).
+//! Syncs hook JSONL through the parent module, then folds durable events,
+//! observatory/costs read models, and the shared diagnostics summary.
 
 use std::path::Path;
 
@@ -13,7 +10,11 @@ use tracedecay_domain::ObservationScopeV1;
 use tracedecay_store::StoreShardScopeV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_usecases::analytics_bridge::analytics_sync_with_db;
+
+use super::analytics_sync_with_db;
+use super::summary::{
+    diagnostics_summary_from_parts, durable_analytics_event_row, read_hook_analytics_rows_at,
+};
 
 fn cli_error(message: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
     tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -41,7 +42,7 @@ async fn registered_diagnostics_message_count(
 }
 
 #[hotpath::measure(label = "analytics.diagnostics")]
-pub(crate) async fn analytics_diagnostics_with_db(
+pub async fn analytics_diagnostics_with_db(
     gdb: &RegisteredGlobalDb,
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
@@ -78,14 +79,13 @@ pub(crate) async fn analytics_diagnostics_with_db(
         .map_err(cli_error)?
     );
     let observatory = hotpath::measure_block!("analytics.observatory", {
-        let observatory = tracedecay_usecases::observability::observatory_read_model(
+        let observatory = crate::observability::observatory_read_model(
             gdb,
             project_filter.as_deref(),
             0,
         )
         .await;
-        tracedecay_usecases::observability::observatory_cli_value(&observatory)
-            .map_err(cli_error)?
+        crate::observability::observatory_cli_value(&observatory).map_err(cli_error)?
     });
     let provider_scope = if all_projects {
         None
@@ -101,7 +101,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     };
     let provider_usage_db = if all_projects { None } else { project_sessions };
     let costs = hotpath::measure_block!("analytics.costs", {
-        let costs = tracedecay_usecases::observability::costs_read_model(
+        let costs = crate::observability::costs_read_model(
             gdb,
             provider_usage_db,
             provider_scope.as_ref(),
@@ -109,12 +109,9 @@ pub(crate) async fn analytics_diagnostics_with_db(
             0,
         )
         .await;
-        tracedecay_usecases::observability::costs_cli_value(&costs).map_err(cli_error)?
+        crate::observability::costs_cli_value(&costs).map_err(cli_error)?
     });
-    let event_rows: Vec<Value> = events
-        .iter()
-        .map(tracedecay_dashboard_api::analytics_api::durable_analytics_event_row)
-        .collect();
+    let event_rows: Vec<Value> = events.iter().map(durable_analytics_event_row).collect();
 
     let store_root = project_root.and_then(|root| {
         tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root)
@@ -124,10 +121,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     let hook_filter_root = if all_projects { None } else { project_root };
     let hook_analytics = hotpath::measure_block!(
         "analytics.hooks",
-        tracedecay_dashboard_api::analytics_api::read_hook_analytics_rows_at(
-            store_root.as_deref(),
-            hook_filter_root,
-        )
+        read_hook_analytics_rows_at(store_root.as_deref(), hook_filter_root)
     );
 
     let message_count =
@@ -140,11 +134,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     };
     let mut summary = hotpath::measure_block!(
         "analytics.assemble",
-        tracedecay_dashboard_api::analytics_api::diagnostics_summary_from_parts(
-            message_count,
-            &hook_analytics,
-            durable,
-        )
+        diagnostics_summary_from_parts(message_count, &hook_analytics, durable)
     );
     if let Some(summary) = summary.as_object_mut() {
         summary.insert(

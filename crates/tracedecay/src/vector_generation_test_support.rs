@@ -3,7 +3,7 @@
 //! This keeps tests on the same nominal projector and store types used by the
 //! product without exposing database-engine connections or SQL primitives.
 
-pub use crate::semantic_code::projector::{
+pub use tracedecay_semantic::projector::{
     CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, ProjectedChunkVectorV1,
     ProjectionRequestBatchV1, SemanticProjectionErrorV1, prepare_vector_generation,
     prepare_vector_generation_async, split_projection_request,

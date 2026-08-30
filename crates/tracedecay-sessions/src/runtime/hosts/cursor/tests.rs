@@ -60,7 +60,7 @@ fn canonical_record_is_stable_across_hook_sweep_and_mtime_context() {
     let range = tracedecay_domain::ObservationSourceRangeV1::new(10, 90).unwrap();
 
     let hook = normalize_cursor_observation_with_message_id(
-        &cursor_native_with_context(native.clone(), &hook_context),
+        &cursor_native_with_context(native.clone(), &hook_context, None, None),
         "session.fixture",
         record_id.clone(),
         record_id.clone(),
@@ -70,7 +70,7 @@ fn canonical_record_is_stable_across_hook_sweep_and_mtime_context() {
     )
     .unwrap();
     let sweep = normalize_cursor_observation_with_message_id(
-        &cursor_native_with_context(native, &sweep_context),
+        &cursor_native_with_context(native, &sweep_context, None, None),
         "session.fixture",
         record_id.clone(),
         record_id,

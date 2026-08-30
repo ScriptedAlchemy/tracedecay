@@ -423,8 +423,8 @@ impl DaemonInvocationState {
         project_id: tracedecay_domain::ProjectId,
         project_root: &Path,
         store_root: PathBuf,
-        semantic_runtime: Option<&crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
-        semantic_lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
+        semantic_runtime: Option<&tracedecay_semantic::DaemonSemanticRuntimeHandleV1>,
+        semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
         semantic_resources: Option<crate::config::SemanticResourceCeilings>,
         native_graph_activation: bool,
         graph_runtime: Arc<

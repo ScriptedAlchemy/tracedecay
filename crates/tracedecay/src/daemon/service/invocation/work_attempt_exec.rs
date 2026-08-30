@@ -75,7 +75,7 @@ use tracedecay_usecases::observability::{
     record_work_operation_resource,
 };
 
-use crate::config::work_executable_binding::{
+use tracedecay_usecases::config::work_executable_binding::{
     PinnedWorkExecutableBindingResolver, WorkExecutableBindingError, WorkExecutableBindingResolver,
 };
 
@@ -619,6 +619,15 @@ fn select_provider(
 ) -> Result<ProviderSelection, ProviderDenial> {
     let configuration = crate::config::cached_runtime_configuration(project_root)
         .map_err(|_| ProviderDenial::preferred(WorkProviderAvailabilityV1::Unavailable))?;
+    // Root `cached_runtime_configuration` still returns the composition-root
+    // pin. The resolver lives on the usecases pin; reconstruct via the same
+    // constructor the private `usecase_runtime_configuration` bridge uses.
+    let configuration = tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
+        configuration.target,
+        configuration.revision_id,
+        configuration.snapshot,
+    )
+    .map_err(|_| ProviderDenial::preferred(WorkProviderAvailabilityV1::Unavailable))?;
     let resolver = PinnedWorkExecutableBindingResolver::from_configuration(&configuration)
         .map_err(|error| ProviderDenial::preferred(availability_state(error)))?;
     select_with_resolver(&resolver, attempt)

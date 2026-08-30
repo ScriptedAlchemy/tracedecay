@@ -941,7 +941,7 @@ async fn retiring_exact_roots_fences_republication_without_closing_other_project
 async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
     let registry = ProjectRuntimeRegistryV1::default();
     let retired = root("semantic-worker-retirement");
-    let semantic = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(1, 1, 4096)
+    let semantic = tracedecay_semantic::DaemonSemanticRuntimeHandleV1::new(1, 1, 4096)
         .expect("semantic runtime");
     registry
         .publish(retired.clone(), semantic.clone())
@@ -952,7 +952,7 @@ async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
     let (cancelled, worker_cancelled) = tokio::sync::oneshot::channel();
     let (release, worker_release) = tokio::sync::oneshot::channel();
     assert!(
-        semantic.schedule(crate::semantic_code::SemanticRuntimeWorkV1::new(
+        semantic.schedule(tracedecay_semantic::SemanticRuntimeWorkV1::new(
             tracedecay_domain::CodeGenerationId::new("code-generation.targeted-retirement")
                 .expect("code generation"),
             1,
@@ -963,7 +963,7 @@ async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
                 }
                 cancelled.send(()).expect("worker-cancel receiver");
                 worker_release.await.expect("worker-release sender");
-                Err(crate::semantic_code::SemanticRuntimeScheduleFailureV1::Cancelled)
+                Err(tracedecay_semantic::SemanticRuntimeScheduleFailureV1::Cancelled)
             },
         ))
     );
@@ -986,8 +986,8 @@ async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
     assert!(retirement.await.expect("retirement task"));
     assert!(matches!(
         semantic.status(),
-        crate::semantic_code::SemanticRuntimeScheduleStatusV1::Failed {
-            reason: crate::semantic_code::SemanticRuntimeScheduleFailureV1::Cancelled,
+        tracedecay_semantic::SemanticRuntimeScheduleStatusV1::Failed {
+            reason: tracedecay_semantic::SemanticRuntimeScheduleFailureV1::Cancelled,
             ..
         }
     ));

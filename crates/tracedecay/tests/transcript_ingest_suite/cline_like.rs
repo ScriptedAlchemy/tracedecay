@@ -875,9 +875,13 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             prefix_cursor.generation(),
             "{provider}: replacement starts a new snapshot generation"
         );
+        // Full coverage of the replacement snapshot — three conversation rows
+        // plus the uncorrelated ui_messages usage record — commits before
+        // projection acknowledgement; the failed projection replays from the
+        // durable queue rather than wedging the observation frontier.
         assert_eq!(
             committed_cursor.position(),
-            3,
+            4,
             "{provider}: observation frontier commits before projection acknowledgement"
         );
         assert_eq!(

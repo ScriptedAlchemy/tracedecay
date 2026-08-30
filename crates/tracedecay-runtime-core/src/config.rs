@@ -16,8 +16,14 @@ pub const TRACEDECAY_DIR: &str = ".tracedecay";
 /// Environment variable that pins the user-level `TraceDecay` data directory.
 pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
 
+/// Environment variable that pins the user-level global database path.
+pub const GLOBAL_DB_PATH_ENV: &str = "TRACEDECAY_GLOBAL_DB";
+
 /// Project graph database filename inside a `.tracedecay/` data dir.
 pub const DB_FILENAME: &str = "tracedecay.db";
+
+/// Filename of the user-level global database inside the profile root.
+pub const GLOBAL_DB_FILENAME: &str = "global.db";
 
 /// New runtime storage lives in the user-level profile shard. The project root
 /// only carries lightweight marker/config files under `.tracedecay/`.
@@ -59,6 +65,30 @@ pub fn user_data_dir() -> Option<PathBuf> {
     }
     let home = dirs::home_dir()?;
     Some(canonicalize_data_dir(home.join(TRACEDECAY_DIR)))
+}
+
+fn global_db_path_override() -> Option<PathBuf> {
+    std::env::var_os(GLOBAL_DB_PATH_ENV)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Path to the user-level global database.
+///
+/// Default is `global.db` inside [`user_data_dir`]. `TRACEDECAY_GLOBAL_DB`
+/// pins an explicit path. This is the same formula `tracedecay-global-db`
+/// previously owned; the helper lives here so handshake identity can resolve
+/// the path without taking that crate as a dependency.
+pub fn global_db_path() -> Option<PathBuf> {
+    if let Some(path) = global_db_path_override() {
+        return Some(path);
+    }
+    user_data_dir().map(|dir| dir.join(GLOBAL_DB_FILENAME))
+}
+
+/// True when `TRACEDECAY_GLOBAL_DB` pins the global DB to an explicit path.
+pub fn global_db_path_is_overridden() -> bool {
+    global_db_path_override().is_some()
 }
 
 fn nextest_isolated_user_data_dir(path: PathBuf) -> PathBuf {
