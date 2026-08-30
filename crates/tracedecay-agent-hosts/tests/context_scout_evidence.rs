@@ -1,11 +1,14 @@
 use std::collections::BTreeSet;
 
 use tracedecay_agent_hosts::agents::context_scout_v2::{
-    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutDecisionV1,
+    ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt, ContextScoutLimitsV1,
+    ContextScoutSelectionInputV1, ContextScoutSuppressionV1, select_deterministic_context_scout,
+};
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryWindowV1, ContextScoutEvidenceAvailabilityV1,
     ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
-    ContextScoutEvidenceSourceReceiptV1, ContextScoutLimitsV1, ContextScoutRedactionReceiptV1,
-    ContextScoutSelectionInputV1, ContextScoutSuppressionV1, select_deterministic_context_scout,
+    ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
 };
 use tracedecay_application::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,

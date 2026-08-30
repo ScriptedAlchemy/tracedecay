@@ -27,7 +27,7 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_daemon_protocol::{InvocationCancellationPolicy, invocation_now_micros};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -> Result<Deadline> {
     let operation_id =

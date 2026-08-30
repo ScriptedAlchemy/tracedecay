@@ -3358,15 +3358,15 @@ mod affected_tests_tests {
             AuthenticatedSymbolGraphCursorAdapter::new(Arc::new(snapshots), authenticator);
 
         let issuing = symbol_graph_context(
-            crate::request_identity::mcp_connection_request_id(
+            tracedecay_application::request_identity::mcp_connection_request_id(
                 &serde_json::json!(1),
                 "connection.symbol-graph",
             )
             .expect("mcp connection request id"),
         );
         let resuming = symbol_graph_context(
-            crate::request_identity::mint_global_request_id(
-                crate::request_identity::GlobalRequestSurface::McpFallback,
+            tracedecay_application::request_identity::mint_global_request_id(
+                tracedecay_application::request_identity::GlobalRequestSurface::McpFallback,
             )
             .expect("mcp fallback request id"),
         );
@@ -3419,8 +3419,8 @@ mod affected_tests_tests {
         let adapter =
             AuthenticatedSymbolGraphCursorAdapter::new(Arc::new(snapshots), authenticator);
         let context = symbol_graph_context(
-            crate::request_identity::mint_global_request_id(
-                crate::request_identity::GlobalRequestSurface::McpFallback,
+            tracedecay_application::request_identity::mint_global_request_id(
+                tracedecay_application::request_identity::GlobalRequestSurface::McpFallback,
             )
             .expect("mcp fallback request id"),
         );

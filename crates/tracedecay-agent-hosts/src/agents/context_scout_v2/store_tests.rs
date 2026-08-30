@@ -41,7 +41,7 @@ fn entry(project_id: [u8; 16], generation: u64) -> ContextScoutDurableQueueEntry
             input_watermark: [14; 32],
         },
         route: ContextScoutRouteV1::Deterministic,
-        model_outcome: ContextScoutModelRunOutcomeV1::NotRequested,
+        model_outcome: ContextScoutModelOutcomeV1::NotRequested,
         model_receipt: None,
         envelope: ContextScoutSuggestionEnvelopeV1 {
             envelope_id: [17; 16],
@@ -132,7 +132,7 @@ async fn restart_requeues_expired_claim_and_keeps_receipt_feedback_idempotent() 
         receipt_id: [23; 16],
         envelope_id: pending.envelope.envelope_id,
         delivered_at: UtcMicros(30),
-        outcome: ContextScoutOutcomeV1::Displayed,
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
     assert_eq!(
         restarted.record_delivery(&delivery_claim, &receipt).await,
@@ -224,7 +224,7 @@ async fn delivery_requires_the_current_claim_after_lease_takeover() {
         receipt_id: [43; 16],
         envelope_id: pending.envelope.envelope_id,
         delivered_at: UtcMicros(15),
-        outcome: ContextScoutOutcomeV1::Displayed,
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
 
     assert_eq!(
@@ -255,7 +255,7 @@ async fn delivery_by_lease_refuses_foreign_and_stale_claim_authority() {
         receipt_id: [52; 16],
         envelope_id: pending.envelope.envelope_id,
         delivered_at: UtcMicros(15),
-        outcome: ContextScoutOutcomeV1::Displayed,
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
 
     assert_eq!(
@@ -330,7 +330,7 @@ async fn delivery_by_lease_persists_exact_receipt_and_idempotent_authority() {
         receipt_id: [62; 16],
         envelope_id: pending.envelope.envelope_id,
         delivered_at: UtcMicros(30),
-        outcome: ContextScoutOutcomeV1::Displayed,
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
     assert_eq!(
         store
@@ -576,7 +576,7 @@ async fn legacy_delivery_provenance_fails_closed_until_exact_replay_migrates_it(
         receipt_id: [23; 16],
         envelope_id: delivered.envelope.envelope_id,
         delivered_at: UtcMicros(30),
-        outcome: ContextScoutOutcomeV1::Displayed,
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
     let feedback = ContextScoutFeedbackV1 {
         receipt_id: receipt.receipt_id,

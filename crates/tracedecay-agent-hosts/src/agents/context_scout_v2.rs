@@ -16,6 +16,15 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::o200k_base_singleton;
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
+    ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1, ContextScoutEvidenceAvailabilityV1,
+    ContextScoutFeedbackKindV1,
+    ContextScoutFeedbackV1, ContextScoutLeaseV1, ContextScoutModelBackendV1,
+    ContextScoutModelOutcomeV1, ContextScoutModelReceiptV1, ContextScoutRouteV1,
+    ContextScoutSuggestionEnvelopeV1, ContextScoutWorkV1,
+};
 use tracedecay_domain::{RetrievalAnchorId, UtcMicros};
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
@@ -33,28 +42,14 @@ mod store;
 #[cfg(test)]
 mod store_tests;
 
-pub use evidence::{
-    ContextScoutEvidenceAvailabilityV1, ContextScoutEvidenceEnvelopeV1,
-    ContextScoutEvidenceSourceKindV1, ContextScoutEvidenceSourceReceiptV1,
-    ContextScoutRedactionReceiptV1,
-};
+pub use evidence::ContextScoutEvidenceEnvelopeExt;
 pub use store::ProjectContextScoutDurableStoreV1;
 
-/// Exact destination for one advisory suggestion. Every field is opaque and
-/// fixed-size so a host integration cannot persist prompt/source/path data.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ContextScoutAddressV1 {
-    pub profile_id: [u8; 16],
-    pub provider_id: [u8; 16],
-    pub protected_session_id: [u8; 32],
-    pub thread_id: [u8; 16],
-    pub turn_id: [u8; 16],
-    pub agent_id: [u8; 16],
-    pub logical_message_id: [u8; 16],
-    pub project_id: [u8; 16],
+pub(crate) trait ContextScoutAddressExt {
+    fn validate(self) -> Result<(), ContextScoutErrorV1>;
 }
 
-impl ContextScoutAddressV1 {
+impl ContextScoutAddressExt for ContextScoutAddressV1 {
     fn validate(self) -> Result<(), ContextScoutErrorV1> {
         if self.profile_id == [0; 16]
             || self.provider_id == [0; 16]
@@ -71,28 +66,12 @@ impl ContextScoutAddressV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutCategoryV1 {
-    Retrieval,
-    Diagnostic,
-    Coordination,
-    Verification,
+pub(crate) trait ContextScoutCandidateExt {
+    fn validate(&self, limits: ContextScoutLimitsV1) -> Result<(), ContextScoutErrorV1>;
+    fn durable(&self) -> bool;
 }
 
-/// A daemon-produced candidate. The text is compact prompt-eligible advice;
-/// its evidence remains separately pinned to durable opaque identities.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutCandidateV1 {
-    pub dedupe_key: [u8; 32],
-    pub category: ContextScoutCategoryV1,
-    pub relevance_score: u16,
-    pub suggestion_text: String,
-    pub evidence: ContextScoutEvidenceEnvelopeV1,
-    pub expires_at: UtcMicros,
-}
-
-impl ContextScoutCandidateV1 {
+impl ContextScoutCandidateExt for ContextScoutCandidateV1 {
     fn validate(&self, limits: ContextScoutLimitsV1) -> Result<(), ContextScoutErrorV1> {
         if self.dedupe_key == [0; 32]
             || !safe_suggestion_text(&self.suggestion_text)
@@ -156,18 +135,6 @@ impl ContextScoutLimitsV1 {
         }
         Ok(())
     }
-}
-
-/// The daemon/policy-owned receptivity result. A model adapter cannot choose
-/// this value and no fixed timing threshold is embedded here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutDeliveryWindowV1 {
-    Immediate,
-    NextBoundary,
-    IdleWindow,
-    OnRequest,
-    Suppressed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,16 +213,6 @@ pub struct ContextScoutSelectionInputV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutSuggestionEnvelopeV1 {
-    pub envelope_id: [u8; 16],
-    pub address: ContextScoutAddressV1,
-    pub input_watermark: [u8; 32],
-    pub configuration_revision: [u8; 32],
-    pub delivery_window: ContextScoutDeliveryWindowV1,
-    pub candidate: ContextScoutCandidateV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ContextScoutDecisionV1 {
     Ready {
@@ -269,20 +226,12 @@ pub enum ContextScoutDecisionV1 {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutRouteV1 {
-    Deterministic,
-    ModelAssisted,
-    DeterministicFallback,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextScoutSelectionV1 {
     pub route: ContextScoutRouteV1,
     pub decision: ContextScoutDecisionV1,
     #[serde(default)]
-    pub model_outcome: ContextScoutModelRunOutcomeV1,
+    pub model_outcome: ContextScoutModelOutcomeV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_receipt: Option<ContextScoutModelReceiptV1>,
 }
@@ -466,58 +415,19 @@ pub enum ContextScoutModelErrorV1 {
     InvalidOutput,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutModelRunOutcomeV1 {
-    #[default]
-    NotRequested,
-    Succeeded,
-    Disabled,
-    Unavailable,
-    Denied,
-    Disconnected,
-    Cancelled,
-    DeadlineExceeded,
-    TokenBudgetExceeded,
-    InvalidOutput,
-}
-
-impl From<ContextScoutModelErrorV1> for ContextScoutModelRunOutcomeV1 {
-    fn from(error: ContextScoutModelErrorV1) -> Self {
-        match error {
-            ContextScoutModelErrorV1::Disabled => Self::Disabled,
-            ContextScoutModelErrorV1::Unavailable => Self::Unavailable,
-            ContextScoutModelErrorV1::Denied => Self::Denied,
-            ContextScoutModelErrorV1::Disconnected => Self::Disconnected,
-            ContextScoutModelErrorV1::Cancelled => Self::Cancelled,
-            ContextScoutModelErrorV1::DeadlineExceeded => Self::DeadlineExceeded,
-            ContextScoutModelErrorV1::TokenBudgetExceeded => Self::TokenBudgetExceeded,
-            ContextScoutModelErrorV1::InvalidOutput => Self::InvalidOutput,
+impl ContextScoutModelErrorV1 {
+    pub const fn as_model_outcome(self) -> ContextScoutModelOutcomeV1 {
+        match self {
+            Self::Disabled => ContextScoutModelOutcomeV1::Disabled,
+            Self::Unavailable => ContextScoutModelOutcomeV1::Unavailable,
+            Self::Denied => ContextScoutModelOutcomeV1::Denied,
+            Self::Disconnected => ContextScoutModelOutcomeV1::Disconnected,
+            Self::Cancelled => ContextScoutModelOutcomeV1::Cancelled,
+            Self::DeadlineExceeded => ContextScoutModelOutcomeV1::DeadlineExceeded,
+            Self::TokenBudgetExceeded => ContextScoutModelOutcomeV1::TokenBudgetExceeded,
+            Self::InvalidOutput => ContextScoutModelOutcomeV1::InvalidOutput,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutModelBackendV1 {
-    Disabled,
-    CodexAppServer,
-    Unsupported,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutModelReceiptV1 {
-    pub requested_backend: ContextScoutModelBackendV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actual_provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actual_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_cost_microusd: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -652,7 +562,7 @@ pub async fn select_model_assisted_context_scout(
             return Ok(ContextScoutSelectionV1 {
                 route: ContextScoutRouteV1::Deterministic,
                 decision: deterministic,
-                model_outcome: ContextScoutModelRunOutcomeV1::NotRequested,
+                model_outcome: ContextScoutModelOutcomeV1::NotRequested,
                 model_receipt: None,
             });
         }
@@ -664,7 +574,7 @@ pub async fn select_model_assisted_context_scout(
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
             decision: deterministic,
-            model_outcome: error.into(),
+            model_outcome: error.as_model_outcome(),
             model_receipt: None,
         });
     }
@@ -672,7 +582,7 @@ pub async fn select_model_assisted_context_scout(
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
             decision: deterministic,
-            model_outcome: ContextScoutModelRunOutcomeV1::TokenBudgetExceeded,
+            model_outcome: ContextScoutModelOutcomeV1::TokenBudgetExceeded,
             model_receipt: None,
         });
     };
@@ -680,7 +590,7 @@ pub async fn select_model_assisted_context_scout(
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
             decision: deterministic,
-            model_outcome: error.into(),
+            model_outcome: error.as_model_outcome(),
             model_receipt: None,
         });
     }
@@ -694,7 +604,7 @@ pub async fn select_model_assisted_context_scout(
             return Ok(ContextScoutSelectionV1 {
                 route: ContextScoutRouteV1::DeterministicFallback,
                 decision: deterministic,
-                model_outcome: error.into(),
+                model_outcome: error.as_model_outcome(),
                 model_receipt: None,
             });
         }
@@ -703,7 +613,7 @@ pub async fn select_model_assisted_context_scout(
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
             decision: deterministic,
-            model_outcome: error.into(),
+            model_outcome: error.as_model_outcome(),
             model_receipt: None,
         });
     }
@@ -716,7 +626,7 @@ pub async fn select_model_assisted_context_scout(
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
             decision: deterministic,
-            model_outcome: ContextScoutModelRunOutcomeV1::InvalidOutput,
+            model_outcome: ContextScoutModelOutcomeV1::InvalidOutput,
             model_receipt: None,
         });
     }
@@ -729,7 +639,7 @@ pub async fn select_model_assisted_context_scout(
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
             decision: deterministic,
-            model_outcome: ContextScoutModelRunOutcomeV1::InvalidOutput,
+            model_outcome: ContextScoutModelOutcomeV1::InvalidOutput,
             model_receipt: None,
         });
     };
@@ -738,7 +648,7 @@ pub async fn select_model_assisted_context_scout(
     Ok(ContextScoutSelectionV1 {
         route: ContextScoutRouteV1::ModelAssisted,
         decision: select_deterministic_context_scout(&model_input, limits)?,
-        model_outcome: ContextScoutModelRunOutcomeV1::Succeeded,
+        model_outcome: ContextScoutModelOutcomeV1::Succeeded,
         model_receipt: Some(proposal.receipt),
     })
 }
@@ -877,13 +787,6 @@ pub(super) fn serialized_token_count(value: &impl Serialize) -> Option<usize> {
 #[cfg(not(feature = "token-counting"))]
 pub(super) fn serialized_token_count(_value: &impl Serialize) -> Option<usize> {
     None
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutWorkV1 {
-    pub address: ContextScoutAddressV1,
-    pub generation: u64,
-    pub input_watermark: [u8; 32],
 }
 
 /// Exact-address burst coalescer. Superseded generations are visible through a
@@ -1114,37 +1017,27 @@ impl ContextScoutSuggestionChannelV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutOutcomeV1 {
-    Attempted,
-    Delayed,
-    Displayed,
-    Expanded,
-    ExplicitlyAccepted,
-    ExplicitlyRejected,
-    Dismissed,
-    ExpiredUnseen,
-    Corrected,
-    Unknown,
+pub fn context_scout_delivery_receipt_matches_envelope(
+    receipt: &ContextScoutDeliveryReceiptV1,
+    envelope: &HookEventEnvelopeV2,
+) -> bool {
+    receipt.receipt_id != [0; 16]
+        && receipt.envelope_id != [0; 16]
+        && receipt.delivered_at.0 > 0
+        && receipt.receipt_id
+            == context_scout_delivery_receipt_id(envelope.event_id, receipt.envelope_id)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutDeliveryReceiptV1 {
-    pub receipt_id: [u8; 16],
-    pub envelope_id: [u8; 16],
-    pub delivered_at: UtcMicros,
-    pub outcome: ContextScoutOutcomeV1,
+/// Local hook-scope adapter. The receipt wire type lives in application, so
+/// this crate cannot implement the hooks trait on that foreign type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextScoutDeliveryReceiptHookV1 {
+    pub receipt: ContextScoutDeliveryReceiptV1,
 }
 
-impl HookScopedFeedbackV1 for ContextScoutDeliveryReceiptV1 {
+impl HookScopedFeedbackV1 for ContextScoutDeliveryReceiptHookV1 {
     fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
-        self.receipt_id != [0; 16]
-            && self.envelope_id != [0; 16]
-            && self.delivered_at.0 > 0
-            && self.receipt_id
-                == context_scout_delivery_receipt_id(envelope.event_id, self.envelope_id)
+        context_scout_delivery_receipt_matches_envelope(&self.receipt, envelope)
     }
 }
 
@@ -1166,28 +1059,12 @@ pub fn validate_context_scout_delivery_receipt(
     if receipt.receipt_id == [0; 16]
         || receipt.envelope_id != envelope.envelope_id
         || receipt.delivered_at.0 <= 0
-        || (receipt.outcome != ContextScoutOutcomeV1::ExpiredUnseen
+        || (receipt.outcome != ContextScoutDeliveryOutcomeV1::ExpiredUnseen
             && receipt.delivered_at.0 >= envelope.candidate.expires_at.0)
     {
         return Err(ContextScoutErrorV1::ReceiptBindingMismatch);
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutFeedbackKindV1 {
-    ExplicitlyAccepted,
-    ExplicitlyRejected,
-    Dismissed,
-    Corrected,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutFeedbackV1 {
-    pub receipt_id: [u8; 16],
-    pub kind: ContextScoutFeedbackKindV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1255,22 +1132,12 @@ fn validate_durable_envelope(
     Ok(())
 }
 
-/// One exact durable queue entry. The queue records the work-generation token
-/// next to the envelope, so a replay cannot turn a superseded model result
-/// into a current delivery.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutDurableQueueEntryV1 {
-    pub work: ContextScoutWorkV1,
-    pub route: ContextScoutRouteV1,
-    #[serde(default)]
-    pub model_outcome: ContextScoutModelRunOutcomeV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_receipt: Option<ContextScoutModelReceiptV1>,
-    pub envelope: ContextScoutSuggestionEnvelopeV1,
+pub(crate) trait ContextScoutDurableQueueEntryExt {
+    fn validate(&self) -> Result<(), ContextScoutErrorV1>;
 }
 
-impl ContextScoutDurableQueueEntryV1 {
-    pub fn validate(&self) -> Result<(), ContextScoutErrorV1> {
+impl ContextScoutDurableQueueEntryExt for ContextScoutDurableQueueEntryV1 {
+    fn validate(&self) -> Result<(), ContextScoutErrorV1> {
         self.work.address.validate()?;
         if self.work.generation == 0 || self.work.input_watermark == [0; 32] {
             return Err(ContextScoutErrorV1::StaleWork);
@@ -1278,21 +1145,21 @@ impl ContextScoutDurableQueueEntryV1 {
         match (self.route, self.model_outcome, self.model_receipt.as_ref()) {
             (
                 ContextScoutRouteV1::ModelAssisted,
-                ContextScoutModelRunOutcomeV1::Succeeded,
+                ContextScoutModelOutcomeV1::Succeeded,
                 Some(receipt),
             ) if receipt.requested_backend == ContextScoutModelBackendV1::CodexAppServer => {}
             (
                 ContextScoutRouteV1::Deterministic | ContextScoutRouteV1::DeterministicFallback,
-                ContextScoutModelRunOutcomeV1::NotRequested,
+                ContextScoutModelOutcomeV1::NotRequested,
                 None,
             ) => {}
             (
                 ContextScoutRouteV1::DeterministicFallback,
-                ContextScoutModelRunOutcomeV1::Disabled
-                | ContextScoutModelRunOutcomeV1::Unavailable
-                | ContextScoutModelRunOutcomeV1::DeadlineExceeded
-                | ContextScoutModelRunOutcomeV1::TokenBudgetExceeded
-                | ContextScoutModelRunOutcomeV1::InvalidOutput,
+                ContextScoutModelOutcomeV1::Disabled
+                | ContextScoutModelOutcomeV1::Unavailable
+                | ContextScoutModelOutcomeV1::DeadlineExceeded
+                | ContextScoutModelOutcomeV1::TokenBudgetExceeded
+                | ContextScoutModelOutcomeV1::InvalidOutput,
                 None,
             ) => {}
             _ => return Err(ContextScoutErrorV1::InvalidCandidate),
@@ -1317,27 +1184,17 @@ pub enum ContextScoutDurableStoreOutcomeV1 {
     Unavailable,
 }
 
-/// Caller-supplied lease identity and deadline. The store owns no timing
-/// policy; it only applies the exact lease and compares its absolute expiry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutLeaseV1 {
-    pub lease_id: [u8; 16],
-    pub expires_at: UtcMicros,
+pub(crate) trait ContextScoutLeaseExt {
+    fn validate(self, now: UtcMicros) -> Result<(), ContextScoutErrorV1>;
 }
 
-impl ContextScoutLeaseV1 {
+impl ContextScoutLeaseExt for ContextScoutLeaseV1 {
     fn validate(self, now: UtcMicros) -> Result<(), ContextScoutErrorV1> {
         if self.lease_id == [0; 16] || now.0 <= 0 || self.expires_at.0 <= now.0 {
             return Err(ContextScoutErrorV1::StaleWork);
         }
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutDurableClaimV1 {
-    pub entry: ContextScoutDurableQueueEntryV1,
-    pub lease: ContextScoutLeaseV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1556,9 +1413,9 @@ pub struct ContextScoutStatusV1 {
     pub active_suggestions: usize,
     pub last_route: Option<ContextScoutRouteV1>,
     pub last_suppression: Option<ContextScoutSuppressionV1>,
-    pub last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
+    pub last_model_outcome: Option<ContextScoutModelOutcomeV1>,
     pub last_model_receipt: Option<ContextScoutModelReceiptV1>,
-    pub last_delivery_outcome: Option<ContextScoutOutcomeV1>,
+    pub last_delivery_outcome: Option<ContextScoutDeliveryOutcomeV1>,
     pub last_feedback: Option<ContextScoutFeedbackKindV1>,
 }
 
@@ -1577,14 +1434,14 @@ pub struct ContextScoutCapabilityStateV1 {
     pub deterministic_available: bool,
     pub configured_model: Option<ContextScoutModelBackendV1>,
     pub configured_model_available: bool,
-    pub last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
+    pub last_model_outcome: Option<ContextScoutModelOutcomeV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutBudgetStateV1 {
     pub limits: ContextScoutLimitsV1,
-    pub last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
+    pub last_model_outcome: Option<ContextScoutModelOutcomeV1>,
     pub exhausted: bool,
     pub last_input_tokens: Option<u64>,
     pub last_output_tokens: Option<u64>,
@@ -1614,9 +1471,9 @@ pub struct ContextScoutDurableRuntimeV1<S, M> {
     coalescer: ContextScoutCoalescerV1,
     last_route: Option<ContextScoutRouteV1>,
     last_suppression: Option<ContextScoutSuppressionV1>,
-    last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
+    last_model_outcome: Option<ContextScoutModelOutcomeV1>,
     last_model_receipt: Option<ContextScoutModelReceiptV1>,
-    last_delivery_outcome: Option<ContextScoutOutcomeV1>,
+    last_delivery_outcome: Option<ContextScoutDeliveryOutcomeV1>,
     last_feedback: Option<ContextScoutFeedbackKindV1>,
 }
 
@@ -1737,7 +1594,7 @@ where
             ContextScoutRuntimeModeV1::Deterministic => ContextScoutSelectionV1 {
                 route: ContextScoutRouteV1::Deterministic,
                 decision: select_deterministic_context_scout(input, limits)?,
-                model_outcome: ContextScoutModelRunOutcomeV1::NotRequested,
+                model_outcome: ContextScoutModelOutcomeV1::NotRequested,
                 model_receipt: None,
             },
             ContextScoutRuntimeModeV1::ConfiguredModel => {
@@ -1748,7 +1605,7 @@ where
         self.last_route = Some(selection.route);
         self.last_model_outcome = Some(selection.model_outcome);
         self.last_model_receipt.clone_from(&selection.model_receipt);
-        if selection.model_outcome == ContextScoutModelRunOutcomeV1::Cancelled {
+        if selection.model_outcome == ContextScoutModelOutcomeV1::Cancelled {
             self.last_suppression = Some(ContextScoutSuppressionV1::Cancelled);
             return Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
                 reason: ContextScoutSuppressionV1::Cancelled,
@@ -2101,7 +1958,7 @@ mod tests {
             receipt_id: [18; 16],
             envelope_id: envelope.envelope_id,
             delivered_at: envelope.candidate.expires_at,
-            outcome: ContextScoutOutcomeV1::Displayed,
+            outcome: ContextScoutDeliveryOutcomeV1::Displayed,
         };
         assert_eq!(
             validate_context_scout_delivery_receipt(&envelope, &receipt),
@@ -2110,7 +1967,7 @@ mod tests {
         validate_context_scout_delivery_receipt(
             &envelope,
             &ContextScoutDeliveryReceiptV1 {
-                outcome: ContextScoutOutcomeV1::ExpiredUnseen,
+                outcome: ContextScoutDeliveryOutcomeV1::ExpiredUnseen,
                 ..receipt
             },
         )
@@ -2319,7 +2176,7 @@ mod tests {
         assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
         assert_eq!(
             selection.model_outcome,
-            ContextScoutModelRunOutcomeV1::InvalidOutput
+            ContextScoutModelOutcomeV1::InvalidOutput
         );
         assert!(matches!(
             selection.decision,
@@ -2333,19 +2190,19 @@ mod tests {
         for (error, expected) in [
             (
                 ContextScoutModelErrorV1::Disabled,
-                ContextScoutModelRunOutcomeV1::Disabled,
+                ContextScoutModelOutcomeV1::Disabled,
             ),
             (
                 ContextScoutModelErrorV1::Unavailable,
-                ContextScoutModelRunOutcomeV1::Unavailable,
+                ContextScoutModelOutcomeV1::Unavailable,
             ),
             (
                 ContextScoutModelErrorV1::DeadlineExceeded,
-                ContextScoutModelRunOutcomeV1::DeadlineExceeded,
+                ContextScoutModelOutcomeV1::DeadlineExceeded,
             ),
             (
                 ContextScoutModelErrorV1::TokenBudgetExceeded,
-                ContextScoutModelRunOutcomeV1::TokenBudgetExceeded,
+                ContextScoutModelOutcomeV1::TokenBudgetExceeded,
             ),
         ] {
             let selection = select_model_assisted_context_scout(
@@ -2381,7 +2238,7 @@ mod tests {
         assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
         assert_eq!(
             selection.model_outcome,
-            ContextScoutModelRunOutcomeV1::InvalidOutput
+            ContextScoutModelOutcomeV1::InvalidOutput
         );
         assert!(selection.model_receipt.is_none());
     }
@@ -2401,7 +2258,7 @@ mod tests {
         assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
         assert_eq!(
             selection.model_outcome,
-            ContextScoutModelRunOutcomeV1::Cancelled
+            ContextScoutModelOutcomeV1::Cancelled
         );
         assert!(selection.model_receipt.is_none());
     }
@@ -2431,7 +2288,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             selection.model_outcome,
-            ContextScoutModelRunOutcomeV1::Cancelled
+            ContextScoutModelOutcomeV1::Cancelled
         );
         assert!(selection.model_receipt.is_none());
     }
@@ -2504,7 +2361,7 @@ mod tests {
             receipt_id: [18; 16],
             envelope_id: envelope.envelope_id,
             delivered_at: UtcMicros(11),
-            outcome: ContextScoutOutcomeV1::Displayed,
+            outcome: ContextScoutDeliveryOutcomeV1::Displayed,
         };
         validate_context_scout_delivery_receipt(&envelope, &receipt).unwrap();
         validate_context_scout_feedback(
@@ -2760,12 +2617,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             status.last_model_outcome,
-            Some(ContextScoutModelRunOutcomeV1::Succeeded)
+            Some(ContextScoutModelOutcomeV1::Succeeded)
         );
         assert_eq!(status.last_model_receipt, Some(model_receipt()));
         let mut forged_cancelled_entry = (*entry).clone();
         forged_cancelled_entry.route = ContextScoutRouteV1::DeterministicFallback;
-        forged_cancelled_entry.model_outcome = ContextScoutModelRunOutcomeV1::Cancelled;
+        forged_cancelled_entry.model_outcome = ContextScoutModelOutcomeV1::Cancelled;
         forged_cancelled_entry.model_receipt = None;
         assert_eq!(
             forged_cancelled_entry.validate(),
@@ -2924,7 +2781,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             status.last_model_outcome,
-            Some(ContextScoutModelRunOutcomeV1::Cancelled)
+            Some(ContextScoutModelOutcomeV1::Cancelled)
         );
         assert_eq!(
             status.last_suppression,
@@ -2957,7 +2814,7 @@ mod tests {
             receipt_id: [31; 16],
             envelope_id: entry.envelope.envelope_id,
             delivered_at: UtcMicros(20),
-            outcome: ContextScoutOutcomeV1::Displayed,
+            outcome: ContextScoutDeliveryOutcomeV1::Displayed,
         };
         let claim = ContextScoutDurableClaimV1 {
             entry: (*entry).clone(),
@@ -2988,7 +2845,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             status.last_delivery_outcome,
-            Some(ContextScoutOutcomeV1::Displayed)
+            Some(ContextScoutDeliveryOutcomeV1::Displayed)
         );
         assert_eq!(
             status.last_feedback,

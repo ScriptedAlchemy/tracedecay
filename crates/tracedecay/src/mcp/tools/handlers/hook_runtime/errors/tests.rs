@@ -7,6 +7,8 @@ use tracedecay_usecases::observation::{
     CaptureClaudeObservationRequestError, ObservationApplicationError,
 };
 
+use tracedecay_mcp::structured_hook_error_data;
+
 use super::*;
 
 #[test]

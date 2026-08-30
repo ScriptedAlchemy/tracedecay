@@ -5,10 +5,13 @@ use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay::agents::context_scout_v2::{
-    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutDecisionV1,
-    ContextScoutDeliveryWindowV1, ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
-    ContextScoutEvidenceSourceReceiptV1, ContextScoutLimitsV1, ContextScoutRedactionReceiptV1,
+    ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt, ContextScoutLimitsV1,
     ContextScoutSelectionInputV1, select_deterministic_context_scout,
+};
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+    ContextScoutDeliveryWindowV1, ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
+    ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
 };
 use tracedecay::agents::host_bundle_v2::{
     HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
