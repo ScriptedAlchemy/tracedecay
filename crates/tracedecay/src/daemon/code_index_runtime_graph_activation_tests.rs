@@ -115,8 +115,11 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     let profile = TempDir::new().expect("profile root");
     let profile_root = profile.path().join("profile");
     let project_id = test_project_id();
-    crate::storage::pin_fixture_repository_identity(fixture.path(), project_id.as_str())
-        .expect("project enrollment");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        fixture.path(),
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
@@ -248,8 +251,11 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     let profile = TempDir::new().expect("profile root");
     let profile_root = profile.path().join("profile");
     let project_id = test_project_id();
-    crate::storage::pin_fixture_repository_identity(fixture.path(), project_id.as_str())
-        .expect("project enrollment");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        fixture.path(),
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(

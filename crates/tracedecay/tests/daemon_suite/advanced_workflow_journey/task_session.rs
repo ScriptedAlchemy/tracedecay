@@ -214,7 +214,7 @@ pub(super) fn install_semantic_fixture(home: &Path) -> InstalledSemanticFixture 
              TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE",
         );
     let profile = home.join(".tracedecay");
-    tracedecay::storage::PrivateStoreIo::create_dir_all(&profile)
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
         .expect("private semantic fixture profile");
     let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(&profile);
     let owner = SemanticModelLifecycleOwnerV1::open_default(&lifecycle_root)
@@ -626,7 +626,9 @@ fn read_active_code_generation(
     home: &Path,
     project: &Path,
 ) -> Option<tracedecay_code_index::production::CodeIndexPublishedGenerationV1> {
-    let layout = tracedecay::storage::resolve_layout(project, &home.join(".tracedecay")).ok()?;
+    let layout =
+        tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay"))
+            .ok()?;
     let scope = scoped_code_index_store_root(&layout.data_root.join("code-index-v1"), project);
     let pointer = serde_json::from_slice::<DurablePublicationPointerV1>(
         &std::fs::read(scope.join("active-code-generation-v1.json")).ok()?,

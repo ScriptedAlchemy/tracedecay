@@ -178,7 +178,7 @@ facts recorded in tracedecay memory:
 3. **Rerun the same corpus** at the same `--model`.
 4. **Compare** the new `summary.md` pass rate and per-scenario tracedecay-vs-
    native counts against the baseline. Store the new baseline as a durable fact
-   (`tracedecay_fact_store`) so future regressions are visible.
+   (`tracedecay_fact_store_add`) so future regressions are visible.
 
 Because every run is hermetic, differences between two runs are attributable to
 the code change (plus model noise), not to drift in the user's real environment.
@@ -187,7 +187,7 @@ the code change (plus model noise), not to drift in the user's real environment.
 
 The `evals/hermetic/corpora/fact-store-adoption.jsonl` corpus measures whether a
 real agent actually **uses project memory** the way the tools intend: whether it
-**stores** durable facts (`tracedecay_fact_store`), **recalls** them when they
+**stores** durable facts (`tracedecay_fact_store_add`), **recalls** them (`tracedecay_fact_store_search`) when they
 would help, and — the headline metric — gives **feedback** on the facts it used
 (`tracedecay_fact_feedback`). The write/recall/feedback loop is the point:
 storing a fact nobody ever reinforces or corrects decays in value, so the
@@ -218,5 +218,5 @@ so the same corpus doubles as a **before/after** measure of those changes.
 
 Store the baseline the same way the post-merge re-eval protocol above prescribes:
 record the per-bucket and overall adoption % as a durable fact via
-`tracedecay_fact_store`, so a later rerun makes any regression — or the intended
+`tracedecay_fact_store_add`, so a later rerun makes any regression — or the intended
 improvement — visible against a fixed number.

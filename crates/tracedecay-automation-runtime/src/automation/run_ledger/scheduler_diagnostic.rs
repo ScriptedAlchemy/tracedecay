@@ -520,7 +520,11 @@ mod tests {
         );
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.ends_with(b"\n"));
-        assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
+        // Exactly one newline: the first one found is the final byte.
+        assert_eq!(
+            bytes.iter().position(|&byte| byte == b'\n'),
+            Some(bytes.len() - 1)
+        );
     }
 
     #[test]

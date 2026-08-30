@@ -41,11 +41,15 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_runtime_core::errors::Result<
-        crate::store::GlobalDbTranscriptStore<&'_ tracedecay_global_db::RegisteredGlobalDb>,
+        tracedecay_usecases::store::transcript::GlobalDbTranscriptStore<
+            &'_ tracedecay_global_db::RegisteredGlobalDb,
+        >,
     > {
-        Ok(crate::store::GlobalDbTranscriptStore::new(
-            self.session_database_for_test(scope)?,
-        ))
+        Ok(
+            tracedecay_usecases::store::transcript::GlobalDbTranscriptStore::new(
+                self.session_database_for_test(scope)?,
+            ),
+        )
     }
 
     #[doc(hidden)]
@@ -180,7 +184,7 @@ impl HostAdmissionTestRuntimeV1 {
                     source: std::io::Error::other(error.to_string()),
                 }
             })?;
-        let store = crate::store::GlobalDbTranscriptStore::new(database);
+        let store = tracedecay_usecases::store::transcript::GlobalDbTranscriptStore::new(database);
         tracedecay_sessions::runtime::source::try_ingest_source(
             &store,
             source,
@@ -295,7 +299,7 @@ impl HostAdmissionTestRuntimeV1 {
                 },
             )?;
         let database = self.session_database_for_test(scope)?;
-        let scoped_ids = crate::store::GlobalDbGitCorrelationStore::new(database)
+        let scoped_ids = tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
             .session_ids_for_scope(git_filter)
             .map_err(
                 |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
@@ -364,7 +368,7 @@ impl HostAdmissionTestRuntimeV1 {
                 source: std::io::Error::other(error.to_string()),
             }
         })?;
-        let store = crate::store::GlobalDbTranscriptStore::new(database);
+        let store = tracedecay_usecases::store::transcript::GlobalDbTranscriptStore::new(database);
         tracedecay_sessions::runtime::source::try_ingest_source(
             &store,
             source,
@@ -390,7 +394,7 @@ impl HostAdmissionTestRuntimeV1 {
             }
         })?;
         let database = self.project_database_for_test()?;
-        let authority = crate::store::GlobalDbSessionIngestAuthority::new(database);
+        let authority = tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(database);
         Ok(
             tracedecay_sessions::runtime::ingest_project_sources_for_provider(
                 &self.brain_id,

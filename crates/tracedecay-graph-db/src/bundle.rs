@@ -187,7 +187,19 @@ impl SealedReadBundleWriterV1 {
                     bytes: 0,
                     failure: None,
                 };
-                write(&mut hashing)?;
+                // Derivations emit token-sized writes (serde_json streams a
+                // few bytes per call); coalesce them so the hash and the file
+                // see IO_CHUNK_BYTES-sized chunks instead of one syscall and
+                // one Sha256 update per token.
+                {
+                    let mut buffered = io::BufWriter::with_capacity(IO_CHUNK_BYTES, &mut hashing);
+                    write(&mut buffered)?;
+                    buffered.flush().map_err(|error| {
+                        GraphDbError::unavailable(format!(
+                            "failed to flush sealed read bundle artifact stage: {error}"
+                        ))
+                    })?;
+                }
                 if let Some(failure) = hashing.failure.take() {
                     return Err(failure);
                 }

@@ -11,9 +11,10 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
-    UpdatePluginOutcome, backup_and_write_json, load_json_file, load_jsonc_file_strict,
-    mcp_config_has_tracedecay, safe_write_text_file, uninstall_mcp_server_entry,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    JsonConfigMutation, McpUninstallPolicy, UpdatePluginOutcome, load_json_file,
+    load_jsonc_file_strict, mcp_config_has_tracedecay, safe_remove_host_file, safe_write_text_file,
+    uninstall_mcp_server_entry, update_json_config_transactionally,
 };
 
 pub struct CursorIntegration;
@@ -171,6 +172,11 @@ impl AgentIntegration for CursorIntegration {
 
     fn is_detected(&self, home: &Path) -> bool {
         home.join(".cursor").is_dir()
+    }
+
+    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+        let surface = home.join(".cursor");
+        surface.is_dir().then_some(surface)
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
@@ -434,8 +440,8 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
         return Ok(());
     };
     if metadata.file_type().is_symlink() || metadata.is_file() {
-        std::fs::remove_file(install_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", install_dir.display()),
+        safe_remove_host_file(install_dir).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", install_dir.display()),
         })?;
         return Ok(());
     }
@@ -462,21 +468,56 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     // hand-maintained legacy list to fall out of date. User-added files
     // outside `skills/` (and any non-tracedecay skill dir) are preserved.
     sweep_retired_bundle_skill_dirs(install_dir)?;
-    remove_cursor_managed_skill_overlay(install_dir);
+    remove_cursor_managed_skill_overlay(install_dir)?;
+    for path in cursor_plugin_managed_paths(install_dir) {
+        remove_cursor_plugin_file(&path)?;
+    }
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
-        std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", install_dir.display()),
-        })?;
-    } else {
-        for path in cursor_plugin_managed_paths(install_dir) {
-            std::fs::remove_file(&path).ok();
+        match std::fs::remove_dir_all(install_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to remove {}: {error}", install_dir.display()),
+                });
+            }
         }
     }
     Ok(())
 }
 
-fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
-    std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
+fn remove_cursor_plugin_file(path: &Path) -> Result<()> {
+    match safe_remove_host_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", path.display()),
+        }),
+    }
+}
+
+fn remove_cursor_managed_skill_overlay(install_dir: &Path) -> Result<()> {
+    let overlay = install_dir.join("skills/agent-managed");
+    match super::collect_regular_files(&overlay) {
+        Ok(files) => {
+            for path in files {
+                remove_cursor_plugin_file(&path)?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to inspect {}: {error}", overlay.display()),
+            });
+        }
+    }
+    match std::fs::remove_dir_all(&overlay) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", overlay.display()),
+        }),
+    }
 }
 
 /// Recognize a receiptless Cursor deployment as a prior first-party install.
@@ -703,11 +744,10 @@ fn sweep_legacy_project_artifacts(project_path: &Path) -> Result<()> {
         uninstall_mcp_server_entry(
             &mcp_path,
             "mcpServers",
-            load_json_file,
+            JsonConfigDialect::Json,
             McpUninstallPolicy {
                 prune_empty_root: true,
                 remove_empty_file: true,
-                durable_remove: false,
             },
         )?;
     }
@@ -781,37 +821,36 @@ fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
     if !hooks_path.exists() {
         return Ok(());
     }
-    let mut hooks = load_jsonc_file_strict(hooks_path)?;
-    let Some(events) = hooks
-        .get_mut("hooks")
-        .and_then(|value| value.as_object_mut())
-    else {
-        return Ok(());
-    };
+    let removed =
+        update_json_config_transactionally(hooks_path, JsonConfigDialect::Jsonc, |mut hooks| {
+            let Some(events) = hooks
+                .get_mut("hooks")
+                .and_then(|value| value.as_object_mut())
+            else {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            };
 
-    let mut removed = false;
-    for value in events.values_mut() {
-        let Some(entries) = value.as_array_mut() else {
-            continue;
-        };
-        let before = entries.len();
-        entries.retain(|entry| !is_legacy_tracedecay_hook(entry));
-        removed |= entries.len() != before;
-    }
-    events.retain(|_, value| value.as_array().is_none_or(|entries| !entries.is_empty()));
+            let mut removed = false;
+            for value in events.values_mut() {
+                let Some(entries) = value.as_array_mut() else {
+                    continue;
+                };
+                let before = entries.len();
+                entries.retain(|entry| !is_legacy_tracedecay_hook(entry));
+                removed |= entries.len() != before;
+            }
+            events.retain(|_, value| value.as_array().is_none_or(|entries| !entries.is_empty()));
 
-    if !removed {
-        return Ok(());
-    }
-    if events.is_empty() {
-        std::fs::remove_file(hooks_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", hooks_path.display()),
+            if !removed {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            }
+            if events.is_empty() {
+                Ok((true, JsonConfigMutation::Remove))
+            } else {
+                Ok((true, JsonConfigMutation::Write(hooks)))
+            }
         })?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed legacy Cursor hooks from {}",
-            hooks_path.display()
-        );
-    } else if backup_and_write_json(hooks_path, &hooks) {
+    if removed {
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed legacy Cursor hooks from {}",
             hooks_path.display()
@@ -1100,25 +1139,48 @@ fn report_cursor_session_ingest<'a>(
     }
 }
 
-fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
+#[derive(Debug, PartialEq, Eq)]
+enum CursorPluginRuleDoctorState {
+    Missing,
+    Unreadable,
+    Incomplete,
+    Active,
+}
+
+fn cursor_plugin_rule_doctor_state(rule_path: &Path) -> CursorPluginRuleDoctorState {
     if !rule_path.exists() {
-        dc.warn(&format!(
+        return CursorPluginRuleDoctorState::Missing;
+    }
+    match std::fs::read_to_string(rule_path) {
+        Ok(contents)
+            if contents.contains("alwaysApply: true")
+                && contents.contains("tracedecay MCP tools") =>
+        {
+            CursorPluginRuleDoctorState::Active
+        }
+        Ok(_) => CursorPluginRuleDoctorState::Incomplete,
+        Err(_) => CursorPluginRuleDoctorState::Unreadable,
+    }
+}
+
+fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
+    match cursor_plugin_rule_doctor_state(rule_path) {
+        CursorPluginRuleDoctorState::Missing => dc.warn(&format!(
             "{} not found — run `tracedecay install --agent cursor`",
             rule_path.display()
-        ));
-        return;
-    }
-    let contents = std::fs::read_to_string(rule_path).unwrap_or_default();
-    if contents.contains("alwaysApply: true") && contents.contains("tracedecay MCP tools") {
-        dc.pass(&format!(
+        )),
+        CursorPluginRuleDoctorState::Unreadable => dc.fail(&format!(
+            "Cursor plugin tracedecay rule is unreadable in {} — run `tracedecay install --agent cursor`",
+            rule_path.display()
+        )),
+        CursorPluginRuleDoctorState::Active => dc.pass(&format!(
             "Cursor plugin tracedecay rule active in {}",
             rule_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
+        )),
+        CursorPluginRuleDoctorState::Incomplete => dc.fail(&format!(
             "Cursor plugin tracedecay rule is incomplete in {} — run `tracedecay install --agent cursor`",
             rule_path.display()
-        ));
+        )),
     }
 }
 
@@ -2199,6 +2261,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn uninstall_removes_managed_files_and_preserves_user_files() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
+        std::fs::write(install_dir.join("user-keep.txt"), "keep").unwrap();
+
+        remove_cursor_plugin_install(&install_dir).expect("uninstall should succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(install_dir.join("user-keep.txt")).unwrap(),
+            "keep"
+        );
+        assert!(
+            !install_dir.join(".cursor-plugin/plugin.json").exists(),
+            "managed plugin files must be removed beside operator files"
+        );
+        assert!(
+            !install_dir.join("rules/tracedecay.mdc").exists(),
+            "managed rule files must be removed beside operator files"
+        );
+    }
+
+    #[test]
+    fn leftover_managed_file_removal_propagates_errors() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
+        std::fs::write(install_dir.join("user-keep.txt"), "keep").unwrap();
+        let managed = install_dir.join("rules/tracedecay.mdc");
+        std::fs::remove_file(&managed).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+        std::fs::write(managed.join("nested"), "blocked").unwrap();
+
+        let error = remove_cursor_plugin_install(&install_dir)
+            .expect_err("a leftover managed path that is not a file must fail uninstall");
+        assert!(error.to_string().contains("failed to remove"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(install_dir.join("user-keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+
     /// The project-local legacy sweep must remove exactly the tracedecay-owned
     /// entries pre-plugin installs wrote (`mcp.json` server entry,
     /// `hook-cursor-*` hooks, the steering rule) while preserving everything
@@ -2322,6 +2427,46 @@ mod tests {
         let project = TempDir::new().unwrap();
         sweep_legacy_project_artifacts(project.path()).expect("sweep should succeed");
         assert!(!project.path().join(".cursor").exists());
+    }
+
+    #[test]
+    fn detected_host_surface_reports_cursor_home() {
+        let home = TempDir::new().unwrap();
+        assert_eq!(CursorIntegration.detected_host_surface(home.path()), None);
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        assert_eq!(
+            CursorIntegration.detected_host_surface(home.path()),
+            Some(home.path().join(".cursor"))
+        );
+    }
+
+    #[test]
+    fn doctor_plugin_rule_distinguishes_unreadable_from_incomplete() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing.mdc");
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&missing),
+            CursorPluginRuleDoctorState::Missing
+        );
+
+        let incomplete = tmp.path().join("incomplete.mdc");
+        std::fs::write(&incomplete, "alwaysApply: false\n").unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&incomplete),
+            CursorPluginRuleDoctorState::Incomplete
+        );
+
+        let unreadable = tmp.path().join("unreadable.mdc");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&unreadable),
+            CursorPluginRuleDoctorState::Unreadable
+        );
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_plugin_rule(&mut counters, &unreadable);
+        assert_eq!(counters.issues, 1);
+        assert_eq!(counters.warnings, 0);
     }
 
     /// The cwd-based sweep must never treat the home directory as a project:

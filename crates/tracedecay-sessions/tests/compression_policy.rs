@@ -96,6 +96,51 @@ fn overflow_recovery_cap_reserves_non_message_overhead() {
     );
 }
 
+/// Structured content must count visible words, not serialized JSON keys.
+/// `{"extra":"ignored key words","text":"one"}` would be 3 tokens if the
+/// policy stringified the object; visible-text extraction is 1.
+fn object_with_text_fixture() -> Value {
+    json!({
+        "content": {
+            "extra": "ignored key words",
+            "text": "one",
+        }
+    })
+}
+
+fn array_of_text_parts_fixture() -> Value {
+    json!({
+        "content": [
+            { "extra": "ignored key words", "text": "one" },
+            { "text": "two three" },
+        ]
+    })
+}
+
+#[test]
+fn overflow_recovery_cap_counts_object_with_text_as_visible_words() {
+    assert_eq!(
+        overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
+            current_tokens: Some(6),
+            max_assembly_tokens: Some(10),
+            messages: &[object_with_text_fixture()],
+        }),
+        Some(5)
+    );
+}
+
+#[test]
+fn overflow_recovery_cap_counts_array_of_text_parts_as_visible_words() {
+    assert_eq!(
+        overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
+            current_tokens: Some(8),
+            max_assembly_tokens: Some(10),
+            messages: &[array_of_text_parts_fixture()],
+        }),
+        Some(5)
+    );
+}
+
 #[test]
 fn dynamic_leaf_size_grows_by_powers_of_two_within_the_ceiling() {
     assert_eq!(

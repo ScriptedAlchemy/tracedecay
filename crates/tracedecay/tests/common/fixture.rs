@@ -44,9 +44,9 @@ use std::process::{Command, Output};
 use std::sync::{Arc, OnceLock};
 
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::storage::{self, StoreLayout};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::IsolatedEnv;
 
@@ -224,7 +224,7 @@ impl TestProfile {
                 &project_root,
                 tracedecay_runtime_core::worktree::git_common_dir(&project_root).as_deref(),
                 None,
-                tracedecay::branch::current_branch(&project_root).as_deref(),
+                tracedecay_runtime_core::branch::current_branch(&project_root).as_deref(),
             )
             .await
             .unwrap_or_else(|error| {

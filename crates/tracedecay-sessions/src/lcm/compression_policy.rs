@@ -92,7 +92,7 @@ pub fn overflow_recovery_assembly_cap(input: OverflowRecoveryCapInput<'_>) -> Op
     let message_tokens = input
         .messages
         .iter()
-        .map(|message| crate::lcm::lcm_budget_tokens(&message_content(message)))
+        .map(crate::lcm::lcm_message_budget_tokens)
         .sum::<i64>();
     let overhead_tokens = (current_tokens - message_tokens).max(0);
     Some((assembly_cap - overhead_tokens).max(1))
@@ -199,15 +199,4 @@ pub fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
         .iter()
         .map(|message| crate::lcm::lcm_budget_tokens(&message.content))
         .sum::<i64>()
-}
-
-fn message_content(message: &Value) -> String {
-    let Some(content) = message.get("content") else {
-        return String::new();
-    };
-    match content {
-        Value::Null => String::new(),
-        Value::String(text) => text.clone(),
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
 }

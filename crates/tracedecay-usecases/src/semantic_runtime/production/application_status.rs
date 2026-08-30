@@ -53,7 +53,8 @@ pub fn application_status_from_projection(
                     .clone()
                     .or_else(|| projection.prior_generation.clone()),
                 reason: match reason {
-                    SemanticRuntimeScheduleFailureV1::Artifact => {
+                    SemanticRuntimeScheduleFailureV1::Artifact
+                    | SemanticRuntimeScheduleFailureV1::ArtifactDetail(_) => {
                         SemanticFallbackReasonV1::ArtifactUnavailable
                     }
                     SemanticRuntimeScheduleFailureV1::Cancelled

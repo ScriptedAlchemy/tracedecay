@@ -94,6 +94,20 @@ impl Default for DaemonLifecycle {
     }
 }
 
+impl tracedecay_mcp::McpConnectionLifecyclePort for DaemonLifecycle {
+    fn accepting(&self) -> bool {
+        DaemonLifecycle::accepting(self)
+    }
+
+    fn try_enter(&self) -> Option<tracedecay_mcp::McpRequestActivity> {
+        DaemonLifecycle::try_enter(self).map(tracedecay_mcp::McpRequestActivity::retain)
+    }
+
+    fn wait_for_draining(&self) -> tracedecay_mcp::McpLifecycleDrainFuture<'_> {
+        Box::pin(DaemonLifecycle::wait_for_draining(self))
+    }
+}
+
 impl DaemonLifecycle {
     pub(crate) fn accepting(&self) -> bool {
         !self.inner.draining.load(Ordering::Acquire)

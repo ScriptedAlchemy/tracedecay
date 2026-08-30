@@ -17,8 +17,8 @@ use tracedecay_sessions::{
     WorkflowRunListRequest, WorkflowRunScope, WorkflowStatus,
 };
 
-use crate::store::GlobalDbGitCorrelationStore;
 use crate::tracedecay::current_timestamp;
+use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
 

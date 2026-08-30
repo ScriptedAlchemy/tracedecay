@@ -93,16 +93,30 @@ pub fn hook_import_sources(project_root: Option<&Path>) -> Vec<HookImportSource>
 
 /// Imports new hook JSONL rows into `analytics_events`, advancing a byte
 /// cursor per source file so re-runs only ingest the appended tail.
+// Takes the source list by value: a borrowed slice iterator held across the
+// per-source awaits trips rustc's higher-ranked Send leak check when this
+// future runs inside a spawned startup catch-up task.
 #[hotpath::measure(label = "usecases.analytics.import", future = true)]
 pub async fn import_hook_analytics(
     gdb: &RegisteredGlobalDb,
-    sources: &[HookImportSource],
+    sources: Vec<HookImportSource>,
 ) -> HookImportOutcome {
     let mut outcome = HookImportOutcome::default();
     for source in sources {
-        outcome.sources.push(import_source(gdb, source).await);
+        outcome.sources.push(import_source(gdb, &source).await);
     }
     outcome
+}
+
+/// Resolves the hook JSONL sources for `project_root` and imports them,
+/// returning the JSON outcome shape the admin CLI and dashboard report.
+#[hotpath::measure(label = "usecases.analytics.sync", future = true)]
+pub async fn analytics_sync_with_db(
+    gdb: &RegisteredGlobalDb,
+    project_root: Option<&Path>,
+) -> Value {
+    let sources = hook_import_sources(project_root);
+    import_hook_analytics(gdb, sources).await.as_json()
 }
 
 pub async fn import_source(
@@ -319,4 +333,60 @@ fn text_field(row: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::hook_row_to_analytics_event;
+
+    #[test]
+    fn maps_hook_invoked_row_with_attribution() {
+        let line = r#"{"agent":"claude","event":"hook_invoked","hook_name":"preToolUse","project_root":"/repo","session_id":"s1","tool_name":"Agent","ts_unix_ms":1783000000000}"#;
+        let Some(event) = hook_row_to_analytics_event(line, None) else {
+            panic!("row should map");
+        };
+        assert_eq!(event.provider, "hook_claude");
+        assert_eq!(event.event_kind, "hook_invoked");
+        assert_eq!(event.hook_name.as_deref(), Some("preToolUse"));
+        assert_eq!(event.session_id.as_deref(), Some("s1"));
+        assert_eq!(event.timestamp, 1_783_000_000);
+        assert!(event.project_id.ends_with("repo"));
+    }
+
+    #[test]
+    fn maps_hint_row_with_hint_id() {
+        let line = r#"{"agent":"cursor","event":"hint_emitted","category":"search","hint_id":"h-abc","project_root":"/repo","session_id":"s1","ts_unix_ms":1783000000000}"#;
+        let Some(event) = hook_row_to_analytics_event(line, None) else {
+            panic!("row should map");
+        };
+        assert_eq!(event.hint_category.as_deref(), Some("search"));
+        assert_eq!(event.hint_id.as_deref(), Some("h-abc"));
+
+        let line = r#"{"agent":"cursor","event":"hint_emitted","category":"search","project_root":"/repo","session_id":"s1","ts_unix_ms":1783000000000}"#;
+        let Some(event) = hook_row_to_analytics_event(line, None) else {
+            panic!("row should map");
+        };
+        assert!(event.hint_id.is_none());
+    }
+
+    #[test]
+    fn unattributed_row_falls_back_to_default_project() {
+        let line = r#"{"agent":"cursor","event":"hook_invoked","hook_name":"postToolUse","ts_unix_ms":1783000000000}"#;
+        let Some(event) = hook_row_to_analytics_event(line, Some(Path::new("/repo"))) else {
+            panic!("row should map");
+        };
+        assert!(event.project_id.ends_with("repo"));
+        let Some(event) = hook_row_to_analytics_event(line, None) else {
+            panic!("row should map");
+        };
+        assert_eq!(event.project_id, "");
+    }
+
+    #[test]
+    fn rows_without_event_field_are_skipped() {
+        assert!(hook_row_to_analytics_event("{}", None).is_none());
+        assert!(hook_row_to_analytics_event("not json", None).is_none());
+    }
 }

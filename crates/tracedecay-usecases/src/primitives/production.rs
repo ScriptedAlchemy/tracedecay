@@ -1274,14 +1274,31 @@ fn update_storage_status_history(
     database_bytes: u64,
     observed_at: i64,
 ) -> (Vec<StorageStatusHistoryPointV1>, String) {
-    let Ok(_guard) = storage_status_history_lock().lock() else {
-        return (
-            vec![StorageStatusHistoryPointV1 {
-                observed_at,
-                database_bytes,
-            }],
-            "current_sample_only_history_lock_failed".to_owned(),
-        );
+    // The lock serializes the read-modify-write of one history file, but it is
+    // process-global: every project's storage-status read funnels through it.
+    // A blocking acquire let one stalled write convoy every concurrent status
+    // read daemon-wide, so contention degrades to the current sample as a
+    // typed bounded state instead of waiting.
+    let _guard = match storage_status_history_lock().try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            return (
+                vec![StorageStatusHistoryPointV1 {
+                    observed_at,
+                    database_bytes,
+                }],
+                "current_sample_only_history_lock_contended".to_owned(),
+            );
+        }
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return (
+                vec![StorageStatusHistoryPointV1 {
+                    observed_at,
+                    database_bytes,
+                }],
+                "current_sample_only_history_lock_failed".to_owned(),
+            );
+        }
     };
     let stored = std::fs::read(history_path).ok();
     let restored = stored
@@ -1367,7 +1384,12 @@ pub(crate) async fn canonical_storage_status(
     let database_path = database.canonical_database_path();
     let store_path = database_path.display().to_string();
     let file_bytes = database_path.metadata().ok().map(|metadata| metadata.len());
-    let page_counts = database.storage_page_counts().await.ok();
+    let page_counts = hotpath::future!(
+        database.storage_page_counts(),
+        label = "usecases.primitives.storage_status.page_counts"
+    )
+    .await
+    .ok();
     let page_size_bytes = page_counts.and_then(|(page_size, _, _)| u32::try_from(page_size).ok());
     let page_count = page_counts.map(|(_, page_count, _)| page_count);
     let freelist_pages = page_counts.map(|(_, _, freelist_pages)| freelist_pages);
@@ -1391,18 +1413,39 @@ pub(crate) async fn canonical_storage_status(
         project_id.as_deref(),
         &store_path,
     );
-    let (history, history_coverage) = database_bytes.map_or_else(
-        || (Vec::new(), "current_sample_unavailable".to_owned()),
-        |bytes| {
-            update_storage_status_history(
-                &history_path,
-                project_id.clone(),
-                store_path.clone(),
-                bytes,
-                now_observed().0,
+    let (history, history_coverage) = match database_bytes {
+        None => (Vec::new(), "current_sample_unavailable".to_owned()),
+        Some(bytes) => {
+            let history_project_id = project_id.clone();
+            let history_store_path = store_path.clone();
+            let observed_at = now_observed().0;
+            // History persistence is file I/O into the store directory; run it
+            // on the blocking pool so a stalled filesystem cannot capture an
+            // async executor thread for the daemon.
+            hotpath::future!(
+                tokio::task::spawn_blocking(move || {
+                    update_storage_status_history(
+                        &history_path,
+                        history_project_id,
+                        history_store_path,
+                        bytes,
+                        observed_at,
+                    )
+                }),
+                label = "usecases.primitives.storage_status.history"
             )
-        },
-    );
+            .await
+            .unwrap_or_else(|_| {
+                (
+                    vec![StorageStatusHistoryPointV1 {
+                        observed_at,
+                        database_bytes: bytes,
+                    }],
+                    "current_sample_only_history_task_failed".to_owned(),
+                )
+            })
+        }
+    };
     StorageStatusPrimitiveResult {
         status: status.to_owned(),
         read_only,
@@ -3826,6 +3869,50 @@ mod affected_tests_tests {
         assert_eq!(changed.len(), 2);
         assert_eq!(changed[1].database_bytes, 8192);
         assert_eq!(changed[1].observed_at, 3);
+    }
+
+    /// The history lock is process-global across every project's storage
+    /// status read. Contention must degrade to the current sample as a typed
+    /// bounded state; the prior blocking acquire convoyed every concurrent
+    /// status read behind one stalled history write, which is how a metadata
+    /// status tool timed out its admitted deadline on a busy profile.
+    #[test]
+    fn storage_status_history_lock_contention_is_a_typed_bounded_state() {
+        let directory = tempfile::tempdir().expect("history tempdir");
+        let history_path = directory.path().join("storage-status-history-v1.json");
+
+        let held = storage_status_history_lock()
+            .lock()
+            .expect("hold the global history lock");
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = update_storage_status_history(
+                &history_path,
+                Some("project.storage-status".to_owned()),
+                "/project/.tracedecay/graph.db".to_owned(),
+                4096,
+                1,
+            );
+            let _ = result_sender.send(result);
+        });
+
+        // The old path parked here until the holder released the lock; the
+        // bounded contract answers while the lock is provably still held.
+        let (history, coverage) = result_receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a contended history read must answer without the lock");
+        drop(held);
+        reader.join().expect("join contended reader");
+
+        assert_eq!(coverage, "current_sample_only_history_lock_contended");
+        assert_eq!(
+            history,
+            vec![StorageStatusHistoryPointV1 {
+                observed_at: 1,
+                database_bytes: 4096,
+            }],
+            "contention reports exactly the live sample, never a partial file read"
+        );
     }
 
     #[test]

@@ -20,15 +20,15 @@ use super::{AutomationRunLedgerRecord, latest_terminal_job_record};
 /// bounds the anti-duplicate scan behind every diagnostic appended by this
 /// gate.
 ///
-/// Invariant: a diagnostic row can only carry a run_id derived from anchor
+/// Invariant: a diagnostic row can only carry a `run_id` derived from anchor
 /// `A` if `A` was already durable when that id was minted, so the row was
 /// appended after `A`'s row. Scanning back to `A` therefore always covers
-/// every row that could share this occurrence's diagnostic run_id, even when
+/// every row that could share this occurrence's diagnostic `run_id`, even when
 /// newer effectful terminals landed afterwards. Re-deriving the anchor from a
 /// second snapshot can narrow the window past an already-appended row with the
 /// same identity, which appends a byte-different duplicate and poisons the
-/// exact-lookup read paths for that run_id. `None` means "this identity has no
-/// anchor" and scans the whole ledger, which is always a safe superset.
+/// exact-lookup read paths for that `run_id`. `None` means "this identity has
+/// no anchor" and scans the whole ledger, which is always a safe superset.
 ///
 /// The schedule *decision* below deliberately still uses a freshly loaded
 /// summary: a newer view can only make the decision more correct. Only the
@@ -229,7 +229,7 @@ pub(super) fn scheduler_skip_run_id(run_id: &str, reason: &str) -> Result<String
 /// ledger snapshot that minted the occurrence identity (see
 /// [`evaluate_and_record_scheduler_skip`]). The daemon obtains it from
 /// `load_latest_scheduler_effectful_for_task_key` in the same read that mints
-/// the occurrence run_id.
+/// the occurrence `run_id`.
 #[cfg(test)]
 pub(super) fn latest_effectful_scheduler_job_record<'a>(
     records: &'a [AutomationRunLedgerRecord],

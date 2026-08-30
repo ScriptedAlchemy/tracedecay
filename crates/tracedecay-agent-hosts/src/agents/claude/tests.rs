@@ -939,3 +939,14 @@ fn activation_adds_wildcard_permission_without_replacing_user_settings() {
         "activation must add the one documented plugin wildcard exactly once"
     );
 }
+
+#[test]
+fn detected_host_surface_reports_claude_home() {
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(ClaudeIntegration.detected_host_surface(home.path()), None);
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    assert_eq!(
+        ClaudeIntegration.detected_host_surface(home.path()),
+        Some(home.path().join(".claude"))
+    );
+}

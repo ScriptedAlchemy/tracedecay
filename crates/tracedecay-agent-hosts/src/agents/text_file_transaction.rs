@@ -372,15 +372,64 @@ fn verify_host_file_snapshot(path: &Path, expected: &HostFileSnapshot) -> std::i
     }
 }
 
+/// Lock, snapshot, and atomically publish replacement bytes for a host file.
+///
+/// This is the single write authority behind `safe_write_bytes_file` and its
+/// metadata-preserving variant: the snapshot arms the publish-time
+/// foreign-edit refusal and supplies the metadata identity restored onto the
+/// replacement.
+pub(super) fn write_bytes_file_locked(
+    path: &Path,
+    contents: &[u8],
+    backup: Option<&Path>,
+    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
+) -> Result<()> {
+    let _lock = lock_host_file_write(path)?;
+    let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to capture metadata for {}: {error}", path.display()),
+    })?;
+    safe_write_bytes_file_from_snapshot(path, contents, backup, replacement_metadata, &observed)
+}
+
 pub(crate) enum TextFileMutation {
     Unchanged,
     Write(String),
     Remove,
 }
 
+/// Whether a mutating transaction leaves a `.bak` of the observed bytes.
+#[derive(Clone, Copy)]
+enum MutationBackup {
+    /// Prompt/rule files: publish without a recovery copy.
+    None,
+    /// Structured host configs: every rewrite or removal of an existing file
+    /// leaves a `.bak` the operator can restore (issue #63).
+    BackupExisting,
+}
+
 /// Run a strict UTF-8 read-transform-mutate while holding the host-file lock.
 pub(crate) fn update_text_file_transactionally<T>(
     path: &Path,
+    update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
+) -> Result<T> {
+    update_file_transactionally(path, MutationBackup::None, update)
+}
+
+/// [`update_text_file_transactionally`] for structured host configs
+/// (JSON/JSONC/TOML): identical read-under-lock → transform →
+/// publish-from-snapshot shape, except that rewriting or removing an existing
+/// file first leaves a `.bak` recovery copy whose path is threaded into the
+/// publish error hint.
+pub(crate) fn update_config_file_transactionally<T>(
+    path: &Path,
+    update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
+) -> Result<T> {
+    update_file_transactionally(path, MutationBackup::BackupExisting, update)
+}
+
+fn update_file_transactionally<T>(
+    path: &Path,
+    backup: MutationBackup,
     update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
 ) -> Result<T> {
     let _lock = lock_host_file_write(path)?;
@@ -396,13 +445,21 @@ pub(crate) fn update_text_file_transactionally<T>(
         None => "",
     };
     let (output, mutation) = update(existing)?;
+    let backup = match (&mutation, backup, &observed) {
+        (TextFileMutation::Unchanged, _, _)
+        | (_, MutationBackup::None, _)
+        | (_, MutationBackup::BackupExisting, HostFileSnapshot::Missing) => None,
+        (_, MutationBackup::BackupExisting, HostFileSnapshot::Present { .. }) => {
+            super::backup_config_file(path)?
+        }
+    };
     match mutation {
         TextFileMutation::Unchanged => {}
         TextFileMutation::Write(replacement) => {
             safe_write_bytes_file_from_snapshot(
                 path,
                 replacement.as_bytes(),
-                None,
+                backup.as_deref(),
                 None,
                 &observed,
             )?;

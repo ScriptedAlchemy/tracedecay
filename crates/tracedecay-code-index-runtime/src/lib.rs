@@ -57,7 +57,6 @@ pub mod git_watch;
 pub(crate) mod logging;
 pub mod mcp_admission;
 pub(crate) mod ports;
-pub(crate) mod runtime_telemetry;
 pub mod semantic_activation_reconciler;
 pub(crate) mod semantic_code;
 pub mod semantic_evaluation;
@@ -65,7 +64,6 @@ pub mod semantic_evaluation_shutdown;
 
 /// Historical `crate::code_index` / `crate::query` paths from the root move.
 pub(crate) use tracedecay_code_index as code_index;
-pub(crate) use tracedecay_dashboard_api as dashboard;
 pub(crate) use tracedecay_query as query;
 pub(crate) use tracedecay_search_eval as search_eval;
 

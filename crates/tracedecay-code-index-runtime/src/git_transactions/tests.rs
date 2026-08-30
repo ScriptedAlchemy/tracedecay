@@ -313,7 +313,9 @@ impl GitIndexTransactionStore for StartupUnavailableStore {
     }
 
     fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
-        Err(GitIndexTransactionStoreError::Unavailable)
+        Err(GitIndexTransactionStoreError::Unavailable(
+            "recovery repository enumeration is unavailable in this fixture".to_string(),
+        ))
     }
 
     fn quarantine_repository(

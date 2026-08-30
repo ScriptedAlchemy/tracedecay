@@ -828,7 +828,7 @@ async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
         )
         .await
         .expect("install fault trigger");
-    assert_eq!(
+    assert!(matches!(
         store
             .write_terminal(terminal_write(
                 &request,
@@ -836,8 +836,9 @@ async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
                 UtcMicros(12),
             ))
             .await,
-        Err(GitIndexTransactionStoreError::Unavailable)
-    );
+        Err(GitIndexTransactionStoreError::Unavailable(reason))
+            if reason.contains("injected terminal receipt failure")
+    ));
     assert!(matches!(
         store.begin_or_replay(request).await,
         Ok(GitIndexTransactionBeginResultV1::RecoveryRequired(record))

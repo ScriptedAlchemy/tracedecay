@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tracedecay::code_index::projection::{expected_request_digest, verify_batch_receipt};
-use tracedecay::store::vector_generation_test_support::{
+use tracedecay::vector_generation_test_support::{
     CanonicalChunkVectorEncoderV1, ProjectionRequestBatchV1, SemanticProjectionErrorV1,
     VectorGenerationIdV1, VectorGenerationPlanV1, VectorGenerationStateMachineV1,
     VectorGenerationStoreErrorV1, prepare_vector_generation, prepare_vector_generation_async,
@@ -1034,7 +1034,7 @@ fn publish_in_batches(
     batches: Vec<ProjectionRequestBatchV1>,
 ) -> (
     VectorGenerationStateMachineV1,
-    tracedecay::store::vector_generation_test_support::VectorGenerationPublicationV1,
+    tracedecay::vector_generation_test_support::VectorGenerationPublicationV1,
 ) {
     let mut store = VectorGenerationStateMachineV1::new();
     let build = store.begin_generation(plan).expect("staged build");

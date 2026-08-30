@@ -176,7 +176,7 @@ impl McpServer {
             // The monitor entry opens, locks, and mmaps a file; keep that
             // off the async workers.
             let monitor_write = tokio::task::spawn_blocking(move || {
-                crate::monitor::write_entry(
+                tracedecay_runtime_core::monitor_ring::write_entry(
                     &monitor_project_root,
                     "tracedecay",
                     &tool_name,
@@ -503,8 +503,9 @@ impl McpServer {
                     hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
                         .ok()?;
                 let worktree = git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
-                let branch =
-                    bounded_identifier(crate::branch::current_branch(&worktree_raw).as_deref());
+                let branch = bounded_identifier(
+                    tracedecay_runtime_core::branch::current_branch(&worktree_raw).as_deref(),
+                );
                 Some((worktree, branch))
             })
             .await;
@@ -535,7 +536,7 @@ impl McpServer {
                 ts,
                 source: SpanSource::HookRoute,
             };
-            if let Err(e) = crate::store::GlobalDbGitCorrelationStore::new(db)
+            if let Err(e) = tracedecay_global_db::GlobalDbGitCorrelationStore::new(db)
                 .record_span_observation(&observation, DEFAULT_SPAN_MERGE_GAP_SECS)
                 .await
             {

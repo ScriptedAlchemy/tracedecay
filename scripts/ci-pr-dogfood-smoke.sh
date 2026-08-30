@@ -29,6 +29,17 @@ elapsed_ms() {
   printf '%s\n' "$((finished_ms - started_ms))"
 }
 
+print_compact_file() {
+  local label="$1"
+  local path="$2"
+  echo "----- $label (last 16 KiB) -----" >&2
+  if [[ -s "$path" ]]; then
+    tail -c 16384 "$path" >&2 || true
+  else
+    echo "(no output captured)" >&2
+  fi
+}
+
 run_timed() {
   local label="$1"
   local timeout_seconds="$2"
@@ -42,15 +53,122 @@ run_timed() {
     --timeout "$timeout_seconds" --kill-after 5 -- "$@" \
     >"$stdout_path" 2>"$stderr_path" || status=$?
   duration_ms="$(elapsed_ms "$started_ms")"
+  echo "tracedecay_ci_timing phase=$label elapsed_ms=$duration_ms status=$status"
+  if ((status != 0)); then
+    echo "error: TraceDecay PR dogfood phase '$label' failed" >&2
+    print_compact_file "$label stdout" "$stdout_path"
+    print_compact_file "$label stderr" "$stderr_path"
+    return "$status"
+  fi
   cat "$stdout_path"
   if [[ -s "$stderr_path" ]]; then
     cat "$stderr_path" >&2
   fi
-  echo "tracedecay_ci_timing phase=$label elapsed_ms=$duration_ms status=$status"
+}
+
+run_validation() {
+  local label="$1"
+  local input_path="$2"
+  shift 2
+  local stdout_path="${input_path}.validation.stdout"
+  local stderr_path="${input_path}.validation.stderr"
+  local status=0
+  python3 -S "$OUTPUT_VALIDATOR" "$@" --input "$input_path" \
+    >"$stdout_path" 2>"$stderr_path" || status=$?
   if ((status != 0)); then
-    echo "error: TraceDecay PR dogfood phase '$label' failed" >&2
+    echo "error: TraceDecay PR dogfood '$label' validation failed" >&2
+    print_compact_file "$label output" "$input_path"
+    print_compact_file "$label validator" "$stderr_path"
     return "$status"
   fi
+  cat "$stdout_path"
+  if [[ -s "$stderr_path" ]]; then
+    cat "$stderr_path" >&2
+  fi
+}
+
+wait_for_strict_readiness() {
+  local project_root="$1"
+  local output_dir="$2"
+  local binary="$3"
+  local timeout_seconds="${TRACEDECAY_DOGFOOD_READINESS_TIMEOUT:-600}"
+  local poll_interval="${TRACEDECAY_DOGFOOD_READINESS_POLL_INTERVAL:-5}"
+  local timeout_ms started_ms deadline_ms now_ms remaining_ms probe_timeout
+  local attempts=0 command_status validation_status duration_ms
+
+  timeout_ms="$(python3 -S -c '
+import math, sys
+try:
+    value = float(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+if not math.isfinite(value) or value <= 0:
+    raise SystemExit(1)
+print(max(1, int(value * 1000)))
+' "$timeout_seconds")" || {
+    echo "error: TRACEDECAY_DOGFOOD_READINESS_TIMEOUT must be greater than zero" >&2
+    return 2
+  }
+  python3 -S -c '
+import math, sys
+try:
+    value = float(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
+' "$poll_interval" || {
+    echo "error: TRACEDECAY_DOGFOOD_READINESS_POLL_INTERVAL must be greater than zero" >&2
+    return 2
+  }
+
+  started_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
+  deadline_ms="$((started_ms + timeout_ms))"
+  : >"$output_dir/status.validation.stderr"
+  while :; do
+    now_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
+    remaining_ms="$((deadline_ms - now_ms))"
+    ((remaining_ms > 0)) || break
+    probe_timeout="$(python3 -S -c 'import sys; print(min(60.0, max(0.05, int(sys.argv[1]) / 1000)))' "$remaining_ms")"
+    attempts="$((attempts + 1))"
+    : >"$output_dir/status.validation.stdout"
+    : >"$output_dir/status.validation.stderr"
+    command_status=0
+    python3 -S "$PROCESS_HELPER" run \
+      --timeout "$probe_timeout" --kill-after 5 -- \
+      "$binary" status --json "$project_root" \
+      >"$output_dir/status.json" 2>"$output_dir/status.stderr" || command_status=$?
+    validation_status=1
+    if ((command_status == 0)); then
+      validation_status=0
+      python3 -S "$OUTPUT_VALIDATOR" --kind status --strict \
+        --input "$output_dir/status.json" \
+        >"$output_dir/status.validation.stdout" \
+        2>"$output_dir/status.validation.stderr" || validation_status=$?
+    fi
+    if ((command_status == 0 && validation_status == 0)); then
+      duration_ms="$(elapsed_ms "$started_ms")"
+      cat "$output_dir/status.json"
+      [[ ! -s "$output_dir/status.stderr" ]] || cat "$output_dir/status.stderr" >&2
+      cat "$output_dir/status.validation.stdout"
+      echo "tracedecay_ci_timing phase=status elapsed_ms=$duration_ms status=0"
+      echo "tracedecay_ci_readiness attempts=$attempts elapsed_ms=$duration_ms"
+      return 0
+    fi
+
+    now_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
+    remaining_ms="$((deadline_ms - now_ms))"
+    ((remaining_ms > 0)) || break
+    python3 -S -c 'import sys, time; time.sleep(min(float(sys.argv[1]), int(sys.argv[2]) / 1000))' \
+      "$poll_interval" "$remaining_ms"
+  done
+
+  duration_ms="$(elapsed_ms "$started_ms")"
+  echo "tracedecay_ci_timing phase=status elapsed_ms=$duration_ms status=1"
+  echo "error: TraceDecay PR dogfood did not reach strict index readiness within ${timeout_seconds}s" >&2
+  print_compact_file "last status output" "$output_dir/status.json"
+  print_compact_file "last status stderr" "$output_dir/status.stderr"
+  print_compact_file "last status validator" "$output_dir/status.validation.stderr"
+  return 1
 }
 
 run_smoke() {
@@ -74,27 +192,24 @@ run_smoke() {
       "$binary" init
   )
 
-  run_timed status 60 "$output_dir/status.json" "$output_dir/status.stderr" \
-    "$binary" status --json "$project_root"
-  python3 -S "$OUTPUT_VALIDATOR" --kind status --input "$output_dir/status.json"
+  wait_for_strict_readiness "$project_root" "$output_dir" "$binary"
 
   run_timed context 90 "$output_dir/context.json" "$output_dir/context.stderr" \
     "$binary" tool context --project "$project_root" \
       --task "Locate the TraceDecay CLI entry point and report available evidence." \
       --format json
-  python3 -S "$OUTPUT_VALIDATOR" --kind context --input "$output_dir/context.json"
+  run_validation context "$output_dir/context.json" --kind context --strict
 
   run_timed pr_context 90 "$output_dir/pr-context.json" "$output_dir/pr-context.stderr" \
     "$binary" tool pr_context --project "$project_root" \
       --base-ref "$base_ref" --head-ref "$head_ref" --format json
-  python3 -S "$OUTPUT_VALIDATOR" --kind pr_context \
-    --input "$output_dir/pr-context.json" \
+  run_validation pr_context "$output_dir/pr-context.json" --kind pr_context --strict \
     --base-oid "$base_oid" --head-oid "$head_oid" --merge-base "$merge_base"
 
   run_timed runtime_status 60 "$output_dir/runtime-status.json" \
     "$output_dir/runtime-status.stderr" \
     "$binary" status --json --runtime "$project_root"
-  python3 -S "$OUTPUT_VALIDATOR" --kind status --input "$output_dir/runtime-status.json"
+  run_validation runtime_status "$output_dir/runtime-status.json" --kind status
 
   echo "tracedecay_ci_dogfood outcome=complete"
 }

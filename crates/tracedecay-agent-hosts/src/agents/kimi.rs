@@ -28,9 +28,9 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
-    McpUninstallPolicy, NonInteractiveInstallOutcome, UpdatePluginOutcome, host_home_override,
-    install_mcp_server_entry, load_json_file, load_json_file_strict, mcp_config_has_tracedecay,
-    safe_write_text_file, uninstall_mcp_server_entry,
+    JsonConfigDialect, McpUninstallPolicy, NonInteractiveInstallOutcome, UpdatePluginOutcome,
+    host_home_override, install_mcp_server_entry, load_json_file, load_json_file_strict,
+    mcp_config_has_tracedecay, safe_write_text_file, uninstall_mcp_server_entry,
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
@@ -118,7 +118,7 @@ impl AgentIntegration for KimiIntegration {
                 "args": ["serve"]
             }),
             "Kimi",
-            load_json_file_strict,
+            JsonConfigDialect::Json,
         )?;
         install_prompt_rules(&agents_md)?;
         super::install_managed_skill_prompt_index(
@@ -150,11 +150,10 @@ impl AgentIntegration for KimiIntegration {
         uninstall_mcp_server_entry(
             &mcp_path,
             "mcpServers",
-            load_json_file,
+            JsonConfigDialect::Json,
             McpUninstallPolicy {
                 prune_empty_root: true,
                 remove_empty_file: true,
-                durable_remove: false,
             },
         )?;
         let agents_md = project_path.join("AGENTS.md");
@@ -489,23 +488,7 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
 
 /// Remove tracedecay rules from AGENTS.md.
 fn uninstall_prompt_rules(agents_md: &Path) -> Result<()> {
-    super::prompt_rules::remove_prompt_rules_with(agents_md, |contents| {
-        if !contents.contains("tracedecay") {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        }
-        let Some(new_contents) =
-            super::prompt_rules::strip_heading_block(contents, PROMPT_RULE_MARKER)
-        else {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        };
-        if new_contents.is_empty() {
-            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
-        } else {
-            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
-                "{new_contents}\n"
-            )))
-        }
-    })
+    super::prompt_rules::remove_standard_prompt_rules(agents_md)
 }
 
 // ---------------------------------------------------------------------------

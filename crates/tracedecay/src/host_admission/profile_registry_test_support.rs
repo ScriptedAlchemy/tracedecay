@@ -208,7 +208,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn plan_registry_reap(&self) -> Result<crate::project_registry::RegistryReapPlan> {
+    pub async fn plan_registry_reap(&self) -> Result<tracedecay_global_db::RegistryReapPlan> {
         self.profile_database
             .plan_registry_reap()
             .await
@@ -218,7 +218,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn apply_registry_reap(
         &self,
-        plan: &crate::project_registry::RegistryReapPlan,
+        plan: &tracedecay_global_db::RegistryReapPlan,
     ) -> Result<usize> {
         let plan = registered_registry_reap_plan(plan);
         self.profile_database.apply_registry_reap(&plan).await
@@ -273,8 +273,8 @@ impl HostAdmissionTestRuntimeV1 {
 
 fn legacy_registry_reap_plan(
     plan: tracedecay_global_db::RegistryReapPlan,
-) -> crate::project_registry::RegistryReapPlan {
-    crate::project_registry::RegistryReapPlan {
+) -> tracedecay_global_db::RegistryReapPlan {
+    tracedecay_global_db::RegistryReapPlan {
         reapable: plan
             .reapable
             .into_iter()
@@ -283,7 +283,7 @@ fn legacy_registry_reap_plan(
         retained: plan
             .retained
             .into_iter()
-            .map(|retained| crate::project_registry::RetainedRegistryEntry {
+            .map(|retained| tracedecay_global_db::RetainedRegistryEntry {
                 entry: legacy_registry_reap_entry(retained.entry),
                 reason: retained.reason,
             })
@@ -293,17 +293,17 @@ fn legacy_registry_reap_plan(
 
 fn legacy_registry_reap_entry(
     entry: tracedecay_global_db::RegistryReapEntry,
-) -> crate::project_registry::RegistryReapEntry {
-    crate::project_registry::RegistryReapEntry {
+) -> tracedecay_global_db::RegistryReapEntry {
+    tracedecay_global_db::RegistryReapEntry {
         kind: match entry.kind {
             tracedecay_global_db::ReapEntryKind::SavingsLedgerPath => {
-                crate::project_registry::ReapEntryKind::SavingsLedgerPath
+                tracedecay_global_db::ReapEntryKind::SavingsLedgerPath
             }
             tracedecay_global_db::ReapEntryKind::ProjectAlias => {
-                crate::project_registry::ReapEntryKind::ProjectAlias
+                tracedecay_global_db::ReapEntryKind::ProjectAlias
             }
             tracedecay_global_db::ReapEntryKind::CodeProject => {
-                crate::project_registry::ReapEntryKind::CodeProject
+                tracedecay_global_db::ReapEntryKind::CodeProject
             }
         },
         key: entry.key,
@@ -313,7 +313,7 @@ fn legacy_registry_reap_entry(
 }
 
 fn registered_registry_reap_plan(
-    plan: &crate::project_registry::RegistryReapPlan,
+    plan: &tracedecay_global_db::RegistryReapPlan,
 ) -> tracedecay_global_db::RegistryReapPlan {
     tracedecay_global_db::RegistryReapPlan {
         reapable: plan
@@ -333,17 +333,17 @@ fn registered_registry_reap_plan(
 }
 
 fn registered_registry_reap_entry(
-    entry: &crate::project_registry::RegistryReapEntry,
+    entry: &tracedecay_global_db::RegistryReapEntry,
 ) -> tracedecay_global_db::RegistryReapEntry {
     tracedecay_global_db::RegistryReapEntry {
         kind: match entry.kind {
-            crate::project_registry::ReapEntryKind::SavingsLedgerPath => {
+            tracedecay_global_db::ReapEntryKind::SavingsLedgerPath => {
                 tracedecay_global_db::ReapEntryKind::SavingsLedgerPath
             }
-            crate::project_registry::ReapEntryKind::ProjectAlias => {
+            tracedecay_global_db::ReapEntryKind::ProjectAlias => {
                 tracedecay_global_db::ReapEntryKind::ProjectAlias
             }
-            crate::project_registry::ReapEntryKind::CodeProject => {
+            tracedecay_global_db::ReapEntryKind::CodeProject => {
                 tracedecay_global_db::ReapEntryKind::CodeProject
             }
         },

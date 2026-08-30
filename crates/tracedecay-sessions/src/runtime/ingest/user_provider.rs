@@ -261,13 +261,16 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
 
     #[hotpath::measure(label = "sessions.ingest.user.hermes", future = true)]
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let outcome = hermes::ingest_user_sessions_capped_with_admission(
+        let Some(outcome) = hermes::ingest_user_sessions_capped_with_admission(
             self.facade,
             self.roots,
             Some(self.max_new_bytes),
             self.cancellation,
         )
-        .await;
+        .await
+        else {
+            return ProviderRunOutcome::skipped();
+        };
         ProviderRunOutcome::bounded(
             outcome.stats,
             outcome.bytes_consumed,

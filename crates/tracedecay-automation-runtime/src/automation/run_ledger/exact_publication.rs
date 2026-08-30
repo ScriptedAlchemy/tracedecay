@@ -289,7 +289,7 @@ fn bind_staged_run_record_exact_with_publisher<T>(
                 Some((existing, len))
                     if existing == publication.ledger_digest && len == publication.payload_len =>
                 {
-                    publish_exact_run_spool(&path, record, &publication, publish_file)?
+                    publish_exact_run_spool(&path, record, &publication, publish_file)?;
                 }
                 Some(_) => {
                     return Err(config_error(format!(
@@ -298,7 +298,7 @@ fn bind_staged_run_record_exact_with_publisher<T>(
                     )));
                 }
                 None if !already_published => {
-                    publish_exact_run_spool(&path, record, &publication, publish_file)?
+                    publish_exact_run_spool(&path, record, &publication, publish_file)?;
                 }
                 None => {}
             }
@@ -853,8 +853,8 @@ fn compare_exact_bytes(
     right: &mut std::fs::File,
     mut remaining: u64,
 ) -> Result<()> {
-    let mut left_buffer = [0_u8; COPY_BUFFER_BYTES];
-    let mut right_buffer = [0_u8; COPY_BUFFER_BYTES];
+    let mut left_buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    let mut right_buffer = vec![0_u8; COPY_BUFFER_BYTES];
     while remaining > 0 {
         let take = usize::try_from(remaining.min(COPY_BUFFER_BYTES as u64))
             .map_err(|_| config_error("automation run comparison chunk is not representable"))?;
@@ -1243,7 +1243,7 @@ fn is_corrupt_append_intent_quarantine_owned_temp_name(name: &str) -> bool {
         return false;
     };
     is_exact_spool_destination_name(destination)
-        && is_canonical_decimal(process_id, u32::MAX as u64)
+        && is_canonical_decimal(process_id, u64::from(u32::MAX))
         && is_canonical_decimal(nonce, u64::MAX)
 }
 
@@ -1421,7 +1421,7 @@ fn ledger_ends_with_newline(ledger: &mut std::fs::File, len: u64) -> Result<bool
 
 fn last_committed_boundary(ledger: &mut std::fs::File, len: u64) -> Result<u64> {
     let mut cursor = len;
-    let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
     while cursor > 0 {
         let start = cursor.saturating_sub(COPY_BUFFER_BYTES as u64);
         let take = usize::try_from(cursor - start)
@@ -1444,11 +1444,9 @@ fn validate_committed_ledger(ledger: &std::fs::File, path: &Path) -> Result<()> 
     let mut rows = super::exact_lookup::ForwardJsonlScanner::new(ledger, path)?;
     while let Some(span) = rows.next_span()? {
         // A blank/whitespace-only span is benign (see scan_jsonl_row) and
-        // must be skipped here too: this validates the main ledger, not a
+        // is ignored here too: this validates the main ledger, not a
         // single-row spool file, so an empty span is not corruption.
-        if super::exact_lookup::scan_jsonl_row(ledger, path, span)?.is_none() {
-            continue;
-        }
+        super::exact_lookup::scan_jsonl_row(ledger, path, span)?;
     }
     Ok(())
 }
@@ -1461,10 +1459,8 @@ fn validate_committed_ledger_prefix(
     let mut rows = super::exact_lookup::ForwardJsonlScanner::new_bounded(ledger, path, clean_eof)?;
     while let Some(span) = rows.next_span()? {
         // See validate_committed_ledger: blank spans in the main ledger are
-        // benign and must be skipped, not treated as corruption.
-        if super::exact_lookup::scan_jsonl_row(ledger, path, span)?.is_none() {
-            continue;
-        }
+        // benign and are ignored, not treated as corruption.
+        super::exact_lookup::scan_jsonl_row(ledger, path, span)?;
     }
     Ok(())
 }
@@ -1474,8 +1470,8 @@ fn exact_prefix_matches(
     right: &mut std::fs::File,
     mut remaining: u64,
 ) -> Result<bool> {
-    let mut left_buffer = [0_u8; COPY_BUFFER_BYTES];
-    let mut right_buffer = [0_u8; COPY_BUFFER_BYTES];
+    let mut left_buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    let mut right_buffer = vec![0_u8; COPY_BUFFER_BYTES];
     while remaining > 0 {
         let take = usize::try_from(remaining.min(COPY_BUFFER_BYTES as u64))
             .map_err(|_| config_error("automation run prefix chunk is not representable"))?;
@@ -1620,7 +1616,7 @@ fn is_exact_spool_owned_temp_name(name: &str) -> bool {
         return false;
     };
     is_exact_spool_destination_name(destination)
-        && is_canonical_decimal(process_id, u32::MAX as u64)
+        && is_canonical_decimal(process_id, u64::from(u32::MAX))
         && is_canonical_decimal(nonce, u64::MAX)
 }
 

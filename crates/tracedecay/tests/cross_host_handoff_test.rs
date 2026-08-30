@@ -39,8 +39,11 @@ async fn codex_to_claude_handoff_preserves_identity_lineage_privacy_and_provenan
     );
     let project_id = ProjectId::new(PROJECT_ID).unwrap();
     assert!(
-        tracedecay::storage::write_repository_identity_marker(&project_root, project_id.as_str())
-            .unwrap()
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project_root,
+            project_id.as_str()
+        )
+        .unwrap()
     );
     let runtime =
         HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())

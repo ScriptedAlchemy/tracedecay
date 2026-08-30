@@ -179,23 +179,13 @@ fn apply_in_transaction(
                 let from = external
                     .and_then(|(from, _)| *from)
                     .or_else(|| {
-                        entity_node(
-                            &entity_nodes,
-                            &existing.entities,
-                            &encoded_namespace,
-                            &relation.from,
-                        )
+                        entity_node(&entity_nodes, existing, &encoded_namespace, &relation.from)
                     })
                     .ok_or_else(|| GraphDbError::invalid("relation source disappeared"))?;
                 let to = external
                     .and_then(|(_, to)| *to)
                     .or_else(|| {
-                        entity_node(
-                            &entity_nodes,
-                            &existing.entities,
-                            &encoded_namespace,
-                            &relation.to,
-                        )
+                        entity_node(&entity_nodes, existing, &encoded_namespace, &relation.to)
                     })
                     .ok_or_else(|| GraphDbError::invalid("relation target disappeared"))?;
                 let edge_properties =
@@ -275,7 +265,7 @@ fn create_entity(
 
 fn entity_node(
     changes: &BTreeMap<String, Option<grafeo_common::types::NodeId>>,
-    existing: &BTreeMap<String, StoredEntity>,
+    existing: &ExistingBatchState,
     encoded_namespace: &str,
     identity: &GraphEntityId,
 ) -> Option<grafeo_common::types::NodeId> {
@@ -283,7 +273,11 @@ fn entity_node(
     if let Some(node) = changes.get(&key) {
         return *node;
     }
-    existing.get(&key).map(|stored| stored.node)
+    existing
+        .entities
+        .get(&key)
+        .map(|stored| stored.node)
+        .or_else(|| existing.entity_locators.get(&key).map(|stored| stored.node))
 }
 
 fn replace_entity(
@@ -572,8 +566,7 @@ fn validate_references(
             }
             GraphMutation::DeleteEntity(identity) => {
                 let key = stable_key_from_encoded(&encoded_namespace, identity.as_str());
-                if let Some(owner) =
-                    entity_owner(&entities, &existing.entities, &encoded_namespace, identity)
+                if let Some(owner) = entity_owner(&entities, existing, &encoded_namespace, identity)
                     && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
@@ -582,12 +575,9 @@ fn validate_references(
             }
             GraphMutation::UpsertEntity(entity) => {
                 let key = stable_key_from_encoded(&encoded_namespace, entity.identity.as_str());
-                if let Some(owner) = entity_owner(
-                    &entities,
-                    &existing.entities,
-                    &encoded_namespace,
-                    &entity.identity,
-                ) && owner != batch.projection
+                if let Some(owner) =
+                    entity_owner(&entities, existing, &encoded_namespace, &entity.identity)
+                    && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
                 }
@@ -631,8 +621,7 @@ fn validate_references(
             ),
         ] {
             if endpoint_namespace.is_none_or(|namespace| namespace == &batch.namespace)
-                && entity_owner(&entities, &existing.entities, &encoded_namespace, endpoint)
-                    .is_none()
+                && entity_owner(&entities, existing, &encoded_namespace, endpoint).is_none()
             {
                 return Err(GraphDbError::invalid(format!(
                     "relation endpoint `{endpoint}` does not exist in namespace `{}`",
@@ -656,7 +645,7 @@ fn validate_references(
             from_namespace,
             &relation.from,
             &entities,
-            &existing.entities,
+            existing,
             &encoded_namespace,
         )?;
         let to = resolve_generation_endpoint(
@@ -665,7 +654,7 @@ fn validate_references(
             to_namespace,
             &relation.to,
             &entities,
-            &existing.entities,
+            existing,
             &encoded_namespace,
         )?;
         external_endpoints.insert(relation.identity.clone(), (from, to));
@@ -706,7 +695,7 @@ fn resolve_generation_endpoint(
     endpoint_namespace: &GraphNamespace,
     identity: &GraphEntityId,
     changes: &BTreeMap<String, EntityChange>,
-    existing: &BTreeMap<String, StoredEntity>,
+    existing: &ExistingBatchState,
     encoded_candidate_namespace: &str,
 ) -> Result<Option<grafeo_common::types::NodeId>, GraphDbError> {
     if endpoint_namespace == candidate_namespace {
@@ -717,7 +706,7 @@ fn resolve_generation_endpoint(
         }
         return Ok(None);
     }
-    crate::state::load_entity(database, endpoint_namespace, identity)?
+    crate::state::load_entity_locator(database, endpoint_namespace, identity)?
         .map(|stored| stored.node)
         .map(Some)
         .ok_or_else(|| {
@@ -729,7 +718,7 @@ fn resolve_generation_endpoint(
 
 fn entity_owner(
     changes: &BTreeMap<String, EntityChange>,
-    existing: &BTreeMap<String, StoredEntity>,
+    existing: &ExistingBatchState,
     encoded_namespace: &str,
     identity: &GraphEntityId,
 ) -> Option<GraphProjectionId> {
@@ -737,7 +726,16 @@ fn entity_owner(
     if let Some(owner) = changes.get(&key) {
         return owner.clone();
     }
-    existing.get(&key).map(|stored| stored.projection.clone())
+    existing
+        .entities
+        .get(&key)
+        .map(|stored| stored.projection.clone())
+        .or_else(|| {
+            existing
+                .entity_locators
+                .get(&key)
+                .map(|stored| stored.projection.clone())
+        })
 }
 
 fn relation_owner(

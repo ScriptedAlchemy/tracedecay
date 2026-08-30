@@ -11,7 +11,6 @@ use std::sync::Arc;
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::store::DatabaseFactStore;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass,
@@ -32,6 +31,7 @@ use tracedecay_runtime_core::db::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 #[cfg(feature = "test-transport")]
 use tracedecay_store::FactStoreError;
 use tracedecay_store::{

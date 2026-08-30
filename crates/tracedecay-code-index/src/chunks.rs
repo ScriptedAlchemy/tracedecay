@@ -25,7 +25,7 @@ use tracedecay_domain::{
     LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, Node, NodeKind, PolicyRevisionId,
     RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
     SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef, ValidatedCodeFileV1,
-    canonical_sha256,
+    canonical_sha256, classify_technical_token, split_subtokens, technical_tokens,
 };
 
 use super::{
@@ -813,33 +813,15 @@ fn structural_segments(body: SourceSpan, mut member_starts: Vec<u64>) -> Vec<(u6
 /// sanitized text (Plan 25: whole exact terms and subtokens are distinct
 /// fields; this is extraction evidence only).
 fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV1>, Vec<String>) {
-    let is_token_char =
-        |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.' | '/');
     let mut terms = Vec::new();
     let mut seen_terms = BTreeSet::new();
     let mut subtokens = Vec::new();
     let mut seen_subtokens = BTreeSet::new();
 
-    let bytes = text.as_bytes();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        let ch = text[cursor..].chars().next().expect("cursor is a boundary");
-        if !is_token_char(ch) {
-            cursor += ch.len_utf8();
-            continue;
-        }
-        let start = cursor;
-        while cursor < bytes.len() {
-            let c = text[cursor..].chars().next().expect("cursor is a boundary");
-            if !is_token_char(c) {
-                break;
-            }
-            cursor += c.len_utf8();
-        }
-        let token = &text[start..cursor];
+    for (start, token) in technical_tokens(text) {
         let span = SourceSpan {
             start_byte: base_offset + start as u64,
-            end_byte: base_offset + cursor as u64,
+            end_byte: base_offset + (start + token.len()) as u64,
         };
         for subtoken in split_subtokens(token) {
             if !seen_subtokens.contains(subtoken.as_str()) {
@@ -847,7 +829,7 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
                 subtokens.push(subtoken);
             }
         }
-        if let Some(kind) = classify_token(token) {
+        if let Some(kind) = classify_technical_token(token) {
             mint_exact_term(&mut terms, &mut seen_terms, kind, token.as_bytes(), span);
         }
     }
@@ -960,93 +942,6 @@ fn mint_exact_term(
     }
 }
 
-/// Classify one maximal token as a whole exact technical term kind, or
-/// `None` when the token is only subtoken evidence.
-fn classify_token(token: &str) -> Option<ExactTechnicalTermKindV1> {
-    let is_ident = |segment: &str| {
-        !segment.is_empty()
-            && segment
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && segment
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-    };
-    if token.strip_prefix("--").is_some_and(|flag| {
-        !flag.is_empty()
-            && !flag.ends_with('-')
-            && flag
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_alphabetic())
-            && flag.chars().all(|character| {
-                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-            })
-    }) {
-        return Some(ExactTechnicalTermKindV1::CliFlag);
-    }
-    if ["E", "TS", "CS"].into_iter().any(|prefix| {
-        token.strip_prefix(prefix).is_some_and(|digits| {
-            digits.len() == 4 && digits.chars().all(|character| character.is_ascii_digit())
-        })
-    }) {
-        return Some(ExactTechnicalTermKindV1::CompilerErrorCode);
-    }
-    if token.strip_prefix("ERR_").is_some_and(|suffix| {
-        !suffix.is_empty()
-            && suffix.chars().all(|character| {
-                character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
-            })
-    }) {
-        return Some(ExactTechnicalTermKindV1::RuntimeErrorCode);
-    }
-    if token.strip_prefix("commit:").is_some_and(|identifier| {
-        (7..=40).contains(&identifier.len())
-            && identifier
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-    }) {
-        return Some(ExactTechnicalTermKindV1::CommitIdentifier);
-    }
-    if matches!(
-        token.to_ascii_lowercase().as_str(),
-        "cargo" | "rustc" | "tracedecay" | "pytest" | "kubectl" | "fastembed" | "ast-grep"
-    ) {
-        return Some(ExactTechnicalTermKindV1::ToolName);
-    }
-    if token.contains("::") && token.split("::").all(is_ident) {
-        return Some(ExactTechnicalTermKindV1::QualifiedName);
-    }
-    if token.contains('/')
-        && token.split('/').all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        })
-        && token
-            .rsplit('/')
-            .next()
-            .is_some_and(|filename| filename.contains('.'))
-    {
-        return Some(ExactTechnicalTermKindV1::Path);
-    }
-    if token.contains('.')
-        && !token.contains('/')
-        && token.split('.').count() >= 3
-        && token.split('.').all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        })
-    {
-        return Some(ExactTechnicalTermKindV1::ConfigurationKey);
-    }
-    None
-}
-
 fn symbol_name_span(source: &str, symbol: &SymbolRow) -> Option<SourceSpan> {
     if symbol.name.is_empty() {
         return None;
@@ -1070,37 +965,6 @@ fn symbol_name_span(source: &str, symbol: &SymbolRow) -> Option<SourceSpan> {
                 end_byte: symbol.span.start_byte + (relative + name.len()) as u64,
             })
         })
-}
-
-/// Split one token into lowercase language-profiled subtokens: path,
-/// qualifier, and key separators first, then snake/camel boundaries.
-fn split_subtokens(token: &str) -> Vec<String> {
-    let mut subtokens = Vec::new();
-    for segment in token.split([':', '.', '/', '-']) {
-        let mut current = String::new();
-        let mut prev: Option<char> = None;
-        for c in segment.chars() {
-            let boundary = match (prev, c) {
-                (Some('_'), _) => false,
-                (_, '_') => true,
-                (Some(p), c) if p.is_lowercase() && c.is_uppercase() => true,
-                (Some(p), c) if p.is_ascii_digit() != c.is_ascii_digit() => true,
-                _ => false,
-            };
-            if boundary && !current.is_empty() {
-                subtokens.push(current.to_lowercase());
-                current.clear();
-            }
-            if c != '_' {
-                current.push(c);
-            }
-            prev = Some(c);
-        }
-        if !current.is_empty() {
-            subtokens.push(current.to_lowercase());
-        }
-    }
-    subtokens
 }
 
 /// One not-yet-identified chunk: everything except the id, digest, ordinal,

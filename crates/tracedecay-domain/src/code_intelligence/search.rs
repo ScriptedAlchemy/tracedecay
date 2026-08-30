@@ -23,6 +23,7 @@ use super::identity::{
     LanguageDescriptorRevision, PolicyRevisionId, QueryNormalizationRevision, SanitizerRevision,
     SourceSpan, SymbolOccurrenceId,
 };
+use super::token_grammar;
 
 /// Maximum canonical bytes of one chunk's sanitized text (contract bound;
 /// oversized bodies split on deterministic structural boundaries or pinned
@@ -465,84 +466,22 @@ fn validate_self_authenticating_technical_term(
     let text = std::str::from_utf8(bytes).map_err(|_| DomainError::NonCanonical {
         field: "exact technical term UTF-8",
     })?;
-    let is_ident = |segment: &str| {
-        !segment.is_empty()
-            && segment
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '_')
-            && segment
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-    };
     let valid = match kind {
-        ExactTechnicalTermKindV1::QualifiedName => {
-            text.contains("::") && text.split("::").all(is_ident)
-        }
-        ExactTechnicalTermKindV1::Path => {
-            text.contains('/')
-                && text.split('/').all(|segment| {
-                    !segment.is_empty()
-                        && segment.chars().all(|character| {
-                            character.is_ascii_alphanumeric()
-                                || matches!(character, '_' | '-' | '.')
-                        })
-                })
-                && text
-                    .rsplit('/')
-                    .next()
-                    .is_some_and(|filename| filename.contains('.'))
-        }
+        ExactTechnicalTermKindV1::QualifiedName => token_grammar::is_qualified_name_token(text),
+        ExactTechnicalTermKindV1::Path => token_grammar::is_path_token(text),
         ExactTechnicalTermKindV1::CompilerErrorCode => {
-            ["E", "TS", "CS"].into_iter().any(|prefix| {
-                text.strip_prefix(prefix).is_some_and(|digits| {
-                    digits.len() == 4 && digits.chars().all(|character| character.is_ascii_digit())
-                })
-            })
+            token_grammar::is_compiler_error_code_token(text)
         }
         ExactTechnicalTermKindV1::RuntimeErrorCode => {
-            text.strip_prefix("ERR_").is_some_and(|suffix| {
-                !suffix.is_empty()
-                    && suffix.chars().all(|character| {
-                        character.is_ascii_uppercase()
-                            || character.is_ascii_digit()
-                            || character == '_'
-                    })
-            })
+            token_grammar::is_runtime_error_code_token(text)
         }
-        ExactTechnicalTermKindV1::CliFlag => text.strip_prefix("--").is_some_and(|flag| {
-            !flag.is_empty()
-                && !flag.ends_with('-')
-                && flag
-                    .chars()
-                    .next()
-                    .is_some_and(|character| character.is_ascii_alphabetic())
-                && flag.chars().all(|character| {
-                    character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-                })
-        }),
-        ExactTechnicalTermKindV1::ToolName => matches!(
-            text.to_ascii_lowercase().as_str(),
-            "cargo" | "rustc" | "tracedecay" | "pytest" | "kubectl" | "fastembed" | "ast-grep"
-        ),
+        ExactTechnicalTermKindV1::CliFlag => token_grammar::is_cli_flag_token(text),
+        ExactTechnicalTermKindV1::ToolName => token_grammar::is_tool_name_token(text),
         ExactTechnicalTermKindV1::ConfigurationKey => {
-            text.split('.').count() >= 3
-                && text.split('.').all(|segment| {
-                    !segment.is_empty()
-                        && segment.chars().all(|character| {
-                            character.is_ascii_lowercase()
-                                || character.is_ascii_digit()
-                                || character == '_'
-                        })
-                })
+            token_grammar::is_configuration_key_token(text)
         }
         ExactTechnicalTermKindV1::CommitIdentifier => {
-            text.strip_prefix("commit:").is_some_and(|identifier| {
-                (7..=40).contains(&identifier.len())
-                    && identifier
-                        .chars()
-                        .all(|character| character.is_ascii_hexdigit())
-            })
+            token_grammar::is_commit_identifier_token(text)
         }
         ExactTechnicalTermKindV1::WholeSymbol
         | ExactTechnicalTermKindV1::CompilerErrorText
