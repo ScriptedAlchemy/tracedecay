@@ -489,7 +489,7 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
             .await
             .unwrap();
     let shard_root = initialized.store_layout().data_root.clone();
-    assert_path_eq(&shard_root, &profile_root.join("projects/proj_branch"));
+    assert_path_eq(&shard_root, profile_root.join("projects/proj_branch"));
     drop(initialized);
 
     let mut branch_meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
