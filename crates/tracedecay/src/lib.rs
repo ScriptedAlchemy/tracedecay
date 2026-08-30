@@ -58,7 +58,6 @@ pub mod host_admission;
 pub use tracedecay_code_index::ast_grep_search;
 pub mod bench;
 pub mod catalog_composition;
-pub mod client_identity;
 pub mod cloud;
 pub use tracedecay_code_index as code_index;
 pub use tracedecay_query as query;
