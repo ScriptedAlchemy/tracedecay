@@ -287,7 +287,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     // reaches the base file only at checkpoint, so durability is the byte
     // footprint of the base file plus its WAL, not the base image alone.
     let native_graph_footprint = |path: &std::path::Path| -> u64 {
-        let base = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        let base = std::fs::metadata(path).map_or(0, |meta| meta.len());
         let wal_dir = path.with_extension("grafeo.wal");
         let wal = walkdir::WalkDir::new(wal_dir)
             .into_iter()
