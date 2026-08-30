@@ -4,7 +4,7 @@
 //! durable query/cursor keys. Optional-stage upgrades additionally require an
 //! accepted profile/evaluation from the configured authority port.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -656,7 +656,7 @@ where
             if graph_serving.is_some() {
                 RetrieverOutcome::Complete(RetrieverBatch {
                     candidates: Vec::new(),
-                    evidence_by_occurrence: Default::default(),
+                    evidence_by_occurrence: BTreeMap::default(),
                     coverage: RetrieverCoverage::default(),
                     continuation: None,
                 })
