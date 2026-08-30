@@ -7,7 +7,11 @@ use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
     CodeSearchChunkId, ManifestDigest, VectorGenerationIdV1,
 };
-use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
+use tracedecay_graph_db::{
+    GraphCancellation, GraphEntityId, GraphNamespace, GraphProjectionId, GraphPropertyName,
+    GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark, MAX_VECTOR_SEARCH_LIMIT,
+    VectorMetric, VectorSearchRequest,
+};
 use tracedecay_store::{
     GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, SemanticVectorChunkDigest,
     SemanticVectorChunkId, SemanticVectorChunkManifestMember, SemanticVectorPublishedGenerationKey,
@@ -42,7 +46,10 @@ use native_records::{
 
 #[cfg(test)]
 pub(crate) use native_records::encode_generation_batch_delta;
-use persistence::{check_cancelled, map_graph_error, resident_size_overflow, storage_error};
+use persistence::{
+    check_cancelled, map_graph_error, resident_size_overflow, search_vector_property,
+    storage_error, vector_metric,
+};
 use snapshot::SemanticVectorVerifiedReadV1;
 
 pub use evaluation_runtime::{
@@ -176,6 +183,69 @@ pub struct VerifiedVectorResidentPlanV1 {
 pub struct ResidentVectorRowV1 {
     pub chunk_id: CodeSearchChunkId,
     pub values: Box<[f32]>,
+}
+
+/// One generation-bound persisted ANN index, retained with the verified
+/// snapshot lease it serves from.
+///
+/// `indexed` is the persisted index's census: the index covers exactly the
+/// vectors written as native entities of this generation's namespace, so a
+/// caller serving a row set that also hydrates reused base-generation rows
+/// compares `indexed` against its resident row count before trusting
+/// searches for candidate generation.
+pub struct SemanticAnnServingIndexV1 {
+    snapshot: snapshot::SemanticVectorVerifiedReadV1,
+    namespace: GraphNamespace,
+    projection: GraphProjectionId,
+    property: GraphPropertyName,
+    dimension: usize,
+    metric: VectorMetric,
+    chunks_by_entity: BTreeMap<GraphEntityId, CodeSearchChunkId>,
+    indexed: u64,
+    cancellation: Arc<dyn GraphCancellation>,
+}
+
+impl SemanticAnnServingIndexV1 {
+    pub const fn indexed(&self) -> u64 {
+        self.indexed
+    }
+
+    /// Index-nearest serving chunks for one transient query vector, in
+    /// ascending index-distance order. The query is searched once and not
+    /// retained. An index hit that does not map to a serving chunk is a
+    /// corrupt index/row divergence and fails closed.
+    pub fn search(
+        &self,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<Vec<CodeSearchChunkId>, VectorGenerationStoreErrorV1> {
+        check_cancelled(self.cancellation.as_ref())?;
+        let result = self
+            .snapshot
+            .vector_search(VectorSearchRequest {
+                namespace: self.namespace.clone(),
+                projection: self.projection.clone(),
+                property: self.property.clone(),
+                query: query.to_vec(),
+                dimension: self.dimension,
+                metric: self.metric,
+                limit: limit.min(MAX_VECTOR_SEARCH_LIMIT),
+                cancellation: Arc::clone(&self.cancellation),
+            })
+            .map_err(map_graph_error)?;
+        result
+            .matches
+            .into_iter()
+            .map(|found| {
+                self.chunks_by_entity.get(&found.entity).cloned().ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::Corrupt(
+                        "semantic vector index returned an entity that is not a serving row"
+                            .to_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
 }
 
 impl GraphVectorGenerationStoreV1 {
@@ -682,6 +752,68 @@ impl GraphVectorGenerationStoreV1 {
             generation_id: expected_generation.clone(),
             retained_bytes,
             hydration_peak_bytes,
+        }))
+    }
+
+    /// The persisted ANN index bound to one published generation, if the
+    /// store holds a populated one.
+    ///
+    /// `serving_chunks` is the caller's complete serving row set; it maps
+    /// index hits back to chunk identities. `Ok(None)` is the typed absence:
+    /// no index was ever built for this generation's vector property, or it
+    /// reopened empty. Coverage against the serving row count is the
+    /// caller's check via [`SemanticAnnServingIndexV1::indexed`], because the
+    /// index covers only this generation's own staged vectors — never rows
+    /// reused from base generations.
+    pub fn ann_serving_index<'a>(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        serving_chunks: impl IntoIterator<Item = &'a CodeSearchChunkId>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<SemanticAnnServingIndexV1>, VectorGenerationStoreErrorV1> {
+        check_cancelled(cancellation.as_ref())?;
+        let Some(snapshot) = self.optional_snapshot()? else {
+            return Ok(None);
+        };
+        let identity = snapshot.projection().clone();
+        let property = search_vector_property(generation_id)?;
+        let dimension = usize::try_from(embedding_key.embedding_key().dimensions)
+            .map_err(storage_error)?;
+        let metric = vector_metric(embedding_key.embedding_key().metric);
+        let status = snapshot
+            .vector_index_status(GraphVectorIndexRequest {
+                namespace: identity.namespace.clone(),
+                projection: identity.projection.clone(),
+                property: property.clone(),
+                dimension,
+                metric,
+                cancellation: Arc::clone(&cancellation),
+            })
+            .map_err(map_graph_error)?;
+        let GraphVectorIndexStatus::Available { vectors } = status else {
+            return Ok(None);
+        };
+        let mut chunks_by_entity = BTreeMap::new();
+        for chunk_id in serving_chunks {
+            check_cancelled(cancellation.as_ref())?;
+            let entity = tracedecay_graph_db::semantic_vector_native::generation_vector_entity_id(
+                generation_id.as_digest().as_str(),
+                &chunk_id.to_string(),
+            )
+            .map_err(map_graph_error)?;
+            chunks_by_entity.insert(entity, chunk_id.clone());
+        }
+        Ok(Some(SemanticAnnServingIndexV1 {
+            snapshot,
+            namespace: identity.namespace,
+            projection: identity.projection,
+            property,
+            dimension,
+            metric,
+            chunks_by_entity,
+            indexed: u64::try_from(vectors).map_err(storage_error)?,
+            cancellation,
         }))
     }
 }

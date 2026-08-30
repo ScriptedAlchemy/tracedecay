@@ -35,8 +35,7 @@ pub(crate) use lifecycle::git_remote_url;
 pub struct TraceDecay {
     db: Database,
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    store_runtime_registry:
-        Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+    pub(crate) store_runtime_registry: crate::project_store_runtime::ProjectStoreRuntimeHandle,
     config: TraceDecayConfig,
     configuration_runtime: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
@@ -91,10 +90,10 @@ impl TraceDecay {
         &self.configuration_runtime
     }
 
-    pub(crate) fn store_runtime_registry(
+    pub(crate) fn project_store_runtime(
         &self,
-    ) -> &Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1> {
-        &self.store_runtime_registry
+    ) -> &dyn tracedecay_usecases::tracedecay::ProjectStoreRuntimeV1 {
+        self.store_runtime_registry.port()
     }
 
     pub(crate) fn profile_database(&self) -> &tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
