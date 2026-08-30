@@ -22,14 +22,17 @@ use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
+use std::sync::mpsc::{RecvTimeoutError, SendError, TryRecvError, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 use tracedecay_domain::{AdmittedEmbeddingProjectionKeyV1, PrivacyDomainId, ProjectionKeyV1};
 
 use super::fastembed_adapter::{
     AdmittedProjectionArtifactV1, EmbedError, EmbeddingRuntime, EmbeddingSession,
-    SemanticExecutionAuthority, SemanticExecutionInterruptionV1,
+    RuntimeFailureKindV1, RuntimeFailureV1, SemanticExecutionAuthority,
+    SemanticExecutionInterruptionV1,
 };
 
 mod clock;
@@ -302,7 +305,12 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Clone for SessionPool<R, C> {
     }
 }
 
-impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
+impl<R, C> SessionPool<R, C>
+where
+    R: EmbeddingRuntime + Send + Sync + 'static,
+    R::Session: 'static,
+    C: MonotonicClock + 'static,
+{
     pub fn new(
         runtime: R,
         clock: C,
@@ -436,22 +444,12 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         drop(state);
 
         let load_started = self.inner.clock.now();
-        let session = match hotpath::measure_block!("semantic.model.load", {
-            self.inner.runtime.open_session(authority)
-        }) {
-            Ok(session) => session,
-            Err(err) => {
-                let mut state = self.inner.lock_state();
-                state.active -= 1;
-                state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
-                state.mark_availability_changed();
-                drop(state);
-                self.inner.wakeups.notify_all();
-                return Err(SessionAcquireError::Open(err));
-            }
-        };
-        let load_elapsed = self.inner.clock.now().saturating_sub(load_started);
         let load_deadline = Duration::from_millis(authority.load_deadline_ms());
+        let session = self.open_session_bounded(authority, load_deadline, reserved_bytes)?;
+        // Injected-clock recheck after a bounded open: a manual test clock can
+        // report a longer load than the wall-time bound observed, and the
+        // deadline verdict must follow the injected clock in that case too.
+        let load_elapsed = self.inner.clock.now().saturating_sub(load_started);
         if load_elapsed > load_deadline {
             let mut state = self.inner.lock_state();
             state.active -= 1;
@@ -696,6 +694,121 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         drained
     }
 
+    /// Run the runtime's cold `open_session` on a dedicated loader thread and
+    /// bound the wait at the artifact's load deadline, so the typed
+    /// `LoadDeadlineExceeded` fires while the load is still executing instead
+    /// of only after it returns. An abandoned loader keeps the slot and byte
+    /// reservation until the runtime actually finishes (its memory is
+    /// genuinely in use until then), then releases both and discards the
+    /// session.
+    fn open_session_bounded(
+        &self,
+        authority: &AdmittedProjectionArtifactV1,
+        load_deadline: Duration,
+        reserved_bytes: u64,
+    ) -> Result<R::Session, SessionAcquireError> {
+        let (result_tx, result_rx) = channel::<Result<R::Session, EmbedError>>();
+        let inner = Arc::clone(&self.inner);
+        let loader_authority = authority.clone();
+        let wait_started = self.inner.clock.now();
+        let spawned = thread::Builder::new()
+            .name("td-semantic-model-load".to_owned())
+            .spawn(move || {
+                let load_started = inner.clock.now();
+                let result = hotpath::measure_block!("semantic.model.load", {
+                    inner.runtime.open_session(&loader_authority)
+                });
+                let opened = result.is_ok();
+                if let Err(SendError(result)) = result_tx.send(result) {
+                    // The acquisition reached the load deadline and abandoned
+                    // this open. Release the slot and reservation now that the
+                    // runtime returned, and account the completed-but-
+                    // discarded open.
+                    let load_elapsed = inner.clock.now().saturating_sub(load_started);
+                    let mut state = inner.lock_state();
+                    state.active -= 1;
+                    state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
+                    if opened {
+                        state.sessions_opened += 1;
+                        state.sessions_closed += 1;
+                        state.last_cold_load_micros = duration_micros(load_elapsed);
+                    }
+                    state.mark_availability_changed();
+                    drop(state);
+                    inner.wakeups.notify_all();
+                    drop(result);
+                }
+            });
+        if spawned.is_err() {
+            self.release_reserved_slot(reserved_bytes);
+            return Err(SessionAcquireError::Open(EmbedError::Runtime(
+                RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::LoadFailed,
+                    detail: "the model load thread could not be spawned".to_owned(),
+                },
+            )));
+        }
+        match result_rx.recv_timeout(load_deadline) {
+            Ok(Ok(session)) => Ok(session),
+            Ok(Err(err)) => {
+                self.release_reserved_slot(reserved_bytes);
+                Err(SessionAcquireError::Open(err))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let elapsed = self.inner.clock.now().saturating_sub(wait_started);
+                // Close the race where the loader's send lands between the
+                // timeout and the receiver drop: a result present now is an
+                // abandoned load this caller must release, exactly like the
+                // loader-side abandonment path.
+                match result_rx.try_recv() {
+                    Ok(result) => {
+                        let mut state = self.inner.lock_state();
+                        state.active -= 1;
+                        state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
+                        if result.is_ok() {
+                            state.sessions_opened += 1;
+                            state.sessions_closed += 1;
+                            state.last_cold_load_micros = duration_micros(elapsed);
+                        }
+                        state.mark_availability_changed();
+                        drop(state);
+                        self.inner.wakeups.notify_all();
+                        drop(result);
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        self.release_reserved_slot(reserved_bytes);
+                    }
+                    Err(TryRecvError::Empty) => {
+                        // Genuinely still loading; the loader thread releases
+                        // the slot and reservation when the runtime returns.
+                    }
+                }
+                Err(SessionAcquireError::LoadDeadlineExceeded {
+                    elapsed,
+                    deadline: load_deadline,
+                })
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.release_reserved_slot(reserved_bytes);
+                Err(SessionAcquireError::Open(EmbedError::Runtime(
+                    RuntimeFailureV1 {
+                        kind: RuntimeFailureKindV1::LoadFailed,
+                        detail: "the model load thread terminated without a result".to_owned(),
+                    },
+                )))
+            }
+        }
+    }
+
+    fn release_reserved_slot(&self, reserved_bytes: u64) {
+        let mut state = self.inner.lock_state();
+        state.active -= 1;
+        state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
+        state.mark_availability_changed();
+        drop(state);
+        self.inner.wakeups.notify_all();
+    }
+
     fn make_guard(
         &self,
         identity: SessionIdentityV1,
@@ -882,6 +995,18 @@ pub mod test_support {
         tokenizer_bytes: u64,
         max_resident_bytes: u64,
     ) -> AdmittedArtifactV1 {
+        admitted_artifact_limits(model_bytes, tokenizer_bytes, max_resident_bytes, 30_000)
+    }
+
+    /// Same fixture with every caller-chosen resource limit, so a test can
+    /// exercise the load deadline against a real clock without waiting the
+    /// production 30 s.
+    pub fn admitted_artifact_limits(
+        model_bytes: u64,
+        tokenizer_bytes: u64,
+        max_resident_bytes: u64,
+        load_deadline_ms: u64,
+    ) -> AdmittedArtifactV1 {
         let model_digest = Sha256DigestHex::of_bytes(b"model");
         let tokenizer_digest = Sha256DigestHex::of_bytes(b"tokenizer");
         let config_digest = Sha256DigestHex::of_bytes(b"config");
@@ -972,7 +1097,7 @@ pub mod test_support {
                     max_threads: 4,
                     max_batch_size: 8,
                     max_sequence_length: 512,
-                    load_deadline_ms: 30_000,
+                    load_deadline_ms,
                 },
                 upstream: UpstreamSourceV1 {
                     name: "fixture/model".to_owned(),
@@ -1023,6 +1148,15 @@ pub mod test_support {
 
     pub fn authority() -> AdmittedProjectionArtifactV1 {
         authority_with_privacy("domain-a", 7)
+    }
+
+    pub fn authority_with_load_deadline_ms(load_deadline_ms: u64) -> AdmittedProjectionArtifactV1 {
+        let artifact = admitted_artifact_limits(5, 9, 64 * 1024 * 1024, load_deadline_ms);
+        let projection = projection_for(&artifact)
+            .admit()
+            .expect("valid projection fixture");
+        AdmittedProjectionArtifactV1::admit(&artifact, &projection)
+            .expect("matching projection and artifact")
     }
 
     pub fn authority_with_privacy(domain: &str, key_epoch: u64) -> AdmittedProjectionArtifactV1 {
