@@ -1,6 +1,5 @@
 use std::borrow::Borrow;
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use tracedecay_store::{
@@ -201,11 +200,11 @@ impl<D> TranscriptIngestStore for GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    fn replace_parse_offset_pair(
+    async fn replace_parse_offset_pair(
         &self,
         first: (&Path, ParseOffset, ParseOffset),
         second: (&Path, ParseOffset, ParseOffset),
-    ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
+    ) -> TranscriptStoreResult<()> {
         hotpath::future!(
             async move {
                 let first_path = Self::path_text(first.0);
@@ -220,13 +219,14 @@ where
             },
             label = "usecases.transcript_store.replace_parse_offset_pair"
         )
+        .await
     }
 
-    fn advance_parse_offset_monotonic(
+    async fn advance_parse_offset_monotonic(
         &self,
         cursor_path: &Path,
         offset: ParseOffset,
-    ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
+    ) -> TranscriptStoreResult<()> {
         hotpath::future!(
             async move {
                 self.db()
@@ -236,14 +236,15 @@ where
             },
             label = "usecases.transcript_store.advance_parse_offset"
         )
+        .await
     }
 
-    fn record_session_ingest_activity(
+    async fn record_session_ingest_activity(
         &self,
         project_root: &Path,
         units: u64,
         provider: &'static str,
-    ) -> impl Future<Output = ()> + Send {
+    ) {
         hotpath::future!(
             async move {
                 crate::event_lane::publish(
@@ -258,6 +259,7 @@ where
             },
             label = "usecases.transcript_store.record_session_ingest_activity"
         )
+        .await
     }
 
     #[hotpath::measure(label = "usecases.transcript_store.get_session", future = true)]
