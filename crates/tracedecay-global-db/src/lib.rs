@@ -1,9 +1,12 @@
 //! User-level database that tracks all `TraceDecay` projects and their saved tokens.
 //!
 //! Stored at `~/.tracedecay/global.db`, this database holds one row per project
-//! with the project's database path and its cumulative tokens-saved count. Read
-//! paths are generally best-effort; authoritative open and maintenance
-//! interfaces preserve failures for callers that must fail closed.
+//! with the project's database path and its cumulative tokens-saved count.
+//! Every read and write in this crate reports its outcome as a typed state:
+//! absence is a truthful `Ok(None)` / empty page, and a failed snapshot,
+//! query, decode, or commit is an error naming the failing operation — never
+//! a silent zero, empty result, or fabricated timestamp. Callers decide at
+//! the call site whether to fail closed or degrade with a named warning.
 //!
 //! ## Dependency edges
 //!

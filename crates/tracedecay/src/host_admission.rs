@@ -696,11 +696,19 @@ impl HostAdmissionTestRuntimeV1 {
             .await
     }
 
+    /// Fails the calling test loudly: a fixture whose accounting write is
+    /// dropped would assert against totals that were never stored.
     #[doc(hidden)]
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
         self.profile_database
-            .upsert(project_path, tokens_saved)
-            .await;
+            .try_upsert_project_tokens(project_path, tokens_saved)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "could not upsert project tokens for '{}': {error}",
+                    project_path.display()
+                )
+            });
     }
 
     #[doc(hidden)]

@@ -237,7 +237,7 @@ async fn delete_project_paths_use_same_canonical_key_as_upsert() {
     assert_eq!(db.get_project_tokens(&project_one).await, 0);
     assert_eq!(deleted, 1);
     assert_eq!(db.get_project_tokens(&project_two).await, 0);
-    assert_eq!(db.global_tokens_saved().await, Some(0));
+    assert_eq!(db.global_tokens_saved().await, 0);
     close_profile_runtime(db).await;
 }
 
@@ -360,7 +360,7 @@ async fn delete_code_projects_cascades_registry_rows_without_touching_project_le
     );
     assert!(db.list_code_projects(10).await.is_empty());
     assert_eq!(db.get_project_tokens(&project_root).await, 42);
-    assert_eq!(db.global_tokens_saved().await, Some(42));
+    assert_eq!(db.global_tokens_saved().await, 42);
     close_profile_runtime(db).await;
 }
 
@@ -974,7 +974,7 @@ async fn project_tokens_saved_schema_and_queries_still_work() {
 
     assert_eq!(db.get_project_tokens(&project_one).await, 33);
     assert_eq!(db.get_project_tokens(&project_two.join(".")).await, 22);
-    assert_eq!(db.global_tokens_saved().await, Some(55));
+    assert_eq!(db.global_tokens_saved().await, 55);
     assert_eq!(
         db.project_ledger_paths_for_test()
             .await

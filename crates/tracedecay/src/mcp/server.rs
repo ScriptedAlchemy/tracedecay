@@ -801,10 +801,20 @@ impl McpServer {
             }
         };
         // Register this project in the global DB with its current tokens.
-        // A failed read must not upsert 0 as if the project saved nothing.
+        // A failed read must not upsert 0 as if the project saved nothing,
+        // and a failed write is named here instead of dissolving silently —
+        // the server still starts, since the ledger is an optional sink.
         if let Some(gdb) = accounting_db.as_ref() {
-            if let Some(persisted) = persisted_tokens_saved {
-                gdb.upsert(cg.project_root(), persisted).await;
+            if let Some(persisted) = persisted_tokens_saved
+                && let Err(error) = gdb
+                    .try_upsert_project_tokens(cg.project_root(), persisted)
+                    .await
+            {
+                tracing::warn!(
+                    project_root = %cg.project_root().display(),
+                    %error,
+                    "startup token-accounting registration failed; the global ledger misses this baseline"
+                );
             }
         } else if global_db.is_none() {
             // Name the gap where it is created. Every later savings and
@@ -1339,20 +1349,25 @@ impl McpServer {
             "approx_tokens_saved": self.tokens_saved.as_ref().map(|tokens| tokens.load(Ordering::Relaxed)),
         });
 
+        // Status stays available when the optional global ledger read fails,
+        // but the failure is reported in place of the number — an unreadable
+        // ledger is not "no global savings".
         let local_tokens_saved = self
             .tokens_saved
             .as_ref()
             .map(|tokens| tokens.load(Ordering::Relaxed));
+        let stats_accounting_db = self.accounting_db.as_ref().or(self.global_db.as_ref());
         if let Some(local) = local_tokens_saved
-            && let Some(ref gdb) = self.accounting_db
-            && let Some(global_total) = gdb.global_tokens_saved().await
+            && let Some(gdb) = stats_accounting_db
         {
-            stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
-        } else if let Some(local) = local_tokens_saved
-            && let Some(ref gdb) = self.global_db
-            && let Some(global_total) = gdb.global_tokens_saved().await
-        {
-            stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
+            match gdb.try_global_tokens_saved().await {
+                Ok(global_total) => {
+                    stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
+                }
+                Err(error) => {
+                    stats["global_tokens_saved_error"] = json!(error);
+                }
+            }
         }
 
         let cg = self.cg_snapshot().await;

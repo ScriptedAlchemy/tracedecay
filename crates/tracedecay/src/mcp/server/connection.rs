@@ -1010,11 +1010,16 @@ impl McpServer {
                 failures.push(format!("persist tokens saved: {e}"));
             }
 
-            if let Some(ref gdb) = self.accounting_db {
-                gdb.upsert(cg.project_root(), tokens_saved).await;
-                gdb.checkpoint().await;
-            } else if let Some(ref gdb) = self.global_db {
-                gdb.upsert(cg.project_root(), tokens_saved).await;
+            // A failed global-ledger flush joins the shutdown failure report
+            // beside the local persistence failures instead of vanishing.
+            if let Some(gdb) = self.accounting_db.as_ref().or(self.global_db.as_ref()) {
+                if let Err(error) = gdb
+                    .try_upsert_project_tokens(cg.project_root(), tokens_saved)
+                    .await
+                {
+                    tracing::warn!(error = %error, "failed to flush tokens saved to the global ledger during shutdown");
+                    failures.push(format!("flush global ledger tokens saved: {error}"));
+                }
                 gdb.checkpoint().await;
             }
 
