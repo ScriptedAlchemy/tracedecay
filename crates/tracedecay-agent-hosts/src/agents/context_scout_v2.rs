@@ -1708,8 +1708,6 @@ mod tests {
     use std::time::Duration;
     use tracedecay_application::context_scout::ContextScoutEvidenceEnvelopeV1;
 
-    use tracedecay_application::context_scout::ContextScoutEvidenceEnvelopeV1;
-
     fn address() -> ContextScoutAddressV1 {
         ContextScoutAddressV1 {
             profile_id: [1; 16],
