@@ -44,6 +44,14 @@
 #![allow(clippy::large_futures)]
 #![allow(unreachable_pub)]
 #![allow(clippy::large_enum_variant)]
+// Pedantic style lints allowed crate-wide, matching the posture this wire
+// contract carried in the composition root before extraction: these are
+// non-correctness stylistic findings whose "fixes" churn moved code.
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::match_same_arms)]
 
 pub mod client;
 pub mod client_identity;
