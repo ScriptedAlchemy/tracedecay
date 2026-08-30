@@ -1831,36 +1831,46 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
 }
 
 #[test]
-fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() {
+fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation() {
     const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 3 * std::mem::size_of::<usize>();
     const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
+    const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 6 * std::mem::size_of::<usize>();
+    const EXACT_INSERT_SORT_RUN_ROWS: usize = TERM_INSERT_SORT_RUN_ROWS;
 
     let (fixture, pages, _) = real_verified_pages();
     let pages = &pages[..1];
     let metadata = fixture.metadata;
     let directory = tempfile::tempdir().expect("artifact tempdir");
-    let probe_path = directory.path().join("term-plan-probe.sqlite");
+    let probe_path = directory.path().join("posting-plans-probe.sqlite");
     let mut probe = CodeLexicalArtifactBuilderV1::create(&probe_path, metadata.clone())
-        .expect("create term plan probe");
+        .expect("create posting plans probe");
     let control = ArtifactControl { cancelled: false };
     let prepared = probe
         .prepare_pages(pages, &control)
-        .expect("prepare term plan fixture");
+        .expect("prepare posting plans fixture");
     let prepared_ledger = prepared[0]
         .ledger_charge_bytes()
         .expect("prepared page ledger charge");
     let fixed_ledger = probe.fixed_ledger_charge_bytes();
     probe
         .append_prepared_pages(&prepared, &control)
-        .expect("append term plan probe");
+        .expect("append posting plans probe");
     let term_rows = rusqlite::Connection::open(&probe_path)
-        .expect("open term plan probe")
+        .expect("open posting plans probe for term rows")
         .query_row("SELECT COUNT(*) FROM term_postings", [], |row| {
             row.get::<_, i64>(0)
         })
         .expect("count prepared term rows");
     let term_rows = usize::try_from(term_rows).expect("term row count");
     assert!(term_rows > 0, "fixture must emit term postings");
+    let exact_rows = rusqlite::Connection::open(&probe_path)
+        .expect("open exact plan probe")
+        .query_row("SELECT COUNT(*) FROM exact_postings", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("count prepared exact rows");
+    let exact_rows = usize::try_from(exact_rows).expect("exact row count");
+    assert!(exact_rows > 0, "fixture must emit exact postings");
     let entry_ledger = term_rows
         .checked_mul(TERM_INSERT_PLAN_BYTES_PER_REF)
         .expect("term plan ledger charge");
@@ -1868,22 +1878,39 @@ fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() 
         .div_ceil(TERM_INSERT_SORT_RUN_ROWS)
         .checked_mul(std::mem::size_of::<(i64, usize, usize, usize)>())
         .expect("term merge heap ledger charge");
+    let exact_entry_ledger = exact_rows
+        .checked_mul(EXACT_INSERT_PLAN_BYTES_PER_REF)
+        .expect("exact plan ledger charge");
+    let exact_merge_heap_ledger = exact_rows
+        .div_ceil(EXACT_INSERT_SORT_RUN_ROWS)
+        .checked_mul(std::mem::size_of::<(
+            i64,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+        )>())
+        .expect("exact merge heap ledger charge");
     let plan_ledger = entry_ledger
         .checked_add(merge_heap_ledger)
-        .expect("complete term plan ledger charge");
+        .and_then(|bytes| bytes.checked_add(exact_entry_ledger))
+        .and_then(|bytes| bytes.checked_add(exact_merge_heap_ledger))
+        .expect("complete posting plan ledger charge");
     let exact_budget = fixed_ledger
         .checked_add(prepared_ledger)
         .and_then(|bytes| bytes.checked_add(plan_ledger))
-        .expect("exact term plan budget");
+        .expect("exact posting plans budget");
     drop(probe);
 
-    let refused_path = directory.path().join("term-plan-refused.sqlite");
+    let refused_path = directory.path().join("posting-plans-refused.sqlite");
     let mut refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
         &refused_path,
         metadata.clone(),
         exact_budget - 1,
     )
-    .expect("create one-byte-under term plan builder");
+    .expect("create one-byte-under posting plans builder");
     assert_eq!(refused.fixed_ledger_charge_bytes(), fixed_ledger);
     assert!(matches!(
         refused.append_prepared_pages(&prepared, &control),
@@ -1896,21 +1923,21 @@ fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() 
     assert_eq!(
         refused
             .progress()
-            .expect("progress after term plan refusal")
+            .expect("progress after posting plans refusal")
             .next_page_ordinal,
         0
     );
     assert_eq!(staged_row_cardinality(&refused_path), (0, 0));
     let refused_term_rows: i64 = rusqlite::Connection::open(&refused_path)
-        .expect("open refused term plan artifact")
+        .expect("open refused posting plans artifact")
         .query_row("SELECT COUNT(*) FROM term_postings", [], |row| row.get(0))
         .expect("count refused term rows");
     assert_eq!(refused_term_rows, 0);
     drop(refused);
 
-    let interrupted_path = directory.path().join("term-plan-interrupted.sqlite");
+    let interrupted_path = directory.path().join("posting-plans-interrupted.sqlite");
     let mut interrupted = CodeLexicalArtifactBuilderV1::create(&interrupted_path, metadata.clone())
-        .expect("create interrupted term plan builder");
+        .expect("create interrupted posting plans builder");
     let documents = usize::try_from(prepared[0].chunk_count()).expect("prepared document count");
     // Append entry + plan entry + both page/document passes + checkpoints
     // before and after the single bounded run + the post-run checkpoint.
@@ -1926,7 +1953,7 @@ fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() 
     assert_eq!(
         interrupted
             .progress()
-            .expect("progress after term plan interruption")
+            .expect("progress after posting plans interruption")
             .next_page_ordinal,
         0,
         "post-sort cancellation must precede transaction entry"
@@ -1939,7 +1966,7 @@ fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() 
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("resume after term plan interruption");
+    .expect("resume after posting plans interruption");
     assert_eq!(
         resumed
             .append_prepared_pages(&prepared, &control)
@@ -1949,16 +1976,16 @@ fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() 
     );
     drop(resumed);
 
-    let exact_path = directory.path().join("term-plan-exact.sqlite");
+    let exact_path = directory.path().join("posting-plans-exact.sqlite");
     let mut exact = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
         &exact_path,
         metadata,
         exact_budget,
     )
-    .expect("create exact term plan builder");
+    .expect("create exact posting plans builder");
     let progress = exact
         .append_prepared_pages(&prepared, &control)
-        .expect("accept exact term plan boundary");
+        .expect("accept exact posting plans boundary");
     assert_eq!(progress.next_page_ordinal, 1);
 }
 
