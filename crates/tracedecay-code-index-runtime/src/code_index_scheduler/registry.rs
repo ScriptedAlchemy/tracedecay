@@ -4632,18 +4632,24 @@ impl CodeIndexSchedulerRegistryV1 {
     /// already-decoded generation.
     ///
     /// This is the freshness probe for a caller that *already* has a complete
-    /// generation it can serve. It runs the same ready gate, but abstains
-    /// instead of parking when the active generation is mid-decode, so awaiting
-    /// a new generation can never preempt serving the old one.
+    /// seated generation it can serve. Validate that immutable serving
+    /// authority directly rather than consulting the publication decoder cache:
+    /// unrelated activation work may own that cache while the seated generation
+    /// remains fully decoded and current.
     pub async fn latest_complete_ready_decoded_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        self.latest_complete_ready_for_scope_with(
-            scope,
-            GenerationDecodeAdmissionV1::AlreadyDecoded,
-        )
-        .await
+        self.activate_for_scope(scope);
+        let root = {
+            let mounted = self.mounted.try_lock().ok()?;
+            unique_mounted_for_scope(&mounted, scope)
+                .unique()?
+                .0
+                .clone()
+        };
+        self.latest_complete_ready_decoded_for_root_scope(&root, scope)
+            .await
     }
 
     fn current_ready_decoded_for_root_scope(
