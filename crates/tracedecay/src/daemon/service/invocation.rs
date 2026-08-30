@@ -188,6 +188,7 @@ mod primitive;
 pub(crate) use primitive::callable_code_request_context;
 mod registrars;
 mod retained;
+mod semantic_activation;
 pub(in crate::daemon) mod semantic_evaluation;
 #[cfg(test)]
 mod tests;

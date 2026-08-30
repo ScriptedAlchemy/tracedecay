@@ -426,6 +426,7 @@ pub enum DaemonInvocationOperation {
     WorkflowApplication,
     HandoffApplication,
     SemanticEvaluateAndPublish,
+    SemanticActivate,
     SemanticQualify,
     LspOpen,
     LspFrame,
@@ -489,6 +490,7 @@ impl DaemonInvocationOperation {
             Self::WorkflowApplication => "workflow_application",
             Self::HandoffApplication => "handoff_application",
             Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
+            Self::SemanticActivate => "semantic_activate",
             Self::SemanticQualify => "semantic_qualify",
             Self::LspOpen => "lsp_open",
             Self::LspFrame => "lsp_frame",
@@ -887,6 +889,20 @@ pub enum DaemonInvocationPayload {
     },
     SemanticEvaluateAndPublish {
         evaluated_profile_id: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    /// One operator journey: evaluate the named profile natively, publish the
+    /// accepted evaluation, and compare-and-swap it into `active_profile` of
+    /// the project's semantic runtime configuration. The daemon composes the
+    /// installed-model material and the configuration revision itself; the
+    /// caller authors only the profile selection.
+    SemanticActivate {
+        evaluated_profile_id: String,
+        /// Record the previously active profile as `rollback_profile` when
+        /// one exists and differs from the newly activated selection.
+        set_rollback: bool,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1497,6 +1513,29 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub fn semantic_activate(
+        request_id: impl Into<String>,
+        evaluated_profile_id: String,
+        set_rollback: bool,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::SemanticActivate {
+                evaluated_profile_id,
+                set_rollback,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub fn semantic_qualify(
         request_id: impl Into<String>,
         evaluated_profile_id: String,
@@ -1925,6 +1964,9 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::SemanticEvaluateAndPublish { .. } => {
                 DaemonInvocationOperation::SemanticEvaluateAndPublish
             }
+            DaemonInvocationPayload::SemanticActivate { .. } => {
+                DaemonInvocationOperation::SemanticActivate
+            }
             DaemonInvocationPayload::SemanticQualify { .. } => {
                 DaemonInvocationOperation::SemanticQualify
             }
@@ -1993,6 +2035,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::WorkflowApplication
                 | DaemonInvocationOperation::HandoffApplication
                 | DaemonInvocationOperation::SemanticEvaluateAndPublish
+                | DaemonInvocationOperation::SemanticActivate
                 | DaemonInvocationOperation::SemanticQualify
                 | DaemonInvocationOperation::LspOpen
         )
@@ -2218,6 +2261,13 @@ impl DaemonInvocationRequest {
                 observed_at,
                 deadline,
                 cancellation,
+            }
+            | DaemonInvocationPayload::SemanticActivate {
+                evaluated_profile_id,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
             } => {
                 if evaluated_profile_id.trim() != evaluated_profile_id
                     || evaluated_profile_id.is_empty()
@@ -2539,6 +2589,55 @@ mod semantic_qualification_tests {
             wire.get("candidate").is_none(),
             "caller-authored candidate material must not cross the publishing wire"
         );
+    }
+
+    #[test]
+    fn semantic_activation_wire_carries_only_the_profile_selection_and_rollback_intent() {
+        let request = DaemonInvocationRequest::semantic_activate(
+            "request.semantic-activation.default-profile",
+            "hybrid-conservative".to_owned(),
+            true,
+            UtcMicros(1_000),
+            Deadline::new(UtcMicros(2_000)).expect("deadline"),
+            CancellationContext::active("cancellation.semantic-activation.default-profile")
+                .expect("cancellation"),
+        );
+
+        assert_eq!(
+            request.operation(),
+            DaemonInvocationOperation::SemanticActivate
+        );
+        assert_eq!(request.operation().as_str(), "semantic_activate");
+        assert!(request.requires_project());
+        assert_eq!(request.validate(), Ok(()));
+        let wire = serde_json::to_value(request).expect("semantic activation wire");
+        assert_eq!(wire["operation"], "semantic_activate");
+        assert_eq!(wire["evaluated_profile_id"], "hybrid-conservative");
+        assert_eq!(wire["set_rollback"], true);
+        assert!(
+            wire.get("candidate").is_none() && wire.get("artifact_path").is_none(),
+            "caller-authored artifact material must not cross the activation wire"
+        );
+    }
+
+    #[test]
+    fn semantic_activation_rejects_blank_or_padded_profile_ids() {
+        for profile in ["", " hybrid-conservative", &"p".repeat(257)] {
+            let request = DaemonInvocationRequest::semantic_activate(
+                "request.semantic-activation.invalid-profile",
+                profile.to_owned(),
+                false,
+                UtcMicros(1_000),
+                Deadline::new(UtcMicros(2_000)).expect("deadline"),
+                CancellationContext::active("cancellation.semantic-activation.invalid-profile")
+                    .expect("cancellation"),
+            );
+            assert_eq!(
+                request.validate(),
+                Err(DaemonInvocationProblem::InvalidRequest),
+                "profile {profile:?} must be rejected before dispatch"
+            );
+        }
     }
 
     #[test]
@@ -3087,6 +3186,21 @@ pub enum DaemonInvocationOutcome {
         report: serde_json::Value,
         source_generation: tracedecay_domain::CodeGenerationId,
         snapshot_digest: ManifestDigest,
+    },
+    /// Terminal receipt of the composed evaluate → publish → activate journey.
+    ///
+    /// `configuration_revision` is the revision produced by the activation
+    /// compare-and-swap; `runtime_state` is the semantic runtime state
+    /// observed immediately after that revision applied, so a caller can
+    /// distinguish "activation recorded, runtime converging" from "ready".
+    SemanticProfileActivated {
+        scope: ResolvedScope,
+        profile_digest: ManifestDigest,
+        report_digest: ManifestDigest,
+        configuration_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rollback_profile_id: Option<String>,
+        runtime_state: tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1,
     },
     SemanticEvaluatedProfileQualified {
         qualification: CanonicalQualificationBlob,
