@@ -153,6 +153,7 @@ class StrictReadinessOutputTests(unittest.TestCase):
                         "coverage": "complete",
                         "staleness_state": "fresh",
                         "latest_generation_id": "generation.ready",
+                        "code_graph_serving": {"state": "ready"},
                     },
                 },
                 "graph_statistics": {
@@ -164,6 +165,38 @@ class StrictReadinessOutputTests(unittest.TestCase):
             },
             strict=True,
         )
+
+    def test_strict_status_rejects_graph_that_is_not_ready_to_serve(self) -> None:
+        for graph_serving in (
+            {"state": "pending"},
+            {"state": "refused", "reason": "projection_failed"},
+            {"state": "unavailable", "reason": "generation_unavailable"},
+            None,
+        ):
+            with self.subTest(graph_serving=graph_serving):
+                worktree = {
+                    "coverage": "complete",
+                    "staleness_state": "fresh",
+                    "latest_generation_id": "generation.ready",
+                }
+                if graph_serving is not None:
+                    worktree["code_graph_serving"] = graph_serving
+                with self.assertRaisesRegex(ValueError, "ready code-graph"):
+                    self.checker.validate_status(
+                        {
+                            "code_index_freshness": {
+                                "status": "current",
+                                "worktree": worktree,
+                            },
+                            "graph_statistics": {
+                                "state": "observed",
+                                "generation_id": "generation.ready",
+                                "symbol_count": 12,
+                                "edge_count": 9,
+                            },
+                        },
+                        strict=True,
+                    )
 
     def test_strict_status_rejects_live_exact_scope_graph_degradation(self) -> None:
         with self.assertRaisesRegex(ValueError, "exact_scope_generation_not_ready"):

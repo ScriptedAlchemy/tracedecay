@@ -338,6 +338,10 @@ async fn queued_cursor_projections_are_reported_and_keep_the_pass_deferred() {
 
 #[tokio::test]
 async fn queued_jsonl_projection_does_not_hide_new_message_from_the_same_session() {
+    // Production installs the process-wide capture authorities during daemon
+    // bootstrap; capture refuses with a typed `BackgroundResourceUnavailable`
+    // without them.
+    crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
     let project = tempfile::tempdir().expect("project tempdir");
     let home = tempfile::tempdir().expect("Cursor home tempdir");
     let project_id = tracedecay_domain::ProjectId::new("project.cursor-jsonl-append").expect("id");

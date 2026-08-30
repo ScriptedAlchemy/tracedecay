@@ -17,6 +17,10 @@ fn populated_source(
     std::path::PathBuf,
     KimiSource,
 ) {
+    // Production installs the process-wide capture authorities during daemon
+    // bootstrap; capture refuses with a typed `BackgroundResourceUnavailable`
+    // without them.
+    crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
     let temp = tempfile::TempDir::new().unwrap();
     let project = temp.path().join("project");
     let share = temp.path().join(".kimi");

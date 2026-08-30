@@ -103,7 +103,7 @@ static SESSION_CAPTURE_TEST_RESIDENT_MEMORY: LazyLock<Arc<ProcessResidentMemoryV
 /// same authority production and the scheduler's test fallback use — keeps
 /// the background CPU width consistent with any later worker-plan install in
 /// the same test process instead of poisoning it with an ad-hoc width.
-fn ensure_process_background_cpu_authority() -> Result<()> {
+pub(crate) fn ensure_process_background_cpu_authority() -> Result<()> {
     if process_background_cpu().is_none() {
         let memory = SESSION_CAPTURE_TEST_RESIDENT_MEMORY.snapshot();
         if let Err(error) = install_worker_plan(

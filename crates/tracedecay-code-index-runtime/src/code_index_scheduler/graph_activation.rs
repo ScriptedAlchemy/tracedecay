@@ -39,6 +39,14 @@ fn injected_resident_memory_refusals()
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
+fn injected_terminal_activation_failures()
+-> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+    static FAILURES: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    FAILURES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
 struct InjectedActivationGateStateV1 {
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
@@ -114,6 +122,18 @@ pub fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: b
     }
 }
 
+#[cfg(test)]
+pub fn set_injected_terminal_activation_failure(worktree_id: &WorktreeId, failed: bool) {
+    let mut failures = injected_terminal_activation_failures()
+        .lock()
+        .expect("injected terminal activation failure gate must not be poisoned");
+    if failed {
+        failures.insert(worktree_id.as_str().to_owned());
+    } else {
+        failures.remove(worktree_id.as_str());
+    }
+}
+
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
 fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
@@ -136,6 +156,14 @@ fn take_injected_activation_failure(worktree_id: &WorktreeId) -> bool {
         }
         _ => false,
     }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn take_injected_terminal_activation_failure(worktree_id: &WorktreeId) -> bool {
+    injected_terminal_activation_failures()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(worktree_id.as_str())
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -272,6 +300,11 @@ impl CodeGraphActivationAuthorityV1 {
                 if let Some(gate) = take_injected_activation_gate(worktree_id) {
                     gate.started.notify_one();
                     gate.release.notified().await;
+                }
+                if take_injected_terminal_activation_failure(worktree_id) {
+                    return Err(CodeIndexSchedulerErrorV1::Identity(
+                        "injected terminal graph activation failure".to_owned(),
+                    ));
                 }
                 if has_injected_resident_memory_refusal(worktree_id) {
                     latest.refuse_graph_activation(

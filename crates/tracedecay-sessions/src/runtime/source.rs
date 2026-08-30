@@ -1032,7 +1032,11 @@ pub fn content_hash64(contents: &str) -> u64 {
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    u64::from_be_bytes(bytes)
+    // The hash rides in `StoredCursor::position`, whose persisted column is a
+    // typed non-negative i64 (strict encode and decode). Masking to 63 bits
+    // keeps every hash inside that domain; the entropy loss is immaterial for
+    // change detection.
+    u64::from_be_bytes(bytes) & (u64::MAX >> 1)
 }
 
 #[cfg(test)]

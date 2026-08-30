@@ -50,6 +50,9 @@ def validate_status(value: dict[str, Any], *, strict: bool = False) -> None:
     if graph.get("state") != "observed":
         reason = graph.get("reason", "unknown")
         raise ValueError(f"strict status requires an observed graph; reason={reason}")
+    graph_serving = worktree.get("code_graph_serving")
+    if not isinstance(graph_serving, dict) or graph_serving.get("state") != "ready":
+        raise ValueError("strict status requires a ready code-graph serving projection")
 
 
 def validate_context(value: dict[str, Any], *, strict: bool = False) -> None:
