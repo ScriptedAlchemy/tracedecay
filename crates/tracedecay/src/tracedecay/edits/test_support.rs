@@ -164,7 +164,7 @@ pub(super) fn fixture_symbol_code_graph(
     }];
     let symbols = GenerationSymbolIndexV1::new(
         generation.clone(),
-        vec![LineageSymbolRecordV1 {
+        vec![Arc::new(LineageSymbolRecordV1 {
             occurrence: occurrence.clone(),
             identity: fixture_digest::<SymbolIdentityDigest>("source-edit-symbol", qualified_name),
             qualified_name: qualified_name.to_owned(),
@@ -186,10 +186,10 @@ pub(super) fn fixture_symbol_code_graph(
                 "source-edit-symbol-content",
                 symbol_source,
             ),
-        }],
+        })],
     )
     .unwrap();
-    let chunks = vec![CodeSearchChunkV1 {
+    let chunks = vec![Arc::new(CodeSearchChunkV1 {
         id: tracedecay_domain::CodeSearchChunkId::new("chunk:source-edit:moved").unwrap(),
         anchor: CodeSearchChunkAnchorV1 {
             generation_id: generation.clone(),
@@ -212,7 +212,7 @@ pub(super) fn fixture_symbol_code_graph(
         exact_terms: Vec::new(),
         subtokens: Vec::new(),
         sanitized_text: BoundedSanitizedText::new(symbol_source).unwrap(),
-    }];
+    })];
     let cancellation = CancellationSignal::active("cancel.source-edit-graph-fixture").unwrap();
     let hermetic = HermeticCodeGraphProjectionStore::memory(&cancellation).unwrap();
     hermetic
