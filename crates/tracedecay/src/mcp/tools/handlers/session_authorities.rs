@@ -7,8 +7,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 ///
 /// `profile_retained_authority` stays a daemon lease because
 /// `retained_catalog` still calls `execute_profile_retained_application`
-/// with `DaemonSessionRuntimeRegistryV1`. Identity reads go through
-/// [`tracedecay_mcp::ProfileRetainedLeasePort`].
+/// with `DaemonSessionRuntimeRegistryV1`.
 #[derive(Clone, Default)]
 pub struct SessionAuthorities<'a> {
     pub(crate) project: Option<&'a RegisteredGlobalDbLeaseV1>,
