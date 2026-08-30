@@ -15,7 +15,6 @@ hotpath = [
     "hotpath/hotpath",
     "tracedecay-automation/hotpath",
     "tracedecay-capture/hotpath",
-    "tracedecay-code-extraction/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
@@ -27,7 +26,6 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay-automation/hotpath-alloc",
     "tracedecay-capture/hotpath-alloc",
-    "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
@@ -39,7 +37,6 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay-automation/hotpath-cpu",
     "tracedecay-capture/hotpath-cpu",
-    "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
@@ -61,7 +58,6 @@ aho-corasick = "1.1.5"
 hotpath.workspace = true
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
@@ -90,7 +86,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7.19"
 toml = "1"
 tracing = "0.1"
-tree-sitter = "0.26"
 url = "2"
 
 [target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
@@ -111,11 +106,6 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 criterion = "0.5"
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
-# The kernel depends on `tracedecay-code-extraction` with `default-features =
-# false` (no grammars) for production. Redundancy fingerprint tests parse real
-# Rust, so the test build opts into the `lite` grammar tier to register the
-# bundled tree-sitter Rust grammar; production stays grammar-free.
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false, features = ["lite"] }
 
 hex = "0.4"
 sha2 = "0.11"
