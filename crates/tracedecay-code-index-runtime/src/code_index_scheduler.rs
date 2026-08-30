@@ -3143,6 +3143,30 @@ impl LatestCompleteCodeIndexV1 {
         )
     }
 
+    /// Snapshot graph-serving activation with one lock acquisition so status
+    /// cannot combine states from opposite sides of an activation transition.
+    pub fn code_graph_serving_readiness(
+        &self,
+    ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1 {
+        match &*self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Pending => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
+            }
+            CodeGraphActivationStateV1::Refused(reason) => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Refused {
+                    reason: (*reason).to_owned(),
+                }
+            }
+            CodeGraphActivationStateV1::Ready(_) => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+            }
+        }
+    }
+
     fn refuse_graph_activation(&self, reason: &'static str) {
         let mut state = self
             .graph_activation
