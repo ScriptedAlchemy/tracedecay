@@ -2779,6 +2779,28 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
                 let graph_activation_enabled = worker_graph_activation.policy().is_enabled();
+                // A coalesced text-slice wake can outlive the graph-off pass
+                // that drained its final overflow. Do not project that bare
+                // Notify permit as a second refresh: no arrival and no hint
+                // means there is no source work left, while a scheduler-owned
+                // raw overflow still reaches the worker through `None` here.
+                let graph_off_text_is_settled = !graph_activation_enabled
+                    && !worker_pending_wake.has_pending_arrival()
+                    && worker_text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready)
+                    && match scheduler.try_lock() {
+                        Ok(scheduler) => scheduler.pending_hint_count() == Some(0),
+                        Err(std::sync::TryLockError::Poisoned(error)) => {
+                            error.into_inner().pending_hint_count() == Some(0)
+                        }
+                        Err(std::sync::TryLockError::WouldBlock) => false,
+                    };
+                if graph_off_text_is_settled {
+                    continue;
+                }
                 // Cover wake claim through failed-arrival restoration so admission
                 // never misreads in-flight owner work as plain unavailability.
                 let _reconcile_pass =
@@ -2999,11 +3021,13 @@ impl CodeIndexSchedulerRegistryV1 {
                         {
                             return Ok(outcome);
                         }
-                        // An empty serving slot must publish the retained
-                        // complete generation before a dirty-tree rebuild.
-                        // Restart remounts otherwise stay warming through the
-                        // successor extract with no seated generation.
-                        if serving_empty
+                        // A graph-enabled empty serving slot must publish the
+                        // retained complete generation before a dirty-tree
+                        // rebuild. Graph-off deliberately leaves this slot
+                        // empty and must instead settle through the retained
+                        // text reconcile below.
+                        if graph_activation_enabled
+                            && serving_empty
                             && text_serving_ready
                             && let Some(outcome) =
                                 scheduler.seat_retained_generation_on_empty_serving()?
