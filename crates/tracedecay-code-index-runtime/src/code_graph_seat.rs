@@ -43,9 +43,9 @@ pub struct CodeGraphReplayBindingV1 {
 
 /// Short-lived activation lease returned by [`CodeGraphSeatRuntimePortV1`].
 ///
-/// The serving slot keeps only [`Self::authority`]; the lease itself is dropped
-/// at the end of persistent graph activation, matching the pre-port inherent
-/// `RetainedCodeGraphRuntimeV1` lifetime.
+/// The serving slot keeps [`Self::authority`]. The activation lease may remain
+/// alive in the detached catalog-restore task so optional read artifacts never
+/// delay occurrence graph publication.
 pub trait CodeGraphSeatLeaseV1: Send {
     fn sweep_aborted_read_bundle_temporaries(&self) -> std::result::Result<(), GraphDbError>;
 
