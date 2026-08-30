@@ -1,4 +1,10 @@
 use super::*;
+use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
+use tracedecay_application::{
+    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
+    CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest,
+};
 
 fn lsp_deadline() -> Deadline {
     Deadline::new(UtcMicros(i64::MAX)).expect("LSP deadline")
@@ -75,7 +81,7 @@ fn test_results_invocation_retains_the_transport_page() {
     let page = PageRequest::first(17).expect("page");
     let request = DaemonInvocationRequest::primitive(
         "request.test-results.page",
-        crate::application_surface::ApplicationSurfaceOperation::TestResults,
+        ApplicationSurfaceOperation::TestResults,
         PrimitiveRequest::RecentTestResults(page.clone()),
         UtcMicros(1),
         Deadline::new(UtcMicros(2)).expect("deadline"),
@@ -101,7 +107,7 @@ fn feedback_invocation_preserves_transport_deadline_and_cancellation() {
         .expect("cancellation");
     let request = DaemonInvocationRequest::feedback(
         "request.feedback.transport",
-        crate::application_surface::ApplicationSurfaceOperation::FeedbackList,
+        ApplicationSurfaceOperation::FeedbackList,
         "feedback-handle.transport".to_owned(),
         UtcMicros(30),
         deadline.clone(),
@@ -125,7 +131,7 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
     let cancellation =
         CancellationContext::cancelled("cancel.callable-code.transport", UtcMicros(40))
             .expect("cancellation");
-    let phrase = crate::application_surface::CodePhraseSearchSurfaceRequest {
+    let phrase = CodePhraseSearchSurfaceRequest {
         query: "daemon invocation".to_owned(),
         phrases: vec!["daemon invocation".to_owned()],
         field_filters: vec![tracedecay_application::retrieval::CodeLexicalFieldFilter {
@@ -139,7 +145,7 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
             Some("src/daemon".to_owned()),
         )
         .expect("scope"),
-        meta: crate::application_surface::CallableCodeSurfaceMeta {
+        meta: CallableCodeSurfaceMeta {
             projection: tracedecay_application::ResultProjection::Evidence,
             order: tracedecay_application::RetrievalOrder::Relevance,
             cursor: None,
@@ -170,10 +176,10 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
         }]
     );
     assert_eq!(canonical.fuzzy_budget, 7);
-    let request = crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(phrase);
+    let request = CallableCodeSurfaceRequest::PhraseSearch(phrase);
     let invocation = DaemonInvocationRequest::callable_code(
         "request.callable-code.transport",
-        crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+        ApplicationSurfaceOperation::CodePhraseSearch,
         request,
         page.clone(),
         UtcMicros(30),
@@ -188,16 +194,12 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
     assert!(matches!(
         invocation.payload,
         DaemonInvocationPayload::CallableCode {
-            surface_operation:
-                crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
-            request:
-                crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(
-                    crate::application_surface::CodePhraseSearchSurfaceRequest {
-                        query,
-                        phrases,
-                        ..
-                    }
-                ),
+            surface_operation: ApplicationSurfaceOperation::CodePhraseSearch,
+            request: CallableCodeSurfaceRequest::PhraseSearch(CodePhraseSearchSurfaceRequest {
+                query,
+                phrases,
+                ..
+            }),
             page: carried_page,
             observed_at: UtcMicros(30),
             deadline: carried_deadline,
@@ -217,7 +219,7 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
         None,
     )
     .expect("scope");
-    let meta = crate::application_surface::CallableCodeSurfaceMeta {
+    let meta = CallableCodeSurfaceMeta {
         projection: tracedecay_application::ResultProjection::Evidence,
         order: tracedecay_application::RetrievalOrder::Relevance,
         cursor: None,
@@ -234,112 +236,94 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
         TypeDefinition,
         References,
     }
-    let navigation = |node_id: &str| crate::application_surface::CodeNavigationSurfaceRequest {
+    let navigation = |node_id: &str| CodeNavigationSurfaceRequest {
         node_id: node_id.to_owned(),
         scope: scope.clone(),
         meta: meta.clone(),
     };
     let request = |case| match case {
         RequestCase::ExactOccurrence => {
-            crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(
-                crate::application_surface::CodeExactOccurrenceSurfaceRequest {
-                    literal: "CallableCode".to_owned(),
-                    kind: None,
-                    scope: scope.clone(),
-                    meta: meta.clone(),
-                },
-            )
+            CallableCodeSurfaceRequest::ExactOccurrence(CodeExactOccurrenceSurfaceRequest {
+                literal: "CallableCode".to_owned(),
+                kind: None,
+                scope: scope.clone(),
+                meta: meta.clone(),
+            })
         }
         RequestCase::PhraseSearch => {
-            crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(
-                crate::application_surface::CodePhraseSearchSurfaceRequest {
-                    query: "callable code".to_owned(),
-                    phrases: vec!["callable code".to_owned()],
-                    field_filters: Vec::new(),
-                    fuzzy_budget: 0,
-                    scope: scope.clone(),
-                    meta: meta.clone(),
-                },
-            )
+            CallableCodeSurfaceRequest::PhraseSearch(CodePhraseSearchSurfaceRequest {
+                query: "callable code".to_owned(),
+                phrases: vec!["callable code".to_owned()],
+                field_filters: Vec::new(),
+                fuzzy_budget: 0,
+                scope: scope.clone(),
+                meta: meta.clone(),
+            })
         }
-        RequestCase::Callees => crate::application_surface::CallableCodeSurfaceRequest::Callees(
-            crate::application_surface::CodeCalleesSurfaceRequest {
-                node_id: "node.callable-code".to_owned(),
-                maximum_depth: 1,
-                resolve_trait_dispatch: false,
-                scope: scope.clone(),
-                meta: meta.clone(),
-            },
-        ),
-        RequestCase::Facets => crate::application_surface::CallableCodeSurfaceRequest::Facets(
-            crate::application_surface::CodeFacetSurfaceRequest {
-                dimension: tracedecay_application::retrieval::CodeFacetDimension::Kind,
-                scope: scope.clone(),
-                meta: meta.clone(),
-            },
-        ),
-        RequestCase::Timeline => crate::application_surface::CallableCodeSurfaceRequest::Timeline(
-            crate::application_surface::CodeTimelineSurfaceRequest {
-                scope: scope.clone(),
-                meta: meta.clone(),
-            },
-        ),
+        RequestCase::Callees => CallableCodeSurfaceRequest::Callees(CodeCalleesSurfaceRequest {
+            node_id: "node.callable-code".to_owned(),
+            maximum_depth: 1,
+            resolve_trait_dispatch: false,
+            scope: scope.clone(),
+            meta: meta.clone(),
+        }),
+        RequestCase::Facets => CallableCodeSurfaceRequest::Facets(CodeFacetSurfaceRequest {
+            dimension: tracedecay_application::retrieval::CodeFacetDimension::Kind,
+            scope: scope.clone(),
+            meta: meta.clone(),
+        }),
+        RequestCase::Timeline => CallableCodeSurfaceRequest::Timeline(CodeTimelineSurfaceRequest {
+            scope: scope.clone(),
+            meta: meta.clone(),
+        }),
         RequestCase::Declaration => {
-            crate::application_surface::CallableCodeSurfaceRequest::Declaration(navigation(
-                "node.declaration",
-            ))
+            CallableCodeSurfaceRequest::Declaration(navigation("node.declaration"))
         }
         RequestCase::Definition => {
-            crate::application_surface::CallableCodeSurfaceRequest::Definition(navigation(
-                "node.definition",
-            ))
+            CallableCodeSurfaceRequest::Definition(navigation("node.definition"))
         }
         RequestCase::TypeDefinition => {
-            crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(navigation(
-                "node.type-definition",
-            ))
+            CallableCodeSurfaceRequest::TypeDefinition(navigation("node.type-definition"))
         }
         RequestCase::References => {
-            crate::application_surface::CallableCodeSurfaceRequest::References(navigation(
-                "node.references",
-            ))
+            CallableCodeSurfaceRequest::References(navigation("node.references"))
         }
     };
     let cases = [
         (
-            crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
+            ApplicationSurfaceOperation::CodeExactOccurrence,
             RequestCase::ExactOccurrence,
         ),
         (
-            crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+            ApplicationSurfaceOperation::CodePhraseSearch,
             RequestCase::PhraseSearch,
         ),
         (
-            crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+            ApplicationSurfaceOperation::CodeCallees,
             RequestCase::Callees,
         ),
         (
-            crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+            ApplicationSurfaceOperation::CodeFacets,
             RequestCase::Facets,
         ),
         (
-            crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+            ApplicationSurfaceOperation::CodeTimeline,
             RequestCase::Timeline,
         ),
         (
-            crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
+            ApplicationSurfaceOperation::CodeDeclaration,
             RequestCase::Declaration,
         ),
         (
-            crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
+            ApplicationSurfaceOperation::CodeDefinition,
             RequestCase::Definition,
         ),
         (
-            crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
+            ApplicationSurfaceOperation::CodeTypeDefinition,
             RequestCase::TypeDefinition,
         ),
         (
-            crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
+            ApplicationSurfaceOperation::CodeReferences,
             RequestCase::References,
         ),
     ];
@@ -886,7 +870,7 @@ async fn feedback_handles_fail_closed_without_an_owner() {
 fn feedback_invocation_retains_trusted_delivery_route() {
     let request = DaemonInvocationRequest::feedback(
         "request.delivery-route",
-        crate::application_surface::ApplicationSurfaceOperation::FeedbackList,
+        ApplicationSurfaceOperation::FeedbackList,
         "handle.delivery-route".to_owned(),
         UtcMicros(1),
         Deadline::new(UtcMicros(2)).expect("deadline"),
@@ -903,12 +887,12 @@ fn feedback_invocation_retains_trusted_delivery_route() {
 fn feedback_cycle_projections_use_distinct_handle_payloads() {
     for (surface_operation, daemon_operation, wire_operation) in [
         (
-            crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact,
+            ApplicationSurfaceOperation::FeedbackImpact,
             DaemonInvocationOperation::FeedbackImpact,
             "feedback_impact",
         ),
         (
-            crate::application_surface::ApplicationSurfaceOperation::AffectedTests,
+            ApplicationSurfaceOperation::AffectedTests,
             DaemonInvocationOperation::AffectedTests,
             "affected_tests",
         ),

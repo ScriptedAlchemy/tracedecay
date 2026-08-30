@@ -4892,6 +4892,25 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         let latest = tokio::task::spawn_blocking(move || {
+            // Availability before hydration: the activation gate below admits
+            // only the already-seated serving generation, so with an empty
+            // slot every decode outcome is refused. Joining the single-flight
+            // O(store) decode in that state parks the caller for the whole
+            // decode ahead of a refusal the registry can deliver immediately
+            // (measured: a cold `search` against a rebuilding generation
+            // blocked 76 s before returning its typed refusal; the same
+            // refusal is sub-second once delivered decode-free). Downgrade to
+            // the decoded-only probe; the freshness fences still run and still
+            // schedule the background remedy.
+            let admission = if serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            {
+                GenerationDecodeAdmissionV1::AlreadyDecoded
+            } else {
+                admission
+            };
             let mut scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),

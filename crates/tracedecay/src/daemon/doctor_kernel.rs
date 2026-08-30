@@ -890,7 +890,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let configuration_runtime = Arc::clone(&configuration_runtime);
         Box::pin(async move {
             let scope =
-                super::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
+                tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
                     .map_err(|_| ApplicationContractError::Inconsistent {
                         field: "daemon Doctor project scope",
                     })?;

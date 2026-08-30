@@ -190,6 +190,27 @@ async fn refuse_unparseable_handshake(
         handshake_line,
         binary_version(),
     );
+    write_refusal_and_drain(transport, &refusal).await;
+}
+
+/// Answer a rejected auth preface with one typed refusal frame and drain the
+/// input the client already pipelined, then let the connection close.
+///
+/// Tearing the socket down on the bare `Err` left the client's pending read
+/// at EOF, which every client surface reported as "connection closed, the
+/// outcome is unknown" — a transport mystery for what is a definitive daemon
+/// answer. The frame never echoes the supplied token.
+async fn refuse_unauthenticated_client(transport: &mut (impl tracedecay_mcp::McpTransport + Send)) {
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_rejected_authentication(
+        binary_version(),
+    );
+    write_refusal_and_drain(transport, &refusal).await;
+}
+
+async fn write_refusal_and_drain(
+    transport: &mut (impl tracedecay_mcp::McpTransport + Send),
+    refusal: &tracedecay_daemon_protocol::DaemonHandshakeRefusal,
+) {
     hotpath::gauge!("daemon.engine.handshake.refused").inc(1_u64);
     log_daemon_event(
         "daemon_handshake_refused",
@@ -681,15 +702,11 @@ fn serve_broker_socket_client_inner(
             let Some(preface_line) = preface_line else {
                 return Ok(None);
             };
-            let preface = DaemonAuthPreface::from_line(&preface_line).map_err(|_| {
-                TraceDecayError::Config {
-                    message: "daemon client authentication failed".to_string(),
-                }
-            })?;
-            if !preface.authenticate(expected_token) {
-                return Err(TraceDecayError::Config {
-                    message: "daemon client authentication failed".to_string(),
-                });
+            let authenticated = DaemonAuthPreface::from_line(&preface_line)
+                .is_ok_and(|preface| preface.authenticate(expected_token));
+            if !authenticated {
+                refuse_unauthenticated_client(&mut transport).await;
+                return Ok(None);
             }
         }
         let line = tokio::select! {
@@ -1387,14 +1404,11 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let Some(preface_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
-    let preface =
-        DaemonAuthPreface::from_line(&preface_line).map_err(|_| TraceDecayError::Config {
-            message: "daemon client authentication failed".to_string(),
-        })?;
-    if !preface.authenticate(auth_token) {
-        return Err(TraceDecayError::Config {
-            message: "daemon client authentication failed".to_string(),
-        });
+    let authenticated = DaemonAuthPreface::from_line(&preface_line)
+        .is_ok_and(|preface| preface.authenticate(auth_token));
+    if !authenticated {
+        refuse_unauthenticated_client(&mut transport).await;
+        return Ok(());
     }
     let Some(handshake_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());

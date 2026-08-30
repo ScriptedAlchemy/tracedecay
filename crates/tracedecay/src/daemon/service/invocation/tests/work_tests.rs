@@ -65,7 +65,7 @@ fn product_task(
 
 #[tokio::test]
 async fn registered_work_services_dispatch_the_core_lifecycle() {
-    let _pin = crate::config::PinnedUserDataDir::new();
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.work.core-invocation").expect("project id");
     let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
@@ -486,7 +486,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
 /// dispatcher's read arms never reach the effect path that publishes.
 #[tokio::test]
 async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
-    let _pin = crate::config::PinnedUserDataDir::new();
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.work.task-activity").expect("project id");
     let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(

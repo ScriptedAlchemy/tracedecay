@@ -14,7 +14,7 @@ use tracedecay_application::{
     remote::status::RemoteOperationalStatusReadPort,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_usecases::session::SessionProjectionServingStatusPort;
+use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
 

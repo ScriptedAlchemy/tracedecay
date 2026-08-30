@@ -1,8 +1,13 @@
 //! application primitive, callable-code, and context-scout daemon invocation handlers.
 
 use super::*;
-use crate::agents::context_scout_v2::{
+use tracedecay_agent_hosts::agents::context_scout_v2::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
+};
+use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
+use tracedecay_application::CallableCodeSurfaceRequest;
+use tracedecay_daemon_protocol::{
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
 };
 use tracedecay_application::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryWindowV1, ContextScoutLeaseV1,
@@ -20,7 +25,7 @@ pub(super) async fn execute_primitive(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
     wire_request_id: String,
-    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+    surface_operation: ApplicationSurfaceOperation,
     request: PrimitiveRequest,
     observed_at: UtcMicros,
     deadline: Deadline,
@@ -143,8 +148,8 @@ pub(super) async fn execute_callable_code(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
     wire_request_id: String,
-    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
-    request: crate::application_surface::CallableCodeSurfaceRequest,
+    surface_operation: ApplicationSurfaceOperation,
+    request: CallableCodeSurfaceRequest,
     page: PageRequest,
     observed_at: UtcMicros,
     deadline: Deadline,
@@ -168,40 +173,40 @@ pub(super) async fn execute_callable_code(
     };
     let kind = match (&request, surface_operation) {
         (
-            crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
+            CallableCodeSurfaceRequest::ExactOccurrence(_),
+            ApplicationSurfaceOperation::CodeExactOccurrence,
         ) => CallableCodeOperationKind::ExactOccurrence,
         (
-            crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+            CallableCodeSurfaceRequest::PhraseSearch(_),
+            ApplicationSurfaceOperation::CodePhraseSearch,
         ) => CallableCodeOperationKind::PhraseSearch,
         (
-            crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+            CallableCodeSurfaceRequest::Callees(_),
+            ApplicationSurfaceOperation::CodeCallees,
         ) => CallableCodeOperationKind::Callees,
         (
-            crate::application_surface::CallableCodeSurfaceRequest::Facets(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+            CallableCodeSurfaceRequest::Facets(_),
+            ApplicationSurfaceOperation::CodeFacets,
         ) => CallableCodeOperationKind::Facets,
         (
-            crate::application_surface::CallableCodeSurfaceRequest::Timeline(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+            CallableCodeSurfaceRequest::Timeline(_),
+            ApplicationSurfaceOperation::CodeTimeline,
         ) => CallableCodeOperationKind::Timeline,
         (
-            crate::application_surface::CallableCodeSurfaceRequest::Declaration(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
+            CallableCodeSurfaceRequest::Declaration(_),
+            ApplicationSurfaceOperation::CodeDeclaration,
         ) => CallableCodeOperationKind::Declaration,
         (
-            crate::application_surface::CallableCodeSurfaceRequest::Definition(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
+            CallableCodeSurfaceRequest::Definition(_),
+            ApplicationSurfaceOperation::CodeDefinition,
         ) => CallableCodeOperationKind::Definition,
         (
-            crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
+            CallableCodeSurfaceRequest::TypeDefinition(_),
+            ApplicationSurfaceOperation::CodeTypeDefinition,
         ) => CallableCodeOperationKind::TypeDefinition,
         (
-            crate::application_surface::CallableCodeSurfaceRequest::References(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
+            CallableCodeSurfaceRequest::References(_),
+            ApplicationSurfaceOperation::CodeReferences,
         ) => CallableCodeOperationKind::References,
         _ => {
             return DaemonInvocationResponse::problem(
@@ -237,7 +242,7 @@ pub(super) async fn execute_callable_code(
         operations,
     );
     match request {
-        crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(request) => {
+        CallableCodeSurfaceRequest::ExactOccurrence(request) => {
             let Ok(request) = request.into_application_request(page) else {
                 return invalid_callable_code_request(wire_request_id);
             };
@@ -247,7 +252,7 @@ pub(super) async fn execute_callable_code(
                 query.exact_occurrence(&context, request, observed_at).await,
             )
         }
-        crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(request) => {
+        CallableCodeSurfaceRequest::PhraseSearch(request) => {
             let Ok(request) = request.into_application_request(
                 tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(),
                 tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_normalization_revision(
@@ -262,7 +267,7 @@ pub(super) async fn execute_callable_code(
                 query.phrase_search(&context, request, observed_at).await,
             )
         }
-        crate::application_surface::CallableCodeSurfaceRequest::Callees(request) => {
+        CallableCodeSurfaceRequest::Callees(request) => {
             let request = request.into_application_request(page);
             callable_code_response(
                 wire_request_id,
@@ -270,7 +275,7 @@ pub(super) async fn execute_callable_code(
                 query.callees(&context, request, observed_at).await,
             )
         }
-        crate::application_surface::CallableCodeSurfaceRequest::Facets(request) => {
+        CallableCodeSurfaceRequest::Facets(request) => {
             let request = request.into_application_request(page);
             callable_code_response(
                 wire_request_id,
@@ -278,7 +283,7 @@ pub(super) async fn execute_callable_code(
                 query.facets(&context, request, observed_at).await,
             )
         }
-        crate::application_surface::CallableCodeSurfaceRequest::Timeline(request) => {
+        CallableCodeSurfaceRequest::Timeline(request) => {
             let request = request.into_application_request(page);
             callable_code_response(
                 wire_request_id,
@@ -286,7 +291,7 @@ pub(super) async fn execute_callable_code(
                 query.timeline(&context, request, observed_at).await,
             )
         }
-        crate::application_surface::CallableCodeSurfaceRequest::Declaration(request) => {
+        CallableCodeSurfaceRequest::Declaration(request) => {
             let request = request.into_application_request(page);
             callable_code_response(
                 wire_request_id,
@@ -294,7 +299,7 @@ pub(super) async fn execute_callable_code(
                 query.declaration(&context, request, observed_at).await,
             )
         }
-        crate::application_surface::CallableCodeSurfaceRequest::Definition(request) => {
+        CallableCodeSurfaceRequest::Definition(request) => {
             let request = request.into_application_request(page);
             callable_code_response(
                 wire_request_id,
@@ -302,7 +307,7 @@ pub(super) async fn execute_callable_code(
                 query.definition(&context, request, observed_at).await,
             )
         }
-        crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(request) => {
+        CallableCodeSurfaceRequest::TypeDefinition(request) => {
             let request = request.into_application_request(page);
             callable_code_response(
                 wire_request_id,
@@ -310,7 +315,7 @@ pub(super) async fn execute_callable_code(
                 query.type_definition(&context, request, observed_at).await,
             )
         }
-        crate::application_surface::CallableCodeSurfaceRequest::References(request) => {
+        CallableCodeSurfaceRequest::References(request) => {
             let request = request.into_application_request(page);
             callable_code_response(
                 wire_request_id,
@@ -466,7 +471,7 @@ pub(super) async fn execute_context_scout(
     service: &DaemonInvocationService,
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
-    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+    surface_operation: ApplicationSurfaceOperation,
     request: ContextScoutSurfaceRequest,
     observed_at: UtcMicros,
     deadline: Deadline,
@@ -488,7 +493,7 @@ pub(super) async fn execute_context_scout(
         }
     };
     let Some(configuration) =
-        crate::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
     else {
         return DaemonInvocationResponse::problem(
             wire_request_id,
@@ -528,7 +533,7 @@ pub(super) async fn execute_context_scout(
         );
     }
     let mut owner = None;
-    for candidate in crate::agents::context_scout_owner::lookup_registered_context_scout_owners(
+    for candidate in tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
         address.project_id,
     ) {
         if is_state_control
@@ -629,10 +634,10 @@ pub(super) async fn execute_context_scout(
         }
         ContextScoutSurfaceRequest::Claim(request) => {
             let window = match request.window {
-                crate::application_surface::ContextScoutClaimWindowSurfaceV1::IdleWindow => {
+                ContextScoutClaimWindowSurfaceV1::IdleWindow => {
                     ContextScoutDeliveryWindowV1::IdleWindow
                 }
-                crate::application_surface::ContextScoutClaimWindowSurfaceV1::OnRequest => {
+                ContextScoutClaimWindowSurfaceV1::OnRequest => {
                     ContextScoutDeliveryWindowV1::OnRequest
                 }
             };
@@ -734,9 +739,9 @@ pub(super) async fn execute_context_scout(
 async fn execute_context_scout_state_transition(
     wire_request_id: String,
     registered: RegisteredConfigurationRuntime,
-    owner: Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    owner: Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
     registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    control: &crate::application_surface::ContextScoutControlSurfaceRequest,
+    control: &ContextScoutControlSurfaceRequest,
     target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
     current: tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
     observed_at: UtcMicros,
@@ -765,7 +770,7 @@ async fn execute_context_scout_state_transition(
     let response = execute_configuration(
         wire_request_id,
         Some(registered.clone()),
-        crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+        ApplicationSurfaceOperation::ConfigurationSet,
         ConfigurationWireRequestV1::Set(tracedecay_application::ConfigurationSetRequestV1 {
             layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
                 project_id: registered.scope.project_id.clone(),
@@ -876,7 +881,7 @@ impl ContextScoutActivationReconciliationError {
 #[hotpath::measure(label = "daemon.service.context_scout.reconcile", future = true)]
 async fn reconcile_context_scout_configuration(
     runtime: &Arc<ProjectConfigurationRuntime>,
-    owner: &Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    owner: &Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
     registry: &Arc<ProjectContextScoutAddressRegistryV1>,
     address: ContextScoutAddressV1,
     scope: &ResolvedScope,
@@ -892,7 +897,7 @@ async fn reconcile_context_scout_configuration(
         snapshot: current.snapshot,
     };
     let refreshed =
-        crate::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
             .ok_or(ContextScoutActivationReconciliationError::InvalidConfiguration)?;
     if !registry
         .advance_control_exact_address(address, scope, &refreshed)

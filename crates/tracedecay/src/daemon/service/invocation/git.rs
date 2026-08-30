@@ -1,6 +1,7 @@
 //! Git index transaction daemon invocation handlers (`execute_git_read`/`execute_git_preview`/`execute_git_apply`).
 
 use super::*;
+use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 use tracedecay_domain::GitIndexPreviewV1;
 
 #[allow(clippy::too_many_arguments)]
@@ -185,7 +186,7 @@ pub(super) async fn execute_git_read(
     wire_request_id: String,
     project_root: Option<&Path>,
     owner: Option<DaemonGitInvocationOwner>,
-    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+    surface_operation: ApplicationSurfaceOperation,
     request: GitReadSurfaceRequest,
     observed_at: UtcMicros,
     deadline: Deadline,
@@ -203,19 +204,19 @@ pub(super) async fn execute_git_read(
     };
     let expected_operation = match &request.request {
         tracedecay_application::git::GitReadRequestV1::Status => {
-            crate::application_surface::ApplicationSurfaceOperation::GitStatus
+            ApplicationSurfaceOperation::GitStatus
         }
         tracedecay_application::git::GitReadRequestV1::Diff { .. } => {
-            crate::application_surface::ApplicationSurfaceOperation::GitDiff
+            ApplicationSurfaceOperation::GitDiff
         }
         tracedecay_application::git::GitReadRequestV1::History { .. } => {
-            crate::application_surface::ApplicationSurfaceOperation::GitHistory
+            ApplicationSurfaceOperation::GitHistory
         }
         tracedecay_application::git::GitReadRequestV1::Blame { .. } => {
-            crate::application_surface::ApplicationSurfaceOperation::GitBlame
+            ApplicationSurfaceOperation::GitBlame
         }
         tracedecay_application::git::GitReadRequestV1::Hunks { .. } => {
-            crate::application_surface::ApplicationSurfaceOperation::GitHunks
+            ApplicationSurfaceOperation::GitHunks
         }
     };
     if surface_operation != expected_operation {
@@ -245,7 +246,7 @@ pub(super) async fn execute_git_read(
         .0
         .saturating_sub(current_micros().0)
         .max(0) as u64;
-    let bounds = crate::git_query::GitQueryBounds {
+    let bounds = tracedecay_usecases::git_query::GitQueryBounds {
         max_entries: if matches!(
             &request.request,
             tracedecay_application::git::GitReadRequestV1::Hunks { .. }

@@ -68,7 +68,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             "automation recovery requires a project owner",
         ));
     };
-    let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         memory.project_root(),
         project_id,
     )

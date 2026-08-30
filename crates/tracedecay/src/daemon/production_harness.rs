@@ -359,7 +359,7 @@ async fn mount_one_production_composition_project(
     let code_search_scope = {
         let graph = composition.server.cg().await;
         let target = graph.configuration_runtime().configuration_target();
-        project_open_owners::resolved_scope_for_project(graph.project_root(), &target.project_id)
+        tracedecay_code_index_runtime::resolved_scope_for_project(graph.project_root(), &target.project_id)
             .map_err(|error| TraceDecayError::Config {
                 message: format!("production-composition code-index scope is invalid: {error:?}"),
             })?

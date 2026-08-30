@@ -287,7 +287,7 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
         .configuration_target()
         .project_id
         .clone();
-    let scope = super::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
         .map_err(|error| TraceDecayError::Config {
             message: format!("dashboard test configuration scope is invalid: {error}"),
         })?;
@@ -383,7 +383,7 @@ pub(crate) async fn register_dashboard_test_retained_runtime(
     project_root: PathBuf,
     project_id: ProjectId,
 ) -> Result<()> {
-    let scope = super::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
         .map_err(|error| TraceDecayError::Config {
             message: format!("dashboard test retained scope is invalid: {error}"),
         })?;

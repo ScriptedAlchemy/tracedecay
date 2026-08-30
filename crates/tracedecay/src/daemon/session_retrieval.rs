@@ -14,16 +14,17 @@ use tracedecay_domain::{
 };
 #[cfg(test)]
 use tracedecay_domain::{RepositoryId, WorktreeId};
+use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
 use tracedecay_store::StoreShardIdV1;
 use tracedecay_usecases::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
 use tracedecay_usecases::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionDataFreshness, SessionFreshnessPolicy, SessionProjectionServingStatusPort,
-    SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
-    SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalQuery,
+    SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
+    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
+    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionTemporalExecutionError, SessionTemporalQuery,
 };
 
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;

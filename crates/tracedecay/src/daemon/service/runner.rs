@@ -212,7 +212,7 @@ impl ServiceRunner {
     pub(super) fn log_hint(&self) -> String {
         match self {
             Self::Systemd => format!("journalctl --user -u {} -f", super::super::SERVICE_NAME),
-            Self::Launchd => crate::config::user_data_dir().map_or_else(
+            Self::Launchd => tracedecay_runtime_core::config::user_data_dir().map_or_else(
                 || "tail -f <tracedecay-data-dir>/daemon.err.log".to_string(),
                 |dir| format!("tail -f \"{}\"", dir.join("daemon.err.log").display()),
             ),

@@ -6725,7 +6725,6 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-query",
  "tracedecay-runtime-core",
- "tracedecay-rusqlite-runtime",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",

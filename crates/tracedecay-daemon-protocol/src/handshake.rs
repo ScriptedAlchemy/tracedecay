@@ -82,6 +82,11 @@ pub enum DaemonHandshakeRefusalReason {
     UnsupportedRevision,
     /// The handshake line was not even JSON.
     InvalidHandshake,
+    /// The client's auth preface was missing, unparseable, or carried a token
+    /// this daemon did not mint. Closing without this frame made an auth
+    /// rejection indistinguishable from a transport failure ("connection
+    /// closed, outcome unknown") on the client.
+    AuthenticationRejected,
 }
 
 /// One JSON line the daemon writes before closing a connection whose
@@ -109,6 +114,18 @@ impl DaemonHandshakeRefusal {
         Self {
             protocol: DAEMON_HANDSHAKE_REFUSAL_PROTOCOL.to_owned(),
             refusal,
+            daemon_version: daemon_version.to_owned(),
+        }
+    }
+
+    /// The refusal frame for a client whose auth preface this daemon rejected.
+    ///
+    /// The daemon answers with this one frame and then closes; it never echoes
+    /// the supplied token or names the expected one.
+    pub fn for_rejected_authentication(daemon_version: &str) -> Self {
+        Self {
+            protocol: DAEMON_HANDSHAKE_REFUSAL_PROTOCOL.to_owned(),
+            refusal: DaemonHandshakeRefusalReason::AuthenticationRejected,
             daemon_version: daemon_version.to_owned(),
         }
     }
@@ -203,6 +220,26 @@ mod handshake_refusal_tests {
         assert_eq!(
             refusal.refusal,
             DaemonHandshakeRefusalReason::InvalidHandshake
+        );
+    }
+
+    #[test]
+    fn rejected_authentication_round_trips_and_names_no_token() {
+        let refusal = DaemonHandshakeRefusal::for_rejected_authentication("0.1.0-beta.99+cafe");
+        assert_eq!(
+            refusal.refusal,
+            DaemonHandshakeRefusalReason::AuthenticationRejected
+        );
+        assert_eq!(refusal.daemon_version, "0.1.0-beta.99+cafe");
+        let line = refusal.to_line().expect("refusal wire line");
+        assert!(
+            line.contains("authentication_rejected"),
+            "the frame must carry the snake_case reason: {line}"
+        );
+        assert_eq!(
+            DaemonHandshakeRefusal::from_line(&line),
+            Some(refusal),
+            "the auth refusal frame must round-trip through its one wire line"
         );
     }
 

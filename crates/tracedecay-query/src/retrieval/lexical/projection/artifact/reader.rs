@@ -1624,7 +1624,7 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut groups = Vec::<FuzzyQueryGroupV1>::new();
         for (query_ordinal, query) in request.whole_terms.iter().enumerate() {
             let normalized_query = normalize_lexical(query);
-            let bound = fuzzy_distance_bound(normalized_query.chars().count());
+            let bound = fuzzy_distance_bound(&normalized_query);
             if bound == 0 {
                 continue;
             }
