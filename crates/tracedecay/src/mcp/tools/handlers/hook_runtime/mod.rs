@@ -198,9 +198,14 @@ pub(crate) async fn handle_projectless_hook_runtime(
             &args,
             action,
             profile_root,
-            session_authorities.profile_identity.ok_or_else(|| {
-                config_error("authenticated profile identity is unavailable for Hook V2 admission")
-            })?,
+            session_authorities
+                .profile_identity
+                .as_deref()
+                .ok_or_else(|| {
+                    config_error(
+                        "authenticated profile identity is unavailable for Hook V2 admission",
+                    )
+                })?,
         )?,
         "claude_compact" => claude_compact(&args, session_authorities).await?,
         _ => unreachable!("projectless hook action validated above"),

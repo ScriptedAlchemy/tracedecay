@@ -63,6 +63,37 @@ pub struct CodeLexicalArtifactReaderV1 {
 
 type ArtifactConnectionMutex<T> = StdMutex<T>;
 
+#[derive(Clone, Copy)]
+enum ReaderIntegrityAuthorityV1 {
+    /// The immutable artifact was SQLite-verified before publication and both
+    /// whole-file hashes still match that exact published byte identity.
+    ContentAddressedPublisherProof,
+    /// The caller binds only the embedded receipt, so SQLite must verify its
+    /// own page structure before any rows are trusted.
+    ReceiptOnly,
+}
+
+fn verify_reader_sqlite_integrity(
+    connection: &Connection,
+    authority: ReaderIntegrityAuthorityV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    if matches!(
+        authority,
+        ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof
+    ) {
+        return Ok(());
+    }
+    let integrity: String = hotpath::measure_block!("query.artifact.open.quick_check", {
+        connection
+            .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+            .map_err(sqlite_corrupt)
+    })?;
+    if integrity != "ok" {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(integrity));
+    }
+    Ok(())
+}
+
 impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -154,7 +185,13 @@ impl CodeLexicalArtifactReaderV1 {
         }
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
-            Self::open_connection_with_control(connection, &receipt, cache_budget_bytes, control,)
+            Self::open_connection_with_control(
+                connection,
+                &receipt,
+                cache_budget_bytes,
+                control,
+                ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
+            )
         )?;
         verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
         verify_named_path_identity(path, &file)?;
@@ -196,7 +233,13 @@ impl CodeLexicalArtifactReaderV1 {
         })?;
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
-            Self::open_connection_with_control(connection, expected, cache_budget_bytes, control,)
+            Self::open_connection_with_control(
+                connection,
+                expected,
+                cache_budget_bytes,
+                control,
+                ReaderIntegrityAuthorityV1::ReceiptOnly,
+            )
         )?;
         crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
         hotpath::gauge!("query.artifact.bytes").set(expected.file_size_bytes());
@@ -209,6 +252,7 @@ impl CodeLexicalArtifactReaderV1 {
         expected: &VerifiedCodeLexicalArtifactV1,
         cache_budget_bytes: usize,
         control: &dyn CodeIndexExecutionControlV1,
+        integrity_authority: ReaderIntegrityAuthorityV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         hotpath::measure_block!("query.artifact.open.schema_verify", {
@@ -273,14 +317,12 @@ impl CodeLexicalArtifactReaderV1 {
                 ))
             }
         )?;
-        let integrity: String = hotpath::measure_block!("query.artifact.open.quick_check", {
-            connection
-                .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-                .map_err(sqlite_corrupt)
-        })?;
-        if integrity != "ok" {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(integrity));
-        }
+        // Content-addressed reopen has stronger authority than `quick_check`:
+        // the builder ran SQLite integrity verification before publication,
+        // and this reader hashes the exact immutable file both before and
+        // after opening it. Repeating a corpus-wide SQLite scan added tens of
+        // seconds without authenticating any bytes the two hashes did not.
+        verify_reader_sqlite_integrity(&connection, integrity_authority)?;
         checkpoint(control)?;
         let stored = hotpath::measure_block!("query.artifact.open.receipt_restore", {
             let receipt_bytes: Vec<u8> = connection
@@ -2448,6 +2490,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use roaring::RoaringBitmap;
+    use rusqlite::hooks::{AuthAction, Authorization};
     use rusqlite::{Connection, params};
     use sha2::{Digest, Sha256};
     use tracedecay_domain::ManifestDigest;
@@ -2477,6 +2520,45 @@ mod tests {
         fn is_deadline_exceeded(&self) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn content_addressed_integrity_reuses_the_publisher_proof() {
+        let connection = Connection::open_in_memory().expect("open SQLite fixture");
+        let quick_check_observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observer = std::sync::Arc::clone(&quick_check_observed);
+        connection
+            .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Pragma { pragma_name, .. }
+                        if pragma_name.eq_ignore_ascii_case("quick_check")
+                ) {
+                    observer.store(true, Ordering::SeqCst);
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .expect("install quick-check observer");
+
+        super::verify_reader_sqlite_integrity(
+            &connection,
+            super::ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
+        )
+        .expect("a content-addressed reopen reuses its publisher integrity proof");
+        assert!(
+            !quick_check_observed.load(Ordering::SeqCst),
+            "content-addressed reopen must not rescan the whole SQLite artifact"
+        );
+
+        let error = super::verify_reader_sqlite_integrity(
+            &connection,
+            super::ReaderIntegrityAuthorityV1::ReceiptOnly,
+        )
+        .expect_err("a receipt-only reopen still requires SQLite integrity verification");
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Io(_)));
+        assert!(quick_check_observed.load(Ordering::SeqCst));
     }
 
     struct MutateSqliteHeaderAtObservation {

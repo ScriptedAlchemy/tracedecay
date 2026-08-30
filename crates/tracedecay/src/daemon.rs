@@ -96,7 +96,11 @@ const PROJECT_OPEN_CAPACITY_ERROR_KINDS: [&str; 2] = [
     "project_server_capacity_reached",
 ];
 /// Message fragments emitted when a daemon request misses its read deadline.
-const DAEMON_READ_DEADLINE_MESSAGES: [&str; 2] = ["before deadline", "deadline already elapsed"];
+const DAEMON_READ_DEADLINE_MESSAGES: [&str; 3] = [
+    "before deadline",
+    "deadline already elapsed",
+    "did not answer after",
+];
 
 /// True when a daemon error message carries the project warming hint.
 pub(crate) fn error_message_is_project_warming(message: &str) -> bool {
@@ -131,6 +135,15 @@ pub fn error_message_is_read_deadline(message: &str) -> bool {
     DAEMON_READ_DEADLINE_MESSAGES
         .iter()
         .any(|deadline| message.contains(deadline))
+}
+
+/// True when a daemon client missed its read deadline, including the typed
+/// `daemon_response_stalled` reason code.
+pub fn error_is_read_deadline(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, _, _))
+    ) || error_message_is_read_deadline(&error.to_string())
 }
 
 mod authority;

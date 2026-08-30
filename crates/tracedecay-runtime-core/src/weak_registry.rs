@@ -90,4 +90,10 @@ impl<K: Eq + Hash, V> WeakRegistry<K, V> {
     pub fn len(&self) -> usize {
         self.lock().len()
     }
+
+    /// Returns whether the registry currently tracks no entries, without
+    /// sweeping dead ones.
+    pub fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
 }

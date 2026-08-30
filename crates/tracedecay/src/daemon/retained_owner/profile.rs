@@ -156,7 +156,7 @@ fn profile_retained_configuration_digest(
 }
 
 pub(crate) fn profile_retained_connection_authority(
-    identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    identity: &dyn tracedecay_application::ProfileIdentityReadPort,
     session_identity: &ResolvedSessionIdentity,
 ) -> Result<ProfileRetainedConnectionAuthorityV1, TraceDecayError> {
     profile_retained_connection_authority_from_persisted_identity(
