@@ -145,7 +145,9 @@ fn host_integration_read_from_report(
 ///
 /// An unmounted worktree reports `Unmounted`; a mounted worktree whose freshness
 /// ladder has already proven a complete generation current reports `Mounted`;
-/// stale, restored-unverified, or busy schedulers report `Indexing` and schedule
+/// a worktree whose background convergence is parked on a deterministic
+/// contract violation reports `Parked` with the exact reason; stale,
+/// restored-unverified, or busy schedulers report `Indexing` and schedule
 /// background reconciliation. Doctor never performs code-index catch-up on its
 /// request path.
 #[hotpath::measure(label = "daemon.doctor.code_index", future = true)]
@@ -159,13 +161,20 @@ pub(in crate::daemon) async fn code_index_read_from_registry(
             coverage: DoctorCoverageCompletenessV1::Complete,
         };
     }
-    let state = if registry.latest_complete_ready(project_root).await.is_some() {
-        CodeIndexMountStateV1::Mounted
-    } else {
-        CodeIndexMountStateV1::Indexing
-    };
+    if registry.latest_complete_ready(project_root).await.is_some() {
+        return CodeIndexMountReadV1::Observed {
+            state: CodeIndexMountStateV1::Mounted,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        };
+    }
+    if let Some(parked) = registry.convergence_park(project_root).await {
+        return CodeIndexMountReadV1::Parked {
+            reason: format!("{}; {}", parked.reason, parked.remediation),
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        };
+    }
     CodeIndexMountReadV1::Observed {
-        state,
+        state: CodeIndexMountStateV1::Indexing,
         coverage: DoctorCoverageCompletenessV1::Complete,
     }
 }
