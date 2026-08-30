@@ -5156,6 +5156,24 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
         "root graph readiness must not join the publication decode flight"
     );
 
+    let scope_ready = tokio::time::timeout(
+        Duration::from_secs(30),
+        registry.latest_complete_ready_decoded_for_scope(&scope),
+    )
+    .await
+    .expect("scope query readiness must not wait for the decode cache")
+    .expect("the seated graph generation remains ready for scoped queries");
+    assert_eq!(
+        scope_ready.generation().manifest().generation_id,
+        generation_id,
+        "scoped query admission must trust the exact seated generation"
+    );
+    assert_eq!(
+        held_decode.waiter_count(),
+        0,
+        "scope query readiness must not join the publication decode flight"
+    );
+
     drop(held_decode);
     registry.shutdown().await;
 }

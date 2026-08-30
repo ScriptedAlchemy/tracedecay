@@ -139,8 +139,10 @@ pub(crate) async fn handle_real_server_tool_call_raw(
         }
     });
     let mut transport = CaptureTransport::default();
-    server
-        .handle_and_write(&request.to_string(), &mut transport)
+    // Heap-allocate the server dispatch future so every awaiting test keeps a
+    // bounded resident frame (perf-profile layouts overflow the test stack
+    // when these mega-futures compose inline).
+    Box::pin(server.handle_and_write(&request.to_string(), &mut transport))
         .await
         .expect("real MCP server tool call");
     serde_json::from_str(transport.output.trim()).expect("JSON-RPC response")
@@ -221,10 +223,12 @@ pub(crate) async fn production_composition_fixture_with_sources(
         .status()
         .expect("git commit");
     assert!(commit.success(), "git commit must succeed");
-    let harness =
-        ProductionProjectCompositionHarnessV1::open(isolation.path(), vec![project_root.clone()])
-            .await
-            .expect("production composition harness");
+    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        vec![project_root.clone()],
+    ))
+    .await
+    .expect("production composition harness");
     ProductionCompositionFixture {
         harness,
         project_root,
@@ -273,10 +277,12 @@ pub(crate) async fn init_production_source_edit_project(
         .status()
         .expect("git commit source-edit fixture");
     assert!(commit.success(), "git commit must succeed");
-    let harness =
-        ProductionProjectCompositionHarnessV1::open(isolation_root, [project_root.to_path_buf()])
-            .await
-            .expect("production source-edit composition");
+    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+        isolation_root,
+        [project_root.to_path_buf()],
+    ))
+    .await
+    .expect("production source-edit composition");
     (
         ProductionSourceEditFixture {
             harness,
@@ -406,11 +412,13 @@ pub(crate) async fn handle_tool_call(
     #[cfg(feature = "test-transport")]
     if tool_name == "tracedecay_message_search" || tool_name.starts_with("tracedecay_lcm_") {
         let runtime = open_active_project_scoped_runtime(cg).await;
-        let server = McpServer::new_with_host_admission_test_runtime_for_test(
-            TraceDecay::open(cg.project_root()).await?,
-            None,
-            runtime,
-        )
+        // Boxed graph-open and server-construction futures: these are the
+        // deep production compositions whose inline layouts overflow the
+        // perf-profile test stack.
+        let graph = Box::pin(TraceDecay::open(cg.project_root())).await?;
+        let server = Box::pin(McpServer::new_with_host_admission_test_runtime_for_test(
+            graph, None, runtime,
+        ))
         .await?;
         if !server.has_project_application_retrieval_for_test() {
             return Err(TraceDecayError::Config {
@@ -445,7 +453,14 @@ pub(crate) async fn handle_tool_call(
         }
         return Ok(ToolResult::new(response["result"].clone(), Vec::new()));
     }
-    tracedecay::mcp::handle_tool_call(cg, tool_name, args, server_stats, scope_prefix).await
+    Box::pin(tracedecay::mcp::handle_tool_call(
+        cg,
+        tool_name,
+        args,
+        server_stats,
+        scope_prefix,
+    ))
+    .await
 }
 
 #[cfg(feature = "test-transport")]
@@ -462,9 +477,7 @@ pub(crate) async fn handle_tool_call_with_runtime(
         obj.entry("format".to_string())
             .or_insert_with(|| serde_json::json!("json"));
     }
-    runtime
-        .call_mcp_tool_for_test(cg, tool_name, args, server_stats, scope_prefix)
-        .await
+    Box::pin(runtime.call_mcp_tool_for_test(cg, tool_name, args, server_stats, scope_prefix)).await
 }
 
 #[cfg(feature = "test-transport")]
@@ -473,8 +486,8 @@ async fn handle_project_open_source_edit_tool_call(
     tool_name: &str,
     mut args: Value,
 ) -> tracedecay_runtime_core::errors::Result<ToolResult> {
-    let graph = TraceDecay::open(cg.project_root()).await?;
-    let server = McpServer::new(graph, None).await;
+    let graph = Box::pin(TraceDecay::open(cg.project_root())).await?;
+    let server = Box::pin(McpServer::new(graph, None)).await;
     server
         .install_project_open_source_edit_authority_for_test()
         .await?;
@@ -641,9 +654,7 @@ async fn call_project_open_source_edit_server(
         }
     });
     let mut transport = CaptureTransport::default();
-    server
-        .handle_and_write(&request.to_string(), &mut transport)
-        .await?;
+    Box::pin(server.handle_and_write(&request.to_string(), &mut transport)).await?;
     let response: Value =
         serde_json::from_str(transport.output.trim()).map_err(|error| TraceDecayError::Config {
             message: format!("source edit MCP response was invalid JSON: {error}"),
@@ -867,9 +878,13 @@ pub(crate) async fn real_mcp_server(cg: TestTraceDecay) -> Arc<McpServer> {
         .upsert_code_project(&project_id, &project_root, None, None, None)
         .await
         .expect("register test project");
-    McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
-        .await
-        .expect("registered test server")
+    Box::pin(McpServer::new_with_host_admission_test_runtime_for_test(
+        cg.into_inner(),
+        None,
+        runtime,
+    ))
+    .await
+    .expect("registered test server")
 }
 
 pub(crate) async fn close_test_graph(cg: TestTraceDecay) {

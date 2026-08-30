@@ -267,7 +267,7 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
     .expect("loopback listener");
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept shutdown client");
-        super::super::serve_windows_broker_client(
+        Box::pin(super::super::serve_windows_broker_client(
             stream,
             TOKEN,
             &server_lifecycle,
@@ -276,7 +276,7 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
                 super::super::ProjectOpenGates::default(),
             )),
             None,
-        )
+        ))
         .await
         .expect("serve shutdown client");
     });
@@ -516,7 +516,7 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept Doctor client");
         let lifecycle = DaemonLifecycle::default();
-        super::super::serve_windows_broker_client_with_class(
+        Box::pin(super::super::serve_windows_broker_client_with_class(
             stream,
             TOKEN,
             &lifecycle,
@@ -527,7 +527,7 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
             super::super::DaemonPerClientAdmission::default(),
             reserved.class(),
             None,
-        )
+        ))
         .await
         .expect("serve Doctor client");
     });
@@ -632,7 +632,7 @@ async fn tools_list_answers_under_general_saturation() {
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept discovery client");
         let lifecycle = DaemonLifecycle::default();
-        super::super::serve_windows_broker_client_with_class(
+        Box::pin(super::super::serve_windows_broker_client_with_class(
             stream,
             TOKEN,
             &lifecycle,
@@ -643,7 +643,7 @@ async fn tools_list_answers_under_general_saturation() {
             super::super::DaemonPerClientAdmission::default(),
             reserved.class(),
             None,
-        )
+        ))
         .await
         .expect("serve discovery client");
     });
