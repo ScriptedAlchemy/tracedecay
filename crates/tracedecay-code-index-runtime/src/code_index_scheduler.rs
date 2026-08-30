@@ -4090,7 +4090,7 @@ pub enum CodeIndexSchedulerErrorV1 {
     SnapshotMemoryCapacityUnavailable,
     #[error("code-index worker plan refused: {0}")]
     WorkerPlan(#[from] tracedecay_code_index::parallelism::CodeIndexWorkerPlanInstallErrorV1),
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-helpers")))]
     #[error("code-index worker plan is not installed")]
     WorkerPlanNotInstalled,
 }
@@ -4135,7 +4135,7 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::SnapshotMemoryAdmission(_)
             | Self::SnapshotMemoryCapacityUnavailable
             | Self::WorkerPlan(_) => false,
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-helpers")))]
             Self::WorkerPlanNotInstalled => false,
         }
     }
