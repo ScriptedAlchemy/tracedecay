@@ -74,7 +74,7 @@ pub use context_headings::{
 };
 pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport};
 pub use lifecycle::{
-    McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity, McpShutdownStatus,
+    McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity,
 };
 pub use project_access::registered_project_reader_tool_names;
 pub use tool_call_deadline::{
