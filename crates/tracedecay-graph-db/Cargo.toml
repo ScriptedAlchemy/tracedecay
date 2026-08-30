@@ -128,6 +128,7 @@ grafeo-common.workspace = true
 grafeo-core.workspace = true
 grafeo-engine.workspace = true
 grafeo-storage.workspace = true
+fs2 = "0.4"
 hex = "0.4"
 hotpath.workspace = true
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
