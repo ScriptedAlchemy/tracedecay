@@ -79,7 +79,6 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     ///
     /// The temporal git-scope resolution lives above this crate; global-db
     /// runs that pre-pass and then calls this method.
-    #[hotpath::measure(future = true, label = "global_db.registered.lcm.grep")]
     pub async fn lcm_grep(
         &self,
         request: LcmGrepRequest,

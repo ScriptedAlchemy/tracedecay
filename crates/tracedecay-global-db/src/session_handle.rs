@@ -20,8 +20,7 @@ use tracedecay_sessions::runtime::{
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
 use crate::{
-    RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbWriteTransaction,
-    RegisteredGlobalDbWriterConnection,
+    RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, RegisteredGlobalDbWriterConnection,
 };
 
 impl SessionQuery for RegisteredGlobalDbWriteTransaction<'_> {
@@ -121,47 +120,6 @@ impl Executor for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl SessionRegisteredDb for RegisteredGlobalDb {
-    type WriteTxn<'a> = RegisteredGlobalDbWriteTransaction<'a>;
-    type WriterConn<'a> = RegisteredGlobalDbWriterConnection<'a>;
-
-    fn read_snapshot(
-        &self,
-    ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, TraceDecayError>> + Send {
-        RegisteredGlobalDb::read_snapshot(self)
-    }
-
-    fn begin_write_transaction(
-        &self,
-    ) -> impl Future<Output = Result<Self::WriteTxn<'_>, TraceDecayError>> + Send {
-        RegisteredGlobalDb::begin_write_transaction(self)
-    }
-
-    fn writer_connection(&self) -> Result<Self::WriterConn<'_>, TraceDecayError> {
-        RegisteredGlobalDb::writer_connection(self)
-    }
-
-    fn db_path(&self) -> &Path {
-        RegisteredGlobalDb::db_path(self)
-    }
-
-    fn registered_binding(&self) -> &StoreRuntimeBindingV1 {
-        RegisteredGlobalDb::binding(self)
-    }
-
-    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
-        RegisteredGlobalDb::verified_locator(self)
-    }
-
-    fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1> {
-        RegisteredGlobalDb::project_graph_runtime(self)
-    }
-
-    fn read_connection(&self) -> DatabaseEngineReadConnection {
-        RegisteredGlobalDb::read_connection(self)
-    }
-}
-
-impl SessionRegisteredDb for RegisteredGlobalDbLeaseV1 {
     type WriteTxn<'a> = RegisteredGlobalDbWriteTransaction<'a>;
     type WriterConn<'a> = RegisteredGlobalDbWriterConnection<'a>;
 
