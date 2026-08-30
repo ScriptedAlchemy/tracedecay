@@ -1091,10 +1091,15 @@ fn sealed_copy_proof(
         .inner
         .markers
         .record_proven(&locator, expected.as_str(), canonical_bytes);
-    // Written now rather than at close: the reader handle serves for the
-    // daemon's lifetime and a crash would drop the proof. Like the close-time
-    // publish, a marker is a cache of completed proofs — failing to write one
-    // costs the next open a re-proof and nothing else.
+    // Published now as well as at close, because both identities matter. An
+    // open session writes only the sidecar WAL (index catalog entries), so
+    // the container bytes stay exactly the ones this proof ran over for as
+    // long as this process serves them: publishing here lets every further
+    // open of the artifact in the same boot — the direct-sealed recover and
+    // the registry adoption were each paying this proof — resolve by stat.
+    // The close-time publish then re-records the checkpointed container for
+    // the next boot. A marker is a cache of completed proofs; failing to
+    // write one costs the next open a re-proof and nothing else.
     if let Err(error) = database.inner.markers.publish() {
         let _ = error;
     }

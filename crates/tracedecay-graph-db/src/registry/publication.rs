@@ -1478,6 +1478,8 @@ mod historical_publication_reuse_tests {
         recovered_generation_enumerations, reset_recovered_generation_enumerations,
         reset_sealed_copy_proofs, sealed_copy_proofs,
     };
+    #[cfg(feature = "graph-sealed-store")]
+    use crate::generation::{reset_sealed_copy_marker_hits, sealed_copy_marker_hits};
     use crate::{
         GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1, GraphDbRegistration,
         GraphDbRegistry, GraphDbRegistryConfig, GraphEntity, GraphEntityId, GraphGenerationId,
@@ -1787,10 +1789,21 @@ mod historical_publication_reuse_tests {
                 GraphEntity::new(
                     GraphEntityId::new("entity:reuse").unwrap(),
                     BTreeSet::new(),
-                    BTreeMap::from([(
-                        GraphPropertyName::new("marker").unwrap(),
-                        GraphProperty::String("reuse".to_owned()),
-                    )]),
+                    BTreeMap::from([
+                        (
+                            GraphPropertyName::new("marker").unwrap(),
+                            GraphProperty::String("reuse".to_owned()),
+                        ),
+                        // A Bytes property seals this generation in replay
+                        // form, the shape every production code graph takes
+                        // (see `COMPACT_ROUND_TRIPS_BYTES`), so these reuse
+                        // and marker tests exercise the production artifact
+                        // form.
+                        (
+                            GraphPropertyName::new("payload").unwrap(),
+                            GraphProperty::Bytes(vec![0x7d, 0x11, 0x03]),
+                        ),
+                    ]),
                 )
                 .unwrap(),
             ],
@@ -2126,6 +2139,48 @@ mod historical_publication_reuse_tests {
             recovered_generation_enumerations(),
             usize::from(counters.full_verifications == 1),
             "row enumeration must happen only when the proof was not inherited"
+        );
+    }
+
+    /// A remount that recovers the generation adopts the on-disk sealed
+    /// artifact through its verify-once marker: the artifact's bytes are the
+    /// ones the build's post-reopen proof ran over, so adoption resolves by
+    /// stat instead of re-streaming the sealed row proof — which is exactly
+    /// the second half of the boot-from-sealed double verification.
+    #[cfg(feature = "graph-sealed-store")]
+    #[test]
+    fn a_fresh_from_disk_recover_adopts_the_sealed_artifact_by_marker() {
+        let mut fixture = published_fixture();
+        assert!(
+            fixture
+                .registry
+                .close(&registration(fixture.binding.clone(), &fixture.root))
+                .unwrap()
+        );
+        mount(&fixture.registry, &fixture.binding, &fixture.root);
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        reset_sealed_copy_proofs();
+        reset_sealed_copy_marker_hits();
+        let recovered = fixture
+            .registry
+            .recover_verified_snapshot(
+                registration(fixture.binding.clone(), &fixture.root),
+                &mut fixture.authority,
+                &context,
+                &fixture.key.projection,
+            )
+            .unwrap();
+        assert_eq!(recovered.generation(), &fixture.generation);
+        assert_eq!(
+            sealed_copy_proofs(),
+            0,
+            "adopting unchanged sealed bytes must not re-stream the sealed row proof"
+        );
+        assert_eq!(
+            sealed_copy_marker_hits(),
+            1,
+            "the artifact's own verify-once marker resolves the adoption proof by stat"
         );
     }
 
