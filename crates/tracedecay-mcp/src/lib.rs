@@ -56,7 +56,6 @@ pub mod hook_events;
 pub mod host_cli;
 pub mod jsonrpc;
 pub mod lifecycle;
-pub mod output_format;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
@@ -77,7 +76,6 @@ pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpT
 pub use lifecycle::{
     McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity, McpShutdownStatus,
 };
-pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use project_access::registered_project_reader_tool_names;
 pub use tool_call_deadline::{
     TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, tool_call_deadline_meta,
