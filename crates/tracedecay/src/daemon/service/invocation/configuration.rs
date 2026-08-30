@@ -54,7 +54,7 @@ pub(super) async fn execute_configuration(
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationList,
                 ConfigurationWireRequestV1::List(_),
             ) => configuration_evidence(
-                serde_json::to_value(client.list(actor).await?)
+                serde_json::to_value(Box::pin(client.list(actor)).await?)
                     .map_err(|_| ConfigurationError::Unavailable)?,
                 authority,
                 observed_at,
@@ -64,7 +64,7 @@ pub(super) async fn execute_configuration(
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationExplain,
                 ConfigurationWireRequestV1::Explain(request),
             ) => configuration_evidence(
-                serde_json::to_value(client.explain(actor, request.key).await?)
+                serde_json::to_value(Box::pin(client.explain(actor, request.key)).await?)
                     .map_err(|_| ConfigurationError::Unavailable)?,
                 authority,
                 observed_at,
@@ -74,7 +74,7 @@ pub(super) async fn execute_configuration(
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet,
                 ConfigurationWireRequestV1::Get(request),
             ) => configuration_evidence(
-                serde_json::to_value(client.get(actor, request.key).await?)
+                serde_json::to_value(Box::pin(client.get(actor, request.key)).await?)
                     .map_err(|_| ConfigurationError::Unavailable)?,
                 authority,
                 observed_at,
@@ -84,7 +84,7 @@ pub(super) async fn execute_configuration(
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationObservedState,
                 ConfigurationWireRequestV1::ObservedState(_),
             ) => configuration_evidence(
-                serde_json::to_value(client.observed_state(actor).await?)
+                serde_json::to_value(Box::pin(client.observed_state(actor)).await?)
                     .map_err(|_| ConfigurationError::Unavailable)?,
                 authority,
                 observed_at,
@@ -95,15 +95,14 @@ pub(super) async fn execute_configuration(
                 ConfigurationWireRequestV1::Audit(request),
             ) => configuration_evidence(
                 serde_json::to_value(
-                    client
-                        .audit(
-                            actor,
-                            ConfigurationAuditQuery {
-                                after_event_id: request.after_event_id,
-                                limit: request.limit,
-                            },
-                        )
-                        .await?,
+                    Box::pin(client.audit(
+                        actor,
+                        ConfigurationAuditQuery {
+                            after_event_id: request.after_event_id,
+                            limit: request.limit,
+                        },
+                    ))
+                    .await?,
                 )
                 .map_err(|_| ConfigurationError::Unavailable)?,
                 authority,
@@ -129,13 +128,13 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let receipt = apply_configuration_or_semantic_transition(
+                let receipt = Box::pin(apply_configuration_or_semantic_transition(
                     &registered,
                     mutation_authority,
                     mutation,
                     request.expected_revision.clone(),
                     observed_at,
-                )
+                ))
                 .await?;
                 configuration_effect(
                     serde_json::to_value(&receipt).map_err(|_| ConfigurationError::Unavailable)?,
@@ -169,13 +168,13 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let receipt = apply_configuration_or_semantic_transition(
+                let receipt = Box::pin(apply_configuration_or_semantic_transition(
                     &registered,
                     mutation_authority,
                     mutation,
                     request.expected_revision.clone(),
                     observed_at,
-                )
+                ))
                 .await?;
                 configuration_effect(
                     serde_json::to_value(&receipt).map_err(|_| ConfigurationError::Unavailable)?,
@@ -221,13 +220,13 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let receipt = apply_configuration_or_semantic_transition(
+                let receipt = Box::pin(apply_configuration_or_semantic_transition(
                     &registered,
                     mutation_authority,
                     mutation,
                     request.expected_revision.clone(),
                     observed_at,
-                )
+                ))
                 .await?;
                 configuration_effect(
                     serde_json::to_value(&receipt).map_err(|_| ConfigurationError::Unavailable)?,
@@ -260,17 +259,16 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let metadata = client
-                    .write_credential(
-                        mutation_authority,
-                        WriteOnlyCredentialMutation {
-                            expected_reference_id: request.expected_reference_id,
-                            kind: request.kind,
-                            write_handle: CredentialWriteHandleV1::new(request.write_handle)?,
-                        },
-                        request.expected_revision.clone(),
-                    )
-                    .await?;
+                let metadata = Box::pin(client.write_credential(
+                    mutation_authority,
+                    WriteOnlyCredentialMutation {
+                        expected_reference_id: request.expected_reference_id,
+                        kind: request.kind,
+                        write_handle: CredentialWriteHandleV1::new(request.write_handle)?,
+                    },
+                    request.expected_revision.clone(),
+                ))
+                .await?;
                 let payload =
                     serde_json::to_value(&metadata).map_err(|_| ConfigurationError::Unavailable)?;
                 configuration_effect(
@@ -303,13 +301,12 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let plan = client
-                    .dry_run_protected_change(
-                        mutation_authority,
-                        request.change,
-                        request.expected_revision.clone(),
-                    )
-                    .await?;
+                let plan = Box::pin(client.dry_run_protected_change(
+                    mutation_authority,
+                    request.change,
+                    request.expected_revision.clone(),
+                ))
+                .await?;
                 configuration_preview(
                     serde_json::to_value(&plan).map_err(|_| ConfigurationError::Unavailable)?,
                     authority,
@@ -336,19 +333,23 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let receipt = client
-                    .apply_protected_change(
-                        mutation_authority,
-                        ProtectedApplyRequest {
-                            plan_id: request.plan_id,
-                            actor_id: registered.actor.clone(),
-                            expected_base_revision_id: request.expected_base_revision_id.clone(),
-                            operation_digest: request.operation_digest,
-                            idempotency_key: request.idempotency_key.clone(),
-                        },
-                    )
-                    .await?;
-                reconcile_configuration_runtime(&registered, &receipt, observed_at).await;
+                let receipt = Box::pin(client.apply_protected_change(
+                    mutation_authority,
+                    ProtectedApplyRequest {
+                        plan_id: request.plan_id,
+                        actor_id: registered.actor.clone(),
+                        expected_base_revision_id: request.expected_base_revision_id.clone(),
+                        operation_digest: request.operation_digest,
+                        idempotency_key: request.idempotency_key.clone(),
+                    },
+                ))
+                .await?;
+                Box::pin(reconcile_configuration_runtime(
+                    &registered,
+                    &receipt,
+                    observed_at,
+                ))
+                .await;
                 configuration_effect(
                     serde_json::to_value(&receipt).map_err(|_| ConfigurationError::Unavailable)?,
                     authority,
@@ -367,7 +368,7 @@ pub(super) async fn execute_configuration(
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackPreview,
                 ConfigurationWireRequestV1::RollbackPreview(request),
             ) => {
-                let current = client.current().await?;
+                let current = Box::pin(client.current()).await?;
                 let mutation_authority = issue_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
@@ -380,15 +381,14 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let plan = client
-                    .dry_run_rollback(
-                        mutation_authority,
-                        ConfigurationRollbackRequest {
-                            target_revision_id: request.target_revision_id,
-                            mode: request.mode,
-                        },
-                    )
-                    .await?;
+                let plan = Box::pin(client.dry_run_rollback(
+                    mutation_authority,
+                    ConfigurationRollbackRequest {
+                        target_revision_id: request.target_revision_id,
+                        mode: request.mode,
+                    },
+                ))
+                .await?;
                 configuration_preview(
                     serde_json::to_value(&plan).map_err(|_| ConfigurationError::Unavailable)?,
                     authority,
@@ -415,19 +415,23 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let receipt = client
-                    .apply_rollback(
-                        mutation_authority,
-                        ProtectedApplyRequest {
-                            plan_id: request.plan_id,
-                            actor_id: registered.actor.clone(),
-                            expected_base_revision_id: request.expected_base_revision_id.clone(),
-                            operation_digest: request.operation_digest,
-                            idempotency_key: request.idempotency_key.clone(),
-                        },
-                    )
-                    .await?;
-                reconcile_configuration_runtime(&registered, &receipt, observed_at).await;
+                let receipt = Box::pin(client.apply_rollback(
+                    mutation_authority,
+                    ProtectedApplyRequest {
+                        plan_id: request.plan_id,
+                        actor_id: registered.actor.clone(),
+                        expected_base_revision_id: request.expected_base_revision_id.clone(),
+                        operation_digest: request.operation_digest,
+                        idempotency_key: request.idempotency_key.clone(),
+                    },
+                ))
+                .await?;
+                Box::pin(reconcile_configuration_runtime(
+                    &registered,
+                    &receipt,
+                    observed_at,
+                ))
+                .await;
                 configuration_effect(
                     serde_json::to_value(&receipt).map_err(|_| ConfigurationError::Unavailable)?,
                     authority,
@@ -470,7 +474,7 @@ pub(super) async fn apply_configuration_or_semantic_transition(
     now: UtcMicros,
 ) -> Result<tracedecay_usecases::configuration::ConfigurationMutationReceipt, ConfigurationError> {
     let requested_semantic_profile = semantic_profile_transition(&mutation)?;
-    let current = registered.runtime.client().current().await?;
+    let current = Box::pin(registered.runtime.client().current()).await?;
     let semantic_profile = requested_semantic_profile.filter(|requested| {
         requires_coordinated_semantic_profile_transition(
             current.config.semantic.active_profile.is_some(),
@@ -478,11 +482,13 @@ pub(super) async fn apply_configuration_or_semantic_transition(
         )
     });
     let receipt = if current.revision_id != expected_revision {
-        registered
-            .runtime
-            .client()
-            .mutate_direct(authority, mutation, expected_revision)
-            .await?
+        Box::pin(
+            registered
+                .runtime
+                .client()
+                .mutate_direct(authority, mutation, expected_revision),
+        )
+        .await?
     } else if let Some(semantic_profile) = semantic_profile {
         let operation = registered
             .semantic_operation
@@ -490,35 +496,39 @@ pub(super) async fn apply_configuration_or_semantic_transition(
             .cloned()
             .ok_or(ConfigurationError::Unavailable)?;
         match semantic_profile {
-            Some(selected_profile) => operation
-                .activate(SemanticProtectedActivationOperationV1 {
+            Some(selected_profile) => {
+                Box::pin(operation.activate(SemanticProtectedActivationOperationV1 {
                     authority,
                     selected_profile,
                     central_mutation: mutation,
                     now,
-                })
+                }))
                 .await
                 .map(|applied| applied.configuration_receipt)
-                .map_err(map_semantic_configuration_error)?,
-            None => operation
-                .rollback(SemanticProtectedRollbackOperationV1 {
+                .map_err(map_semantic_configuration_error)?
+            }
+            None => {
+                Box::pin(operation.rollback(SemanticProtectedRollbackOperationV1 {
                     authority,
                     central_mutation: mutation,
                     trigger: "configuration_semantic_profile_disabled".to_owned(),
                     now,
-                })
+                }))
                 .await
                 .map(|applied| applied.configuration_receipt)
-                .map_err(map_semantic_configuration_error)?,
+                .map_err(map_semantic_configuration_error)?
+            }
         }
     } else {
-        registered
-            .runtime
-            .client()
-            .mutate_direct(authority, mutation, expected_revision)
-            .await?
+        Box::pin(
+            registered
+                .runtime
+                .client()
+                .mutate_direct(authority, mutation, expected_revision),
+        )
+        .await?
     };
-    reconcile_configuration_runtime(registered, &receipt, now).await;
+    Box::pin(reconcile_configuration_runtime(registered, &receipt, now)).await;
     Ok(receipt)
 }
 
