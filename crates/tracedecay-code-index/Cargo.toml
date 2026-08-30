@@ -98,7 +98,7 @@ hotpath.workspace = true
 ignore = "0.4"
 rayon = "1"
 regex = "1"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.11"
 thiserror = "2"

@@ -103,11 +103,16 @@ pub trait CodeChunker {
 
 /// The chunks produced for one file: the generation-bound document manifest
 /// plus its chunks in deterministic order (Plan 25).
+///
+/// Rows are `Arc`-shared so a published generation's per-file artifacts and
+/// its flattened aggregate manifest hold the same allocations instead of two
+/// owned copies of the corpus. Serialization is transparent: an `Arc` row
+/// writes and reads exactly the bytes of the row itself.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeFileChunksV1 {
     pub document: CodeSearchDocumentV1,
-    pub chunks: Vec<CodeSearchChunkV1>,
+    pub chunks: Vec<Arc<CodeSearchChunkV1>>,
 }
 
 /// Opaque capability proving the exact chunk bytes produced by one
@@ -133,7 +138,7 @@ pub struct ExactExtractionAuthorityV1 {
 /// ```
 #[derive(Clone, Debug)]
 pub struct ExtractionAdmittedCodeSearchChunkV1 {
-    chunk: CodeSearchChunkV1,
+    chunk: Arc<CodeSearchChunkV1>,
 }
 
 impl ExtractionAdmittedCodeSearchChunkV1 {
@@ -142,8 +147,10 @@ impl ExtractionAdmittedCodeSearchChunkV1 {
     }
 
     /// Consume the authority-bearing wrapper and return its admitted chunk.
+    /// A row still shared with its generation is copied out; page-scale
+    /// consumers hold a bounded number of rows at once.
     pub fn into_chunk(self) -> CodeSearchChunkV1 {
-        self.chunk
+        Arc::try_unwrap(self.chunk).unwrap_or_else(|shared| (*shared).clone())
     }
 }
 
@@ -151,7 +158,7 @@ impl ExtractionAdmittedCodeSearchChunkV1 {
 // after the parser-backed chunk digest has been validated.
 unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
     fn into_admitted_chunk(self) -> CodeSearchChunkV1 {
-        self.chunk
+        self.into_chunk()
     }
 }
 
@@ -167,7 +174,7 @@ const PARALLEL_CHUNK_THRESHOLD: usize = 16;
 /// sequential sweep this replaces.
 #[hotpath::measure(label = "code_index.chunk.map_ordered")]
 fn map_chunks_ordered<T, F>(
-    chunks: &[CodeSearchChunkV1],
+    chunks: &[Arc<CodeSearchChunkV1>],
     operation: F,
 ) -> Result<Vec<T>, ChunkingFailureV1>
 where
@@ -175,7 +182,7 @@ where
     F: Fn(&CodeSearchChunkV1) -> Result<T, ChunkingFailureV1> + Send + Sync,
 {
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
-        return chunks.iter().map(operation).collect();
+        return chunks.iter().map(|chunk| operation(chunk)).collect();
     }
     let results: Vec<Result<T, ChunkingFailureV1>> = chunks
         .par_iter()
@@ -188,14 +195,14 @@ where
 /// the pool once the batch is large enough. The lowest-index failure is
 /// returned, matching the sequential sweep's short-circuit outcome.
 fn try_for_each_chunk_ordered<F>(
-    chunks: &[CodeSearchChunkV1],
+    chunks: &[Arc<CodeSearchChunkV1>],
     operation: F,
 ) -> Result<(), ChunkingFailureV1>
 where
     F: Fn(&CodeSearchChunkV1) -> Result<(), ChunkingFailureV1> + Send + Sync,
 {
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
-        return chunks.iter().try_for_each(operation);
+        return chunks.iter().try_for_each(|chunk| operation(chunk));
     }
     let failure = chunks
         .par_iter()
@@ -213,7 +220,7 @@ where
 }
 
 impl ExactExtractionAuthorityV1 {
-    fn mint(chunks: &[CodeSearchChunkV1]) -> Result<Self, ChunkingFailureV1> {
+    fn mint(chunks: &[Arc<CodeSearchChunkV1>]) -> Result<Self, ChunkingFailureV1> {
         let digests = map_chunks_ordered(chunks, |chunk| {
             canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk)
         })?;
@@ -257,7 +264,7 @@ impl ExactExtractionAuthorityV1 {
 
     pub(crate) fn validate_all(
         &self,
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
     ) -> Result<(), ChunkingFailureV1> {
         if chunks.len() != self.chunk_digests.len() {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
@@ -282,7 +289,7 @@ impl ExactExtractionAuthorityV1 {
 
     pub fn admit(
         &self,
-        chunk: CodeSearchChunkV1,
+        chunk: Arc<CodeSearchChunkV1>,
     ) -> Result<ExtractionAdmittedCodeSearchChunkV1, ChunkingFailureV1> {
         self.validate_chunk(&chunk)?;
         Ok(ExtractionAdmittedCodeSearchChunkV1 { chunk })
@@ -290,7 +297,7 @@ impl ExactExtractionAuthorityV1 {
 
     pub fn admit_all(
         &self,
-        chunks: Vec<CodeSearchChunkV1>,
+        chunks: Vec<Arc<CodeSearchChunkV1>>,
     ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
         if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
             return chunks.into_iter().map(|chunk| self.admit(chunk)).collect();
@@ -394,6 +401,9 @@ impl CodeFileChunksV1 {
 
         let mut occurrences: BTreeMap<SymbolOccurrenceId, SymbolOccurrenceId> = BTreeMap::new();
         for chunk in &mut rematerialized.chunks {
+            // Carried rows are shared with the prior generation; rebinding
+            // writes into this generation's own copy.
+            let chunk = Arc::make_mut(chunk);
             chunk.anchor.generation_id = generation_id.clone();
             chunk.anchor.file_occurrence_id = file_occurrence_id.clone();
             if let Some(prior_occurrence) = chunk.anchor.symbol_occurrence_id.clone() {
@@ -1213,7 +1223,10 @@ impl DeterministicCodeChunker {
             chunk_ids: chunks.iter().map(|chunk| chunk.id.clone()).collect(),
         };
         CodeFileIndexArtifactsV1::from_parser_artifact(
-            CodeFileChunksV1 { document, chunks },
+            CodeFileChunksV1 {
+                document,
+                chunks: chunks.into_iter().map(Arc::new).collect(),
+            },
             symbols,
             edges,
             edge_abstentions,
@@ -2034,7 +2047,7 @@ mod tests {
                 eligibility: CodeSearchEligibilityV1::Eligible,
                 chunk_ids: vec![chunk_id.clone()],
             },
-            chunks: vec![CodeSearchChunkV1 {
+            chunks: vec![Arc::new(CodeSearchChunkV1 {
                 id: chunk_id,
                 anchor: CodeSearchChunkAnchorV1 {
                     generation_id,
@@ -2059,7 +2072,7 @@ mod tests {
                 exact_terms: vec![],
                 subtokens: vec!["text".to_owned()],
                 sanitized_text: BoundedSanitizedText::new("text").unwrap(),
-            }],
+            })],
         }
     }
 
@@ -2068,7 +2081,9 @@ mod tests {
         file_chunks().validate().expect("consistent file chunks");
 
         let mut mixed_generation = file_chunks();
-        mixed_generation.chunks[0].anchor.generation_id = id("generation.other");
+        Arc::make_mut(&mut mixed_generation.chunks[0])
+            .anchor
+            .generation_id = id("generation.other");
         assert_eq!(
             mixed_generation.validate(),
             Err(ChunkingFailureV1::GenerationMismatch)
@@ -2086,7 +2101,7 @@ mod tests {
         let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
         let admitted = authority.admit(expected.clone()).expect("exact admission");
 
-        assert_eq!(admitted.into_chunk(), expected);
+        assert_eq!(admitted.into_chunk(), *expected);
     }
 
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";
@@ -2208,13 +2223,13 @@ mod tests {
     }
 
     fn sequential_digest_reference(
-        chunks: &[CodeSearchChunkV1],
+        chunks: &[Arc<CodeSearchChunkV1>],
     ) -> BTreeMap<CodeSearchChunkId, String> {
         let mut digests = BTreeMap::new();
         for chunk in chunks {
             digests.insert(
                 chunk.id.clone(),
-                canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk)
+                canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk.as_ref())
                     .expect("reference digest"),
             );
         }
@@ -2256,7 +2271,12 @@ mod tests {
             .into_iter()
             .map(ExtractionAdmittedCodeSearchChunkV1::into_chunk)
             .collect::<Vec<_>>();
-        assert_eq!(readmitted, chunks.chunks, "admission must preserve order");
+        let expected = chunks
+            .chunks
+            .iter()
+            .map(|chunk| (**chunk).clone())
+            .collect::<Vec<_>>();
+        assert_eq!(readmitted, expected, "admission must preserve order");
     }
 
     /// The fanned-out sweeps still report the lowest-index failure, so callers
@@ -2269,18 +2289,26 @@ mod tests {
         assert!(early < late);
 
         let mut identity_first = baseline.clone();
-        identity_first.chunks[early].anchor.parent_chunk_id =
-            Some(identity_first.chunks[early].id.clone());
-        identity_first.chunks[late].anchor.generation_id = id("generation.other");
+        let early_id = identity_first.chunks[early].id.clone();
+        Arc::make_mut(&mut identity_first.chunks[early])
+            .anchor
+            .parent_chunk_id = Some(early_id);
+        Arc::make_mut(&mut identity_first.chunks[late])
+            .anchor
+            .generation_id = id("generation.other");
         assert!(matches!(
             identity_first.validate(),
             Err(ChunkingFailureV1::NonCanonicalIdentity(_))
         ));
 
         let mut generation_first = baseline.clone();
-        generation_first.chunks[early].anchor.generation_id = id("generation.other");
-        generation_first.chunks[late].anchor.parent_chunk_id =
-            Some(generation_first.chunks[late].id.clone());
+        Arc::make_mut(&mut generation_first.chunks[early])
+            .anchor
+            .generation_id = id("generation.other");
+        let late_id = generation_first.chunks[late].id.clone();
+        Arc::make_mut(&mut generation_first.chunks[late])
+            .anchor
+            .parent_chunk_id = Some(late_id);
         assert_eq!(
             generation_first.validate(),
             Err(ChunkingFailureV1::GenerationMismatch)
@@ -2542,6 +2570,7 @@ mod tests {
         let body_pieces: Vec<&CodeSearchChunkV1> = result
             .chunks
             .iter()
+            .map(Arc::as_ref)
             .filter(|chunk| chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody)
             .collect();
         assert!(body_pieces.len() > 1, "oversized body split into windows");
@@ -3180,11 +3209,12 @@ pub fn real_symbol() {}
             end_byte: chunk.anchor.source_span.start_byte
                 + (relative + "comment_fake".len()) as u64,
         };
-        chunk.exact_terms.push(
+        let forged = Arc::make_mut(&mut chunk);
+        forged.exact_terms.push(
             ExactTechnicalTermV1::untrusted_whole_symbol_candidate(
                 b"comment_fake".to_vec(),
                 span,
-                chunk
+                forged
                     .anchor
                     .symbol_occurrence_id
                     .clone()
@@ -3192,7 +3222,7 @@ pub fn real_symbol() {}
             )
             .expect("raw matching-occurrence candidate"),
         );
-        chunk.exact_terms.sort_by_key(|term| {
+        forged.exact_terms.sort_by_key(|term| {
             (
                 term.span().start_byte,
                 term.span().end_byte,

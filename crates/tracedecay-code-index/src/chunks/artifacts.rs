@@ -1,6 +1,6 @@
 //! Canonical parser-backed evidence retained for one indexed code file.
 
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
@@ -125,7 +125,9 @@ impl CodeIndexImportEvidenceV1 {
 #[serde(deny_unknown_fields)]
 pub struct CodeFileIndexArtifactsV1 {
     pub chunks: CodeFileChunksV1,
-    pub symbols: Vec<LineageSymbolRecordV1>,
+    /// `Arc`-shared with the generation's flattened symbol index; the wire
+    /// form is the plain record.
+    pub symbols: Vec<Arc<LineageSymbolRecordV1>>,
     pub edges: Vec<CanonicalRelationEdgeV1>,
     pub edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     pub imports: Vec<CodeIndexImportEvidenceV1>,
@@ -167,7 +169,13 @@ impl CodeFileIndexArtifactsV1 {
                 CodeIndexImportEvidenceV1::from_extracted(row, &extraction.file_occurrence_id)
             })
             .collect::<Vec<_>>();
-        let artifacts = Self::from_parts(chunks, symbols, edges, edge_abstentions, imports)?;
+        let artifacts = Self::from_parts(
+            chunks,
+            symbols.into_iter().map(Arc::new).collect(),
+            edges,
+            edge_abstentions,
+            imports,
+        )?;
         artifacts.validate_generation_import_authority(extraction)?;
         Ok(artifacts)
     }
@@ -183,7 +191,7 @@ impl CodeFileIndexArtifactsV1 {
 
     fn from_parts(
         chunks: CodeFileChunksV1,
-        symbols: Vec<LineageSymbolRecordV1>,
+        symbols: Vec<Arc<LineageSymbolRecordV1>>,
         edges: Vec<CanonicalRelationEdgeV1>,
         edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
         mut imports: Vec<CodeIndexImportEvidenceV1>,
@@ -351,6 +359,9 @@ impl CodeFileIndexArtifactsV1 {
 
         let mut symbols = self.symbols.clone();
         for symbol in &mut symbols {
+            // Carried records are shared with the prior generation; rebinding
+            // writes into this generation's own copy.
+            let symbol = Arc::make_mut(symbol);
             symbol.occurrence = rematerialized_occurrence(&occurrences, &symbol.occurrence)?;
         }
         symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));

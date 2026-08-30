@@ -248,9 +248,10 @@ fn assemble_published_generation(
                 ignored_source_admissions,
                 ignored_source_admissions_digest,
             )?;
-            // Persist pages moved into `files` exactly once. Project the
-            // generation aggregates from those restored pages so the seating
-            // path never holds a second owned copy of the whole persist corpus.
+            // Persist pages moved into `files` exactly once, and chunk/symbol
+            // rows are `Arc`-shared between those pages and the generation
+            // aggregates: this flatten clones row pointers and per-file
+            // document manifests, never a second owned copy of the corpus.
             let chunk_rows = files
                 .iter()
                 .map(|file| file.artifacts.chunks.clone())
