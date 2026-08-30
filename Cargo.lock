@@ -5977,6 +5977,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-automation-runtime",
+ "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
@@ -6287,7 +6288,6 @@ dependencies = [
  "tracedecay-lsp",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
- "tracedecay-sessions",
  "tracedecay-tool-catalog",
 ]
 
@@ -6753,6 +6753,7 @@ dependencies = [
  "tokio",
  "tracedecay-application",
  "tracedecay-capture",
+ "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-private-fs",

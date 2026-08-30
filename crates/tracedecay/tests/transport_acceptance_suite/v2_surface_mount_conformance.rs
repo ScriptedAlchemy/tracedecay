@@ -38,7 +38,7 @@
 //! inspects source files or shells out to a scanner; each assertion is a
 //! product call.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

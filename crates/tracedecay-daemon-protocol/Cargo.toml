@@ -21,7 +21,6 @@ hotpath = [
     "tracedecay-lsp/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
-    "tracedecay-sessions/hotpath",
     "tracedecay-tool-catalog/hotpath",
 ]
 hotpath-alloc = [
@@ -33,7 +32,6 @@ hotpath-alloc = [
     "tracedecay-lsp/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
 ]
 hotpath-cpu = [
@@ -45,9 +43,11 @@ hotpath-cpu = [
     "tracedecay-lsp/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
 ]
+# Repo-wide `test-helpers` convention: exposes this crate's test-only helper
+# surfaces to dependent crates' test builds only. Never gates production code.
+test-helpers = []
 
 [dependencies]
 base64 = "0.22"
@@ -63,7 +63,6 @@ tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 [dev-dependencies]
 tempfile = "3"

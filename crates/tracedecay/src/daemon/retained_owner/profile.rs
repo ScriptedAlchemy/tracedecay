@@ -17,7 +17,6 @@ use tracedecay_application::{
 use tracedecay_domain::{
     ActorId, BrainId, ManifestDigest, UserProfileId, UtcMicros, canonical_sha256,
 };
-use tracedecay_mcp::ProfileRetainedLeasePort;
 use tracedecay_usecases::context::ResolvedSessionIdentity;
 
 use super::lcm::DirectRetainedLcmPortV1;
@@ -60,16 +59,6 @@ impl ProfileRetainedConnectionAuthorityV1 {
 
     pub(crate) fn configuration_digest(&self) -> &ManifestDigest {
         &self.configuration_digest
-    }
-}
-
-impl ProfileRetainedLeasePort for ProfileRetainedConnectionAuthorityV1 {
-    fn session_identity(&self) -> &ResolvedSessionIdentity {
-        ProfileRetainedConnectionAuthorityV1::session_identity(self)
-    }
-
-    fn configuration_digest(&self) -> &ManifestDigest {
-        ProfileRetainedConnectionAuthorityV1::configuration_digest(self)
     }
 }
 

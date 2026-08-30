@@ -351,12 +351,6 @@ semantic-gpu-cuda = [
 [lib]
 name = "tracedecay"
 
-# Plan 36 portability: symlink-alias snapshot capture (test-transport only).
-[[test]]
-name = "git_index_snapshot_root_canonicalization"
-path = "tests/git_index_snapshot_root_canonicalization.rs"
-required-features = ["test-transport"]
-
 # Integration harnesses that intentionally exercise in-process daemon/test
 # transport seams stay out of the default production feature graph.
 [[test]]
@@ -364,33 +358,10 @@ name = "dashboard_api_test"
 path = "tests/dashboard_api_test/main.rs"
 required-features = ["test-transport"]
 
+# Former single-file test-transport targets, compiled as modules of one binary.
 [[test]]
-name = "daemon_fault_harness_test"
-path = "tests/daemon_fault_harness_test.rs"
-required-features = ["test-transport"]
-
-# The PartialEffect leg parks a real fact commit at the daemon's durable commit
-# boundary, which is the `test-transport` fact-commit barrier.
-[[test]]
-name = "typed_terminal_restart_acceptance"
-path = "tests/typed_terminal_restart_acceptance.rs"
-required-features = ["test-transport"]
-
-[[test]]
-name = "graph_rebuild_status_test"
-path = "tests/graph_rebuild_status_test.rs"
-required-features = ["test-transport"]
-
-[[test]]
-name = "serve_proxy_lifecycle_test"
-path = "tests/serve_proxy_lifecycle_test.rs"
-required-features = ["test-transport"]
-
-# Drives a live daemon, the real stdio MCP server, and the real CLI listing to
-# grade every declared surface for a mount in both directions.
-[[test]]
-name = "v2_surface_mount_conformance"
-path = "tests/v2_surface_mount_conformance.rs"
+name = "transport_acceptance_suite"
+path = "tests/transport_acceptance_suite/main.rs"
 required-features = ["test-transport"]
 
 # Shared with the extracted rusqlite-runtime package's restart/parity tests;
@@ -563,8 +534,8 @@ harness = false
 test = false
 
 [[test]]
-name = "advisory_runtime_acceptance"
-path = "tests/advisory_runtime_acceptance.rs"
+name = "runtime_acceptance_suite"
+path = "tests/runtime_acceptance_suite/main.rs"
 required-features = ["test-helpers"]
 
 [[test]]
@@ -573,33 +544,13 @@ path = "tests/agent_suite/main.rs"
 required-features = ["test-helpers"]
 
 [[test]]
-name = "application_production_reachability"
-path = "tests/application_production_reachability.rs"
-required-features = ["test-helpers"]
-
-[[test]]
 name = "automation_runner_test"
 path = "tests/automation_runner_test/main.rs"
 required-features = ["test-helpers"]
 
 [[test]]
-name = "cross_host_handoff_test"
-path = "tests/cross_host_handoff_test.rs"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "daemon_runtime_acceptance"
-path = "tests/daemon_runtime_acceptance.rs"
-required-features = ["test-helpers"]
-
-[[test]]
 name = "daemon_suite"
 path = "tests/daemon_suite/main.rs"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "grafeo_restart_acceptance"
-path = "tests/grafeo_restart_acceptance.rs"
 required-features = ["test-helpers"]
 
 [[test]]
@@ -613,16 +564,6 @@ path = "tests/hooks_lsp_suite/main.rs"
 required-features = ["test-helpers"]
 
 [[test]]
-name = "host_event_fixture_test"
-path = "tests/host_event_fixture_test.rs"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "lifecycle_production_authority_test"
-path = "tests/lifecycle_production_authority_test.rs"
-required-features = ["test-helpers"]
-
-[[test]]
 name = "mcp_suite"
 path = "tests/mcp_suite/main.rs"
 required-features = ["test-helpers"]
@@ -630,21 +571,6 @@ required-features = ["test-helpers"]
 [[test]]
 name = "memory_suite"
 path = "tests/memory_suite/main.rs"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "private_route_restart_acceptance"
-path = "tests/private_route_restart_acceptance.rs"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "runtime_surface_acceptance"
-path = "tests/runtime_surface_acceptance.rs"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "search_eval_cli_test"
-path = "tests/search_eval_cli_test.rs"
 required-features = ["test-helpers"]
 
 [[test]]
@@ -660,16 +586,6 @@ required-features = ["test-helpers"]
 [[test]]
 name = "storage_suite"
 path = "tests/storage_suite/main.rs"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "tool_client_transport"
-path = "tests/tool_client_transport.rs"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "windows_durable_behavior"
-path = "tests/windows_durable_behavior.rs"
 required-features = ["test-helpers"]
 
 # Both reach the shared `tests/common` harness, which builds the host-admission

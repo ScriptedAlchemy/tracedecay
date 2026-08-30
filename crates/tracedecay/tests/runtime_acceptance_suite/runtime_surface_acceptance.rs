@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;

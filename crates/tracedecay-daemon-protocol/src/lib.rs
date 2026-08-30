@@ -53,6 +53,7 @@ pub mod handshake;
 pub mod output_format;
 pub mod surface;
 pub mod transport;
+pub mod wire;
 
 pub use client::{
     AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,

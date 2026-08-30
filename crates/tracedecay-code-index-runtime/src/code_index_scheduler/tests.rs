@@ -11636,6 +11636,15 @@ async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() 
         .latest_text_serving_for_scope(&scope)
         .await
         .is_some_and(|text| text.query_owners_are_warm());
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness during held graph activation");
+    assert_ne!(
+        freshness.staleness_state.as_deref(),
+        Some("fresh"),
+        "dashboard must not claim a terminal generation while native graph activation is still held: {freshness:?}"
+    );
     activation_gate.release();
 
     assert_ne!(

@@ -22,9 +22,8 @@ use tracedecay_mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_sessions::admission::{
-    HostAdmissionOutcome, HostAdmissionStatus, is_wire_oversized_io_error,
-};
+use tracedecay_daemon_protocol::wire::is_wire_oversized_io_error;
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
@@ -83,10 +82,6 @@ pub(crate) use rmcp::{
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
-pub(crate) use tracedecay_mcp::{
-    mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
-    tool_error_response, tool_result_has_semantic_error,
-};
 
 pub struct ServerStats {
     started_at: Instant,
@@ -765,7 +760,6 @@ impl McpServer {
             project_session_refresh_wake,
             user_session_refresh_wake,
             project_session_refresh_serving,
-            user_session_refresh_serving: _user_session_refresh_serving,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
             automation_scheduler_reconciler,

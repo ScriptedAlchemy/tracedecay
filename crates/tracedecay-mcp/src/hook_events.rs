@@ -956,6 +956,26 @@ mod tests {
     }
 
     #[test]
+    fn should_run_sync_respects_debounce_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing.marker");
+        assert!(super::should_run_sync(&missing, 1_000, 3));
+        assert!(super::should_run_sync(&missing, 120, 30));
+
+        let marker = dir.path().join("sync.marker");
+        super::write_sync_marker(&marker, 996);
+        assert!(super::should_run_sync(&marker, 1_000, 3));
+        super::write_sync_marker(&marker, 998);
+        assert!(!super::should_run_sync(&marker, 1_000, 3));
+        super::write_sync_marker(&marker, 1_000);
+        assert!(!super::should_run_sync(&marker, 1_000, 3));
+
+        super::write_sync_marker(&marker, 100);
+        assert!(!super::should_run_sync(&marker, 120, 30));
+        assert!(super::should_run_sync(&marker, 130, 30));
+    }
+
+    #[test]
     fn parses_agent_and_event_kind_from_hook_notification() {
         let params = json!({
             "agent": "cursor",

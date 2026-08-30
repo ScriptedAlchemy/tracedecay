@@ -34,7 +34,7 @@ use tracedecay_hooks::{
 };
 use tracedecay_tool_catalog::BindingSurface;
 
-mod common;
+use crate::common;
 
 fn id<T>(value: &str) -> T
 where
@@ -135,7 +135,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
         .expect("production project-open startup");
 
     let callback = include_bytes!(
-        "../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
     );
     let decoded =
         decode_native_hook_event(HookHostV1::ClaudeCode, callback).expect("authentic callback");

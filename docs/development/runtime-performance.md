@@ -77,7 +77,12 @@ an alternate `HOTPATH_MCP_PORT` and be queried directly.
 The CPU feature is not a self-contained sampling executable. On Linux or
 macOS, install both `hotpath-samply` and `samply` on `PATH` before requesting
 CPU profiling. `HOTPATH_SAMPLY_WRAPPER_BIN` and `HOTPATH_SAMPLY_BIN` may point
-to explicit executable paths. Release archives do not bundle either external
+to explicit executable paths. The `tracedecay` CLI never starts the CPU
+sampler implicitly: the samply attach SIGSTOPs the profiled process until the
+attach completes, and a sampler failure inside that window would leave a
+headless hook or CLI invocation stopped forever. Request CPU sampling
+explicitly with `HOTPATH_REPORT` (for example `HOTPATH_REPORT=functions-cpu`),
+which overrides the CLI's default exclusion. Release archives do not bundle either external
 tool, so their absence must be reported as an unavailable CPU profiler rather
 than treated as CPU evidence.
 
