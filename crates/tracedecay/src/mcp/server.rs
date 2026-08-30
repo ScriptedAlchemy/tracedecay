@@ -82,10 +82,6 @@ pub(crate) use rmcp::{
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
-pub(crate) use tracedecay_mcp::{
-    mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
-    tool_error_response, tool_result_has_semantic_error,
-};
 
 pub struct ServerStats {
     started_at: Instant,
@@ -764,7 +760,6 @@ impl McpServer {
             project_session_refresh_wake,
             user_session_refresh_wake,
             project_session_refresh_serving,
-            user_session_refresh_serving: _user_session_refresh_serving,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
             automation_scheduler_reconciler,

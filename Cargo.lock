@@ -6068,6 +6068,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "toml",
+ "tracedecay-agent-hosts",
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-domain",

@@ -4,7 +4,10 @@
 use serde_json::json;
 
 use tracedecay_daemon_protocol::DaemonClientIdentity;
-use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, tool_error_response,
+    tool_result_has_semantic_error,
+};
 use tracedecay_runtime_core::errors::Result;
 
 use super::*;
@@ -183,78 +186,134 @@ async fn projectless_tools_call_response_with_connection(
         };
         hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
     }
-    if let Err(error) = store_administration.ensure_account_active().await {
+    if let Err(error) = boxed_projectless_phase(store_administration.ensure_account_active()).await
+    {
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     }
-    if tool_name == "tracedecay_admin_project" {
-        #[derive(serde::Deserialize)]
-        #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-        enum ProjectlessAdminProjectAction {
-            AutomationReconcile {
-                scope: tracedecay_dashboard_api::AutomationReconcileScope,
-            },
-        }
-
-        let request = match serde_json::from_value::<ProjectlessAdminProjectAction>(arguments) {
-            Ok(request) => request,
-            Err(error) => {
-                return JsonRpcResponse::error(
-                    id,
-                    ErrorCode::InvalidParams,
-                    format!("invalid projectless tracedecay_admin_project arguments: {error}"),
-                );
+    // Keep unrelated tool families out of one generated poll frame. Some handlers
+    // retain large typed futures, and combining them here can exhaust a Tokio
+    // worker stack before the selected handler is polled.
+    let response =
+        match tool_name {
+            "tracedecay_admin_project" => boxed_projectless_phase(
+                projectless_admin_project_response(id, arguments, connection, store_administration),
+            ),
+            "tracedecay_hook_runtime" => boxed_projectless_phase(
+                projectless_hook_runtime_response(id, arguments, connection, store_administration),
+            ),
+            "tracedecay_admin_cli" => boxed_projectless_phase(projectless_admin_cli_response(
+                id,
+                arguments,
+                connection,
+                store_administration,
+            )),
+            _ => {
+                if let Some(operation) =
+                    crate::mcp::tools::retained_mcp_operation(tool_name, &arguments)
+                {
+                    boxed_projectless_phase(projectless_profile_retained_response(
+                        id,
+                        tool_name,
+                        operation,
+                        arguments,
+                        connection,
+                        store_administration,
+                    ))
+                } else {
+                    return JsonRpcResponse::error(
+                        id,
+                        ErrorCode::InternalError,
+                        format!("{tool_name} requires an initialized code project"),
+                    );
+                }
             }
         };
-        let ProjectlessAdminProjectAction::AutomationReconcile { scope } = request;
-        if scope != tracedecay_dashboard_api::AutomationReconcileScope::Profile {
+    response.await
+}
+
+async fn projectless_admin_project_response(
+    id: serde_json::Value,
+    arguments: serde_json::Value,
+    connection: &ProjectlessConnectionStateV1,
+    store_administration: &StoreAdministration,
+) -> tracedecay_mcp::JsonRpcResponse {
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+    enum ProjectlessAdminProjectAction {
+        AutomationReconcile {
+            scope: tracedecay_dashboard_api::AutomationReconcileScope,
+        },
+    }
+
+    let request = match serde_json::from_value::<ProjectlessAdminProjectAction>(arguments) {
+        Ok(request) => request,
+        Err(error) => {
             return JsonRpcResponse::error(
                 id,
                 ErrorCode::InvalidParams,
-                "project-scoped automation reconciliation requires a project path".to_string(),
+                format!("invalid projectless tracedecay_admin_project arguments: {error}"),
             );
         }
-        let outcomes = match store_administration
-            .reconcile_cached_automation_for_profile(&connection.client_identity.profile_root)
-            .await
-        {
-            Ok(outcomes) => outcomes,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-        let report = tracedecay_dashboard_api::ProfileAutomationReconcileReport {
-            scope,
-            cached_owners: outcomes.len(),
-            outcomes,
-            uncached_projects:
-                tracedecay_dashboard_api::UncachedProjectReconcileOutcome::DeferredUntilProjectStartup,
-        };
-        return JsonRpcResponse::success(
+    };
+    let ProjectlessAdminProjectAction::AutomationReconcile { scope } = request;
+    if scope != tracedecay_dashboard_api::AutomationReconcileScope::Profile {
+        return JsonRpcResponse::error(
             id,
-            json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
-                }]
-            }),
+            ErrorCode::InvalidParams,
+            "project-scoped automation reconciliation requires a project path".to_string(),
         );
     }
-    if tool_name == "tracedecay_hook_runtime" {
-        let global_db = match store_administration.registered_profile_database().await {
+    let outcomes = match boxed_projectless_phase(
+        store_administration
+            .reconcile_cached_automation_for_profile(&connection.client_identity.profile_root),
+    )
+    .await
+    {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+        }
+    };
+    let report = tracedecay_dashboard_api::ProfileAutomationReconcileReport {
+        scope,
+        cached_owners: outcomes.len(),
+        outcomes,
+        uncached_projects:
+            tracedecay_dashboard_api::UncachedProjectReconcileOutcome::DeferredUntilProjectStartup,
+    };
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
+            }]
+        }),
+    )
+}
+
+async fn projectless_hook_runtime_response(
+    id: serde_json::Value,
+    arguments: serde_json::Value,
+    connection: &ProjectlessConnectionStateV1,
+    store_administration: &StoreAdministration,
+) -> tracedecay_mcp::JsonRpcResponse {
+    let global_db =
+        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
             Ok(global_db) => global_db,
             Err(error) => {
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        let session_runtime_registry =
-            match store_administration.registered_runtime_registry().await {
-                Ok(registry) => registry,
-                Err(error) => {
-                    return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-                }
-            };
-        let user_session_db = match store_administration
-            .registered_profile_session_database()
+    let session_runtime_registry =
+        match boxed_projectless_phase(store_administration.registered_runtime_registry()).await {
+            Ok(registry) => registry,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+    let user_session_db =
+        match boxed_projectless_phase(store_administration.registered_profile_session_database())
             .await
         {
             Ok(database) => database,
@@ -262,14 +321,14 @@ async fn projectless_tools_call_response_with_connection(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        let profile_identity = match store_administration.profile_identity() {
-            Ok(identity) => identity,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-        let host_admission_broker = match store_administration
-            .host_admission_broker(&user_session_db)
+    let profile_identity = match store_administration.profile_identity() {
+        Ok(identity) => identity,
+        Err(error) => {
+            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+        }
+    };
+    let host_admission_broker =
+        match boxed_projectless_phase(store_administration.host_admission_broker(&user_session_db))
             .await
         {
             Ok(broker) => broker,
@@ -277,91 +336,86 @@ async fn projectless_tools_call_response_with_connection(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        let host_admission_broker = Ok(&host_admission_broker);
-        let refresh_wake = store_administration
+    let host_admission_broker = Ok(&host_admission_broker);
+    let refresh_wake = boxed_projectless_phase(
+        store_administration
             .session_temporal_refresh_schedulers()
             .ensure_profile(
                 user_session_db.db_path().to_path_buf(),
                 user_session_db.clone(),
-            )
-            .await;
-        return match crate::mcp::tools::handle_projectless_hook_runtime(
-            arguments.clone(),
-            &connection.client_identity.profile_root,
-            session_runtime_registry,
-            global_db.as_ref(),
-            crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
-                .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
-                .with_registered_databases(None, Some(&user_session_db)),
-            host_admission_broker,
-        )
-        .await
-        {
-            Ok(result) if crate::mcp::server::tool_result_has_semantic_error(&result) => {
-                JsonRpcResponse::success(id, result.value)
-            }
-            Ok(result) => match crate::mcp::server::join_required_live_transcript_refresh(
-                tool_name,
+            ),
+    )
+    .await;
+    match boxed_projectless_phase(crate::mcp::tools::handle_projectless_hook_runtime(
+        arguments.clone(),
+        &connection.client_identity.profile_root,
+        session_runtime_registry,
+        global_db.as_ref(),
+        crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
+            .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
+            .with_registered_databases(None, Some(&user_session_db)),
+        host_admission_broker,
+    ))
+    .await
+    {
+        Ok(result) if tool_result_has_semantic_error(&result) => {
+            JsonRpcResponse::success(id, result.value)
+        }
+        Ok(result) => match boxed_projectless_phase(
+            crate::mcp::server::join_required_live_transcript_refresh(
+                "tracedecay_hook_runtime",
                 &arguments,
                 false,
                 None,
                 Some(&refresh_wake),
-            )
-            .await
-            {
-                Ok(crate::mcp::server::LiveTranscriptRefreshJoin::PublicationJoined) => {
-                    JsonRpcResponse::success(id, result.value)
-                }
-                Ok(crate::mcp::server::LiveTranscriptRefreshJoin::NotRequired) => {
-                    refresh_wake.wake();
-                    JsonRpcResponse::success(id, result.value)
-                }
-                Err(error) => crate::mcp::server::tool_error_response(id, tool_name, &error),
-            },
-            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
-        };
+            ),
+        )
+        .await
+        {
+            Ok(crate::mcp::server::LiveTranscriptRefreshJoin::PublicationJoined) => {
+                JsonRpcResponse::success(id, result.value)
+            }
+            Ok(crate::mcp::server::LiveTranscriptRefreshJoin::NotRequired) => {
+                refresh_wake.wake();
+                JsonRpcResponse::success(id, result.value)
+            }
+            Err(error) => tool_error_response(id, "tracedecay_hook_runtime", &error),
+        },
+        Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
-    if tool_name == "tracedecay_admin_cli" {
-        let global_db = match store_administration.registered_profile_database().await {
+}
+
+async fn projectless_admin_cli_response(
+    id: serde_json::Value,
+    arguments: serde_json::Value,
+    connection: &ProjectlessConnectionStateV1,
+    store_administration: &StoreAdministration,
+) -> tracedecay_mcp::JsonRpcResponse {
+    let global_db =
+        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
             Ok(global_db) => global_db,
             Err(error) => {
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        let accounting_db = match store_administration.registered_profile_database().await {
+    let accounting_db =
+        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
             Ok(database) => database,
             Err(error) => {
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        return match crate::mcp::tools::handle_projectless_admin_cli(
-            arguments,
-            &global_db,
-            tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
-            &connection.client_identity.profile_root,
-        )
-        .await
-        {
-            Ok(result) => JsonRpcResponse::success(id, result.value),
-            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
-        };
+    match boxed_projectless_phase(crate::mcp::tools::handle_projectless_admin_cli(
+        arguments,
+        &global_db,
+        tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
+        &connection.client_identity.profile_root,
+    ))
+    .await
+    {
+        Ok(result) => JsonRpcResponse::success(id, result.value),
+        Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
-    if let Some(operation) = crate::mcp::tools::retained_mcp_operation(tool_name, &arguments) {
-        return projectless_profile_retained_response(
-            id,
-            tool_name,
-            operation,
-            arguments,
-            connection,
-            store_administration,
-        )
-        .await;
-    }
-    JsonRpcResponse::error(
-        id,
-        ErrorCode::InternalError,
-        format!("{tool_name} requires an initialized code project"),
-    )
 }
 
 #[hotpath::measure(label = "daemon.project.projectless_retained", future = true)]
@@ -392,21 +446,23 @@ async fn projectless_profile_retained_response(
         );
     }
     if is_lcm
-        && let Err(error) = await_user_profile_host_admission_replay_for_identity(
-            store_administration,
-            &connection.client_identity,
-        )
-        .await
+        && let Err(error) =
+            boxed_projectless_phase(await_user_profile_host_admission_replay_for_identity(
+                store_administration,
+                &connection.client_identity,
+            ))
+            .await
     {
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     }
-    let runtime_registry = match store_administration.registered_runtime_registry().await {
-        Ok(registry) => registry,
-        Err(error) => {
-            return crate::mcp::server::tool_error_response(id, tool_name, &error);
-        }
-    };
-    let result = crate::mcp::tools::execute_profile_retained_mcp_tool(
+    let runtime_registry =
+        match boxed_projectless_phase(store_administration.registered_runtime_registry()).await {
+            Ok(registry) => registry,
+            Err(error) => {
+                return tool_error_response(id, tool_name, &error);
+            }
+        };
+    let result = boxed_projectless_phase(crate::mcp::tools::execute_profile_retained_mcp_tool(
         operation,
         tool_name,
         arguments,
@@ -417,11 +473,11 @@ async fn projectless_profile_retained_response(
         None,
         None,
         None,
-    )
+    ))
     .await;
     match result {
         Ok(result) => JsonRpcResponse::success(id, result.value),
-        Err(error) => crate::mcp::server::tool_error_response(id, tool_name, &error),
+        Err(error) => tool_error_response(id, tool_name, &error),
     }
 }
 

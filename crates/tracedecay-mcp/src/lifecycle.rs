@@ -7,21 +7,6 @@
 use std::future::Future;
 use std::pin::Pin;
 
-/// Outcome of one MCP connection or server shutdown join.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum McpShutdownStatus {
-    Clean,
-    Failed(String),
-    TimedOut,
-}
-
-impl McpShutdownStatus {
-    #[must_use]
-    pub const fn is_clean(&self) -> bool {
-        matches!(self, Self::Clean)
-    }
-}
-
 /// Request-activity guard retained while one MCP request is admitted.
 ///
 /// Dropping the guard releases the underlying lifecycle seat. The boxed
