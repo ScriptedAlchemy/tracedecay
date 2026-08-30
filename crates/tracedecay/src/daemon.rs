@@ -221,6 +221,7 @@ pub(crate) mod query_authority_provider;
 pub(crate) mod retained_test_support;
 mod shutdown_coordination;
 mod shutdown_orchestration;
+mod shutdown_watchdog;
 mod store_shutdown;
 pub(crate) use core_admission::*;
 pub use core_client::*;
