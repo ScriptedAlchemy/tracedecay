@@ -24,6 +24,6 @@ infer graph state from database files.
   authorization and receipt path.
 
 The [V2 product contract](plans/tracedecay-v2/00-plan-set-index.md) is the
-authority for these boundaries. [Index design](INDEX-DESIGN.md) describes the
-generation and projection model; use `tracedecay status --json` and
+authority for these boundaries. The [V2 operating model](V2-OPERATING-MODEL.md)
+describes the generation and projection model; use `tracedecay status --json` and
 `tracedecay doctor` to inspect a running installation.
