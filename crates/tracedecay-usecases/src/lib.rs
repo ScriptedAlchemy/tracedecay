@@ -83,7 +83,6 @@ pub mod event_lane;
 pub mod analytics_bridge;
 pub mod external_source_store;
 pub mod feedback;
-pub mod git_index_transactions;
 pub mod git_intelligence;
 pub mod git_query;
 pub mod git_reads;

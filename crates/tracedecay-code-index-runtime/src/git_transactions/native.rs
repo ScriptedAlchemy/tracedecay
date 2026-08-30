@@ -25,7 +25,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::GitIndexTransactionRecordV1;
 
-use tracedecay_usecases::git_index_transactions::{
+use crate::git_index_transactions::{
     FixedGitIndexRunner, GIT_INDEX_ADAPTER_REVISION, NativeGitIndexError, NativeIndexLock,
     ValidatedIndexPatch,
 };

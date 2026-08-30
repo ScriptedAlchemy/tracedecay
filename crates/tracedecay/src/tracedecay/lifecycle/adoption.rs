@@ -26,7 +26,6 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use tracedecay_daemon_protocol::MovedStoreAdoption;
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};

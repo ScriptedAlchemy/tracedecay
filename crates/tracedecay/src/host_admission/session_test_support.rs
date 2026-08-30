@@ -391,7 +391,7 @@ impl HostAdmissionTestRuntimeV1 {
             }
         })?;
         let database = self.project_database_for_test()?;
-        let authority = tracedecay_usecases::host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(database);
+        let authority = tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(database);
         Ok(
             tracedecay_sessions::runtime::ingest_project_sources_for_provider(
                 &self.brain_id,

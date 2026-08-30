@@ -51,7 +51,7 @@ async fn call_admin_cli(
     arguments: Value,
 ) -> tracedecay_runtime_core::errors::Result<Value> {
     let handshake =
-        tracedecay::daemon::DaemonHandshake::for_current_client(project_root, None, false, false)?;
+        tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)?;
     let result =
         tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
             .await?;
