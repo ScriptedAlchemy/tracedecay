@@ -64,7 +64,7 @@ use tracedecay_mcp::{
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::BindingSurface;
-use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use crate::cli::dispatch::resolve_cli_application_surface;
 use crate::commands::{recover_truncated_mcp_result, reject_truncation_envelope};

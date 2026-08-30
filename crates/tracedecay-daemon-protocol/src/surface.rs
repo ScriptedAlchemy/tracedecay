@@ -1,14 +1,17 @@
 //! Wire DTOs that the daemon invocation contract carries but that cannot live
 //! in `tracedecay-application` without inverting the crate DAG.
 //!
-//! `GitReadSurfaceRequest` embeds the usecases Git-read enum (application
-//! cannot depend on usecases). Context Scout delivery carries the host-runtime
-//! durable claim (application cannot depend on agent-hosts).
+//! `GitReadSurfaceRequest` embeds the application Git-read enum. Context Scout
+//! delivery carries the application crate's scout wire vocabulary.
 
 use serde::{Deserialize, Serialize};
 use tracedecay_api::HttpApplicationOperation;
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1,
+    ContextScoutFeedbackV1, ContextScoutWorkV1,
+};
+use tracedecay_application::git::GitReadRequestV1;
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
-use tracedecay_usecases::git_reads::GitReadRequestV1;
 
 pub type ApplicationSurfaceOperation = HttpApplicationOperation;
 
@@ -30,13 +33,13 @@ pub enum ContextScoutClaimWindowSurfaceV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutExactAddressSurfaceRequest {
-    pub address: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutAddressV1,
+    pub address: ContextScoutAddressV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutRecentSurfaceRequest {
-    pub address: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutAddressV1,
+    pub address: ContextScoutAddressV1,
     #[serde(default = "default_context_scout_recent_limit")]
     pub limit: usize,
 }
@@ -48,7 +51,7 @@ const fn default_context_scout_recent_limit() -> usize {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutControlSurfaceRequest {
-    pub address: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutAddressV1,
+    pub address: ContextScoutAddressV1,
     pub expected_revision: ConfigurationRevisionId,
     pub idempotency_key: ConfigurationIdempotencyKey,
 }
@@ -56,31 +59,31 @@ pub struct ContextScoutControlSurfaceRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutCancelSurfaceRequest {
-    pub address: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutAddressV1,
-    pub work: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutWorkV1,
+    pub address: ContextScoutAddressV1,
+    pub work: ContextScoutWorkV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutClaimSurfaceRequest {
-    pub address: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutAddressV1,
+    pub address: ContextScoutAddressV1,
     pub window: ContextScoutClaimWindowSurfaceV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutDeliverySurfaceRequest {
-    pub address: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutAddressV1,
-    pub claim: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutDurableClaimV1,
-    pub receipt: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+    pub address: ContextScoutAddressV1,
+    pub claim: ContextScoutDurableClaimV1,
+    pub receipt: ContextScoutDeliveryReceiptV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutFeedbackSurfaceRequest {
-    pub address: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutAddressV1,
-    pub receipt: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
-    pub feedback: tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutFeedbackV1,
+    pub address: ContextScoutAddressV1,
+    pub receipt: ContextScoutDeliveryReceiptV1,
+    pub feedback: ContextScoutFeedbackV1,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -100,9 +103,7 @@ pub enum ContextScoutSurfaceRequest {
 }
 
 impl ContextScoutSurfaceRequest {
-    pub const fn address(
-        &self,
-    ) -> tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutAddressV1 {
+    pub const fn address(&self) -> ContextScoutAddressV1 {
         match self {
             Self::Status(request) | Self::Capability(request) | Self::Budget(request) => {
                 request.address

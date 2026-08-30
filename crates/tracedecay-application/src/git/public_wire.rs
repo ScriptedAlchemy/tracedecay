@@ -7,9 +7,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    GitBlameV1, GitCoverageV1, GitDiffV1, GitHeadStateV1, GitHistoryV1, GitIndexCommitIntentV1,
-    GitIndexPreviewId, GitIndexTransactionOperationV1, GitOidV1, GitOperationStateV1, HunkRefV1,
-    ManifestDigest, RepositoryId, UtcMicros,
+    GitBlameV1, GitCoverageV1, GitDiffScopeV1, GitDiffV1, GitHeadStateV1, GitHistoryV1,
+    GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexTransactionOperationV1, GitOidV1,
+    GitOperationStateV1, HunkRefV1, ManifestDigest, RepositoryId, UtcMicros,
 };
 
 use crate::IdempotencyKey;
@@ -172,4 +172,59 @@ pub enum GitReadResultV1 {
     History(GitQueryEnvelopeV1<GitHistoryV1>),
     Blame(GitQueryEnvelopeV1<GitBlameV1>),
     Hunks(GitQueryEnvelopeV1<GitHunkPreviewInputV1>),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "query", rename_all = "snake_case")]
+pub enum GitReadRequestV1 {
+    Status,
+    Diff {
+        scope: GitDiffScopeV1,
+    },
+    History {
+        max_count: u32,
+        path: Option<String>,
+        follow: bool,
+        first_parent: bool,
+    },
+    Blame {
+        path: String,
+        follow_renames: bool,
+    },
+    Hunks {
+        scope: GitDiffScopeV1,
+        #[serde(skip)]
+        daemon_binding: Option<DaemonGitHunkPreviewBindingV1>,
+    },
+}
+
+/// Daemon-private binding injected only after exact native snapshot capture.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DaemonGitHunkPreviewBindingV1 {
+    pub preview_id: GitIndexPreviewId,
+    pub snapshot_digest: ManifestDigest,
+    pub expires_at: UtcMicros,
+}
+
+impl GitReadRequestV1 {
+    pub fn capability_id(&self) -> &'static str {
+        match self {
+            Self::Status => "capability.application.git.status",
+            Self::Diff { .. } => "capability.application.git.diff",
+            Self::History { .. } => "capability.application.git.history",
+            Self::Blame { .. } => "capability.application.git.blame",
+            Self::Hunks { .. } => "capability.application.git.hunks",
+        }
+    }
+
+    pub fn use_case_id(&self) -> &'static str {
+        match self {
+            Self::Status => "use-case.application.git.status",
+            Self::Diff { .. } => "use-case.application.git.diff",
+            Self::History { .. } => "use-case.application.git.history",
+            Self::Blame { .. } => "use-case.application.git.blame",
+            Self::Hunks { .. } => "use-case.application.git.hunks",
+        }
+    }
 }

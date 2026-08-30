@@ -41,9 +41,6 @@ pub(super) fn map_claude_observation_ingest_error(
     )
 }
 
-#[cfg(test)]
-pub(crate) use tracedecay_mcp::structured_hook_error_data;
-
 pub(super) fn map_host_admission_outcome(outcome: HostAdmissionOutcome) -> TraceDecayError {
     hook_admission_error(
         outcome.status,

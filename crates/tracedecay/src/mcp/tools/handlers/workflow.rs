@@ -31,7 +31,7 @@ use tracedecay_usecases::diagnostics_store::DiagnosticsStore;
 use tracedecay_usecases::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
 };
-use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::support::{generic_tool_result, rendered_tool_result, unique_file_paths};
 use tracedecay_mcp::ToolResult;
