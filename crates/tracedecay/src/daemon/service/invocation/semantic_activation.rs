@@ -220,6 +220,22 @@ impl DaemonInvocationService {
                 pin,
             )
             .state;
+        // The invocation wire carries the observed state as serialized JSON
+        // (the protocol crate does not depend on the usecases state enum).
+        let runtime_state = match serde_json::to_value(&runtime_state) {
+            Ok(value) => value,
+            Err(error) => {
+                return application_problem(
+                    request_id,
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "semantic_activation.state_serialization_failed".to_owned(),
+                        message: format!(
+                            "the observed runtime state could not be serialized: {error}"
+                        ),
+                    }),
+                );
+            }
+        };
 
         DaemonInvocationResponse::with_outcome(
             request_id,

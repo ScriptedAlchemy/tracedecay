@@ -3243,8 +3243,10 @@ pub enum DaemonInvocationOutcome {
     /// Terminal receipt of the composed evaluate → publish → activate journey.
     ///
     /// `configuration_revision` is the revision produced by the activation
-    /// compare-and-swap; `runtime_state` is the semantic runtime state
-    /// observed immediately after that revision applied, so a caller can
+    /// compare-and-swap; `runtime_state` is the serialized
+    /// `SemanticRuntimeStateV1` observed immediately after that revision
+    /// applied (the daemon serializes the typed state; like the evaluation
+    /// `report` above, it crosses this wire as JSON), so a caller can
     /// distinguish "activation recorded, runtime converging" from "ready".
     SemanticProfileActivated {
         scope: ResolvedScope,
@@ -3253,7 +3255,7 @@ pub enum DaemonInvocationOutcome {
         configuration_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rollback_profile_id: Option<String>,
-        runtime_state: tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1,
+        runtime_state: serde_json::Value,
     },
     SemanticEvaluatedProfileQualified {
         qualification: CanonicalQualificationBlob,

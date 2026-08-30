@@ -1577,6 +1577,7 @@ pub struct SemanticEvaluationPublicationResultV1 {
 }
 
 /// Terminal receipt of the composed semantic activation journey.
+/// `runtime_state` is the daemon-serialized `SemanticRuntimeStateV1`.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct SemanticActivationResultV1 {
     pub project_id: String,
@@ -1584,7 +1585,7 @@ pub struct SemanticActivationResultV1 {
     pub report_digest: String,
     pub configuration_revision: String,
     pub rollback_profile_id: Option<String>,
-    pub runtime_state: tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1,
+    pub runtime_state: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
