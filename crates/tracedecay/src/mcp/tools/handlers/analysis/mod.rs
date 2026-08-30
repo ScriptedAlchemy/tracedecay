@@ -60,12 +60,12 @@ use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::tools::render;
 use super::support::{
     effective_path, generic_tool_result, rendered_tool_result, require_object_args,
     require_positive_limit, unique_file_paths,
 };
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render;
 
 /// True when `path` names a Rust source file (case-insensitive `.rs`). Gates
 /// tree-sitter masking, which parses with the Rust grammar and would

@@ -153,12 +153,11 @@ use tracedecay_tool_catalog::BindingSurface;
 #[cfg(test)]
 use tracedecay_tool_catalog::{ProfileId, SurfaceOperationName};
 
+use super::LegacyToolCompatibilityOwner;
 use super::binding::{
     McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
     tool_is_selector_bound_effect,
 };
-use super::LegacyToolCompatibilityOwner;
-use tracedecay_mcp::ToolResult;
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::tracedecay::TraceDecay;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
@@ -175,6 +174,7 @@ use retained_catalog::retained_mcp_composition;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_mcp::ToolResult;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use work::handle_work;
 use workflow_family::handle_workflow;

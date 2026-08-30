@@ -10,13 +10,13 @@ use tracedecay_mcp::response_handles::{
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use tracedecay_mcp::ToolResult;
 use super::super::binding::{
     tool_accepts_registered_project_selector, tool_is_selector_bound_effect,
 };
-use tracedecay_mcp::tools::render;
 use super::support;
 use super::support::registered_project_context;
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render;
 
 pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
     support::text_tool_result(text, Vec::new())

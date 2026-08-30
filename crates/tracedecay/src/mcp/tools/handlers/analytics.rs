@@ -32,9 +32,9 @@ use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 
-use tracedecay_mcp::tools::renderers;
-use tracedecay_mcp::ToolResult;
 use super::support::tool_json_with_md;
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::renderers;
 
 /// Bound on how many automation run-ledger rows a single call will scan.
 const AUTOMATION_RECORD_LIMIT: usize = 200;

@@ -9,8 +9,8 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_mcp::ToolResult;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use tracedecay_mcp::tools::renderers;
 use super::support::tool_json_with_md;
+use tracedecay_mcp::tools::renderers;
 
 const DEFAULT_RUN_LIMIT: usize = 50;
 const MAX_RUN_LIMIT: usize = 200;

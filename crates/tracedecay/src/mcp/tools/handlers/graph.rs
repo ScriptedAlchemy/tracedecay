@@ -24,13 +24,13 @@ use crate::tracedecay::TraceDecay;
 use crate::types::{EdgeKind, NodeKind};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::tools::render::{self, Md};
 use super::dependency_hints;
 use super::support::{
     self, CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, require_node_id,
     take_internal_context_memory_analytics, text_tool_result, unique_file_paths,
 };
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::render::{self, Md};
 
 mod context_support;
 mod primitive_surface;

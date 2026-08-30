@@ -13,9 +13,9 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_code_extraction::redundancy::round4;
 use tracedecay_runtime_core::errors::Result;
 
+use super::support::decode_primitive_request;
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render::{self, Md};
-use super::support::decode_primitive_request;
 
 #[hotpath::measure(label = "mcp.health.redundancy.total")]
 pub(crate) async fn handle_redundancy(

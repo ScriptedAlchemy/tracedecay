@@ -13,8 +13,8 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 
-use tracedecay_mcp::ToolResult;
 use super::json_result;
+use tracedecay_mcp::ToolResult;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]

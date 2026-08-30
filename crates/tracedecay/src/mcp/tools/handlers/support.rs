@@ -13,9 +13,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
+use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
-use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);

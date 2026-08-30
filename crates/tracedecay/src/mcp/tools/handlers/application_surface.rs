@@ -274,10 +274,12 @@ fn render_result_parts(
             Some(render_canonical_markdown(operation, binding_id, result)?)
         }
     };
-    let text =
-        tracedecay_mcp::tools::render::finalize_with_format(project_root, requested_format, &value, || {
-            markdown.unwrap_or_default()
-        });
+    let text = tracedecay_mcp::tools::render::finalize_with_format(
+        project_root,
+        requested_format,
+        &value,
+        || markdown.unwrap_or_default(),
+    );
     let mut rendered = super::text_tool_result(&text);
     if let Err(problem) = result {
         // Keep the typed problem machine-readable in every presentation
