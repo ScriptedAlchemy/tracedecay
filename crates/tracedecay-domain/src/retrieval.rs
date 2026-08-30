@@ -519,6 +519,24 @@ pub enum RetrievalError {
     Denied,
     #[error("contract violation: {0}")]
     Contract(#[from] RetrievalContractError),
+    #[error(
+        "the required base capability manifest is missing, incompatible, mixed-generation, or unauthorized"
+    )]
+    CapabilityManifestRejected,
+    #[error("lane evidence generation does not match the pinned snapshot generation")]
+    GenerationMismatch,
+    #[error("lane authority is unavailable: {0}")]
+    AuthorityUnavailable(String),
+    #[error("lane projection is incompatible with the request profile")]
+    IncompatibleProjection,
+    #[error("the read port observed stale evidence")]
+    StaleEvidence,
+    #[error("the read port was cancelled")]
+    Cancelled,
+    #[error("the read port exceeded its bounded work budget")]
+    BudgetExceeded,
+    #[error("contract violation: {0}")]
+    LaneContract(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
