@@ -1,9 +1,9 @@
 # V2 current outcomes
 
 `00-plan-set-index.md` remains sole roadmap/acceptance authority.
-This file records outcomes only. Last reconciled: 2026-08-29.
+This file records outcomes only. Last reconciled: 2026-08-30.
 
-Branch: `docs/plan-and-ops-truth` (from `codex/tracedecay-total-redesign-plan-reopened`).
+Branch: `codex/tracedecay-total-redesign-plan-reopened` (PR #707).
 Workspace: 38 crates under `crates/` (virtual root; counted from workspace
 `members` in the root `Cargo.toml`). Build via `kache cargo --`.
 Do not reclaim or wipe the machine kache store; do not treat sccache or
@@ -55,9 +55,28 @@ reconciled:
   recovery reopens serving search.
 - `GrafeoDB::close` skips the checkpoint when the container is already current.
 - Durable Ready receipt is reattached after remount.
-- Redundancy spans validate in sanitized coordinates.
 - Status reads serve the cached background process sample.
 - Transport phases are spanned (daemon wire, LSP outbound, automation/MCP).
+
+## 2026-08-30 landing wave
+
+- Retention convergence landed with a binary handoff; the store was growing
+  64.9→83.3 GiB per 2 h on the old binary.
+- Deferred-bind proxy (#752).
+- `semantic activate` journey shipped with typed revision refusal (#753).
+- Vector-commit fix (#754): peak RSS 3044→236 MiB, wall 184→24 s at 120k×768.
+- Skew-crash poll-frame fix; the daemon DoS is closed.
+- Sealed decode cut: 55.3→29.6 s, RSS 2678→1875 MiB.
+- Publication gate split: sealed-store build no longer blocks retrieval;
+  verify-once markers fixed the double 84 s verify.
+- Typed-park plus self-heal for owner-privacy roots.
+- Storage-status blocking fixes: 431 ms warm.
+- Session journal paging.
+- Redundancy sanitizer coordinate fix.
+- Fact-store category and telemetry fixes.
+- ANN wiring landed, held on exact-flat pending the latency verdict.
+- Seconds-as-micros sweep.
+- Wave review verdict: sound; 92 local failures proven environmental.
 
 ## Unverified on HEAD
 
