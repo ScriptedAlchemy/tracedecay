@@ -89,7 +89,7 @@ struct AdminCliContext<'a> {
     project: Option<&'a TraceDecay>,
     registered_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     registered_user_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
-    profile_identity: Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    profile_identity: Option<std::sync::Arc<dyn tracedecay_application::ProfileIdentityReadPort>>,
     session_sync: Option<&'a dyn SessionSyncServicePort>,
     request_id: Option<RequestId>,
     deadline: Option<Deadline>,
@@ -194,8 +194,9 @@ impl<'a> AdminCliContext<'a> {
 
     fn require_profile_identity(
         &self,
-    ) -> Result<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1> {
+    ) -> Result<&dyn tracedecay_application::ProfileIdentityReadPort> {
         self.profile_identity
+            .as_deref()
             .ok_or_else(|| TraceDecayError::Config {
                 message: "daemon durable profile identity is unavailable".to_string(),
             })

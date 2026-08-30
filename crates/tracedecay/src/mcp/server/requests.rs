@@ -1161,8 +1161,8 @@ impl McpServer {
                             &tool_name,
                             &analytics_arguments,
                             selected_owner.is_some(),
-                            self.project_session_refresh_wake.as_ref(),
-                            self.user_session_refresh_wake.as_ref(),
+                            self.project_session_refresh_wake.as_deref(),
+                            self.user_session_refresh_wake.as_deref(),
                         ),
                         label = "mcp.server.tools_call.complete.transcript_refresh"
                     )
@@ -1275,7 +1275,7 @@ impl McpServer {
         } else {
             self.project_session_refresh_wake.as_ref()
         };
-        wake.is_some_and(|wake| wake.status().unavailable_reason.is_some())
+        wake.is_some_and(|wake| wake.is_unavailable())
     }
 
     /// Finishes a dispatch that bypassed success accounting because the backing

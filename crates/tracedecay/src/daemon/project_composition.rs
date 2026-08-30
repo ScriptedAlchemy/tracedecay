@@ -863,7 +863,7 @@ async fn production_project_server_inner(
             };
             let remote_operational_read: doctor_kernel::RemoteOperationalReadProviderV1 = {
                 let remote_operational_status = Arc::clone(&remote_operational_status);
-                Arc::new(move || remote_operational_status().doctor_read())
+                Arc::new(move || remote_operational_status.read().doctor_read())
             };
             let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
                 canonical_project_path.to_path_buf(),

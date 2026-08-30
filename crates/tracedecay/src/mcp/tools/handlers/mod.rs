@@ -254,8 +254,9 @@ pub struct ToolCallRegistryOptions<'a> {
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub(crate) doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
-    pub(crate) remote_operational_status:
-        Option<crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1>,
+    pub(crate) remote_operational_status: Option<
+        std::sync::Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>,
+    >,
     pub(crate) code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub(crate) explorer_semantic_reader: Option<crate::dashboard::ExplorerSemanticReader>,

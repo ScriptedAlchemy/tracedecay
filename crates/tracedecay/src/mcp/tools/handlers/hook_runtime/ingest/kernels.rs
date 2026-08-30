@@ -65,7 +65,7 @@ impl TranscriptPayloadRouteV1 {
 }
 
 /// Everything a capture kernel may borrow for one ingest pass.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct TranscriptCaptureContext<'a> {
     pub(super) cg: Option<&'a TraceDecay>,
     pub(super) args: &'a Value,

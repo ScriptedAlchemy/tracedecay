@@ -664,7 +664,7 @@ pub(super) async fn handle_dashboard(
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     remote_operational_status: Option<
-        crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1,
+        std::sync::Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>,
     >,
     code_index_freshness_reader: Option<
         crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
@@ -926,7 +926,7 @@ pub(super) async fn handle_dashboard(
                     automation_writer,
                     doctor_report_reader,
                     remote_operational_status_reader: remote_operational_status.map(|provider| {
-                        Arc::new(move || provider())
+                        Arc::new(move || provider.read())
                             as crate::dashboard::RemoteOperationalStatusReader
                     }),
                     code_index_freshness_reader,

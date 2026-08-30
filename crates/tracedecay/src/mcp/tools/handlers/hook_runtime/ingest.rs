@@ -287,7 +287,7 @@ async fn admit_codex_rollouts_for_compaction(
         if attempt > 0 {
             tokio::time::sleep(COMPACTION_INGEST_RETRY_DELAY).await;
         }
-        match admit_codex_rollouts_once(cg, session_authorities).await {
+        match admit_codex_rollouts_once(cg, session_authorities.clone()).await {
             Ok(messages_upserted) => return Ok(messages_upserted),
             Err(error) => {
                 let converging =
@@ -611,7 +611,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
     } else {
         HostAdmissionScope::Project
     };
-    let facade = host_admission_facade(cg, admission_scope, session_authorities)?;
+    let facade = host_admission_facade(cg, admission_scope, session_authorities.clone())?;
     let admission = facade.accept_replay(provider, admission_scope);
     if let Some(rejection) = reject_unadmitted(
         admission,
@@ -638,7 +638,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
             user_scope,
             profile_root,
             global_db,
-            session_authorities,
+            session_authorities: session_authorities.clone(),
             facade: &facade,
             max_new_bytes,
             cancellation
