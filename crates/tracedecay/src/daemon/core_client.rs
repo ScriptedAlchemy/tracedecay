@@ -282,7 +282,7 @@ pub(crate) fn client_connection(socket_path: &Path) -> Result<DaemonConnection> 
 }
 
 pub(crate) async fn write_daemon_preamble(
-    writer: &mut tokio::io::WriteHalf<BrokerStream>,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     connection: &DaemonConnection,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
@@ -433,7 +433,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
         }
         None => connect_to_current_daemon_within(socket_path, None).await?,
     };
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = stream.into_owned_split();
     let id = json!(1);
     let mut params = json!({
         "name": tool_name,
