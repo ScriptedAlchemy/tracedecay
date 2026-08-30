@@ -59,12 +59,12 @@ const TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1: usize = 64;
 /// floor stays above the query staleness threshold and the ceiling keeps a
 /// persistently failing artifact from being retried more than a few times an
 /// hour while never resealing it. Tests shrink the clock, not the shape.
-const ACTIVATION_RETRY_BACKOFF_FLOOR: Duration = if cfg!(test) {
+const ACTIVATION_RETRY_BACKOFF_FLOOR: Duration = if cfg!(any(test, feature = "test-helpers")) {
     Duration::from_millis(50)
 } else {
     Duration::from_secs(30)
 };
-const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(test) {
+const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(any(test, feature = "test-helpers")) {
     Duration::from_millis(400)
 } else {
     Duration::from_mins(10)

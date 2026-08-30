@@ -4653,7 +4653,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
             return Ok(());
         }
-        #[cfg(test)]
+        // The shared scheduler test sources also compile into the composition
+        // root's test binary, where this crate is a dependency built with
+        // `test-helpers` instead of `cfg(test)`; both spellings are the same
+        // fixture surface, so the auto-install fallback must cover both.
+        #[cfg(any(test, feature = "test-helpers"))]
         {
             let snapshot = self.resident_memory.snapshot();
             tracedecay_code_index::parallelism::install_worker_plan(
@@ -4662,7 +4666,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             )?;
             Ok(())
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-helpers")))]
         {
             Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
         }
