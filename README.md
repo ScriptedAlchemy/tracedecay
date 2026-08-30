@@ -136,7 +136,7 @@ worktree/ref/commit generations and report typed stale, indexing, partial, or
 unavailable state when that snapshot is not ready. Branches and worktrees do
 not create separate databases or fact stores.
 
-See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for branch
+See [docs/V2-OPERATING-MODEL.md](docs/V2-OPERATING-MODEL.md) for branch
 selection, provenance, and recovery behavior.
 
 ## Dashboard
@@ -234,9 +234,8 @@ cargo clippy --workspace --all-targets
 - [User guide](docs/USER-GUIDE.md)
 - [Comparable tools](docs/COMPARABLE-TOOLS.md)
 - [Dashboard](docs/dashboard.md)
-- [Branching](docs/BRANCHING-USER-GUIDE.md)
-- [MCP extensions](docs/MCP-extensions.md)
-- [Architecture/design notes](docs/DESIGN-DOC.md)
+- [V2 operating model](docs/V2-OPERATING-MODEL.md)
+- [V2 roadmap](docs/plans/tracedecay-v2/00-plan-set-index.md)
 
 ## Origin
 
