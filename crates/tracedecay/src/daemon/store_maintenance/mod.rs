@@ -9,12 +9,12 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::branch::BranchAdminAction;
 use crate::config::RetentionConfig;
 use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
+use tracedecay_runtime_core::branch::BranchAdminAction;
 
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
@@ -449,8 +449,13 @@ pub(super) async fn run_code_generation_retention(
     }
     let layout = graph.hook_store_layout();
     let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
-    // No published generation means nothing has been sealed for this project.
-    if !store_root.join("active-code-generation-v1.json").is_file() {
+    // A store directory that never materialized has nothing to sweep. A store
+    // *without* an active pointer is different: it is crash debris from a
+    // publish that never reached its pointer write (an OOM-killed rebuild is
+    // the ordinary cause), and the planner collects it as a typed unpublished
+    // store — before this, such orphaned partial generations were unreachable
+    // by every retention pass while their worktree root stayed live.
+    if !store_root.is_dir() {
         return true;
     }
     let vector_inventory =
@@ -556,23 +561,26 @@ async fn apply_code_generation_retention(
             return false;
         }
     };
-    // A failed replay reconcile in offline mode keeps its journaled release
-    // evidence for a later graph-available pass; deletion of newly planned
-    // files stays safe, but the pass reports degraded so the retry cadence
-    // stays short.
-    let mut offline_replay_reconcile_failed = false;
+    // A failed or retained replay reconcile keeps its durable release
+    // evidence for a later graph-available pass. Deleting newly planned files
+    // stays safe in every inventory mode — retention hard-links each retired
+    // generation into the replay pool before its release event becomes
+    // durable, so the graph can always finish its retirement later. The pass
+    // therefore keeps collecting instead of letting sealed generations and
+    // their multi-GiB text artifacts accumulate without bound whenever the
+    // graph is dark, wedged, or busy (a recurring `graph_replay_release_failed`
+    // used to abort every pass here and grew one store by tens of GiB in a
+    // single crash-rebuild night). A failure still reports degraded and fails
+    // the pass so the retry cadence stays short.
+    let mut replay_reconcile_failed = false;
     match graph_replay::reconcile_graph_replay_releases(graph, &store_root, cancellation).await {
-        graph_replay::ReconcileOutcome::Complete => {}
-        graph_replay::ReconcileOutcome::Retained => return true,
+        graph_replay::ReconcileOutcome::Complete | graph_replay::ReconcileOutcome::Retained => {}
         graph_replay::ReconcileOutcome::Failed => {
-            if matches!(&vector_inventory, VectorRetentionInventoryV1::Online { .. }) {
-                return false;
-            }
-            offline_replay_reconcile_failed = true;
+            replay_reconcile_failed = true;
         }
     }
     if !plan.has_collectable_work() {
-        return !offline_replay_reconcile_failed;
+        return !replay_reconcile_failed;
     }
     if cancellation.is_cancelled() {
         log_code_generation_retention_degraded("retention_cancelled");
@@ -777,7 +785,7 @@ async fn apply_code_generation_retention(
             graph_replay::reconcile_graph_replay_releases(graph, &store_root, cancellation)
                 .await
                 .succeeded()
-                && !offline_replay_reconcile_failed
+                && !replay_reconcile_failed
         }
         Ok(Err(CodeGenerationRetentionErrorV1::Cancelled)) => {
             log_code_generation_retention_degraded("retention_cancelled");

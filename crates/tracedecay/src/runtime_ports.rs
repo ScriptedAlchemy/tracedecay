@@ -213,7 +213,8 @@ fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
 
 fn resolve_hook_store_layout(
     project_root: &Path,
-) -> Pin<Box<dyn Future<Output = Result<crate::storage::StoreLayout>> + Send + '_>> {
+) -> Pin<Box<dyn Future<Output = Result<tracedecay_runtime_core::storage::StoreLayout>> + Send + '_>>
+{
     Box::pin(hotpath::future!(
         crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root),
         label = "runtime_ports.resolve_store_layout"

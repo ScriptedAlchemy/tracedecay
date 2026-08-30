@@ -155,7 +155,7 @@ mod tests {
         // authority root; a fixture that splits them exercises a different
         // (cross-authority) dispatch shape than the one under test.
         let canonical_root = dir.path().canonicalize().unwrap();
-        let profile_root = crate::storage::default_profile_root().unwrap();
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
         assert!(
             profile_root.starts_with(&canonical_root),
             "hermetic profile authority {} must live under the fixture root {}",

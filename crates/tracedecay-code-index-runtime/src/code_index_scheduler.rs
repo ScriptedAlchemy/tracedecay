@@ -46,7 +46,7 @@ use tracedecay_usecases::code_index::{
 };
 
 use self::freshness_witness::RestoreFreshnessWitnessV1;
-use crate::dashboard::code_index_freshness_api::{
+use tracedecay_dashboard_api::code_index_freshness_api::{
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
 };
 

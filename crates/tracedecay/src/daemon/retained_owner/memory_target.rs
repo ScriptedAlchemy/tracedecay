@@ -10,10 +10,10 @@ use tracedecay_store::StoreShardScopeV1;
 
 use super::map_execution_error;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::store::memory::ProjectMemoryDbHandle;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::store::memory::ProjectMemoryDbHandle;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MemoryTargetAccessV1 {
@@ -236,8 +236,10 @@ mod tests {
         let runtime = active.test_runtime_for_test().unwrap();
         let selected_root = tmp.path().join("selected");
         std::fs::create_dir_all(&selected_root).unwrap();
-        let selected_id =
-            ProjectId::new(crate::storage::default_profile_project_id(&selected_root)).unwrap();
+        let selected_id = ProjectId::new(
+            tracedecay_runtime_core::storage::default_profile_project_id(&selected_root),
+        )
+        .unwrap();
         let sibling = Arc::new(
             runtime
                 .sibling_project(&selected_root, selected_id)

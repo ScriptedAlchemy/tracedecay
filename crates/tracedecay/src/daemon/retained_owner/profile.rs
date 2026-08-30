@@ -657,8 +657,11 @@ mod tests {
         let project_id = ProjectId::new("project.profile-retained-decoy").expect("project id");
         let project_root = temporary.path().join("project-decoy");
         std::fs::create_dir_all(&project_root).expect("project fixture root");
-        crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
-            .expect("project enrollment");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
         let project_database = runtime_registry
             .project_sessions(project_id.clone(), [project_root])
             .await

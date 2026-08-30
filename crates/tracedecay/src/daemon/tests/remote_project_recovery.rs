@@ -12,7 +12,7 @@ use super::{
 };
 use tracedecay_daemon_protocol::DaemonHandshake;
 
-fn initialized_project_id(layout: &crate::storage::StoreLayout) -> ProjectId {
+fn initialized_project_id(layout: &tracedecay_runtime_core::storage::StoreLayout) -> ProjectId {
     ProjectId::new(
         layout
             .identity

@@ -39,8 +39,11 @@ pub use client::{
 };
 pub use client_identity::DaemonClientIdentity;
 pub use connection::{
-    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE, DaemonConnection,
-    DaemonLivenessProbe, connect_to_daemon_connection, next_daemon_response_line,
+    DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
+    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_TOOL_REQUEST_DEADLINE,
+    DaemonConnection, DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
+    connect_to_daemon_connection, daemon_connect_failure, daemon_response_stalled,
+    daemon_tool_response_bound, next_daemon_response_line, tool_request_deadline,
     write_daemon_preamble,
 };
 pub use contract::{

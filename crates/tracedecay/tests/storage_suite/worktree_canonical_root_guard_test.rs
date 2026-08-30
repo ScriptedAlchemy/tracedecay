@@ -3,7 +3,7 @@
 //! A tracedecay project id is shared across every linked worktree of a
 //! repository through the registered profile registry's
 //! `git-common-dir:<common dir>` alias. Before the guard in
-//! `tracedecay::project_registry::primary_checkout_root`, opening a session
+//! `tracedecay_runtime_core::project_registry::primary_checkout_root`, opening a session
 //! from *any* linked worktree would re-register the shared project with
 //! `canonical_root`/`display_root` pinned to that worktree's own (often
 //! transient) path — the last worktree to touch the project would win.
@@ -142,7 +142,7 @@ async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_sto
             .unwrap();
         drop(database);
     }
-    let marker_path = tracedecay::storage::repository_identity_path(&fx.main)
+    let marker_path = tracedecay_runtime_core::storage::repository_identity_path(&fx.main)
         .expect("primary checkout should have a repository identity path");
     std::fs::remove_file(&marker_path).unwrap();
 
@@ -317,7 +317,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
 }
 
 // Coverage for "the primary checkout no longer exists on disk" lives in
-// `tracedecay::project_registry::tests::primary_checkout_root_keeps_worktree_when_primary_checkout_is_missing`.
+// `tracedecay_dashboard_api::project_registry::tests::primary_checkout_root_keeps_worktree_when_primary_checkout_is_missing`.
 // A real git worktree cannot produce that state end-to-end: a linked
 // worktree resolves `git_common_dir` by reading files inside the primary's
 // `.git` directory, so deleting the primary also deletes the very metadata

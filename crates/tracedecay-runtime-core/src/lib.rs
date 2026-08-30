@@ -87,6 +87,7 @@ pub mod git_discovery;
 pub mod git_repository;
 pub mod lifecycle_lease;
 pub mod memory;
+pub mod monitor_ring;
 pub mod os_str_bytes;
 pub mod path_safety;
 pub mod path_scope;
@@ -103,6 +104,7 @@ pub mod sync;
 pub mod text;
 pub mod timeutil;
 pub mod tracedecay;
+pub mod weak_registry;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;
 pub mod work_topology;

@@ -225,7 +225,7 @@ impl DaemonSessionRetrievalRoot {
                 )
                 .unwrap_or_else(|error| panic!("test worktree identity: {error}")),
                 BranchId::new(
-                    crate::branch::current_branch(&project_root)
+                    tracedecay_runtime_core::branch::current_branch(&project_root)
                         .unwrap_or_else(|| "detached".to_owned()),
                 )
                 .unwrap_or_else(|error| panic!("test branch identity: {error}")),

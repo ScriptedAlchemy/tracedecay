@@ -171,7 +171,7 @@ async fn projectless_tools_call_response_with_connection(
         #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
         enum ProjectlessAdminProjectAction {
             AutomationReconcile {
-                scope: crate::dashboard::AutomationReconcileScope,
+                scope: tracedecay_dashboard_api::AutomationReconcileScope,
             },
         }
 
@@ -186,7 +186,7 @@ async fn projectless_tools_call_response_with_connection(
             }
         };
         let ProjectlessAdminProjectAction::AutomationReconcile { scope } = request;
-        if scope != crate::dashboard::AutomationReconcileScope::Profile {
+        if scope != tracedecay_dashboard_api::AutomationReconcileScope::Profile {
             return JsonRpcResponse::error(
                 id,
                 ErrorCode::InvalidParams,
@@ -202,12 +202,12 @@ async fn projectless_tools_call_response_with_connection(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        let report = crate::dashboard::ProfileAutomationReconcileReport {
+        let report = tracedecay_dashboard_api::ProfileAutomationReconcileReport {
             scope,
             cached_owners: outcomes.len(),
             outcomes,
             uncached_projects:
-                crate::dashboard::UncachedProjectReconcileOutcome::DeferredUntilProjectStartup,
+                tracedecay_dashboard_api::UncachedProjectReconcileOutcome::DeferredUntilProjectStartup,
         };
         return JsonRpcResponse::success(
             id,
