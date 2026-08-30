@@ -308,6 +308,18 @@ impl AgentIntegration for CodexIntegration {
             || codex_plugin_manifest_path(home).exists()
     }
 
+    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+        let config_dir = home.join(".codex");
+        if config_dir.is_dir() {
+            return Some(config_dir);
+        }
+        if let Some(cached) = codex_plugin_cached_install_dirs(home).into_iter().next() {
+            return Some(cached);
+        }
+        let manifest = codex_plugin_manifest_path(home);
+        manifest.exists().then_some(manifest)
+    }
+
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
         let current_cache =
             codex_plugin_current_cached_install_dir(home).join(".codex-plugin/plugin.json");
@@ -367,7 +379,12 @@ impl AgentIntegration for CodexIntegration {
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         if codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))?
-            || codex_plugin_enabled(&ctx.home).unwrap_or(false)
+            || codex_plugin_enabled(&ctx.home).map_err(|()| TraceDecayError::Config {
+                message: format!(
+                    "could not read Codex native plugin activation state at {}",
+                    codex_config_path(&ctx.home).display()
+                ),
+            })?
         {
             let marketplace_name = codex_cached_marketplace_name(&ctx.home);
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;

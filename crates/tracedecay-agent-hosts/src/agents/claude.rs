@@ -23,8 +23,7 @@ pub(super) use super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER;
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
     JsonConfigDialect, JsonConfigMutation, NonInteractiveInstallOutcome, UpdatePluginOutcome,
-    expected_tool_perms, load_json_file, safe_write_text_file,
-    update_json_config_transactionally,
+    expected_tool_perms, load_json_file, safe_write_text_file, update_json_config_transactionally,
 };
 
 pub struct ClaudeIntegration;
@@ -251,6 +250,11 @@ impl AgentIntegration for ClaudeIntegration {
 
     fn is_detected(&self, home: &Path) -> bool {
         home.join(".claude").is_dir()
+    }
+
+    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+        let surface = home.join(".claude");
+        surface.is_dir().then_some(surface)
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
