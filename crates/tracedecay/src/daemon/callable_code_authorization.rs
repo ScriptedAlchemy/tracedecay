@@ -381,7 +381,10 @@ fn concealed() -> ApplicationProblem {
 /// shape stays concealed so a probing caller learns nothing about identity.
 fn configuration_current_problem(error: ConfigurationError) -> ApplicationProblem {
     match error {
-        ConfigurationError::Unavailable => concealed(),
+        ConfigurationError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "configuration_authority_unavailable".to_owned(),
+            message: "The project configuration authority is temporarily unavailable.".to_owned(),
+        }),
         ConfigurationError::TargetUnavailable
         | ConfigurationError::AuthorizedTargetAmbiguous
         | ConfigurationError::RevisionConflict
