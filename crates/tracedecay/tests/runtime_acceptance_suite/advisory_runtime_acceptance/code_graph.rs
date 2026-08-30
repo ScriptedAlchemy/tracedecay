@@ -144,7 +144,7 @@ pub(super) fn hermetic_ci_code_graph(
         };
         let occurrence = SymbolOccurrenceId::new(format!("symbol.advisory.ci.{name}"))
             .expect("fixture CI symbol occurrence");
-        records.push(LineageSymbolRecordV1 {
+        records.push(Arc::new(LineageSymbolRecordV1 {
             occurrence: occurrence.clone(),
             identity: SymbolIdentityDigest::new(digest("symbol-identity", name))
                 .expect("fixture CI symbol identity"),
@@ -167,8 +167,8 @@ pub(super) fn hermetic_ci_code_graph(
             file_identity: file_identity.clone(),
             content_digest: ContentDigest::new(digest("symbol-content", declaration))
                 .expect("fixture CI symbol content"),
-        });
-        chunks.push(CodeSearchChunkV1 {
+        }));
+        chunks.push(Arc::new(CodeSearchChunkV1 {
             id: CodeSearchChunkId::new(format!("chunk.advisory.ci.{name}"))
                 .expect("fixture CI chunk"),
             anchor: CodeSearchChunkAnchorV1 {
@@ -199,7 +199,7 @@ pub(super) fn hermetic_ci_code_graph(
             subtokens: Vec::new(),
             sanitized_text: BoundedSanitizedText::new(declaration.trim())
                 .expect("fixture CI sanitized text"),
-        });
+        }));
         occurrences.push(occurrence);
     }
     let failed = occurrences[1].clone();
@@ -253,7 +253,7 @@ fn publish_graph(
     scope: ResolvedScope,
     generation: CodeGenerationId,
     edges: &[CanonicalRelationEdgeV1],
-    chunks: &[CodeSearchChunkV1],
+    chunks: &[Arc<CodeSearchChunkV1>],
     files: &[SanitizedCodeFileV1],
     symbols: Option<GenerationSymbolIndexV1>,
 ) -> Arc<dyn CodeGraphProjectionReadPort> {

@@ -305,7 +305,7 @@ fn publish_initial_generation() -> (
             target_projection_key: projection_key.clone(),
             source_generation: id("code-generation.1"),
             source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha.id, gone.id, stable.id].into(),
+            expected_chunk_ids: vec![alpha.id.clone(), gone.id.clone(), stable.id.clone()].into(),
             base_generation: None,
         })
         .expect("initial build");
@@ -522,7 +522,7 @@ fn fake_projection_uses_canonical_chunks_and_projection_receipts() {
         vec![
             change(
                 &alpha,
-                Some(alpha_old.content_digest),
+                Some(alpha_old.content_digest.clone()),
                 Some(alpha.content_digest.clone()),
             ),
             change(&added, None, Some(added.content_digest.clone())),
@@ -582,7 +582,7 @@ fn fake_projection_uses_canonical_chunks_and_projection_receipts() {
     assert!(published.vectors().contains_key(&alpha.id));
     assert!(published.vectors().contains_key(&added.id));
     assert!(published.vectors().contains_key(&stable.id));
-    assert_eq!(published.tombstones(), &[gone_old.id]);
+    assert_eq!(published.tombstones(), &[gone_old.id.clone()]);
     assert_eq!(published.receipts().len(), 1);
 }
 
@@ -618,7 +618,7 @@ fn committed_checkpoint_remains_staged_until_immutable_publication() {
             target_projection_key: projection_key,
             source_generation: id("code-generation.2"),
             source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha.id].into(),
+            expected_chunk_ids: vec![alpha.id.clone()].into(),
             base_generation: None,
         })
         .unwrap();
@@ -694,7 +694,7 @@ fn unchanged_generation_reuses_vectors_without_fake_inference() {
             target_projection_key: projection_key,
             source_generation: id("code-generation.2"),
             source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha.id, gone.id, stable.id].into(),
+            expected_chunk_ids: vec![alpha.id.clone(), gone.id.clone(), stable.id.clone()].into(),
             base_generation: Some(base_generation.clone()),
         })
         .unwrap();
@@ -856,7 +856,7 @@ fn duplicate_vector_rows_fail_without_advancing_the_checkpoint() {
             target_projection_key: projection_key,
             source_generation: id("code-generation.1"),
             source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha.id].into(),
+            expected_chunk_ids: vec![alpha.id.clone()].into(),
             base_generation: None,
         })
         .unwrap();
@@ -1681,7 +1681,7 @@ fn projection_rejects_a_chunk_that_exceeds_its_admitted_byte_ceiling() {
     assert_eq!(
         error,
         SemanticProjectionErrorV1::InferenceBatchByteCeilingExceeded {
-            chunk_id: oversized.id,
+            chunk_id: oversized.id.clone(),
             actual_bytes: 5,
             inference_batch_bytes: 4,
         }
