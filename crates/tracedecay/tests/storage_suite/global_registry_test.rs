@@ -226,10 +226,13 @@ async fn delete_project_paths_use_same_canonical_key_as_upsert() {
 
     db.upsert(&project_one, 10).await;
     db.upsert(&project_two, 20).await;
-    db.delete_project(&project_one.join(".")).await;
+    let deleted_one = db.delete_project(&project_one.join(".")).await.unwrap();
     let deleted = db
-        .delete_projects(&[project_two.join(".").to_string_lossy().into_owned()])
-        .await;
+        .delete_project_paths(&[project_two.join(".").to_string_lossy().into_owned()])
+        .await
+        .unwrap();
+
+    assert_eq!(deleted_one, 1);
 
     assert_eq!(db.get_project_tokens(&project_one).await, 0);
     assert_eq!(deleted, 1);
@@ -286,7 +289,10 @@ async fn registered_profile_runtime_creates_and_round_trips_registry_records() {
         projects[0].canonical_root,
         project_root.canonicalize().unwrap().to_string_lossy()
     );
-    assert_eq!(db.search_code_projects("repo.git", 10).await.len(), 1);
+    assert_eq!(
+        db.search_code_projects("repo.git", 10).await.unwrap().len(),
+        1
+    );
 
     let context = db
         .project_registry_context_by_alias(&project_root)
@@ -337,7 +343,8 @@ async fn delete_code_projects_cascades_registry_rows_without_touching_project_le
 
     let deleted = db
         .delete_code_projects(&["proj_registry".to_string()])
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(deleted, 1);
     assert!(
@@ -557,10 +564,11 @@ async fn observation_store_resolver_rejects_multiple_stores_without_newest_fallb
             .contains("resolves to multiple stores")
     );
     assert!(
-        db.resolve_project_store_by_alias(&project_root)
-            .await
-            .is_none(),
-        "legacy resolver must not select a newest store from ambiguous authority"
+        matches!(
+            db.resolve_project_store_by_alias(&project_root).await,
+            Err(tracedecay_global_db::ProjectStoreResolutionError::AmbiguousStores { .. })
+        ),
+        "alias resolver must report ambiguous store authority instead of picking one"
     );
 
     let error = db
@@ -930,13 +938,13 @@ async fn registry_remote_resolution_is_conservative_when_ambiguous() {
     .unwrap();
     upsert_test_store(&db, "proj_two", "store_two").await;
 
-    assert!(
+    assert!(matches!(
         db.resolve_unique_project_store_by_git_remote(
             "https://github.com/ScriptedAlchemy/tracedecay.git"
         )
-        .await
-        .is_none()
-    );
+        .await,
+        Err(tracedecay_global_db::ProjectStoreResolutionError::AmbiguousProjects { .. })
+    ));
     close_profile_runtime(db).await;
 }
 

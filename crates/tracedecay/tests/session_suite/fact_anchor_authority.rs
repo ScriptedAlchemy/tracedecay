@@ -518,10 +518,12 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
     // Ambiguous scope: two canonical projects share one remote identity, so
     // remote-based resolution must fail closed instead of picking a store.
     assert!(
-        runtime
-            .resolve_unique_project_store_by_git_remote(remote)
-            .await
-            .is_none(),
+        matches!(
+            runtime
+                .resolve_unique_project_store_by_git_remote(remote)
+                .await,
+            Err(tracedecay_global_db::ProjectStoreResolutionError::AmbiguousProjects { .. })
+        ),
         "an ambiguous project scope must fail closed"
     );
     let still_a = runtime
@@ -604,10 +606,10 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
         "an unknown project scope must fail closed"
     );
     assert!(
-        runtime
-            .resolve_project_store_by_alias(&unknown)
-            .await
-            .is_none(),
+        matches!(
+            runtime.resolve_project_store_by_alias(&unknown).await,
+            Err(tracedecay_global_db::ProjectStoreResolutionError::ProjectNotRegistered { .. })
+        ),
         "a failed resolution must not mint a fallback alias or store"
     );
     drop(runtime);

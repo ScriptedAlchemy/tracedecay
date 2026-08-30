@@ -79,6 +79,81 @@ pub struct RegistryReapPlan {
     pub retained: Vec<RetainedRegistryEntry>,
 }
 
+/// Why an alias- or git-remote-based store resolution produced no sole store.
+///
+/// Mirrors [`crate::ProjectObservationStoreError`]: absence, ambiguity, and
+/// registry faults are distinct outcomes, so a caller can fail closed on a
+/// broken registry read instead of treating it as "not registered".
+#[derive(Debug)]
+pub enum ProjectStoreResolutionError {
+    /// The registry read path itself failed.
+    Unavailable {
+        source: tracedecay_runtime_core::errors::TraceDecayError,
+    },
+    /// No registered project matches the requested alias, id, or remote.
+    ProjectNotRegistered { selector: String },
+    /// The remote URL cannot be normalized into a comparable identity.
+    UnsupportedGitRemote { git_remote_url: String },
+    /// More than one registered project claims the same git remote.
+    AmbiguousProjects {
+        git_remote_url: String,
+        project_ids: Vec<String>,
+    },
+    /// The project is registered but owns no store.
+    StoreNotRegistered { project_id: String },
+    /// More than one store is registered for the project.
+    AmbiguousStores {
+        project_id: String,
+        store_ids: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for ProjectStoreResolutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable { source } => {
+                write!(formatter, "project store registry is unavailable: {source}")
+            }
+            Self::ProjectNotRegistered { selector } => {
+                write!(formatter, "no project is registered for '{selector}'")
+            }
+            Self::UnsupportedGitRemote { git_remote_url } => write!(
+                formatter,
+                "git remote '{git_remote_url}' cannot be normalized into a project identity"
+            ),
+            Self::AmbiguousProjects {
+                git_remote_url,
+                project_ids,
+            } => write!(
+                formatter,
+                "git remote '{git_remote_url}' is ambiguous across project ids: {}",
+                project_ids.join(", ")
+            ),
+            Self::StoreNotRegistered { project_id } => write!(
+                formatter,
+                "no store is registered for project '{project_id}'"
+            ),
+            Self::AmbiguousStores {
+                project_id,
+                store_ids,
+            } => write!(
+                formatter,
+                "project '{project_id}' resolves to multiple stores: {}",
+                store_ids.join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProjectStoreResolutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unavailable { source } => Some(source),
+            _ => None,
+        }
+    }
+}
+
 impl RegistryReapPlan {
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -1178,68 +1253,109 @@ impl RegisteredGlobalDb {
             .map(|context| context.project))
     }
 
+    /// Resolves the sole registered store for a project-root alias path.
+    ///
+    /// Absence, ambiguity, and read faults are distinct typed outcomes: an
+    /// unregistered alias is [`ProjectStoreResolutionError::ProjectNotRegistered`],
+    /// a project with zero or multiple stores stays
+    /// `StoreNotRegistered`/`AmbiguousStores`, and a failed registry read is
+    /// `Unavailable` — never a silent "no store".
     pub async fn resolve_project_store_by_alias(
         &self,
         alias_path: &Path,
-    ) -> Option<ProjectStoreResolution> {
+    ) -> Result<ProjectStoreResolution, ProjectStoreResolutionError> {
         let project_id = self
             .project_id_by_path_alias(alias_path, ProjectIdentityAliasKind::ProjectRoot)
             .await
-            .ok()
-            .flatten()?;
+            .map_err(|source| ProjectStoreResolutionError::Unavailable { source })?
+            .ok_or_else(|| ProjectStoreResolutionError::ProjectNotRegistered {
+                selector: alias_path.display().to_string(),
+            })?;
         self.resolve_project_store_for_project_id(&project_id).await
     }
 
+    /// Resolves the sole registered store for a git remote URL, failing closed
+    /// on every non-unique outcome instead of collapsing it into absence.
     pub async fn resolve_unique_project_store_by_git_remote(
         &self,
         git_remote_url: &str,
-    ) -> Option<ProjectStoreResolution> {
-        let remote = super::normalize_git_remote_url(git_remote_url)?;
-        let projects = self.list_code_projects(usize::MAX).await.ok()?;
-        let mut matches = projects.into_iter().filter(|project| {
-            project
-                .git_remote_url
-                .as_deref()
-                .and_then(super::normalize_git_remote_url)
-                .is_some_and(|stored| stored == remote)
-        });
-        let project = matches.next()?;
-        if matches.next().is_some() {
-            return None;
-        }
-        self.resolve_project_store_for_project_id(&project.project_id)
+    ) -> Result<ProjectStoreResolution, ProjectStoreResolutionError> {
+        let remote = super::normalize_git_remote_url(git_remote_url).ok_or_else(|| {
+            ProjectStoreResolutionError::UnsupportedGitRemote {
+                git_remote_url: git_remote_url.to_string(),
+            }
+        })?;
+        let projects = self
+            .list_code_projects(usize::MAX)
             .await
+            .map_err(|source| ProjectStoreResolutionError::Unavailable { source })?;
+        let mut project_ids = projects
+            .into_iter()
+            .filter(|project| {
+                project
+                    .git_remote_url
+                    .as_deref()
+                    .and_then(super::normalize_git_remote_url)
+                    .is_some_and(|stored| stored == remote)
+            })
+            .map(|project| project.project_id)
+            .collect::<Vec<_>>();
+        match project_ids.as_slice() {
+            [] => Err(ProjectStoreResolutionError::ProjectNotRegistered {
+                selector: git_remote_url.to_string(),
+            }),
+            [project_id] => self.resolve_project_store_for_project_id(project_id).await,
+            _ => {
+                project_ids.sort();
+                Err(ProjectStoreResolutionError::AmbiguousProjects {
+                    git_remote_url: git_remote_url.to_string(),
+                    project_ids,
+                })
+            }
+        }
     }
 
     async fn resolve_project_store_for_project_id(
         &self,
         project_id: &str,
-    ) -> Option<ProjectStoreResolution> {
+    ) -> Result<ProjectStoreResolution, ProjectStoreResolutionError> {
         let context = self
             .project_registry_context_by_id(project_id)
             .await
-            .ok()
-            .flatten()?;
-        if context.stores.len() != 1 {
-            return None;
-        }
-        let store = context.stores.into_iter().next()?;
-        Some(ProjectStoreResolution {
+            .map_err(|source| ProjectStoreResolutionError::Unavailable { source })?
+            .ok_or_else(|| ProjectStoreResolutionError::ProjectNotRegistered {
+                selector: project_id.to_string(),
+            })?;
+        let mut stores = context.stores;
+        let store = match stores.len() {
+            0 => {
+                return Err(ProjectStoreResolutionError::StoreNotRegistered {
+                    project_id: project_id.to_string(),
+                });
+            }
+            1 => stores.pop().ok_or_else(|| {
+                ProjectStoreResolutionError::StoreNotRegistered {
+                    project_id: project_id.to_string(),
+                }
+            })?,
+            _ => {
+                let mut store_ids = stores
+                    .into_iter()
+                    .map(|context| context.store.store_id)
+                    .collect::<Vec<_>>();
+                store_ids.sort();
+                return Err(ProjectStoreResolutionError::AmbiguousStores {
+                    project_id: project_id.to_string(),
+                    store_ids,
+                });
+            }
+        };
+        Ok(ProjectStoreResolution {
             project: context.project,
             store: store.store,
             graph_scopes: store.graph_scopes,
             artifacts: store.artifacts,
         })
-    }
-
-    pub async fn search_code_projects(&self, query: &str, limit: usize) -> Vec<CodeProjectRecord> {
-        match self.try_search_code_projects(query, limit).await {
-            Ok(projects) => projects,
-            Err(error) => {
-                tracing::warn!(%error, "optional project search failed");
-                Vec::new()
-            }
-        }
     }
 
     #[hotpath::measure(future = true, label = "global_db.registry.query.search")]
@@ -1579,18 +1695,22 @@ impl RegisteredGlobalDb {
         project_id_by_alias_key(self, &alias).await
     }
 
+    /// Deletes registry authority rows, returning the committed row count.
+    /// A failed transaction, delete, or commit is an error — never "0 deleted".
     #[hotpath::measure(future = true, label = "global_db.registry.persist.delete")]
-    pub async fn delete_code_projects(&self, project_ids: &[String]) -> usize {
+    pub async fn delete_code_projects(
+        &self,
+        project_ids: &[String],
+    ) -> tracedecay_runtime_core::errors::Result<usize> {
+        const OPERATION: &str = "delete registered code projects";
         const CHUNK: usize = 256;
         if project_ids.is_empty() {
-            return 0;
+            return Ok(0);
         }
         crate::hotpath_observe::record_transaction_rows(
             u64::try_from(project_ids.len()).unwrap_or(u64::MAX),
         );
-        let Ok(transaction) = self.begin_write_transaction().await else {
-            return 0;
-        };
+        let transaction = self.begin_write_transaction().await?;
         let mut total = 0_usize;
         for chunk in project_ids.chunks(CHUNK) {
             let sql = format!(
@@ -1598,51 +1718,58 @@ impl RegisteredGlobalDb {
                 vec!["?"; chunk.len()].join(",")
             );
             let values = chunk.iter().cloned().map(Value::Text).collect::<Vec<_>>();
-            if let Ok(deleted) = transaction.execute(&sql, values).await {
-                total = total.saturating_add(deleted as usize);
-            }
+            let deleted = transaction
+                .execute(&sql, values)
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            total = total.saturating_add(deleted as usize);
         }
-        if transaction.commit().await.is_ok() {
-            total
-        } else {
-            0
-        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        Ok(total)
     }
 
+    /// Deletes one savings-ledger row, returning how many rows went away
+    /// (0 when the path was never registered — a truthful absence).
     #[hotpath::measure(future = true, label = "global_db.registry.persist.delete_ledger")]
-    pub async fn delete_project(&self, project_path: &Path) {
+    pub async fn delete_project(
+        &self,
+        project_path: &Path,
+    ) -> tracedecay_runtime_core::errors::Result<usize> {
+        const OPERATION: &str = "delete registered project ledger row";
         crate::hotpath_observe::record_transaction_rows(1);
-        let Ok(transaction) = self.begin_write_transaction().await else {
-            return;
-        };
-        if transaction
+        let transaction = self.begin_write_transaction().await?;
+        let deleted = transaction
             .execute(
                 "DELETE FROM projects WHERE path = ?1",
                 params![project_path_alias_key(project_path)],
             )
             .await
-            .is_ok()
-        {
-            let _ = transaction.commit().await;
-        }
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        Ok(deleted as usize)
     }
 
-    pub async fn delete_projects(&self, project_paths: &[String]) -> usize {
-        self.delete_project_paths(project_paths).await
-    }
-
+    /// Deletes savings-ledger rows by path, returning the committed row count.
     #[hotpath::measure(future = true, label = "global_db.registry.persist.delete_paths")]
-    pub async fn delete_project_paths<P: AsRef<Path>>(&self, project_paths: &[P]) -> usize {
+    pub async fn delete_project_paths<P: AsRef<Path>>(
+        &self,
+        project_paths: &[P],
+    ) -> tracedecay_runtime_core::errors::Result<usize> {
+        const OPERATION: &str = "delete registered project ledger rows";
         const CHUNK: usize = 256;
         if project_paths.is_empty() {
-            return 0;
+            return Ok(0);
         }
         crate::hotpath_observe::record_transaction_rows(
             u64::try_from(project_paths.len()).unwrap_or(u64::MAX),
         );
-        let Ok(transaction) = self.begin_write_transaction().await else {
-            return 0;
-        };
+        let transaction = self.begin_write_transaction().await?;
         let mut total = 0_usize;
         for chunk in project_paths.chunks(CHUNK) {
             let sql = format!(
@@ -1653,15 +1780,17 @@ impl RegisteredGlobalDb {
                 .iter()
                 .map(|path| Value::Text(project_path_alias_key(path.as_ref())))
                 .collect::<Vec<_>>();
-            if let Ok(deleted) = transaction.execute(&sql, values).await {
-                total = total.saturating_add(deleted as usize);
-            }
+            let deleted = transaction
+                .execute(&sql, values)
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            total = total.saturating_add(deleted as usize);
         }
-        if transaction.commit().await.is_ok() {
-            total
-        } else {
-            0
-        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        Ok(total)
     }
 
     /// Lists registered code-project roots from one frozen runtime snapshot.

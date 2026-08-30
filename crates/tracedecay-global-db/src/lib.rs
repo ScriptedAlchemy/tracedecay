@@ -116,8 +116,8 @@ use project_registry::project_path_alias_key;
 /// Registry reap contract. Lives beside `plan_registry_reap`, its only producer.
 pub use project_registry::{
     EPHEMERAL_PROJECT_ROOT_REASON_CODE, GIT_COMMON_DIR_ALIAS_PREFIX, PROJECT_REGISTRY_AUTHORITY,
-    ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry, alias_key_path,
-    ephemeral_root_rejection, is_ephemeral_path,
+    ProjectStoreResolutionError, ReapEntryKind, RegistryReapEntry, RegistryReapPlan,
+    RetainedRegistryEntry, alias_key_path, ephemeral_root_rejection, is_ephemeral_path,
 };
 pub use registered::{
     DeliveryAttemptClaimV1, DeliverySourceReceiptReadV1, DurableDeliverySettlementReceiptV1,
