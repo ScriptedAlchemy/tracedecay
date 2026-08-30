@@ -1489,11 +1489,15 @@ async fn hermes_conflicting_identity_does_not_overwrite_committed_observation() 
             .await
             .is_empty()
     );
-    // Collision fails closed before advancing past the conflicting row.
-    assert_eq!(
-        observation_source_cursor(&db, "hermes", SESSION_ID, &project).await,
-        Some(prefix_cursor)
-    );
+    // The collision is a deterministic, non-retryable admission refusal:
+    // the committed observation is preserved and the conflicting row is
+    // covered (`admission_refused`), so the frontier advances exactly one
+    // row within the same generation instead of wedging on the conflict.
+    let after_conflict = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
+        .await
+        .expect("committed Hermes observation cursor");
+    assert_eq!(after_conflict.generation(), prefix_cursor.generation());
+    assert_eq!(after_conflict.position(), prefix_cursor.position() + 1);
 }
 
 #[tokio::test]
