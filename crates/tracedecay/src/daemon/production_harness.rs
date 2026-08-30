@@ -805,7 +805,7 @@ async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     scope: &tracedecay_application::ResolvedScope,
-) -> Result<code_index_scheduler::LatestCompleteCodeIndexV1> {
+) -> Result<Option<code_index_scheduler::LatestCompleteCodeIndexV1>> {
     timeout(Duration::from_secs(20), async {
         loop {
             // Scope-aware readiness is the authenticated demand boundary that
@@ -816,7 +816,19 @@ async fn wait_for_production_composition_code_index(
                 .latest_complete_ready_for_scope(scope)
                 .await
             {
-                return latest;
+                return Some(latest);
+            }
+            // A project whose verified source publishes no generation at all
+            // (every file unsupported or unextractable) is a typed state, not
+            // a warming one: waiting for its publication would always exhaust
+            // the timeout. The composition still mounts; graph-backed reads
+            // then report their typed generation-unavailable refusals.
+            if invocation
+                .code_index_schedulers
+                .reconciled_without_generation_for_scope(scope)
+                .await
+            {
+                return None;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

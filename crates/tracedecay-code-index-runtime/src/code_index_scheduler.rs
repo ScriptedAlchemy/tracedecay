@@ -5996,6 +5996,22 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.verified_against_source
     }
 
+    /// True when reconciliation has verified the live worktree against source
+    /// truth and that verified source publishes no code generation at all —
+    /// the typed state of a project whose files are all unsupported,
+    /// unextractable, or absent. Distinct from a warming scheduler, whose
+    /// verification has not run yet, and from a publish failure, which leaves
+    /// `verified_against_source` untouched by returning an error instead.
+    pub fn reconciled_without_generation(&self) -> bool {
+        self.verified_against_source
+            && self
+                .publication
+                .load_active_shared()
+                .ok()
+                .flatten()
+                .is_none()
+    }
+
     pub fn pending_hint_count(&self) -> Option<u64> {
         let hints = self
             .hints

@@ -553,16 +553,17 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
 #[cfg(feature = "test-transport")]
 pub(crate) async fn install_project_open_source_edit_owners_for_test(
     server: &McpServer,
-) -> Result<()> {
+) -> Result<bool> {
     let graph = server.cg().await;
-    let code_graph =
-        server
-            .code_graph_projection_read_port()
-            .ok_or_else(|| TraceDecayError::Config {
-                message:
-                    "test source-edit owner requires the production code-graph projection port"
-                        .to_owned(),
-            })?;
+    let Some(code_graph) = server.code_graph_projection_read_port() else {
+        // A directly constructed test server carries no production code-graph
+        // projection port, so the daemon-owned source-edit authority cannot
+        // mount. Report that typed state instead of failing: the dispatch
+        // boundary (selector rejection, argument validation) is still the
+        // production path, and an actual edit then reports its typed
+        // executor-unavailable refusal rather than dying here before dispatch.
+        return Ok(false);
+    };
     let project_root = graph.project_root().to_path_buf();
     let project_id = graph
         .configuration_runtime()
@@ -585,7 +586,8 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
         code_graph,
         authorization,
         SourceEditMutationGate::ready(),
-    )
+    )?;
+    Ok(true)
 }
 
 /// Registers code-index-independent owners for one newly inserted project.

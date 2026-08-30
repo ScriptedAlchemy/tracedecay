@@ -80,7 +80,13 @@ async fn open_project(
         &composition.canonical_project_path,
         &code_search_scope,
     )
-    .await?;
+    .await?
+    .ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "capacity-journey project '{}' has extractable sources but published no generation",
+            composition.canonical_project_path.display()
+        ),
+    })?;
     Ok((composition, latest))
 }
 
