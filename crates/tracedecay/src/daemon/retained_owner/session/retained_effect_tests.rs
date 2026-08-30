@@ -100,7 +100,7 @@ impl RetiredRefreshFixture {
         .expect("project retrieval service");
         let refresh = Arc::new(DaemonSessionRefreshService::new(
             database.clone(),
-            wake,
+            Arc::new(wake),
             Some(project_id.as_str().to_owned()),
         ));
         let workflow_index = Arc::new(DaemonWorkflowIndexReadService::new(database.clone()));

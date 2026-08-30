@@ -1857,10 +1857,10 @@ pub struct CodeIndexPublishEvidenceV1 {
     pub snapshot_content_identity: ContentDigest,
     /// Publication receipt evidence: asserted by determinism tests, not read
     /// on any production path.
-    pub _lane_digest: ManifestDigest,
+    pub lane_digest: ManifestDigest,
     /// Publication receipt evidence: asserted by determinism tests, not read
     /// on any production path.
-    pub _file_occurrence_ids: Vec<FileOccurrenceId>,
+    pub file_occurrence_ids: Vec<FileOccurrenceId>,
     pub reextracted_files: usize,
     pub changed_chunks: usize,
     pub reused_chunks: usize,
@@ -4900,8 +4900,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 generation_id: pending.manifest().generation_id.clone(),
                 repository_id: self.repository_id.clone(),
                 snapshot_content_identity,
-                _lane_digest: lane_digest,
-                _file_occurrence_ids: pending
+                lane_digest,
+                file_occurrence_ids: pending
                     .snapshot()
                     .files
                     .iter()
@@ -5097,8 +5097,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 generation_id: generation.manifest().generation_id.clone(),
                 repository_id: self.repository_id.clone(),
                 snapshot_content_identity: generation.snapshot().content_identity.clone(),
-                _lane_digest: lane_digest,
-                _file_occurrence_ids: generation
+                lane_digest,
+                file_occurrence_ids: generation
                     .snapshot()
                     .files
                     .iter()
@@ -5543,8 +5543,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                     generation_id: generation.manifest().generation_id.clone(),
                     repository_id: self.repository_id.clone(),
                     snapshot_content_identity: generation.snapshot().content_identity.clone(),
-                    _lane_digest: lane_digest,
-                    _file_occurrence_ids: generation
+                    lane_digest,
+                    file_occurrence_ids: generation
                         .snapshot()
                         .files
                         .iter()

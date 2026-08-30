@@ -9,13 +9,19 @@ use tracedecay_application::ResolvedScope;
 use tracedecay_domain::ProjectId;
 use tracedecay_query::code_search;
 
+/// Typed refusal for scope resolution. The composition root deliberately
+/// narrows its internal contract errors to this: the executors map every
+/// resolution failure onto the search-unavailable vocabulary uniformly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeIndexScopeUnavailableV1;
+
 /// Scope resolver the search/diff executors call for each request root.
 pub trait CodeIndexScopeResolverV1: Clone + Send + Sync + 'static {
     fn resolved_scope_for_project(
         &self,
         project_root: &Path,
         project_id: &ProjectId,
-    ) -> Result<ResolvedScope, ()>;
+    ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1>;
 }
 
 /// Closed admission refusal vocabulary the executors map onto search outcomes.

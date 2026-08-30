@@ -1913,7 +1913,7 @@ mod tests {
         assert!(
             administration
                 .profile_host_admission_replay
-                .wait_bootstrap_completed(&profile_root, Duration::from_secs(60))
+                .wait_bootstrap_completed(&profile_root, Duration::from_mins(1))
                 .await,
             "production bootstrap worker must publish its terminal state"
         );
