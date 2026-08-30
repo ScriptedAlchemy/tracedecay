@@ -44,14 +44,6 @@
 #![allow(clippy::large_futures)]
 #![allow(unreachable_pub)]
 #![allow(clippy::large_enum_variant)]
-// Waivers carried over from the composition root this wire code was extracted
-// from: telemetry casts, deliberately explicit wire-enum match arms, and the
-// serialized handshake flag set keep their pre-extraction lint posture.
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::match_same_arms)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
 
 pub mod client;
 pub mod client_identity;
