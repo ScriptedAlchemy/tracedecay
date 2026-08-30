@@ -39,7 +39,7 @@ mod artifacts;
 
 pub use artifacts::{
     CodeFileIndexArtifactsV1, CodeIndexEdgeAbstentionReasonV1, CodeIndexEdgeAbstentionV1,
-    CodeIndexImportEvidenceV1,
+    CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
 };
 
 /// Eligibility of one generation-bound file document for chunk production.
@@ -1202,10 +1202,9 @@ impl DeterministicCodeChunker {
             self.lineage_symbols(source, &file_identity, &symbol_rows)
         })?;
         let mut relation_edges = result.edges.clone();
-        relation_edges.extend(resolve_same_file_references(
-            &result.unresolved_refs,
-            &symbol_rows,
-        ));
+        let (same_file_edges, unresolved_references) =
+            resolve_file_references(&result.unresolved_refs, &symbol_rows);
+        relation_edges.extend(same_file_edges);
         let (edges, edge_abstentions) = canonical_relation_edges(&relation_edges, &symbol_rows);
 
         let eligibility = if partial_reason.is_empty() {
@@ -1230,6 +1229,7 @@ impl DeterministicCodeChunker {
             symbols,
             edges,
             edge_abstentions,
+            unresolved_references,
             artifact,
             batch,
         )
@@ -1704,12 +1704,42 @@ impl DeterministicCodeChunker {
     }
 }
 
-/// Resolve same-file symbol references (calls and other extractor
-/// reference kinds) into relation edges. Only an UNAMBIGUOUS name match
-/// against this file's own symbol table resolves; ambiguous or unmatched
-/// references stay unresolved rather than guessing. Cross-file resolution
-/// requires the dependency closure and is deliberately not attempted here.
-fn resolve_same_file_references(unresolved: &[UnresolvedRef], symbols: &[SymbolRow]) -> Vec<Edge> {
+/// Names too ubiquitous to resolve across files by name alone: standard
+/// library types, universal trait methods, and container operations that
+/// fabricate false edges when matched outside their defining file. Same-file
+/// resolution still binds them (a unique kind-compatible local definition is
+/// real evidence); generation sealing never binds them cross-file.
+pub(crate) const CROSS_FILE_REFERENCE_BLOCKLIST: &[&str] = &[
+    // Rust std types / prelude
+    "Result", "Option", "String", "Vec", "Box", "Arc", "Rc", "Ok", "Err", "Some", "None",
+    // Ubiquitous trait methods
+    "fmt", "format", "display", "to_string", "clone", "clone_from", "default", "from", "into",
+    "try_from", "try_into", "new", "build", "builder", "parse", "from_str", "eq", "ne", "cmp",
+    "partial_cmp", "hash", "next", "iter", "into_iter", "drop", "deref", "deref_mut", "as_ref",
+    "as_mut", "borrow", "borrow_mut", "read", "write", "flush", "close", "len", "is_empty",
+    "contains", "push", "pop", "insert", "remove", "get", "unwrap", "expect", "map", "and_then",
+    "or_else", "unwrap_or",
+    // Common test/assertion names
+    "assert", "assert_eq", "assert_ne", "debug_assert",
+    // Common patterns matched across files
+    "run", "start", "stop", "init", "setup",
+    // Stdlib method names that collide with user-defined functions
+    "status", "modified", "output", "exists", "join", "to_owned", "collect", "filter", "find",
+    "take", "skip", "count", "sum", "max", "min", "sort", "extend", "chain", "zip", "enumerate",
+    "flatten", "open", "create", "metadata", "canonicalize", "spawn", "wait", "send", "recv",
+    "lock", "try_lock",
+];
+
+/// Resolve same-file symbol references (calls and other extractor reference
+/// kinds) into relation edges, and retain the references this file cannot
+/// bind as typed cross-file candidates. Only an UNAMBIGUOUS kind-compatible
+/// name match against this file's own symbol table resolves; ambiguous or
+/// unmatched references stay unresolved rather than guessing. Cross-file
+/// resolution requires the whole generation's symbol set and runs at sealing.
+fn resolve_file_references(
+    unresolved: &[UnresolvedRef],
+    symbols: &[SymbolRow],
+) -> (Vec<Edge>, Vec<CodeIndexUnresolvedReferenceV1>) {
     let mut by_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
     for symbol in symbols {
         by_name
@@ -1717,39 +1747,164 @@ fn resolve_same_file_references(unresolved: &[UnresolvedRef], symbols: &[SymbolR
             .or_default()
             .push(symbol);
     }
-    let mut resolved = Vec::new();
-    for reference in unresolved {
-        let Some(candidates) = by_name.get(reference.reference_name.as_str()) else {
-            continue;
-        };
-        let compatible = candidates
-            .iter()
-            .copied()
-            .filter(|target| {
-                reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
-            })
-            .collect::<Vec<_>>();
-        let [target] = compatible.as_slice() else {
-            continue;
-        };
-        resolved.push(Edge {
-            source: reference.from_node_id.clone(),
-            target: target.node_id.clone(),
-            kind: reference.reference_kind,
-            line: Some(reference.line),
-        });
+    // A node id normally identifies one symbol row; duplicates abstain rather
+    // than anchoring retained evidence to an arbitrary row.
+    let mut by_node_id: BTreeMap<&str, Option<&SymbolRow>> = BTreeMap::new();
+    for symbol in symbols {
+        by_node_id
+            .entry(symbol.node_id.as_str())
+            .and_modify(|entry| *entry = None)
+            .or_insert(Some(symbol));
     }
-    resolved
+    // Extractors emit a bare method-name duplicate alongside every dotted
+    // receiver call (`self.rows.push(row)` → `self.rows.push` + `push`) so an
+    // in-file method definition can still match. Index those duplicates by
+    // their call site: a duplicate that binds back to its own enclosing symbol
+    // is a receiver whose type is unknown (usually a container or another
+    // struct's method sharing the name), not evidence of recursion.
+    let dotted_duplicate_sites = unresolved
+        .iter()
+        .filter(|reference| reference.reference_name.contains('.'))
+        .filter_map(|reference| {
+            let simple = reference.reference_name.rsplit('.').next()?;
+            (simple != reference.reference_name).then_some((
+                reference.from_node_id.as_str(),
+                reference.line,
+                reference.column,
+                simple,
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut resolved = Vec::new();
+    let mut retained = Vec::new();
+    for reference in unresolved {
+        let compatible = by_name
+            .get(reference.reference_name.as_str())
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|target| {
+                        reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        match compatible.as_slice() {
+            [target] => {
+                if target.node_id == reference.from_node_id
+                    && dotted_duplicate_sites.contains(&(
+                        reference.from_node_id.as_str(),
+                        reference.line,
+                        reference.column,
+                        reference.reference_name.as_str(),
+                    ))
+                {
+                    continue;
+                }
+                resolved.push(Edge {
+                    source: reference.from_node_id.clone(),
+                    target: target.node_id.clone(),
+                    kind: reference.reference_kind,
+                    line: Some(reference.line),
+                });
+            }
+            [] => {
+                if let Some(candidate) = cross_file_reference_candidate(reference, &by_node_id) {
+                    retained.push(candidate);
+                }
+            }
+            // Same-file ambiguity: adding cross-file candidates can only make
+            // it more ambiguous, so the reference stays unresolved.
+            _ => {}
+        }
+    }
+    (resolved, retained)
 }
 
+/// The retained cross-file form of one reference the file could not bind, or
+/// `None` when the reference can never bind cross-file: receiver-dotted
+/// paths (unknown receiver type), blocklisted ubiquitous names, relation
+/// kinds outside the canonical graph contract, and references whose
+/// enclosing symbol is not uniquely identified.
+fn cross_file_reference_candidate(
+    reference: &UnresolvedRef,
+    by_node_id: &BTreeMap<&str, Option<&SymbolRow>>,
+) -> Option<CodeIndexUnresolvedReferenceV1> {
+    if reference.reference_name.contains('.') {
+        return None;
+    }
+    let simple_name = reference
+        .reference_name
+        .rsplit("::")
+        .next()
+        .unwrap_or(reference.reference_name.as_str());
+    if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+        return None;
+    }
+    let kind = canonical_relation_kind(&reference.reference_kind)?;
+    let from = (*by_node_id.get(reference.from_node_id.as_str())?)?;
+    Some(CodeIndexUnresolvedReferenceV1 {
+        from_occurrence: from.occurrence.clone(),
+        reference_name: reference.reference_name.clone(),
+        kind,
+        evidence_span: from.span,
+    })
+}
+
+/// The structural compatibility matrix between a reference's edge kind and a
+/// candidate target's node kind. Deliberately conservative where the edge
+/// kind constrains the target shape: `Implements`/`Extends`/`DerivesMacro`
+/// must bind a trait-shaped target and `Calls` a callable one — otherwise a
+/// `Calls` ref named `new` happily binds a same-file `struct new`, and an
+/// `impl Default for X` ref poisons rank/impls by binding an unrelated
+/// `Default` enum variant. Everything else stays permissive.
 fn reference_target_kind_is_compatible(reference_kind: EdgeKind, target_kind: &str) -> bool {
+    match canonical_relation_kind(&reference_kind) {
+        Some(kind) => relation_target_kind_is_compatible(kind, target_kind),
+        // `DerivesMacro` has no canonical relation kind (it abstains at
+        // canonicalization) but still binds trait-shaped targets only, so the
+        // abstention names a plausible endpoint rather than a name collision.
+        None => relation_target_kind_is_compatible(RelationEdgeKindV1::Implements, target_kind),
+    }
+}
+
+/// [`reference_target_kind_is_compatible`] over the canonical relation kinds,
+/// shared with generation sealing's cross-file resolution.
+pub(crate) fn relation_target_kind_is_compatible(
+    kind: RelationEdgeKindV1,
+    target_kind: &str,
+) -> bool {
     let Some(target_kind) = NodeKind::from_str(target_kind) else {
         return false;
     };
-    match reference_kind {
-        EdgeKind::Implements => matches!(
+    match kind {
+        RelationEdgeKindV1::Implements | RelationEdgeKindV1::Extends => matches!(
             target_kind,
-            NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType
+            NodeKind::Trait
+                | NodeKind::Interface
+                | NodeKind::InterfaceType
+                | NodeKind::Class
+                | NodeKind::InnerClass
+                | NodeKind::AbstractMethod
+                | NodeKind::SealedClass
+                | NodeKind::Annotation
+                | NodeKind::TypeAlias
+        ),
+        RelationEdgeKindV1::Calls => matches!(
+            target_kind,
+            NodeKind::Function
+                | NodeKind::Method
+                | NodeKind::StructMethod
+                | NodeKind::Constructor
+                | NodeKind::AbstractMethod
+                | NodeKind::ArrowFunction
+                | NodeKind::Procedure
+                | NodeKind::Macro
+        ),
+        RelationEdgeKindV1::Annotates => matches!(
+            target_kind,
+            NodeKind::Annotation | NodeKind::Decorator | NodeKind::AnnotationUsage
         ),
         _ => true,
     }
@@ -3121,10 +3276,15 @@ pub fn real_symbol() {}
             file_path: "src/lib.rs".to_owned(),
         };
 
-        let resolved = resolve_same_file_references(&[reference], &[enum_variant, trait_target]);
+        let (resolved, retained) =
+            resolve_file_references(&[reference], &[enum_variant, trait_target]);
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].kind, EdgeKind::Implements);
         assert_eq!(resolved[0].target, "node.trait.default");
+        assert!(
+            retained.is_empty(),
+            "a same-file-resolved reference must not also be retained: {retained:?}"
+        );
     }
 
     #[test]
