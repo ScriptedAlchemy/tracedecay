@@ -803,8 +803,11 @@ impl GraphDbRegistry {
                 // fields byte-exactly), the same trust decision the recover
                 // fast path makes in `load_verified_head`. A fresh-from-disk
                 // instance starts with an empty cache and pays the full
-                // proof below.
-                if let Some(lease) = database.verified_generation(&locator)?
+                // proof below, and a quarantined generation is deliberately
+                // a cache miss here: this publication re-projects the rows
+                // and re-proves the digest, which is the repair the
+                // quarantine was waiting for.
+                if let Some(lease) = database.republishable_verified_generation(&locator)?
                     && lease.head == historical_head
                 {
                     operation.check(self, context)?;

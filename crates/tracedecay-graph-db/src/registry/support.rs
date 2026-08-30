@@ -15,7 +15,7 @@ use super::{
 use crate::error::rollback_failure;
 use crate::location::PersistentGraphStoreState;
 use crate::{
-    GraphCancellation, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
+    GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
     GraphDbRuntimeState, GraphDurability, GraphFormatVersion,
 };
 
@@ -71,24 +71,10 @@ pub(super) fn open_registered_graph(
         "registry.open",
     )?;
     let persistent_store_state = inspect_graph_database_file(path)?;
-    let cancellation: Arc<dyn GraphCancellation> = match persistent_store_state {
-        PersistentGraphStoreState::Prospective => Arc::new(ProspectiveGraphFormatCancellation),
-        PersistentGraphStoreState::Existing => Arc::new(RegisteredGraphOpenCancellation {
-            request: Arc::clone(&registration.cancellation),
-            lifecycle: Arc::clone(&registration.lifecycle_cancellation),
-        }),
-    };
-    let owner = GraphDbOwner::open_registered(
-        GraphDbOpenOptions {
-            location: GraphDbLocation::Persistent(path.to_path_buf()),
-            expected_format,
-            durability: GraphDurability::WalSync,
-            cancellation,
-        },
-        persistent_store_state,
-        authority_attachment,
-    )?;
-    if persistent_store_state == PersistentGraphStoreState::Prospective
+    let (database, final_store_state) =
+        open_registered_database(path, expected_format, registration, persistent_store_state)?;
+    let owner = GraphDbOwner::register_database(database, authority_attachment)?;
+    if final_store_state == PersistentGraphStoreState::Prospective
         && let Err(error) = check_request(
             registration.lifecycle_cancellation.as_ref(),
             registration.deadline,
@@ -112,6 +98,77 @@ pub(super) fn open_registered_graph(
         };
     }
     Ok(owner)
+}
+
+/// Opens the registry-owned database, running the deterministic-corruption
+/// quarantine protocol when a preexisting container reports the typed
+/// corruption verdict, then reopening the vacated path as a fresh store that
+/// the canonical replay authorities re-project into.
+fn open_registered_database(
+    path: &Path,
+    expected_format: GraphFormatVersion,
+    registration: &GraphDbRegistration,
+    persistent_store_state: PersistentGraphStoreState,
+) -> Result<(Arc<GraphDb>, PersistentGraphStoreState), GraphDbError> {
+    let open = |state: PersistentGraphStoreState| {
+        GraphDb::open_with_store_state(
+            registered_open_options(path, expected_format, registration, state),
+            Some(state),
+        )
+    };
+    match open(persistent_store_state) {
+        Ok(database) => Ok((database, persistent_store_state)),
+        Err(GraphDbError::Corrupt { message })
+            if persistent_store_state == PersistentGraphStoreState::Existing =>
+        {
+            let recovery = crate::store_quarantine::recover_deterministically_corrupt_container(
+                path,
+                &message,
+                &|| open(PersistentGraphStoreState::Existing),
+            )?;
+            match recovery {
+                crate::store_quarantine::CorruptStoreRecovery::Reopened(database) => {
+                    Ok((database, PersistentGraphStoreState::Existing))
+                }
+                crate::store_quarantine::CorruptStoreRecovery::Quarantined {
+                    quarantine_directory,
+                } => {
+                    let fresh_state = inspect_graph_database_file(path)?;
+                    let database = open(fresh_state)?;
+                    tracing::info!(
+                        event = "store_rebuilt_after_quarantine",
+                        container = %path.display(),
+                        quarantine = %quarantine_directory.display(),
+                        "fresh graph store opened after corruption quarantine; canonical \
+                         replay authorities re-project its generations"
+                    );
+                    Ok((database, fresh_state))
+                }
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn registered_open_options(
+    path: &Path,
+    expected_format: GraphFormatVersion,
+    registration: &GraphDbRegistration,
+    persistent_store_state: PersistentGraphStoreState,
+) -> GraphDbOpenOptions {
+    let cancellation: Arc<dyn GraphCancellation> = match persistent_store_state {
+        PersistentGraphStoreState::Prospective => Arc::new(ProspectiveGraphFormatCancellation),
+        PersistentGraphStoreState::Existing => Arc::new(RegisteredGraphOpenCancellation {
+            request: Arc::clone(&registration.cancellation),
+            lifecycle: Arc::clone(&registration.lifecycle_cancellation),
+        }),
+    };
+    GraphDbOpenOptions {
+        location: GraphDbLocation::Persistent(path.to_path_buf()),
+        expected_format,
+        durability: GraphDurability::WalSync,
+        cancellation,
+    }
 }
 
 fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
