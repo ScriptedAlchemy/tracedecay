@@ -339,7 +339,8 @@ async fn capture_hermes_profile(
         ctx.max_new_bytes,
         ctx.cancellation,
     )
-    .await;
+    .await
+    .ok_or_else(|| config_error("Hermes transcript source is unavailable"))?;
     Ok(TranscriptCaptureOutcome {
         messages_upserted: outcome.stats.messages_upserted,
         source_deferred: outcome.deferred_by_byte_cap,
@@ -390,7 +391,8 @@ async fn capture_hermes_project(
         ctx.max_new_bytes,
         ctx.cancellation,
     )
-    .await;
+    .await
+    .ok_or_else(|| config_error("Hermes transcript source is unavailable"))?;
     Ok(TranscriptCaptureOutcome {
         messages_upserted: outcome.stats.messages_upserted,
         source_deferred: outcome.deferred_by_byte_cap,

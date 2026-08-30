@@ -214,6 +214,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
 
     pub(super) fn read_store_size(
         &mut self,
+        reply_bound: std::time::Duration,
     ) -> Result<worker::StoreSizeTelemetrySample, ReaderAcquireError> {
         if self.snapshot_active {
             return Err(ReaderAcquireError::Worker(
@@ -229,7 +230,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         self.checkout
             .worker
             .client
-            .store_size()
+            .store_size(reply_bound)
             .map_err(map_worker_error)
     }
 

@@ -1133,11 +1133,11 @@ thread_local! {
 /// paths and vanished paths yield `None`, so identity is only widened by
 /// verifiable filesystem evidence.
 ///
-/// `Path::canonicalize` is memoized per distinct `project_path` for the
+/// Canonicalization is memoized per distinct `project_path` for the
 /// current thread so a drain or rebuild transaction does not re-walk the
 /// filesystem for the same family root on every session write.
 ///
-/// On macOS, `Path::canonicalize` expands firmlinks such as `/var` ->
+/// On macOS, canonicalization expands firmlinks such as `/var` ->
 /// `/private/var`. Prefer the stable public `/var/...` spelling (same policy as
 /// [`tracedecay_sessions::runtime::git_correlation::normalize_worktree`]) so host-reported
 /// temp/project roots are not rewritten into a form that breaks search keys and
@@ -1154,7 +1154,11 @@ fn canonical_project_path(path: &str) -> Option<String> {
 }
 
 fn compute_canonical_project_path(path: &str) -> Option<String> {
-    let canonical = std::path::Path::new(path).canonicalize().ok()?;
+    let path_ref = std::path::Path::new(path);
+    if !path_ref.exists() {
+        return None;
+    }
+    let canonical = tracedecay_runtime_core::path_safety::canonicalize_existing_prefix(path_ref)?;
     let mut canonical = canonical.to_string_lossy().into_owned();
     if let Some(stripped) = canonical.strip_prefix("/private/var/") {
         canonical = format!("/var/{stripped}");

@@ -14,16 +14,16 @@ final-status-level = "slow"
 path = "junit.xml"
 
 # Heavy daemon git-metadata-watcher tests do real work — 50 sequential `git
-# commit`s, concurrent extractions, worktree add + store-layout GC. Their
-# assertions are order-independent (final indexed state / GC report /
-# single-flight outcome), so they are correct regardless of interleaving, but
-# under parallel CI load the real git+extraction work can be STARVED past the
-# global 6-minute slow-timeout and killed. Raising the terminate ceiling for
-# just these tests removes that wall-time-budget sensitivity without touching
-# any assertion or adding a sleep. Applies on all hosts (the flake is a
-# scheduler-starvation timeout, not a Windows-only concern).
+# commit`s, concurrent reconciliations, and the code-index-runtime watcher
+# unit suite. Their assertions are order-independent (final indexed state /
+# single sealed generation), so they are correct regardless of interleaving,
+# but under parallel CI load the real git+extraction work can be STARVED past
+# the global 6-minute slow-timeout and killed. Raising the terminate ceiling
+# for just these tests removes that wall-time-budget sensitivity without
+# touching any assertion or adding a sleep. Applies on all hosts (the flake
+# is a scheduler-starvation timeout, not a Windows-only concern).
 [[profile.ci.overrides]]
-filter = '(binary(=daemon_suite) & test(/^git_watch_test::(fifty_commit_rebase_needs_one_sync|concurrent_syncs_are_single_flight|deleted_branch_store_gc_fails_closed_without_daemon_administration)$/)) | (binary(=tracedecay) & test(~daemon::git_watch::tests::))'
+filter = '(binary(=daemon_suite) & test(/^git_watch_test::(one_reconciliation_covers_a_fifty_commit_frontier|concurrent_reconciliations_converge_on_one_sealed_generation)$/)) | (binary(=tracedecay_code_index_runtime) & test(~git_watch::tests::))'
 slow-timeout = { period = "60s", terminate-after = 10 }
 
 [test-groups]

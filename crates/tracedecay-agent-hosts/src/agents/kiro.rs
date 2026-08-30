@@ -29,9 +29,9 @@ use tracedecay_automation_runtime::automation::skill_targets::{
 };
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
-    UpdatePluginOutcome, backup_config_file, config_backup_path, install_mcp_server_entry,
-    load_json_file, load_json_file_strict, mcp_config_has_tracedecay, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    McpUninstallPolicy, UpdatePluginOutcome, backup_config_file, config_backup_path,
+    install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay, safe_write_json_file,
     uninstall_mcp_server_entry,
 };
 
@@ -632,7 +632,7 @@ fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
         "mcpServers",
         mcp_server_entry(tracedecay_bin),
         "Kiro",
-        load_json_file_strict,
+        JsonConfigDialect::Json,
     )
 }
 
@@ -801,11 +801,10 @@ fn uninstall_mcp_server(path: &Path) -> Result<()> {
     uninstall_mcp_server_entry(
         path,
         "mcpServers",
-        load_json_file,
+        JsonConfigDialect::Json,
         McpUninstallPolicy {
             prune_empty_root: true,
             remove_empty_file: true,
-            durable_remove: true,
         },
     )
 }

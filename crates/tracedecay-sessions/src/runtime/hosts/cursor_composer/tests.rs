@@ -631,7 +631,10 @@ async fn open_temp_kv_db_with_sql(setup_sql: &str) -> (tempfile::TempDir, ReadOn
 async fn rusqlite_foreign_reader_is_immutable_query_only_and_no_create() {
     let tmp = tempfile::TempDir::new().unwrap();
     let missing = tmp.path().join("missing-state.vscdb");
-    assert!(open_readonly_immutable(&missing).await.is_none());
+    assert!(
+        open_readonly_immutable(&missing).await.is_err(),
+        "a missing Cursor database is a typed open miss, not a silent None"
+    );
     assert!(
         !missing.exists(),
         "read-only foreign open must not create a missing Cursor database"
@@ -700,6 +703,81 @@ async fn rusqlite_foreign_reader_is_immutable_query_only_and_no_create() {
     assert!(
         !journal.exists(),
         "immutable read must not create a rollback journal"
+    );
+}
+
+#[cfg(unix)]
+fn write_unreadable_file(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, b"present but denied").unwrap();
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o000);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
+#[cfg(unix)]
+fn restore_file_permissions(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o644);
+    let _ = std::fs::set_permissions(path, permissions);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn present_unreadable_composer_store_is_a_typed_open_failure() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("state.vscdb");
+    write_unreadable_file(&path);
+    let error = match open_readonly_immutable(&path).await {
+        Ok(_) => {
+            restore_file_permissions(&path);
+            panic!("present unreadable store must not open as success")
+        }
+        Err(error) => error,
+    };
+    restore_file_permissions(&path);
+    assert!(
+        error.contains("read-only"),
+        "open failure must stay typed, got {error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn present_unreadable_state_db_defers_the_composer_sweep() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    write_unreadable_file(&state_db);
+
+    let project_id =
+        tracedecay_domain::ProjectId::new("project.cursor-composer-unreadable").unwrap();
+    let admission = MemoryHostAdmission::default();
+    let source = CursorComposerSource::with_home(home.path());
+    let outcome = source
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .expect("unreadable store must finish as a deferred sweep, not a silent zero-work Ok");
+    restore_file_permissions(&state_db);
+
+    assert_eq!(outcome.messages_upserted, 0);
+    assert!(
+        outcome.deferred_by_byte_cap,
+        "a present-but-unreadable state.vscdb must defer so catch-up retries"
     );
 }
 

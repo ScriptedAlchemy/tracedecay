@@ -1,8 +1,17 @@
-//! Content-similarity primitives shared by the write-time diff check and the
-//! dashboard's similarity/curation analytics.
+//! Write-time near-duplicate and dashboard similarity primitives.
 //!
-//! Runtime and dashboard consumers share these token-overlap primitives so
-//! retrieval and curation classification cannot drift.
+//! Tokenization here is English-prose oriented: a token may continue with
+//! hyphen or apostrophe, trailing `_`/`'`/`-` is trimmed, and a stopword
+//! list is dropped so overlap scores measure content words. Dashboard
+//! curation analytics and write-time near-duplicate checks share this
+//! classifier so those two surfaces cannot drift.
+//!
+//! This is **not** the project-memory fact-search tokenizer
+//! (`store::memory::scoring::project_memory_tokens`). Search keeps path-like
+//! punctuation (`/`, `:`, `.`) as token characters and does not strip
+//! stopwords, so FTS queries and Jaccard scoring can match identifiers
+//! such as `crate::foo` and `src/lib.rs`. Unifying the two would change
+//! either search hits or similarity classification.
 
 use std::collections::BTreeSet;
 

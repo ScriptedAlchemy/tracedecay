@@ -31,14 +31,20 @@ pub enum NativeIntegrationStoreError {
     CleanupReceiptConflict,
     #[error("native integration repository is quarantined")]
     RepositoryQuarantined,
-    #[error("native integration store is unavailable")]
-    Unavailable,
+    #[error("native integration store is unavailable: {0}")]
+    Unavailable(String),
     #[error("native integration store requires reset")]
     ResetRequired,
     #[error("native integration store durability is uncertain")]
     DurabilityUncertain,
     #[error("native integration stored data is invalid: {0}")]
     InvalidData(String),
+}
+
+impl NativeIntegrationStoreError {
+    pub fn unavailable(source: impl std::fmt::Display) -> Self {
+        Self::Unavailable(source.to_string())
+    }
 }
 
 impl From<DomainError> for NativeIntegrationStoreError {
@@ -194,7 +200,9 @@ pub trait NativeIntegrationStore: Send + Sync {
         _repository_id: &RepositoryId,
         _limit: u32,
     ) -> NativeIntegrationStoreResult<Vec<NativeWorktreeCleanupTransactionV1>> {
-        Err(NativeIntegrationStoreError::Unavailable)
+        Err(NativeIntegrationStoreError::unavailable(
+            "pending worktree cleanups are not implemented",
+        ))
     }
 
     fn compare_and_swap_worktree_cleanup(
