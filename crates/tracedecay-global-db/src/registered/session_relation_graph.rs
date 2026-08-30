@@ -14,7 +14,7 @@ impl RegisteredGlobalDb {
         graph: tracedecay_graph_db::GraphDbLeaseV1,
         graph_binding: StoreRuntimeBindingV1,
         graph_verified_locator: VerifiedStoreLocatorV1,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let shard = &self.binding().shard_id;
         let exact = match (&shard.scope, &scope) {
             (
@@ -67,7 +67,7 @@ impl RegisteredGlobalDb {
 
     pub(crate) fn session_relation_graph(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<(
+    ) -> tracedecay_domain::errors::Result<(
         &SessionRelationScope,
         &tracedecay_graph_db::GraphDbLeaseV1,
         &StoreRuntimeBindingV1,
@@ -86,16 +86,14 @@ impl RegisteredGlobalDb {
 
     pub fn session_relation_graph_identity(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<(&StoreRuntimeBindingV1, &VerifiedStoreLocatorV1)>
-    {
+    ) -> tracedecay_domain::errors::Result<(&StoreRuntimeBindingV1, &VerifiedStoreLocatorV1)> {
         let (_, _, binding, locator) = self.session_relation_graph()?;
         Ok((binding, locator))
     }
 
     pub fn session_relation_store(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<(&SessionRelationScope, SessionRelationGraphStore)>
-    {
+    ) -> tracedecay_domain::errors::Result<(&SessionRelationScope, SessionRelationGraphStore)> {
         let (scope, graph, _, _) = self.session_relation_graph()?;
         Ok((scope, SessionRelationGraphStore::new(graph.clone())))
     }
@@ -105,7 +103,7 @@ impl RegisteredGlobalDb {
     /// [`SessionRelationGraphStore`] without crossing crate versions.
     pub fn session_relation_graph_lease(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_graph_db::GraphDbLeaseV1> {
+    ) -> tracedecay_domain::errors::Result<tracedecay_graph_db::GraphDbLeaseV1> {
         let (_, graph, _, _) = self.session_relation_graph()?;
         Ok(graph.clone())
     }

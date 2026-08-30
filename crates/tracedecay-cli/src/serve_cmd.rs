@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 use tracedecay::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Returns the first plausible unexpanded `${...}` template variable in a
 /// `--path` argument (e.g. `${workspaceFolder}`), or `None` when the value

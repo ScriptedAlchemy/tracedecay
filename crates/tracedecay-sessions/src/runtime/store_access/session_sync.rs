@@ -2,7 +2,7 @@ use tracedecay_runtime_core::db::engine::{Value, params};
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot, collect_rowid_pages, collect_rowid_pages_with,
 };
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 use super::super::registered_db::{SessionExec, SessionRegisteredDb, SessionStoreAccess};
 

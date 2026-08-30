@@ -7,7 +7,7 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::map_projection_error;
 

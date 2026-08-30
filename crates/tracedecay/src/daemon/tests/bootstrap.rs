@@ -4,7 +4,7 @@ use crate::daemon::{ProjectServerRequirement, project_server_requirement};
 use std::process::Command;
 use tracedecay_mcp::JsonRpcResponse;
 #[cfg(unix)]
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 #[cfg(unix)]
 use tracedecay_usecases::context::CancellationToken;
 
@@ -1856,7 +1856,7 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
     let first = tasks
         .start(route.clone(), async move {
             first_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
+            Err(tracedecay_domain::errors::TraceDecayError::Database {
                 message: "session temporal receipts or cursor keys are mutable".to_string(),
                 operation: "ensure global database authority invariants".to_string(),
             })
@@ -1962,7 +1962,7 @@ async fn project_open_task_registry_caps_distinct_inflight_routes() {
         let claim = tasks
             .start(
                 project_open_test_route(&format!("bounded-{index}")),
-                std::future::pending::<tracedecay_runtime_core::errors::Result<()>>(),
+                std::future::pending::<tracedecay_domain::errors::Result<()>>(),
             )
             .await;
         assert!(
@@ -2083,8 +2083,8 @@ async fn project_open_failure_cache_is_bounded_separately() {
     );
 }
 
-fn authority_invariant_error(message: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Database {
+fn authority_invariant_error(message: &str) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Database {
         message: message.to_string(),
         operation: "ensure global database authority invariants".to_string(),
     }
@@ -2092,7 +2092,7 @@ fn authority_invariant_error(message: &str) -> tracedecay_runtime_core::errors::
 
 #[test]
 fn deterministic_code_authority_conflicts_do_not_spin_project_warmup() {
-    let error = tracedecay_runtime_core::errors::TraceDecayError::Database {
+    let error = tracedecay_domain::errors::TraceDecayError::Database {
         message: "DuplicateCodeAuthority { shard_id: fixture }".to_string(),
         operation: "register code-shard authority".to_string(),
     };
@@ -2105,7 +2105,7 @@ fn deterministic_code_authority_conflicts_do_not_spin_project_warmup() {
 
 #[test]
 fn exhausted_code_runtime_capacity_retries_at_resource_cadence() {
-    let error = tracedecay_runtime_core::errors::TraceDecayError::Database {
+    let error = tracedecay_domain::errors::TraceDecayError::Database {
         message: "ProjectCodeBudgetExhausted { limit: 4 }".to_string(),
         operation: "open registered session runtime".to_string(),
     };
@@ -2188,7 +2188,7 @@ fn transient_authority_failures_stay_immediately_retryable() {
     );
     assert_eq!(
         super::super::project_open_retry_backoff(
-            &tracedecay_runtime_core::errors::TraceDecayError::Database {
+            &tracedecay_domain::errors::TraceDecayError::Database {
                 message: "invalid committed observation authority JSON: trailing characters"
                     .to_string(),
                 operation: "read observation".to_string(),
@@ -2210,7 +2210,7 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
     let rejected_state = match tasks
         .start(rejected.clone(), async move {
             rejected_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "identity cutover conflict: strict route invariant".to_string(),
             })
         })
@@ -2286,7 +2286,7 @@ async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
         .start_cancellable(route, move |cancellation| async move {
             task_started.notify_one();
             cancellation.cancelled().await;
-            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "project open cancelled".to_string(),
             })
         })
@@ -2337,7 +2337,7 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
                 .send(())
                 .expect("publish safe unit completion");
             cancellation.cancelled().await;
-            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "project open cancelled after safe unit".to_string(),
             })
         })
@@ -2438,12 +2438,12 @@ async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
     let state = tasks
         .start(unrelated.clone(), async move {
             started_tx.send(()).map_err(|()| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: "unrelated open observer dropped".to_owned(),
                 }
             })?;
             release_rx.await.map_err(|_| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: "unrelated open release dropped".to_owned(),
                 }
             })?;
@@ -3009,7 +3009,7 @@ async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
                     open_polled_by_future.notify_one();
                     open_lifecycle.wait_for_draining().await;
                     open_won_by_future.store(true, std::sync::atomic::Ordering::Release);
-                    Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    Err(tracedecay_domain::errors::TraceDecayError::Config {
                         message: "simultaneous warmup completion".to_string(),
                     })
                 },
@@ -3301,7 +3301,7 @@ async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication()
     let project_path = std::path::PathBuf::from("/projects/uncontended");
     let published = super::super::project_open_orchestration::wait_for_project_open_publication(
         &project_path,
-        async { Ok::<(), tracedecay_runtime_core::errors::TraceDecayError>(()) },
+        async { Ok::<(), tracedecay_domain::errors::TraceDecayError>(()) },
     )
     .await;
     assert!(
@@ -3311,7 +3311,7 @@ async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication()
 
     let warming = super::super::project_open_orchestration::wait_for_project_open_publication(
         &project_path,
-        std::future::pending::<tracedecay_runtime_core::errors::Result<()>>(),
+        std::future::pending::<tracedecay_domain::errors::Result<()>>(),
     )
     .await
     .expect_err("an uncontended warm-up must not pin the foreground request");

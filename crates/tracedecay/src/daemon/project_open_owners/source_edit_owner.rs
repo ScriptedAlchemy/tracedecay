@@ -8,7 +8,7 @@ use tracedecay_domain::{UtcMicros, canonical_sha256};
 
 use super::{POLICY_REVISION_V1, ProjectOpenSourceEditAuthorizationV1};
 use crate::mcp::McpServer;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
 pub(super) fn source_edit_request_context(

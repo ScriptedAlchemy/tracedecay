@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::TRACEDECAY_DIR;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     ENROLLMENT_FILENAME, EnrollmentMarker, PrivateStoreIo, REPOSITORY_IDENTITY_FILENAME,

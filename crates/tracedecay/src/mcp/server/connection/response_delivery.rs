@@ -4,7 +4,7 @@ use crate::mcp::server::McpServer;
 use crate::mcp::server::routing::SelectedProjectResponseLease;
 use tracedecay_mcp::serialize_response_line;
 use tracedecay_mcp::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 impl McpServer {
     /// Process a single raw JSON-RPC line and write the response. The

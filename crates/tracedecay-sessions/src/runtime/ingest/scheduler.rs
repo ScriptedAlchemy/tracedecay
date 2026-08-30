@@ -388,13 +388,49 @@ mod tests {
             .expect("restart discovery");
         assert!(idle.report.paths.is_empty());
         assert!(idle.next_frontier.is_complete());
+        // Production consumers acknowledge every delivered pass (idle ones
+        // included); an unacknowledged pass replays verbatim on the next
+        // discovery, which would mask the addition below.
+        discovery_state.acknowledge();
 
         let added = write_dated_rollout(temp.path(), "after-restart");
-        let awakened = codex::CodexSource::with_home(temp.path())
+        // Change detection restarts discovery through a validation sweep that
+        // measures the corpus before it emits, so the addition is delivered
+        // across the following bounded passes, not in the detection pass
+        // itself.
+        let awakened_source = codex::CodexSource::with_home(temp.path());
+        let detection = awakened_source
             .discover_transcript_paths_with_state(bounds, reloaded, &mut discovery_state)
-            .expect("addition discovery");
-        assert!(awakened.report.paths.contains(&added));
-        assert!(!awakened.next_frontier.is_complete());
+            .expect("addition detection");
+        assert!(!detection.next_frontier.is_complete());
+        write_codex_discovery_frontier(&store, reloaded, detection.next_frontier)
+            .await
+            .expect("persist detection frontier");
+        discovery_state.acknowledge();
+        let mut awakened_paths: BTreeSet<_> = detection.report.paths.iter().cloned().collect();
+        for _ in 0..128 {
+            let frontier = read_codex_discovery_frontier(&store)
+                .await
+                .expect("read awakened frontier");
+            let pass = awakened_source
+                .discover_transcript_paths_with_state(bounds, frontier, &mut discovery_state)
+                .expect("addition discovery");
+            awakened_paths.extend(pass.report.paths.iter().cloned());
+            write_codex_discovery_frontier(&store, frontier, pass.next_frontier)
+                .await
+                .expect("persist awakened frontier");
+            discovery_state.acknowledge();
+            if pass.next_frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(awakened_paths.contains(&added));
+        assert!(
+            read_codex_discovery_frontier(&store)
+                .await
+                .expect("final frontier")
+                .is_complete()
+        );
     }
 
     #[tokio::test]

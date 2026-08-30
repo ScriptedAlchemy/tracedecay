@@ -23,7 +23,7 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Installs every root-owned runtime port. Idempotent; first call wins.
 ///

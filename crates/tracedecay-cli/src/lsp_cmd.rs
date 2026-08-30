@@ -19,14 +19,14 @@ static LSP_BRIDGE_CONTROL_SEQUENCE: ProcessLocalRequestSequence =
 
 pub(crate) async fn handle_lsp_action(
     action: LspAction,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     match action {
         LspAction::Servers { json } => {
             hotpath::measure_block!("cli.lsp.servers", print_lsp_servers(json))?
         }
         LspAction::Bridge { stdio, project } => {
             if !stdio {
-                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: "lsp bridge requires --stdio".to_owned(),
                 });
             }
@@ -49,7 +49,7 @@ pub(crate) async fn handle_lsp_action(
 /// arbitrary daemon socket.
 async fn run_stdio_bridge(
     project_root: Option<PathBuf>,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let mut stdin = FramedRead::new(tokio::io::stdin(), ContentLengthCodec::new());
     let initialize = if project_root.is_none() {
         Some(read_initialize_binding(&mut stdin).await?)
@@ -125,7 +125,7 @@ async fn run_stdio_bridge(
 
 async fn detach_stdio_bridge(
     session: &mut DaemonLspSessionClient,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     session
         .detach(deadline, cancellation)
@@ -134,9 +134,9 @@ async fn detach_stdio_bridge(
 }
 
 fn finish_stdio_bridge(
-    bridge_result: tracedecay_runtime_core::errors::Result<()>,
-    detach_result: tracedecay_runtime_core::errors::Result<()>,
-) -> tracedecay_runtime_core::errors::Result<()> {
+    bridge_result: tracedecay_domain::errors::Result<()>,
+    detach_result: tracedecay_domain::errors::Result<()>,
+) -> tracedecay_domain::errors::Result<()> {
     match (bridge_result, detach_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -155,7 +155,7 @@ struct InitializeBinding {
 
 async fn read_initialize_binding<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut FramedRead<R, ContentLengthCodec>,
-) -> tracedecay_runtime_core::errors::Result<InitializeBinding> {
+) -> tracedecay_domain::errors::Result<InitializeBinding> {
     let frame = reader
         .next()
         .await
@@ -170,7 +170,7 @@ async fn read_initialize_binding<R: tokio::io::AsyncRead + Unpin>(
     initialize_binding(&frame)
 }
 
-fn initialize_binding(frame: &str) -> tracedecay_runtime_core::errors::Result<InitializeBinding> {
+fn initialize_binding(frame: &str) -> tracedecay_domain::errors::Result<InitializeBinding> {
     let mut request: Value = serde_json::from_str(frame).map_err(|_| {
         bridge_config_error("lsp bridge without --project requires a valid initialize request")
     })?;
@@ -288,7 +288,7 @@ fn initialize_binding(frame: &str) -> tracedecay_runtime_core::errors::Result<In
     })
 }
 
-fn canonical_file_uri_path(uri: &str) -> tracedecay_runtime_core::errors::Result<PathBuf> {
+fn canonical_file_uri_path(uri: &str) -> tracedecay_domain::errors::Result<PathBuf> {
     let uri = url::Url::parse(uri)
         .map_err(|_| bridge_config_error("LSP workspace root must be a valid file URI"))?;
     if uri.scheme() != "file" || uri.query().is_some() || uri.fragment().is_some() {
@@ -302,7 +302,7 @@ fn canonical_file_uri_path(uri: &str) -> tracedecay_runtime_core::errors::Result
     canonicalize_workspace_root(&path)
 }
 
-fn canonicalize_workspace_root(path: &Path) -> tracedecay_runtime_core::errors::Result<PathBuf> {
+fn canonicalize_workspace_root(path: &Path) -> tracedecay_domain::errors::Result<PathBuf> {
     let canonical = path.canonicalize().map_err(|error| {
         bridge_config_error(format!(
             "LSP workspace root '{}' cannot be resolved: {error}",
@@ -318,7 +318,7 @@ fn canonicalize_workspace_root(path: &Path) -> tracedecay_runtime_core::errors::
 async fn flush_daemon_frame(
     session: &mut DaemonLspSessionClient,
     stdout: &mut tokio::io::Stdout,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     match poll_daemon_frame_with_reconnect(session).await? {
         FramePoll::Frame(frame) => {
             let encoded = ContentLengthCodec::encode(&frame)
@@ -336,7 +336,7 @@ async fn flush_daemon_frame(
 async fn send_client_frame_with_reconnect(
     session: &mut DaemonLspSessionClient,
     frame: &str,
-) -> tracedecay_runtime_core::errors::Result<FrameSend> {
+) -> tracedecay_domain::errors::Result<FrameSend> {
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     match session
         .try_send_client_frame(frame, deadline, cancellation)
@@ -357,7 +357,7 @@ async fn send_client_frame_with_reconnect(
 
 async fn poll_daemon_frame_with_reconnect(
     session: &mut DaemonLspSessionClient,
-) -> tracedecay_runtime_core::errors::Result<FramePoll> {
+) -> tracedecay_domain::errors::Result<FramePoll> {
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     match session.poll_daemon_frame(deadline, cancellation).await {
         Ok(outcome) => Ok(outcome),
@@ -375,7 +375,7 @@ async fn poll_daemon_frame_with_reconnect(
 
 async fn acknowledge_daemon_frame_with_reconnect(
     session: &mut DaemonLspSessionClient,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     match session
         .acknowledge_daemon_frame(deadline, cancellation)
@@ -396,7 +396,7 @@ async fn acknowledge_daemon_frame_with_reconnect(
 
 async fn reconnect_session(
     session: &mut DaemonLspSessionClient,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     session
         .reconnect(deadline, cancellation)
@@ -423,7 +423,7 @@ fn lsp_request_control() -> Result<(Deadline, CancellationSignal), InvocationErr
 
 fn lsp_invocation_error(
     error: InvocationError,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
+) -> tracedecay_domain::errors::TraceDecayError {
     let message = match error {
         InvocationError::Cancelled => "LSP gateway request was cancelled".to_owned(),
         InvocationError::DeadlineExceeded => "LSP gateway request deadline elapsed".to_owned(),
@@ -439,27 +439,27 @@ fn lsp_invocation_error(
             None => format!("LSP gateway request failed: {:?}", problem.kind()),
         },
     };
-    tracedecay_runtime_core::errors::TraceDecayError::Config { message }
+    tracedecay_domain::errors::TraceDecayError::Config { message }
 }
 
 fn bridge_error(
     phase: &str,
     error: impl std::fmt::Debug,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("LSP bridge {phase} failure: {error:?}"),
     }
 }
 
 fn bridge_config_error(
     message: impl Into<String>,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),
     }
 }
 
-fn print_lsp_servers(json: bool) -> tracedecay_runtime_core::errors::Result<()> {
+fn print_lsp_servers(json: bool) -> tracedecay_domain::errors::Result<()> {
     let adapters = lsp_adapters::builtin_adapters();
     if json {
         let rows: Vec<_> = adapters.iter().map(lsp_server_row).collect();

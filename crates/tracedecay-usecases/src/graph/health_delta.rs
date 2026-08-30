@@ -19,7 +19,7 @@ use tracedecay_domain::{
 };
 
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::observability::RegisteredObservabilityPortV1;
 

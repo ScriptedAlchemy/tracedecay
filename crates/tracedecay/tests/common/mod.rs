@@ -72,7 +72,7 @@ pub fn register_test_schema_installer() {
 
 pub async fn initialize_test_database(
     path: &Path,
-) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
+) -> tracedecay_domain::errors::Result<(Database, bool)> {
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test initialize")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize).await
@@ -80,7 +80,7 @@ pub async fn initialize_test_database(
 
 pub async fn open_test_database(
     path: &Path,
-) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
+) -> tracedecay_domain::errors::Result<(Database, bool)> {
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing).await
@@ -88,7 +88,7 @@ pub async fn open_test_database(
 
 pub async fn open_test_database_read_only(
     path: &Path,
-) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
+) -> tracedecay_domain::errors::Result<(Database, bool)> {
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test read-only open")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::ReadOnly).await
@@ -1318,7 +1318,7 @@ impl LcmTestRuntime {
         scope: HostAdmissionScope,
         node_id: &str,
         source_node_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         self.runtime
             .replace_lcm_summary_source_for_test(scope, node_id, source_node_id)
             .await

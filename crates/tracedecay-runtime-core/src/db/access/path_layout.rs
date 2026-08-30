@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::access_io_error;
 

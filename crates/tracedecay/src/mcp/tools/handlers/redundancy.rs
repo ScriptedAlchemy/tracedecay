@@ -11,7 +11,7 @@ use tracedecay_application::retrieval::grep_analysis::RedundancyResultV1;
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::tracedecay::TraceDecay;
 use tracedecay_code_extraction::redundancy::round4;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::support::decode_primitive_request;
 use tracedecay_mcp::ToolResult;

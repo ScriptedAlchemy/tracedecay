@@ -103,7 +103,7 @@ END;
 
 pub async fn ensure_observability_rollup_schema(
     executor: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     executor
         .execute_batch(OBSERVABILITY_ROLLUP_SCHEMA_V1)
         .await

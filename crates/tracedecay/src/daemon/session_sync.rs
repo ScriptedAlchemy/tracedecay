@@ -602,7 +602,7 @@ impl DaemonSessionSyncService {
         &self,
         context: &SessionSyncProjectContext,
         key: &str,
-    ) -> tracedecay_runtime_core::errors::Result<SessionSyncJournalV1> {
+    ) -> tracedecay_domain::errors::Result<SessionSyncJournalV1> {
         self.update_journal(context, key, |journal| {
             if journal.status != SessionSyncJournalStatusV1::Complete {
                 journal.status = SessionSyncJournalStatusV1::Running;
@@ -618,7 +618,7 @@ impl DaemonSessionSyncService {
         project_sessions: &RegisteredGlobalDbLeaseV1,
         key: &str,
         termination: OperationTermination,
-    ) -> tracedecay_runtime_core::errors::Result<SessionSyncJournalV1> {
+    ) -> tracedecay_domain::errors::Result<SessionSyncJournalV1> {
         let journal = self
             .refresh_source_frontiers_with_project_sessions(context, project_sessions, key)
             .await?;
@@ -643,7 +643,7 @@ impl DaemonSessionSyncService {
         coverage: Vec<SessionSyncSourceCoverageV1>,
         source_frontiers: Vec<SessionSyncSourceFrontierV1>,
         failure_codes: Vec<String>,
-    ) -> tracedecay_runtime_core::errors::Result<SessionSyncJournalV1> {
+    ) -> tracedecay_domain::errors::Result<SessionSyncJournalV1> {
         self.update_journal(context, key, |journal| {
             if journal.status == SessionSyncJournalStatusV1::Complete {
                 return;
@@ -673,7 +673,7 @@ impl DaemonSessionSyncService {
         context: &SessionSyncProjectContext,
         key: &str,
         mut update: impl FnMut(&mut SessionSyncJournalV1),
-    ) -> tracedecay_runtime_core::errors::Result<SessionSyncJournalV1> {
+    ) -> tracedecay_domain::errors::Result<SessionSyncJournalV1> {
         loop {
             let current = hotpath::future!(
                 context.registry.read_session_sync_journal(key),
@@ -682,7 +682,7 @@ impl DaemonSessionSyncService {
             .await
             .map_err(store_error)?
             .ok_or_else(|| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: "session sync journal disappeared".to_owned(),
                 }
             })?;
@@ -715,7 +715,7 @@ impl DaemonSessionSyncService {
         key: &str,
         stats: SessionSyncStatsV1,
         coverage: Vec<SessionSyncSourceCoverageV1>,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+    ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let source_frontiers = context.source_frontiers(project_sessions).await?;
         self.update_journal(context, key, |journal| {
             if journal.status != SessionSyncJournalStatusV1::Complete {
@@ -734,14 +734,14 @@ impl DaemonSessionSyncService {
         context: &SessionSyncProjectContext,
         project_sessions: &RegisteredGlobalDbLeaseV1,
         key: &str,
-    ) -> tracedecay_runtime_core::errors::Result<SessionSyncJournalV1> {
+    ) -> tracedecay_domain::errors::Result<SessionSyncJournalV1> {
         let current = context
             .registry
             .read_session_sync_journal(key)
             .await
             .map_err(store_error)?
             .ok_or_else(
-                || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                || tracedecay_domain::errors::TraceDecayError::Config {
                     message: "session sync journal disappeared".to_owned(),
                 },
             )?;
@@ -1036,30 +1036,30 @@ fn saturating_usize_to_u64(value: usize) -> u64 {
 
 fn contract_error(
     error: impl std::fmt::Display,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: error.to_string(),
     }
 }
 
-fn store_error(error: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+fn store_error(error: impl std::fmt::Display) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("session sync journal store failed: {error}"),
     }
 }
 
 fn journal_decode_error(
     error: impl std::fmt::Display,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("session sync journal decode failed: {error}"),
     }
 }
 
 fn journal_encode_error(
     error: impl std::fmt::Display,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("session sync journal encode failed: {error}"),
     }
 }

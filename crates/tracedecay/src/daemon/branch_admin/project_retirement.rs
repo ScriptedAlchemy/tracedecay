@@ -16,18 +16,18 @@ pub(crate) struct ProjectServerCapacityRetirementCompletion {
 }
 
 impl ProjectServerCapacityRetirementCompletion {
-    pub(crate) async fn wait(self) -> tracedecay_runtime_core::errors::Result<()> {
+    pub(crate) async fn wait(self) -> tracedecay_domain::errors::Result<()> {
         match wait_for_project_server_retirement(self.completion).await {
             ProjectServerRetirementStatus::Clean => Ok(()),
             ProjectServerRetirementStatus::Failed(error) => {
-                Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
                         "project server retirement failed before capacity reuse: {error}"
                     ),
                 })
             }
             ProjectServerRetirementStatus::Pending => {
-                Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: "project server retirement returned a non-terminal receipt".to_owned(),
                 })
             }
@@ -86,7 +86,7 @@ impl ProjectServerRetirementAdmission<'_> {
         retirement: Task,
     ) -> ProjectServerCapacityRetirementCompletion
     where
-        Task: std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>
+        Task: std::future::Future<Output = tracedecay_domain::errors::Result<()>>
             + Send
             + 'static,
     {
@@ -757,7 +757,7 @@ mod tests {
             .acquire_project_server_retirement_admission()
             .await;
         let failed = admission.spawn_and_track_fallible(owner("project-failed"), async move {
-            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "synthetic capacity cleanup failure".to_owned(),
             })
         });

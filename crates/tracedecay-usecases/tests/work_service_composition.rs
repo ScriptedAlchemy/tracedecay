@@ -12,7 +12,7 @@ use tracedecay_runtime_core::db::{
     Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
     TestRuntimeProfileIdentityV1,
 };
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};

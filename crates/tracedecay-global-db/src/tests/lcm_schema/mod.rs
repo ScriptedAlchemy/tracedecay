@@ -15,7 +15,7 @@ use tracedecay_runtime_core::db::{
 
 use crate::tests::harness::open_registered_test_database_fixture;
 
-async fn open_global_db(db_path: &Path) -> tracedecay_runtime_core::errors::Result<TestConnection> {
+async fn open_global_db(db_path: &Path) -> tracedecay_domain::errors::Result<TestConnection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -28,7 +28,7 @@ async fn open_global_db(db_path: &Path) -> tracedecay_runtime_core::errors::Resu
 
 async fn open_read_only_global_db(
     db_path: &Path,
-) -> tracedecay_runtime_core::errors::Result<Option<(DatabaseAuthority, Database)>> {
+) -> tracedecay_domain::errors::Result<Option<(DatabaseAuthority, Database)>> {
     if !db_path.try_exists()? {
         return Ok(None);
     }

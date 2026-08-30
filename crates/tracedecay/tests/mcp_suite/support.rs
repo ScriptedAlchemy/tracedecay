@@ -44,7 +44,7 @@ use tracedecay_domain::{
 use tracedecay_mcp::McpTransport;
 use tracedecay_mcp::ToolResult;
 #[cfg(feature = "test-transport")]
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -389,7 +389,7 @@ pub(crate) async fn handle_tool_call(
     mut args: serde_json::Value,
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
@@ -471,7 +471,7 @@ pub(crate) async fn handle_tool_call_with_runtime(
     mut args: serde_json::Value,
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
@@ -485,7 +485,7 @@ async fn handle_project_open_source_edit_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
     mut args: Value,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let graph = Box::pin(TraceDecay::open(cg.project_root())).await?;
     let server = Box::pin(McpServer::new(graph, None)).await;
     server
@@ -545,7 +545,7 @@ pub(crate) async fn handle_production_source_edit_tool_call(
     mut args: Value,
     _server_stats: Option<Value>,
     _scope_prefix: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(object) = args.as_object_mut() {
         object
@@ -643,7 +643,7 @@ async fn call_project_open_source_edit_server(
     server: &McpServer,
     tool_name: &str,
     arguments: Value,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -977,7 +977,7 @@ pub(crate) fn extract_first_json_content(value: &Value) -> Value {
         .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
 }
 
-pub(crate) fn expect_tool_error<T>(result: tracedecay_runtime_core::errors::Result<T>) -> String {
+pub(crate) fn expect_tool_error<T>(result: tracedecay_domain::errors::Result<T>) -> String {
     match result {
         Ok(_) => panic!("expected tool call to fail"),
         Err(err) => format!("{err}"),

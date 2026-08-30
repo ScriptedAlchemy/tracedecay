@@ -1494,7 +1494,7 @@ async fn run_cold_store_page(
     profile_database: &tracedecay_global_db::RegisteredGlobalDb,
     retention: &crate::config::RetentionConfig,
     cancellation: &tracedecay_usecases::context::CancellationToken,
-) -> tracedecay_runtime_core::errors::Result<ColdStorePageMetrics> {
+) -> tracedecay_domain::errors::Result<ColdStorePageMetrics> {
     let checkpoint_path = checkpoint_path(profile_root);
     let cursor = load_cursor(&checkpoint_path).unwrap_or(ColdStoreCursorV1 {
         after_project_id: None,
@@ -1510,7 +1510,7 @@ async fn run_cold_store_page(
         || retention.incident_debris_retention_days.is_some()
     {
         Some(now_secs_i64().map_err(|message| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: message.to_owned(),
             }
         })?)
@@ -1546,7 +1546,7 @@ async fn run_cold_store_page(
         let findings = tracedecay_maintenance::retention::orphan_stores::classify_stores(
             &page.entries,
             retention_now.ok_or_else(|| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: "maintenance retention clock unavailable".to_owned(),
                 }
             })?,
@@ -1578,7 +1578,7 @@ async fn run_cold_store_page(
             profile_root,
             retention_window_secs(days),
             retention_now.ok_or_else(|| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: "maintenance retention clock unavailable".to_owned(),
                 }
             })?,
@@ -1607,7 +1607,7 @@ async fn run_cold_store_page(
         after_project_id: None,
     });
     persist_cursor(&checkpoint_path, &next_cursor).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("persist maintenance cold-store cursor: {error}"),
         }
     })?;

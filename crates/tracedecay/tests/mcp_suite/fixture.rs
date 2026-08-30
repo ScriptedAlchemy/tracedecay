@@ -26,7 +26,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_runtime_core::errors::Result as TdResult;
+use tracedecay_domain::errors::Result as TdResult;
 use tracedecay_runtime_core::storage::{
     PrivateStoreIo, default_profile_project_id, default_profile_root,
 };

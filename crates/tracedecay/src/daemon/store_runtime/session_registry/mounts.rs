@@ -31,7 +31,7 @@ use super::{
     open_runtime_with_presence, register_registered_schema_installer, registry_open_error,
     runtime_incarnation, session_registry_error,
 };
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 struct UnavailableRemoteSpoolKeyringV1;
 

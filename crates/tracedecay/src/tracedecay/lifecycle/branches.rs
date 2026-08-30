@@ -12,7 +12,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::DatabaseAccessMode;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_usecases::config::open_runtime_configuration_for_registered_database_read_only;
 use tracedecay_usecases::configuration::ProjectConfigurationRuntime;

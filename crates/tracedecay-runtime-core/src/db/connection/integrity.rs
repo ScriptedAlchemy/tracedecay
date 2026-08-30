@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 pub(super) fn read_only_upgrade_error(db_path: &Path, operation: &str) -> TraceDecayError {
     TraceDecayError::Database {

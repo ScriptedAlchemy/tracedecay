@@ -11,7 +11,7 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_usecases::graph::queries::GraphQueryManager;
 use tracedecay_usecases::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
@@ -381,28 +381,28 @@ impl VerifiedGraphQuery {
 
 fn graph_projection_error(
     error: tracedecay_code_index::graph_projection::CodeGraphProjectionError,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
+) -> tracedecay_domain::errors::TraceDecayError {
     map_code_graph_read_runtime_error(map_projection_error(error))
 }
 
-fn graph_invalid_request(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+fn graph_invalid_request(detail: &str) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::project_route(
         "code-graph-invalid-request",
         false,
         detail,
     )
 }
 
-fn graph_budget_exhausted(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+fn graph_budget_exhausted(detail: &str) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::project_route(
         "code-graph-budget-exhausted",
         false,
         detail,
     )
 }
 
-fn graph_corrupt(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+fn graph_corrupt(detail: &str) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::project_route(
         "code-graph-corrupt",
         false,
         detail,

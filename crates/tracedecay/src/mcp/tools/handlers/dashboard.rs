@@ -25,7 +25,7 @@ use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::dashboard_lcm::DashboardLcmReadAdapter;
 use super::support::generic_tool_result;

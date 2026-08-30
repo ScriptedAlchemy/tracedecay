@@ -21,7 +21,7 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationResponse,
 };
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::tool_call_support::json_result;
 

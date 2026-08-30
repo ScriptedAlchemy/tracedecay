@@ -7,11 +7,14 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationProblem, ApplicationProblemKind, AuthorityReceipt,
     CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
+    SafeDiagnostic,
 };
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
-use tracedecay_usecases::configuration::{ConfigurationControlStore, ProjectConfigurationRuntime};
+use tracedecay_usecases::configuration::{
+    ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
+};
 use tracedecay_usecases::graph::CodeGraphReadError;
 
 type CurrentAccessFuture<'a> = Pin<
@@ -36,7 +39,7 @@ impl CurrentCallableCodeAccessPort for ProductionCallableCodeAccessPort {
                 .configuration_store()
                 .current()
                 .await
-                .map_err(|_| concealed())?;
+                .map_err(configuration_current_problem)?;
             let configuration = tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
                 self.configuration.configuration_target().clone(),
                 current.revision_id,
@@ -370,6 +373,32 @@ fn concealed() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
 }
 
+/// Availability of the configuration authority is not an authorization
+/// outcome. During cold open the store can be transiently unavailable
+/// (reader saturation, publication still pending) and concealing that window
+/// would mint a permanent denial against the daemon's own project; it must
+/// surface as a retryable unavailable state instead. Every other failure
+/// shape stays concealed so a probing caller learns nothing about identity.
+fn configuration_current_problem(error: ConfigurationError) -> ApplicationProblem {
+    match error {
+        ConfigurationError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "configuration_authority_unavailable".to_owned(),
+            message: "The project configuration authority is temporarily unavailable.".to_owned(),
+        }),
+        ConfigurationError::TargetUnavailable
+        | ConfigurationError::AuthorizedTargetAmbiguous
+        | ConfigurationError::RevisionConflict
+        | ConfigurationError::PlanExpired
+        | ConfigurationError::PlanStale
+        | ConfigurationError::PolicyWideningForbidden
+        | ConfigurationError::ProjectlessProfileRequired
+        | ConfigurationError::IdempotencyConflict
+        | ConfigurationError::MutationAuthorityRejected
+        | ConfigurationError::Validation(_)
+        | ConfigurationError::ResetRequired { .. } => concealed(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -551,5 +580,51 @@ mod tests {
         assert_eq!(context.request_id(), &request_id);
         assert_eq!(context.cancellation(), &cancellation.context());
         assert!(context.allows(operation.capability_id(), operation.use_case_id()));
+    }
+
+    #[test]
+    fn transient_configuration_unavailability_stays_retryable_not_denied() {
+        let problem = configuration_current_problem(ConfigurationError::Unavailable);
+        assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+
+        let read_error = map_graph_admission_problem(problem);
+        assert!(
+            matches!(read_error, CodeGraphReadError::Unavailable { .. }),
+            "a warming configuration authority must not read as a denial: {read_error:?}"
+        );
+
+        let routed = tracedecay_usecases::graph::map_code_graph_read_runtime_error(read_error);
+        let tracedecay_domain::errors::TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable,
+            ..
+        } = routed
+        else {
+            panic!("graph-read unavailability must stay a project-route refusal: {routed:?}");
+        };
+        assert_eq!(reason_code, "code-graph-unavailable");
+        assert!(
+            retryable,
+            "the cold-open configuration window must stay retryable"
+        );
+    }
+
+    #[test]
+    fn authorization_shaped_configuration_failures_stay_concealed() {
+        for error in [
+            ConfigurationError::TargetUnavailable,
+            ConfigurationError::MutationAuthorityRejected,
+            ConfigurationError::Validation("tampered".to_owned()),
+        ] {
+            let problem = configuration_current_problem(error);
+            assert_eq!(
+                problem.kind(),
+                ApplicationProblemKind::NotFoundOrNotAuthorized
+            );
+            assert!(matches!(
+                map_graph_admission_problem(problem),
+                CodeGraphReadError::Denied
+            ));
+        }
     }
 }

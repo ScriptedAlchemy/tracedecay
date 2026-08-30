@@ -4,7 +4,7 @@ use std::path::Path;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     DaemonEngine, DaemonHandshake, effective_automation_config_for_project, log_daemon_event,

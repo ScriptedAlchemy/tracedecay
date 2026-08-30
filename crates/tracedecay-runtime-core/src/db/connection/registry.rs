@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::db::{DatabaseAuthority, engine::Connection};
-use crate::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use crate::profiled_lock::ProfiledMutex;
 // The store-runtime registry moved into this kernel, so the facade retains the
 // concrete handle rather than an erased port.
@@ -280,7 +280,7 @@ impl DatabaseInner {
         runtime: StoreRuntimeClientLease,
         access: DatabaseAccessMode,
         authority: Option<DatabaseAuthority>,
-    ) -> crate::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let runtime = runtime.into_database_attachment().map_err(|error| {
             database_registry_error("publish canonical database runtime", format!("{error:?}"))
         })?;

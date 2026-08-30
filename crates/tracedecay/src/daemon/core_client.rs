@@ -702,12 +702,12 @@ pub async fn call_default_tool_awaiting_project_open(
 pub fn tool_json_payload(
     result: &serde_json::Value,
     tool_name: &str,
-) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
+) -> tracedecay_domain::errors::Result<serde_json::Value> {
     let blocks = result
         .get("content")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(
-            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+            || tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("daemon tool {tool_name} returned no content blocks"),
             },
         )?;
@@ -716,12 +716,12 @@ pub fn tool_json_payload(
         .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
         .filter_map(|text| serde_json::from_str(text).ok());
     let payload = payloads.next().ok_or_else(|| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("daemon tool {tool_name} returned no JSON payload"),
         }
     })?;
     if payloads.next().is_some() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("daemon tool {tool_name} returned multiple JSON payloads"),
         });
     }

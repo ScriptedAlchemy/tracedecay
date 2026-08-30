@@ -7,7 +7,7 @@ use std::path::Path;
 use tracedecay_lsp::percent_hex_nibble;
 
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Legacy compatibility entry point for callers that previously opened a
 /// project database in-process.

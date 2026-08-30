@@ -24,7 +24,7 @@ use tracedecay_mcp::context_headings::{
     CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
     CONTEXT_TEST_COVERAGE_HEADING,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 
 const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;

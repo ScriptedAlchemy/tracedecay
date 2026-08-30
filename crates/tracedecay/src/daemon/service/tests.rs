@@ -982,7 +982,7 @@ fn atomic_service_write_faults_preserve_the_forward_boundary() {
             &mut |step| {
                 observed.push(step);
                 if step == failed_step {
-                    Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    Err(tracedecay_domain::errors::TraceDecayError::Config {
                         message: format!("injected {step:?} failure"),
                     })
                 } else {

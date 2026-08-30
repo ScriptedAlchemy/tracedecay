@@ -10,7 +10,7 @@ use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, read_bounded, with_owned_temp_publish,
 };
 
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::verify::{application_contract_error, config_error, domain_error, io_error};
 use super::{

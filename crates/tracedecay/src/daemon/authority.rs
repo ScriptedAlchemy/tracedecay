@@ -13,7 +13,7 @@ use tracedecay_runtime_core::path_safety::{
     canonicalize_existing_prefix, collapse_relative_components,
 };
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_daemon_protocol::DaemonEndpoint;

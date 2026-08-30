@@ -12,7 +12,7 @@ fn cli_project_root() -> Option<PathBuf> {
 
 /// `tracedecay analytics sync`: import hook JSONL rows into the durable
 /// `analytics_events` table and print what happened.
-pub async fn run_analytics_sync() -> tracedecay_runtime_core::errors::Result<()> {
+pub async fn run_analytics_sync() -> tracedecay_domain::errors::Result<()> {
     let project_root = cli_project_root();
     let outcome = call_admin_cli(project_root, json!({ "action": "analytics_sync" })).await?;
     println!(
@@ -27,7 +27,7 @@ pub async fn run_analytics_sync() -> tracedecay_runtime_core::errors::Result<()>
 pub async fn run_analytics_diagnostics(
     all_projects: bool,
     no_sync: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let project_root = cli_project_root();
     let summary = call_admin_cli(
         project_root,
@@ -49,7 +49,7 @@ pub async fn run_analytics_diagnostics(
 async fn call_admin_cli(
     project_root: Option<PathBuf>,
     arguments: Value,
-) -> tracedecay_runtime_core::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
     let handshake =
         tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)?;
     let result =

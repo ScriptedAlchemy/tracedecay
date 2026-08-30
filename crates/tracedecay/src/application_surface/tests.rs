@@ -1714,7 +1714,7 @@ async fn dead_daemon_surface_dispatch_fails_fast_with_typed_unreachable() {
             _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
         ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
-            tracedecay_runtime_core::errors::Result<()>,
+            tracedecay_domain::errors::Result<()>,
         > {
             Box::pin(async { Ok(()) })
         }

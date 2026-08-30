@@ -137,7 +137,7 @@ fn normalize_default(value: Option<&str>) -> Option<String> {
 async fn validate_table(
     conn: &impl QueryExecutor,
     contract: &Table,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let actual = read_columns(conn, contract.name).await?;
     if actual.len() != contract.columns.len() {
         return Err(global_db_operation_message(
@@ -268,7 +268,7 @@ fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) ->
 async fn validate_indexes_for_table(
     conn: &impl QueryExecutor,
     table: &str,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let actual = read_indexes(conn, table).await?;
     let expected = INDEXES
         .iter()
@@ -327,7 +327,7 @@ async fn validate_indexes_for_table(
 async fn validate_trigger(
     conn: &impl QueryExecutor,
     trigger: &super::invariants::Trigger,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT tbl_name, sql FROM sqlite_master
@@ -367,7 +367,7 @@ async fn validate_trigger(
 
 async fn validate_observation_autoincrement(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT EXISTS(
@@ -410,7 +410,7 @@ async fn validate_observation_autoincrement(
 async fn validate_tables_and_indexes(
     conn: &impl QueryExecutor,
     tables: &[Table],
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     for contract in tables {
         validate_table(conn, contract).await?;
         validate_indexes_for_table(conn, contract.name).await?;
@@ -421,7 +421,7 @@ async fn validate_tables_and_indexes(
 async fn validate_named_tables_and_indexes(
     conn: &impl QueryExecutor,
     table_names: &[&str],
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     for table_name in table_names {
         let contract = TABLES
             .iter()
@@ -441,20 +441,20 @@ async fn validate_named_tables_and_indexes(
 pub async fn validate_session_temporal_schema_contract(
     conn: &impl QueryExecutor,
     table_names: &[&str],
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     validate_named_tables_and_indexes(conn, table_names).await
 }
 
 pub async fn validate_released_v3_temporal_projection_receipt_contract(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     validate_table(conn, &SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3).await?;
     validate_indexes_for_table(conn, SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3.name).await
 }
 
 pub async fn validate_session_graph_publication_schema_contract(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let actual = read_graph_publication_inventory(conn).await?;
     let expected = EXPECTED_GRAPH_PUBLICATION_SCHEMA
         .as_ref()
@@ -497,7 +497,7 @@ pub async fn validate_session_graph_publication_schema_contract(
 
 async fn read_graph_publication_inventory(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<GraphPublicationSchemaInventory> {
+) -> tracedecay_domain::errors::Result<GraphPublicationSchemaInventory> {
     let mut rows = conn
         .query(
             "SELECT type, name, tbl_name, COALESCE(sql, '')
@@ -559,13 +559,13 @@ fn belongs_to_graph_publication_namespace(name: &str, table: &str) -> bool {
 
 pub async fn validate_registry_schema_contract(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     validate_named_tables_and_indexes(conn, REGISTRY_TABLE_NAMES).await
 }
 
 pub async fn validate_remote_deletion_schema_contract(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     validate_named_tables_and_indexes(conn, &["remote_deletion_tombstones"]).await
 }
 
@@ -575,7 +575,7 @@ pub async fn validate_remote_deletion_schema_contract(
 /// schema modules; this validator intentionally neither claims nor validates those domains.
 pub async fn validate_authority_schema_contract(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     validate_tables_and_indexes(conn, TABLES).await?;
     for invariant in super::invariants::INVARIANTS {
         for trigger in invariant.triggers {

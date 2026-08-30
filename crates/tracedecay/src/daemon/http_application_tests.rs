@@ -696,7 +696,7 @@ async fn daemon_http_cold_resolution_failure_returns_a_safe_typed_problem() {
     let registry = DaemonHttpApplicationRegistry::default();
     registry
         .install_resolver(|_| async {
-            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "sensitive resolver detail must not cross HTTP".to_owned(),
             })
         })
@@ -878,7 +878,7 @@ async fn daemon_http_unavailable_cold_resolution_preserves_curate_request_identi
     let registry = DaemonHttpApplicationRegistry::default();
     registry
         .install_resolver(|_| async {
-            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "resolver unavailable".to_owned(),
             })
         })
@@ -995,7 +995,7 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
             let resolver_calls = Arc::clone(&observed_resolver_calls);
             async move {
                 resolver_calls.fetch_add(1, Ordering::Relaxed);
-                std::future::pending::<tracedecay_runtime_core::errors::Result<Option<Router>>>()
+                std::future::pending::<tracedecay_domain::errors::Result<Option<Router>>>()
                     .await
             }
         })

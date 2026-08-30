@@ -175,7 +175,7 @@ pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use work::handle_work;
 use workflow_family::handle_workflow;
 

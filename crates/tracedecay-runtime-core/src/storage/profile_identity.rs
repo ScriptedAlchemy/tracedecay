@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use crate::db::DatabaseAuthority;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// On-disk schema version accepted by [`read_existing_profile_identity_record`].
 pub const PROFILE_IDENTITY_SCHEMA_VERSION: u32 = 1;

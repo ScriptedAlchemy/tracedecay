@@ -6,7 +6,7 @@ use tracedecay_dashboard_api::project_registry::{
 };
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::cli::ProjectsAction;
 

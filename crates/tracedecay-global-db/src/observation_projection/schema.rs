@@ -562,7 +562,7 @@ mod tests {
 
     async fn open_registered_schema(
         path: &std::path::Path,
-    ) -> tracedecay_runtime_core::errors::Result<(
+    ) -> tracedecay_domain::errors::Result<(
         RegisteredGlobalDbLeaseV1,
         RegisteredGlobalDbOwnerV1,
     )> {

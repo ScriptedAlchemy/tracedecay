@@ -1,4 +1,4 @@
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_sessions::runtime::SessionStoreAccess;
 
 use crate::RegisteredGlobalDb;

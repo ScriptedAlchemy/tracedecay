@@ -6285,7 +6285,6 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-domain",
  "tracedecay-private-fs",
- "tracedecay-runtime-core",
  "tracedecay-tool-catalog",
 ]
 
@@ -6600,7 +6599,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
- "tracedecay-automation",
  "tracedecay-capture",
  "tracedecay-domain",
  "tracedecay-graph-db",

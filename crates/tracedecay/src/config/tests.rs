@@ -1334,7 +1334,7 @@ mod runtime_configuration_cutover {
             .expect_err("missing registered source binding must not be repaired");
         assert!(matches!(
             error,
-            tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { ref authority, .. }
+            tracedecay_domain::errors::TraceDecayError::ResetRequired { ref authority, .. }
                 if authority == "configuration"
         ));
     }
@@ -1575,7 +1575,7 @@ mod runtime_configuration_cutover {
             .expect_err("locator drift without the daemon binding id must stay a reset");
         assert!(matches!(
             error,
-            tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { ref authority, .. }
+            tracedecay_domain::errors::TraceDecayError::ResetRequired { ref authority, .. }
                 if authority == "configuration"
         ));
     }
@@ -1667,7 +1667,7 @@ mod runtime_configuration_cutover {
         assert!(
             matches!(
                 error,
-                tracedecay_runtime_core::errors::TraceDecayError::Config { .. }
+                tracedecay_domain::errors::TraceDecayError::Config { .. }
             ),
             "genuine unavailability must stay a typed configuration error, got {error:?}"
         );
@@ -1708,7 +1708,7 @@ mod runtime_configuration_cutover {
         assert!(
             matches!(
                 error,
-                tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { ref authority, .. }
+                tracedecay_domain::errors::TraceDecayError::ResetRequired { ref authority, .. }
                     if authority == "configuration"
             ),
             "uninitialized durable configuration must remain a typed reset state: {error:?}"

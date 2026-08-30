@@ -63,7 +63,7 @@ use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
     render_tool_cli_help, short_tool_name,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::BindingSurface;
 
 use crate::cli::dispatch::resolve_cli_application_surface;

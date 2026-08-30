@@ -27,8 +27,8 @@ fn wipe_io(
     operation: &str,
     path: &Path,
     error: &std::io::Error,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("failed to {operation} '{}': {error}", path.display()),
     }
 }
@@ -36,9 +36,9 @@ fn wipe_io(
 fn validate_complete_wipe_profile_root(
     profile_root: &Path,
     user_home: Option<&Path>,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if !profile_root.is_absolute() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "complete profile wipe requires an absolute profile root, got '{}'",
                 profile_root.display()
@@ -48,7 +48,7 @@ fn validate_complete_wipe_profile_root(
     let metadata = std::fs::symlink_metadata(profile_root)
         .map_err(|error| wipe_io("inspect complete-wipe profile root", profile_root, &error))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "complete profile wipe root '{}' must be a regular directory, not a symlink",
                 profile_root.display()
@@ -63,7 +63,7 @@ fn validate_complete_wipe_profile_root(
         )
     })?;
     if canonical != profile_root || canonical.parent().is_none() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "complete profile wipe root '{}' must be an exact canonical non-filesystem-root directory",
                 profile_root.display()
@@ -75,7 +75,7 @@ fn validate_complete_wipe_profile_root(
             .canonicalize()
             .map_err(|error| wipe_io("canonicalize user home", user_home, &error))?;
         if canonical_home.starts_with(&canonical) {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "complete profile wipe root '{}' must not be the user home or one of its ancestors",
                     profile_root.display()
@@ -89,7 +89,7 @@ fn validate_complete_wipe_profile_root(
 fn remove_fixed_profile_path(
     profile_root: &Path,
     name: &str,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
     let path = profile_root.join(name);
@@ -113,7 +113,7 @@ fn remove_fixed_profile_path(
                 .map_err(|error| wipe_io("remove profile database file", &path, &error))?
         }
         Ok(_) => {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "profile database wipe target '{}' is not a regular file or directory",
                     path.display()
@@ -128,10 +128,10 @@ fn remove_fixed_profile_path(
     Ok(removed)
 }
 
-fn verify_wipe_path_absent(path: &Path) -> tracedecay_runtime_core::errors::Result<()> {
+fn verify_wipe_path_absent(path: &Path) -> tracedecay_domain::errors::Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        Ok(_) => Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "wipe did not remove expected namespace entry '{}'",
                 path.display()
@@ -141,7 +141,7 @@ fn verify_wipe_path_absent(path: &Path) -> tracedecay_runtime_core::errors::Resu
     }
 }
 
-fn remove_local_wipe_directory(path: &Path) -> tracedecay_runtime_core::errors::Result<bool> {
+fn remove_local_wipe_directory(path: &Path) -> tracedecay_domain::errors::Result<bool> {
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
     tracedecay_runtime_core::storage::reject_symlink_components(path, "local wipe target")
@@ -151,7 +151,7 @@ fn remove_local_wipe_directory(path: &Path) -> tracedecay_runtime_core::errors::
             std::fs::remove_dir_all(path)
                 .map_err(|error| wipe_io("remove local wipe directory", path, &error))?;
             let parent = path.parent().ok_or_else(|| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!("local wipe target '{}' has no parent", path.display()),
                 }
             })?;
@@ -160,7 +160,7 @@ fn remove_local_wipe_directory(path: &Path) -> tracedecay_runtime_core::errors::
             verify_wipe_path_absent(path)?;
             Ok(true)
         }
-        Ok(_) => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        Ok(_) => Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "local wipe target '{}' is not a regular directory",
                 path.display()
@@ -173,7 +173,7 @@ fn remove_local_wipe_directory(path: &Path) -> tracedecay_runtime_core::errors::
 
 fn wipe_complete_profile_database_state(
     profile_root: &Path,
-) -> tracedecay_runtime_core::errors::Result<usize> {
+) -> tracedecay_domain::errors::Result<usize> {
     let mut removed = 0usize;
     for name in PROFILE_DATABASE_PATHS {
         removed += usize::from(remove_fixed_profile_path(profile_root, name)?);
@@ -283,7 +283,7 @@ mod wipe_safety_tests {
 pub(crate) async fn handle_wipe(
     all: bool,
     assume_yes: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     handle_wipe_inner(all, assume_yes).await
 }
 
@@ -292,7 +292,7 @@ fn handle_wipe_inner(
     assume_yes: bool,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>
+        dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>>
             + Send
             + 'static,
     >,
@@ -365,7 +365,7 @@ fn handle_wipe_inner(
             io::stderr().flush().ok();
             let mut answer = String::new();
             io::stdin().lock().read_line(&mut answer).map_err(|e| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!("failed to read stdin: {e}"),
                 }
             })?;
@@ -433,7 +433,7 @@ fn handle_wipe_inner(
         }
 
         if !failures.is_empty() {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "local wipe failed for {} selected target(s): {}",
                     failures.len(),
@@ -450,7 +450,7 @@ fn handle_wipe_inner(
 
 /// Handles the `list` and `list --all` commands.
 #[hotpath::measure(label = "cli.list.run", future = true)]
-pub(crate) async fn handle_list(all: bool) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn handle_list(all: bool) -> tracedecay_domain::errors::Result<()> {
     handle_list_inner(all).await
 }
 
@@ -458,7 +458,7 @@ fn handle_list_inner(
     all: bool,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>
+        dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>>
             + Send
             + 'static,
     >,

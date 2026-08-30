@@ -18,7 +18,7 @@ use tracedecay_automation_runtime::automation::outcomes::{
     load_outcomes_snapshot,
 };
 use tracedecay_automation_runtime::automation::skill_usage::summarize_skill_usage;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_store::FactReadControl;
 
@@ -131,7 +131,7 @@ fn snapshot_fields(loaded: Result<AutomationOutcomesSnapshot>) -> (Value, String
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use tracedecay_runtime_core::errors::TraceDecayError;
+    use tracedecay_domain::errors::TraceDecayError;
 
     #[test]
     fn a_failed_snapshot_load_reports_the_failure_instead_of_never_refreshed() {

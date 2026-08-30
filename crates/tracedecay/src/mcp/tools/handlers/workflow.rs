@@ -24,7 +24,7 @@ use url::Url;
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::tracedecay::{TraceDecay, is_test_file};
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::diagnose::{Severity, parse_cargo_output};
 use tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_usecases::diagnostics_query::DiagnosticsQuery;

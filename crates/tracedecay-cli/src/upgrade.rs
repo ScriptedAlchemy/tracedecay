@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
 
 use tracedecay::cloud::{self, InstallMethod};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::user_config::UserConfig;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";

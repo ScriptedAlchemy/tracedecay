@@ -24,7 +24,7 @@ pub mod registered_schema {
     use std::sync::OnceLock;
 
     use crate::db::engine::{Connection, Executor, QueryExecutor, Transaction};
-    use crate::errors::{Result, TraceDecayError};
+    use tracedecay_domain::errors::{Result, TraceDecayError};
     use tracedecay_store::StoreRuntimeBindingV1;
 
     /// A sealed, initialization-only capability over the exact connection

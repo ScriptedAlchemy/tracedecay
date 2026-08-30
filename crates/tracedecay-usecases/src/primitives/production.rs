@@ -2337,7 +2337,7 @@ const STORAGE_TABLE_DETAIL_LIMIT: usize = 10;
 /// or zero line that would read as "no table holds any bytes".
 #[cfg(test)]
 fn largest_table_details(
-    tables: tracedecay_runtime_core::errors::Result<Vec<(String, u64)>>,
+    tables: tracedecay_domain::errors::Result<Vec<(String, u64)>>,
 ) -> Vec<String> {
     let mut tables = match tables {
         Ok(tables) => tables,
@@ -2970,7 +2970,7 @@ mod storage_table_detail_tests {
     #[test]
     fn an_unsampled_store_says_so_instead_of_reporting_no_bytes() {
         let details = largest_table_details(Err(
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 message: "reader lease timed out".to_owned(),
                 operation: "sample graph-store table sizes".to_owned(),
             },

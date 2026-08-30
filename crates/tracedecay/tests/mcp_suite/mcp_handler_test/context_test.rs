@@ -6,7 +6,7 @@ use std::fs;
 use std::process::Command;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::errors::{Result as TraceDecayResult, TraceDecayError};
+use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
 
 struct ScopedProductionContextFixture {
     harness: ProductionProjectCompositionHarnessV1,
