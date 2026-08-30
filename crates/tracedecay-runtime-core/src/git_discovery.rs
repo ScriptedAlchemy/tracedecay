@@ -4,7 +4,12 @@
 //! temporarily unreadable, a helper can time out, or its caller can cancel the
 //! operation. This module preserves that uncertainty instead of collapsing it
 //! into "not a repository".
+//!
+//! Admission uses the authority-first helpers. Session ingest and other path
+//! probes that must not open pack indexes use
+//! [`discover_repository_identity_cli_first`].
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -38,12 +43,30 @@ pub enum GitDiscoveryUnknown {
     ProbeFailed,
 }
 
+impl fmt::Display for GitDiscoveryUnknown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("cancelled"),
+            Self::DeadlineExceeded => f.write_str("deadline exceeded"),
+            Self::SpawnFailed => f.write_str("git helper could not be started"),
+            Self::ProbeFailed => f.write_str("git identity probe failed"),
+        }
+    }
+}
+
 /// Repository discovery never represents uncertainty as absence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRepositoryIdentityOutcome {
     Resolved(GitRepositoryIdentity),
     NotRepository,
     Unknown(GitDiscoveryUnknown),
+}
+
+impl GitRepositoryIdentityOutcome {
+    /// True when membership could not be decided.
+    pub const fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown(_))
+    }
 }
 
 /// Resolve a repository identity without blocking the async executor.
@@ -149,6 +172,46 @@ pub fn discover_repository_identity_with_control(
     }
 }
 
+/// Resolve identity from `rev-parse` first so session ingest does not open
+/// pack indexes. Authority discovery runs only when the helper fails without
+/// a timeout.
+///
+/// A timed-out helper is [`GitDiscoveryUnknown::DeadlineExceeded`] and does
+/// not fall through to in-process discovery. An unreadable authority after a
+/// failed helper is [`GitDiscoveryUnknown::ProbeFailed`], not
+/// [`GitRepositoryIdentityOutcome::NotRepository`].
+pub fn discover_repository_identity_cli_first(directory: &Path) -> GitRepositoryIdentityOutcome {
+    if !repository_control_may_exist(directory) {
+        return GitRepositoryIdentityOutcome::NotRepository;
+    }
+    discover_repository_identity_from_cli(
+        directory,
+        crate::git::git_capture_at(directory, &REPOSITORY_IDENTITY_ARGS),
+        || repository_identity_from_authority(directory),
+    )
+}
+
+fn discover_repository_identity_from_cli(
+    directory: &Path,
+    cli: crate::git::GitCaptureAtResult,
+    authority_fallback: impl FnOnce() -> Option<GitRepositoryIdentityOutcome>,
+) -> GitRepositoryIdentityOutcome {
+    let fallback = || {
+        authority_fallback().unwrap_or(GitRepositoryIdentityOutcome::Unknown(
+            GitDiscoveryUnknown::ProbeFailed,
+        ))
+    };
+    match cli {
+        crate::git::GitCaptureAtResult::Captured(output) => {
+            parse_repository_identity(directory, output.as_bytes()).unwrap_or_else(fallback)
+        }
+        crate::git::GitCaptureAtResult::Failed => fallback(),
+        crate::git::GitCaptureAtResult::TimedOut => {
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        }
+    }
+}
+
 fn repository_control_may_exist(directory: &Path) -> bool {
     let direct = directory.ancestors().any(git_control_exists_or_unknown);
     if direct {
@@ -248,7 +311,7 @@ fn parse_repository_identity(
     } else {
         directory.join(raw_common)
     };
-    let common_dir = common_dir.canonicalize().unwrap_or(common_dir);
+    let common_dir = common_dir.canonicalize().ok()?;
     Some(GitRepositoryIdentityOutcome::Resolved(
         GitRepositoryIdentity {
             worktree_root,
@@ -305,4 +368,141 @@ fn capture_child(
 fn kill_and_reap(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("git not on PATH — required for identity tests");
+        assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+    }
+
+    #[test]
+    fn paired_cli_identity_resolves_relative_paths_without_discovery() {
+        let tmp = tempdir().unwrap();
+        let worktree = tmp.path().join("worktree");
+        let nested = worktree.join("src/deep");
+        let git_dir = worktree.join(".git");
+        let common_dir = tmp.path().join("main/.git");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::create_dir_all(&common_dir).unwrap();
+        let output = format!("{}\n../../.git\n../../../main/.git", worktree.display());
+
+        let outcome = discover_repository_identity_from_cli(
+            &nested,
+            crate::git::GitCaptureAtResult::Captured(output),
+            || panic!("valid CLI identity must short-circuit in-process discovery"),
+        );
+        let GitRepositoryIdentityOutcome::Resolved(identity) = outcome else {
+            panic!("paired CLI identity should resolve");
+        };
+
+        assert_eq!(identity.worktree_root, fs::canonicalize(&worktree).unwrap());
+        assert_eq!(identity.git_dir, fs::canonicalize(&git_dir).unwrap());
+        assert_eq!(identity.common_dir, fs::canonicalize(&common_dir).unwrap());
+    }
+
+    #[test]
+    fn timed_out_cli_identity_does_not_fallback_to_discovery() {
+        let tmp = tempdir().unwrap();
+        let outcome = discover_repository_identity_from_cli(
+            tmp.path(),
+            crate::git::GitCaptureAtResult::TimedOut,
+            || panic!("timed-out CLI identity must not fall through to in-process discovery"),
+        );
+        assert_eq!(
+            outcome,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+    }
+
+    #[test]
+    fn failed_cli_unreadable_authority_is_unknown_not_absent() {
+        let tmp = tempdir().unwrap();
+        let outcome = discover_repository_identity_from_cli(
+            tmp.path(),
+            crate::git::GitCaptureAtResult::Failed,
+            || None,
+        );
+        assert_eq!(
+            outcome,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::ProbeFailed)
+        );
+    }
+
+    #[test]
+    fn uncanonicalizable_common_dir_is_probe_failed() {
+        let tmp = tempdir().unwrap();
+        let worktree = tmp.path().join("worktree");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        let output = format!(
+            "{}\n{}\n{}",
+            worktree.display(),
+            git_dir.display(),
+            tmp.path().join("missing/.git").display()
+        );
+
+        let outcome = discover_repository_identity_from_cli(
+            &worktree,
+            crate::git::GitCaptureAtResult::Captured(output),
+            || None,
+        );
+        assert_eq!(
+            outcome,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::ProbeFailed)
+        );
+    }
+
+    #[test]
+    fn cli_first_resolves_nested_linked_worktree() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "--quiet"]);
+        fs::write(main.join("README.md"), "hi").unwrap();
+        run_git(&main, &["add", "."]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        );
+        let worktree = tmp.path().join("wt");
+        run_git(
+            &main,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        );
+        let nested = worktree.join("src/deep");
+        fs::create_dir_all(&nested).unwrap();
+
+        let GitRepositoryIdentityOutcome::Resolved(identity) =
+            discover_repository_identity_cli_first(&nested)
+        else {
+            panic!("linked worktree identity");
+        };
+        assert_eq!(identity.worktree_root, fs::canonicalize(&worktree).unwrap());
+        assert_eq!(
+            identity.common_dir,
+            fs::canonicalize(main.join(".git")).unwrap()
+        );
+        assert_ne!(identity.git_dir, identity.common_dir);
+    }
 }

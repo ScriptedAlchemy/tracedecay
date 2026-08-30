@@ -31,32 +31,34 @@ pub(crate) const DAEMON_SATURATION_RESPONSE_DEADLINE: Duration = Duration::from_
 /// cancels the in-flight stage rather than starting a fresh Duration clock.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DaemonClientDeadline {
+    started: Instant,
     deadline: Instant,
 }
 
 impl DaemonClientDeadline {
     pub(crate) fn until(deadline: Instant) -> Result<Self> {
-        if Instant::now() >= deadline {
-            return Err(TraceDecayError::Config {
-                message: "daemon client deadline already elapsed".to_string(),
-            });
+        let started = Instant::now();
+        if started >= deadline {
+            return Err(tracedecay_daemon_protocol::daemon_response_stalled(
+                Duration::ZERO,
+            ));
         }
-        Ok(Self { deadline })
+        Ok(Self { started, deadline })
     }
 
     pub(crate) fn remaining(&self) -> Result<Duration> {
         self.deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "daemon client deadline already elapsed".to_string(),
+            .ok_or_else(|| {
+                tracedecay_daemon_protocol::daemon_response_stalled(self.started.elapsed())
             })
     }
 
     pub(crate) async fn run<F, T>(
         &self,
-        stage: &'static str,
-        request_label: &str,
+        _stage: &'static str,
+        _request_label: &str,
         fut: F,
     ) -> Result<T>
     where
@@ -64,11 +66,9 @@ impl DaemonClientDeadline {
     {
         match timeout_at(self.deadline, fut).await {
             Ok(result) => result,
-            Err(_) => Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon {request_label} timed out during {stage} before deadline; request outcome may be unknown"
-                ),
-            }),
+            Err(_) => Err(tracedecay_daemon_protocol::daemon_response_stalled(
+                self.started.elapsed(),
+            )),
         }
     }
 }
