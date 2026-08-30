@@ -49,7 +49,10 @@ def _group_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        # Some BSD kernels return EPERM for a group whose only remaining
+        # member is a zombie.  Permission confirms that the group exists,
+        # not that it still contains work capable of running.
+        pass
     return _group_has_runnable_member(pid)
 
 
