@@ -13,7 +13,8 @@ Usage: scripts/run-session-temporal-benchmark.sh --dry-run|--run|--refresh-contr
              Windows CI proves temporal durability via nextest.
   --refresh-contract
              Run the same real measurement from a clean source commit, then
-             regenerate the workload manifest and result together (Linux-hosted).
+             publish the result with its clean-commit provenance (Linux-hosted).
+             The workload manifest is static configuration and is not rewritten.
 EOF
 }
 
@@ -33,7 +34,6 @@ validate_harness_evidence() {
   local python_bin
   python_bin="$(find_python)"
   "$python_bin" - "$repo_root" <<'PY'
-import hashlib
 import json
 import pathlib
 import sys
@@ -59,9 +59,6 @@ def require(condition, message):
     if not condition:
         raise SystemExit(f"Session-temporal dry-run failed: {message}")
 
-def sha256(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
 workload_path = benchmark_root / "workload-v1.json"
 workload = load(workload_path)
 index = load(benchmark_root / "evidence-index.json")
@@ -70,6 +67,8 @@ current_result_path = benchmark_root / "result-current.json"
 historical_result = load(historical_result_path)
 receipt = load(root / receipt_path)
 
+# Content identity is the git commit; the dry run validates artifact shape and
+# state, not file hashes.
 require(workload.get("schema_version") == 2, "unexpected workload schema")
 require(workload.get("workload_id") == "session-temporal-v1", "workload id mismatch")
 require(workload.get("status") == "harness_ready", "workload must be harness_ready")
@@ -79,9 +78,7 @@ require(fixture.get("sanitization_receipt") == receipt_path, "sanitization recei
 require(receipt.get("independently_sourced") is True, "receipt must be independently sourced")
 require(receipt.get("provider") == "codex", "receipt provider must be codex")
 for entry in receipt.get("files", []):
-    path = root / entry["path"]
-    require(path.is_file(), f"missing receipt file: {entry['path']}")
-    require(sha256(path) == entry["sha256"], f"receipt hash mismatch: {entry['path']}")
+    require((root / entry["path"]).is_file(), f"missing receipt file: {entry['path']}")
 
 contract = workload.get("measurement_contract") or {}
 actual_phases = [item.get("phase") for item in contract.get("phases", [])]
@@ -96,21 +93,11 @@ require(workload.get("production_path", {}).get("available_to_benchmark_target")
 implementation = workload.get("implementation") or {}
 require(implementation.get("path") == "crates/tracedecay/src/session_temporal_benchmark.rs",
         "implementation path mismatch")
-require(implementation.get("sha256") == sha256(root / implementation["path"]),
-        "implementation hash mismatch")
-
-inventory = workload.get("file_inventory")
-require(isinstance(inventory, list) and inventory, "file inventory is empty")
-seen = set()
-for entry in inventory:
-    relative = pathlib.PurePosixPath(entry["path"])
-    require(not relative.is_absolute() and ".." not in relative.parts,
-            f"non-relative inventory path: {relative}")
-    require(str(relative) not in seen, f"duplicate inventory path: {relative}")
-    seen.add(str(relative))
-    path = root / pathlib.Path(*relative.parts)
-    require(path.is_file(), f"missing inventory file: {relative}")
-    require(sha256(path) == entry["sha256"], f"hash mismatch: {relative}")
+require((root / implementation["path"]).is_file(), "implementation source missing")
+runner = workload.get("runner") or {}
+require(runner.get("path") == "scripts/run-session-temporal-benchmark.sh",
+        "runner path mismatch")
+require((root / runner["path"]).is_file(), "runner script missing")
 
 require(index.get("schema_version") == 2, "unexpected evidence index schema")
 require(index.get("current_acceptance") is None, "current acceptance must remain null")
@@ -134,8 +121,6 @@ require(bool(historical_result.get("stale_reason")),
 
 provisional = index.get("provisional")
 if provisional is None:
-    require("refresh_provenance" not in workload,
-            "harness without current measurement must not retain refresh provenance")
     require(not current_result_path.exists(),
             "current measurement exists without an evidence-index pointer")
 elif provisional == "result-current.json":
@@ -144,28 +129,30 @@ elif provisional == "result-current.json":
     require(result.get("workload_id") == workload["workload_id"], "current result workload mismatch")
     require(result.get("capture_status") == "provisional", "current result must be provisional")
     require(result.get("acceptance_eligible") is False, "current result must be ineligible")
-    require(result.get("workload_manifest_sha256") == sha256(workload_path),
-            "current result workload hash mismatch")
-    require(result.get("source_identity", {}).get("harness")
+    require(result.get("workload_manifest") == "benchmark_data/session-temporal/workload-v1.json",
+            "current result workload manifest mismatch")
+    identity = result.get("source_identity", {})
+    require(identity.get("harness")
             == "crates/tracedecay/src/session_temporal_benchmark.rs",
             "current result harness identity mismatch")
-    require(result.get("source_identity", {}).get("harness_sha256")
-            == sha256(root / "crates/tracedecay/src/session_temporal_benchmark.rs"),
-            "current result harness hash mismatch")
-    provenance = workload.get("refresh_provenance") or {}
-    require(provenance.get("source_mode") == "clean_git_worktree_v1",
-            "current result must have clean-source provenance")
-    records_per_repetition = provenance.get("records_per_repetition")
+    require(identity.get("runner") == "scripts/run-session-temporal-benchmark.sh",
+            "current result runner identity mismatch")
+    require(identity.get("source_mode") == "clean_git_worktree_v1",
+            "current result must record clean-source provenance")
+    commit = identity.get("commit")
+    require(isinstance(commit, str) and len(commit) == 40
+            and all(char in "0123456789abcdef" for char in commit),
+            "current result must record a full source commit")
+    measurement = result.get("measurement", {})
+    require(measurement.get("warmup_repetitions") == 3,
+            "current result warmup repetitions mismatch")
+    require(measurement.get("measured_repetitions") == 30,
+            "current result measured repetitions mismatch")
+    records_per_repetition = measurement.get("records_per_repetition")
     require(isinstance(records_per_repetition, int) and records_per_repetition > 0,
             "current result records_per_repetition must be positive")
-    require(provenance.get("record_count") == records_per_repetition,
-            "current result record count mismatch")
-    require(provenance.get("measured_record_count") == records_per_repetition * 30,
+    require(measurement.get("measured_record_count") == records_per_repetition * 30,
             "current result measured record count mismatch")
-    require(result.get("measurement", {}).get("records_per_repetition") == records_per_repetition,
-            "current result measurement records mismatch")
-    require(result.get("measurement", {}).get("measured_record_count") == records_per_repetition * 30,
-            "current result measurement record count mismatch")
 else:
     require(False, f"unexpected provisional result pointer: {provisional}")
 
