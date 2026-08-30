@@ -862,7 +862,7 @@ impl HostAdmissionTestRuntimeV1 {
                     Some(profile_sessions),
                 );
         context.profile_root = Some(profile_root);
-        context.profile_identity = Some(profile_identity);
+        context.profile_identity = Some(std::sync::Arc::new(profile_identity));
         context.host_admission_test_runtime = Some(self);
         Ok(context)
     }
