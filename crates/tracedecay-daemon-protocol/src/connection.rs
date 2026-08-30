@@ -69,6 +69,7 @@ impl DaemonConnection {
         self
     }
 
+    #[must_use]
     pub fn with_daemon_version(mut self, daemon_version: impl Into<String>) -> Self {
         self.daemon_version = Some(daemon_version.into());
         self

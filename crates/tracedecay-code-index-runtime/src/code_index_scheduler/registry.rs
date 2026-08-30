@@ -2792,7 +2792,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // violation it named.
                 if text_generation
                     .as_ref()
-                    .is_some_and(|latest| latest.text_serving_is_ready())
+                    .is_some_and(super::LatestCodeTextGenerationV1::text_serving_is_ready)
                 {
                     clear_convergence_park(&worker_convergence_park);
                 } else if convergence_park_retries_on_wake(&worker_convergence_park)
@@ -4644,12 +4644,11 @@ impl CodeIndexSchedulerRegistryV1 {
         let canonical_root = project_root.canonicalize().ok()?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&canonical_root)?;
-        let parked = worktree
+        worktree
             .convergence_park
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        parked
+            .clone()
     }
 
     /// Query-admission entry point: serve only an already-decoded generation

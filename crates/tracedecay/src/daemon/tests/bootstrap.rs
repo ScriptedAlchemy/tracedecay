@@ -2640,6 +2640,17 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         .expect("prewarm portable bootstrap profile registry");
     super::super::prewarm_daemon_bootstrap_catalog()
         .expect("prewarm portable static bootstrap catalog");
+    // Daemon bootstrap installs the profile-scoped code-index worker plan
+    // before publishing any transport endpoint
+    // (`bootstrap::install_profile_worker_plan`), and project open refuses
+    // outright without it. This test drives `serve_windows_broker_client`
+    // directly, so it must reproduce that ordering itself or the warmup poll
+    // fails with "profile code-index worker plan was not installed".
+    super::super::DaemonInvocationState::default()
+        .install_worker_selection(
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
+        )
+        .expect("install portable broker profile worker plan");
     let gates = Arc::new(tokio::sync::Mutex::new(
         super::super::ProjectOpenGates::default(),
     ));

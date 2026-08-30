@@ -658,18 +658,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{decode_file_id_value, encode_file_id};
-
-    #[test]
-    fn transcript_file_id_encoding_round_trips_the_full_u64_domain() {
-        for file_id in [0, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
-            assert_eq!(decode_file_id_value(encode_file_id(file_id)), file_id);
-        }
-    }
-}
-
 async fn require_expected_pair_offset(
     conn: &impl QueryExecutor,
     path: &str,
@@ -684,5 +672,17 @@ async fn require_expected_pair_offset(
             })
         }
         result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_file_id_value, encode_file_id};
+
+    #[test]
+    fn transcript_file_id_encoding_round_trips_the_full_u64_domain() {
+        for file_id in [0, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
+            assert_eq!(decode_file_id_value(encode_file_id(file_id)), file_id);
+        }
     }
 }
