@@ -5680,20 +5680,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         Ok(self.latest_complete_with(admission))
     }
 
-    /// Admit a generation only when the current worktree stat signature still
-    /// matches the signature sealed by the last reconcile. Workspace-wide
-    /// completeness needs this stronger fence because a file can be added
-    /// inside the ordinary bounded-staleness window.
-    fn latest_complete_ready_for_exact_source_with(
-        &mut self,
-        admission: GenerationDecodeAdmissionV1,
-    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
-        if !self.exact_source_is_ready()? {
-            return Ok(None);
-        }
-        Ok(self.latest_complete_with(admission))
-    }
-
     /// Run the exact-source freshness fence without resolving a generation.
     /// Callers that already own the immutable serving handle must not consult
     /// the publication decoder cache merely to prove that handle is current.
