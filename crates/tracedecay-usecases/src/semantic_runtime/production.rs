@@ -3908,6 +3908,33 @@ pub fn project_semantic_application_status(
 pub type SavedCodeGenerationScheduleHookV1 =
     Arc<dyn Fn(Arc<CodeIndexPublishedGenerationV1>) -> bool + Send + Sync>;
 
+/// Daemon runtime retained when the saved-generation hook is constructed.
+///
+/// Serving publication deliberately invokes the hook from `spawn_blocking`
+/// while it owns the synchronous scheduler. Looking up a current Tokio runtime
+/// from that worker always fails, so the hook must carry the daemon runtime
+/// across the blocking handoff instead.
+#[derive(Clone)]
+struct SemanticProjectionDispatchRuntimeV1 {
+    handle: tokio::runtime::Handle,
+}
+
+impl SemanticProjectionDispatchRuntimeV1 {
+    fn capture() -> Option<Self> {
+        tokio::runtime::Handle::try_current()
+            .ok()
+            .map(|handle| Self { handle })
+    }
+
+    fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.handle.spawn(future)
+    }
+}
+
 /// Owned authorities and identities captured by a saved-generation hook.
 pub struct SavedGenerationScheduleHookParametersV1 {
     pub project_root: PathBuf,
@@ -3951,6 +3978,7 @@ pub fn production_saved_generation_schedule_hook(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(project_root.clone(), runtime.as_ref().clone());
+    let dispatch_runtime = SemanticProjectionDispatchRuntimeV1::capture();
     Arc::new(move |generation| {
         if generation.snapshot().worktree.as_ref() != Some(&worktree_id) {
             return false;
@@ -3960,7 +3988,7 @@ pub fn production_saved_generation_schedule_hook(
             Arc::clone(&generation),
         );
         let runtime = Arc::clone(&runtime);
-        let Ok(tokio) = tokio::runtime::Handle::try_current() else {
+        let Some(dispatch_runtime) = dispatch_runtime.clone() else {
             return false;
         };
         let queued_bytes = generation
@@ -3983,7 +4011,7 @@ pub fn production_saved_generation_schedule_hook(
             .enqueue_work(
                 batch,
                 Box::new(move |lease| {
-                    tokio.spawn(async move {
+                    dispatch_runtime.spawn(async move {
                         let lease = Arc::new(lease);
                         if lease.is_cancelled() {
                             return;
@@ -4032,6 +4060,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
+    use std::time::Duration;
     use tracedecay_domain::UtcMicros;
 
     use tokio::sync::oneshot;
@@ -4124,6 +4153,26 @@ mod tests {
         .expect("blocking evaluator joins");
 
         assert_eq!(observed, Ok(7));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn saved_generation_dispatch_retains_daemon_runtime_across_blocking_handoff() {
+        let runtime = SemanticProjectionDispatchRuntimeV1::capture()
+            .expect("daemon runtime is available while the hook is constructed");
+        let (observed_tx, observed_rx) = oneshot::channel();
+
+        tokio::task::spawn_blocking(move || {
+            runtime.spawn(async move {
+                let _ = observed_tx.send(());
+            });
+        })
+        .await
+        .expect("blocking serving-generation handoff joins");
+
+        tokio::time::timeout(Duration::from_secs(1), observed_rx)
+            .await
+            .expect("captured runtime dispatch remains live")
+            .expect("semantic dispatch reports completion");
     }
 
     #[test]
