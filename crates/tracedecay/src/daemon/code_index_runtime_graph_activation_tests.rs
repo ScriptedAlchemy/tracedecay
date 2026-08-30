@@ -273,8 +273,32 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("writable project database");
+    // Activation issues verified graph reads; the project graph runtime binds
+    // asynchronously after `project_memory` returns, so an unawaited bind
+    // races activation into "not ready for verified reads".
+    crate::host_admission::await_bound_graph_runtime(
+        &project_database,
+        "bind small persistent activation graph runtime",
+    )
+    .await
+    .expect("bound project graph runtime");
     let native_graph_path = project_database.database_path().with_extension("grafeo");
-    let native_graph_before = std::fs::read(&native_graph_path).unwrap_or_default();
+    // Publication is crash-atomic: it commits into the graph store's WAL and
+    // reaches the base file only at checkpoint, so durability is the byte
+    // footprint of the base file plus its WAL, not the base image alone.
+    let native_graph_footprint = |path: &std::path::Path| -> u64 {
+        let base = std::fs::metadata(path).map_or(0, |meta| meta.len());
+        let wal_dir = path.with_extension("grafeo.wal");
+        let wal = walkdir::WalkDir::new(wal_dir)
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.file_type().is_file())
+            .filter_map(|entry| entry.metadata().ok())
+            .map(|meta| meta.len())
+            .sum::<u64>();
+        base + wal
+    };
+    let native_graph_before = native_graph_footprint(&native_graph_path);
 
     let graph_activation = CodeGraphActivationAuthorityV1::Persistent {
         runtime: graph_runtime.code_graph_seat_port(),
@@ -297,14 +321,23 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     activated
         .interactive_graph_store()
         .expect("activated generation must publish an interactive graph store");
-    assert_ne!(
-        std::fs::read(&native_graph_path).expect("native graph after publication"),
-        native_graph_before,
-        "persistent activation must publish the generation into the native graph"
-    );
 
     graph_runtime
         .shutdown_memory_graph_reconciliation_tasks()
         .await
         .expect("join graph reconciliation tasks");
+
+    // The committed image converges shortly after activation returns rather
+    // than atomically with it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if native_graph_footprint(&native_graph_path) != native_graph_before {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "persistent activation must publish the generation into the native graph"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

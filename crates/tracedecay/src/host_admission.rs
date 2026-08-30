@@ -47,7 +47,7 @@ mod profile_registry_test_support;
 mod session_test_support;
 mod verified_graph_test_support;
 
-#[cfg(feature = "test-transport")]
+#[cfg(any(test, feature = "test-transport"))]
 #[doc(hidden)]
 pub(crate) use verified_graph_test_support::await_bound_graph_runtime;
 
