@@ -383,6 +383,52 @@ fn valid_enum_passes() {
     assert_eq!(parsed.tool_args["metric"], json!("fan_in"));
 }
 
+/// The fact category vocabulary reaches the schema through a `$defs`
+/// reference inside a nullable `anyOf`; client-side validation must resolve
+/// it and reject an unknown value with the admitted list.
+#[test]
+fn invalid_ref_enum_errors_with_allowed_values() {
+    let d = def("fact_store_add");
+    let err = parse_invocation(
+        &d,
+        &[
+            "--content".to_string(),
+            "categorized fact".to_string(),
+            "--category".to_string(),
+            "pitfall".to_string(),
+        ],
+    )
+    .unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("`pitfall` is not one of:"), "got: {msg}");
+    for admitted in [
+        "general",
+        "user_pref",
+        "project",
+        "tool",
+        "decision",
+        "code_area",
+    ] {
+        assert!(msg.contains(admitted), "missing `{admitted}` in: {msg}");
+    }
+}
+
+#[test]
+fn valid_ref_enum_passes() {
+    let d = def("fact_store_add");
+    let parsed = parse_invocation(
+        &d,
+        &[
+            "--content".to_string(),
+            "categorized fact".to_string(),
+            "--category".to_string(),
+            "decision".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(parsed.tool_args["category"], json!("decision"));
+}
+
 #[test]
 fn args_payload_missing_required_errors() {
     let d = def("search");
