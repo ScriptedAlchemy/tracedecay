@@ -48,10 +48,25 @@ impl EditSymbolV1 {
             .bytes()
             .filter(|byte| *byte == b'\n')
             .count();
-        if u32::try_from(start_line).ok() != Some(self.start_line)
-            || u32::try_from(end_inclusive.saturating_sub(start_line).saturating_add(1)).ok()
-                != Some(self.line_span)
-        {
+        // The attested byte span begins at the symbol's leading docs/attrs
+        // (they travel with the declaration), while `start_line`/`line_span`
+        // attest the declaration itself. Cross-check the two attestations on
+        // their shared facts: the declaration must begin inside the span and
+        // both must agree on where the symbol ends.
+        let attested_start = usize::try_from(self.start_line).map_err(|error| {
+            symbol_evidence_unavailable(format!("symbol start line exceeds this host: {error}"))
+        })?;
+        if self.line_span == 0 {
+            return Err(symbol_evidence_unavailable(
+                "symbol line span is not a positive line count",
+            ));
+        }
+        let attested_end = attested_start
+            .checked_add(self.line_span as usize - 1)
+            .ok_or_else(|| {
+                symbol_evidence_unavailable("symbol line extent exceeds this host")
+            })?;
+        if start_line > attested_start || end_inclusive != attested_end {
             return Err(symbol_evidence_unavailable(
                 "symbol source span disagrees with its extraction-attested line bounds",
             ));
@@ -115,11 +130,19 @@ pub(in crate::tracedecay) fn edit_symbol_from_summary(
 }
 
 /// Resolves a symbol against the immutable generation admitted for this edit.
+///
+/// Accepts the stored qualified form (`src/pricing.rs::total`), a bare name,
+/// and module-qualified forms (`pricing::total`, `crate::pricing::total`,
+/// `src\pricing.rs::total`): stored qualified names are file-path prefixed, so
+/// module qualifiers resolve as a suffix of the candidate's path-expanded
+/// segment chain.
 #[hotpath::measure(label = "edits.resolve_symbol")]
 pub(in crate::tracedecay) fn resolve_symbol_for_edit(
     graph: &SourceEditGraphReadV1,
     symbol: &str,
 ) -> Result<EditSymbolV1> {
+    let normalized = symbol.replace('\\', "/");
+    let symbol = normalized.as_str();
     let cancellation = graph.cancellation();
     let mut matches = graph
         .reader()
@@ -130,11 +153,24 @@ pub(in crate::tracedecay) fn resolve_symbol_for_edit(
             cancellation.clone(),
         )
         .map_err(projection_error)?;
-    if matches.is_empty() && !symbol.contains("::") {
-        matches = graph
+    if matches.is_empty() {
+        let simple_name = symbol.rsplit("::").next().unwrap_or(symbol);
+        let candidates = graph
             .reader()
-            .resolve_simple_name(symbol, None, MAX_EDIT_SYMBOL_MATCHES + 1, cancellation)
+            .resolve_simple_name(simple_name, None, MAX_EDIT_SYMBOL_MATCHES + 1, cancellation)
             .map_err(projection_error)?;
+        matches = if symbol.contains("::") {
+            candidates
+                .into_iter()
+                .filter(|candidate| {
+                    candidate.metadata.as_ref().is_some_and(|metadata| {
+                        module_qualified_request_matches(symbol, &metadata.qualified_name)
+                    })
+                })
+                .collect()
+        } else {
+            candidates
+        };
     }
     if matches.len() > MAX_EDIT_SYMBOL_MATCHES {
         return Err(TraceDecayError::project_route(
@@ -148,6 +184,44 @@ pub(in crate::tracedecay) fn resolve_symbol_for_edit(
         .map(edit_symbol_from_summary)
         .collect::<Result<Vec<_>>>()?;
     narrow_symbol_for_edit(symbol, symbols)
+}
+
+/// Whether a module-qualified request names the stored candidate: the
+/// request's segments (with `crate::` stripped) must be a suffix of the
+/// candidate's segment chain, where file-path segments expand into their
+/// path components with the source extension removed — `src/pricing.rs::t`
+/// and `pricing::t` describe the same chain tail.
+fn module_qualified_request_matches(requested: &str, candidate_qualified_name: &str) -> bool {
+    let requested = requested.strip_prefix("crate::").unwrap_or(requested);
+    let requested = qualified_segment_chain(requested);
+    let candidate = qualified_segment_chain(candidate_qualified_name);
+    !requested.is_empty() && candidate.ends_with(&requested)
+}
+
+fn qualified_segment_chain(value: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    for part in value.split("::") {
+        if part.is_empty() {
+            continue;
+        }
+        if part.contains('/') || part.contains('.') {
+            let mut components = part
+                .split('/')
+                .filter(|component| !component.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if let Some(last) = components.last_mut()
+                && let Some((stem, _extension)) = last.rsplit_once('.')
+                && !stem.is_empty()
+            {
+                *last = stem.to_owned();
+            }
+            segments.extend(components);
+        } else {
+            segments.push(part.to_owned());
+        }
+    }
+    segments
 }
 
 fn narrow_symbol_for_edit(symbol: &str, symbols: Vec<EditSymbolV1>) -> Result<EditSymbolV1> {
