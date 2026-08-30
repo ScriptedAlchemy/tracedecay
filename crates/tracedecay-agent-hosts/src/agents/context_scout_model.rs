@@ -326,7 +326,8 @@ mod tests {
             candidates: vec![
                 super::super::context_scout_v2::ContextScoutModelCandidateInputV1 {
                     dedupe_key: [1; 32],
-                    category: super::super::context_scout_v2::ContextScoutCategoryV1::Verification,
+                    category:
+                        tracedecay_application::context_scout::ContextScoutCategoryV1::Verification,
                     suggestion_text: "Run the cited focused test.".to_string(),
                     citation_anchor_ids: vec![
                         tracedecay_domain::RetrievalAnchorId::new("anchor.model.fixture").unwrap(),

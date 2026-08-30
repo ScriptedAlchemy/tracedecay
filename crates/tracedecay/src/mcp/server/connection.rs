@@ -2,6 +2,7 @@
 //! policy, and daemon-owned host-admission replay driving.
 
 use super::*;
+use tracedecay_mcp::serialize_response_line;
 
 #[cfg(any(test, feature = "test-transport"))]
 mod response_delivery;

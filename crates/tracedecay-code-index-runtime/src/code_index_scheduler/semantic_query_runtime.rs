@@ -180,7 +180,7 @@ pub struct SemanticAugmentedCompositionV1 {
     pub cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub hydration_budget: tracedecay_domain::RetrievalBudget,
     /// Shared query fallback carried for test identity assertions only.
-    pub _fallback: Arc<tracedecay_domain::QueryFallbackSubpayload>,
+    pub fallback: Arc<tracedecay_domain::QueryFallbackSubpayload>,
 }
 
 pub enum SemanticAugmentationOutcomeV1 {
@@ -195,7 +195,7 @@ pub enum SemanticAugmentationOutcomeV1 {
 impl SemanticAugmentationOutcomeV1 {
     fn fallback(&self) -> &Arc<tracedecay_domain::QueryFallbackSubpayload> {
         match self {
-            Self::Augmented(augmented) => &augmented._fallback,
+            Self::Augmented(augmented) => &augmented.fallback,
             Self::Fallback { fallback, .. } => fallback,
         }
     }
@@ -590,7 +590,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         composition,
                         cursor,
                         hydration_budget: authority.execution.profile().retrieval_budget,
-                        _fallback: executed.fallback,
+                        fallback: executed.fallback,
                     },
                 )))
             }

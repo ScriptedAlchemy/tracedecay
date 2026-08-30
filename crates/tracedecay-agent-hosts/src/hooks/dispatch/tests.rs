@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
 use crate::hooks::daemon_ports::daemon_admission_response;
 use std::sync::Mutex;
 use tracedecay_application::context_scout::{
@@ -412,7 +413,9 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
         &envelope,
         &admission,
         rollback,
-        Some(receipt.clone()),
+        Some(ContextScoutDeliveryReceiptHookV1 {
+            receipt: receipt.clone(),
+        }),
         deadline,
         &DaemonDeliveryReceiptPort::new(project.path()),
     )
@@ -459,18 +462,13 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
     assert_eq!(calls[0].0.as_deref(), Some(project.path()));
     assert_eq!(calls[0].1["action"], "hook_v2_delivery_receipt");
     assert_eq!(
-        serde_json::from_value::<ContextScoutDeliveryReceiptV1>(
-            calls[0].1["receipt"].clone()
-        )
-        .unwrap(),
+        serde_json::from_value::<ContextScoutDeliveryReceiptV1>(calls[0].1["receipt"].clone())
+            .unwrap(),
         receipt
     );
     assert_eq!(calls[1].1["action"], "hook_v2_feedback");
     assert_eq!(
-        serde_json::from_value::<ContextScoutFeedbackV1>(
-            calls[1].1["feedback"].clone()
-        )
-        .unwrap(),
+        serde_json::from_value::<ContextScoutFeedbackV1>(calls[1].1["feedback"].clone()).unwrap(),
         commit.feedback
     );
     assert_eq!(calls[2].1["action"], "hook_v2_feedback_notice_delivery");
@@ -618,7 +616,9 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         &envelope,
         &sample_receipt(HookImmediateAdmissionStateV1::Accepted, true),
         rollback,
-        Some(receipt.clone()),
+        Some(ContextScoutDeliveryReceiptHookV1 {
+            receipt: receipt.clone(),
+        }),
         deadline,
         &port,
     )
@@ -630,7 +630,7 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         &envelope,
         &sample_receipt(HookImmediateAdmissionStateV1::Accepted, false),
         rollback,
-        Some(foreign),
+        Some(ContextScoutDeliveryReceiptHookV1 { receipt: foreign }),
         deadline,
         &port,
     )
@@ -642,7 +642,7 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         &envelope,
         &sample_receipt(HookImmediateAdmissionStateV1::Accepted, false),
         rollback,
-        Some(receipt),
+        Some(ContextScoutDeliveryReceiptHookV1 { receipt }),
         deadline,
         &port,
     )

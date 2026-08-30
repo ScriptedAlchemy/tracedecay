@@ -63,6 +63,11 @@ use crate::catalog_composition::{
     ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
     compose_application_catalog_with,
 };
+use tracedecay_application::feedback::observations::{
+    FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
+    FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
+};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 pub use tracedecay_application::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
     CodeCallersSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
@@ -77,10 +82,6 @@ use tracedecay_daemon_protocol::{
     InvocationControls, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
-use tracedecay_application::feedback::observations::{
-    FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
-    FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
-};
 use tracedecay_usecases::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
     OperationRequestControls,
@@ -90,7 +91,6 @@ use tracedecay_usecases::primitives::{
     FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, QualifiedNamePrimitiveRequest,
     SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest, StorageStatusPrimitiveRequest,
 };
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 mod configuration_wire;
 mod handoff;
@@ -2905,9 +2905,7 @@ pub async fn execute_application_surface(
                 tracedecay_daemon_protocol::DaemonInvocationRequest::primitive(
                     request_id.as_str(),
                     operation,
-                    PrimitiveRequest::RecentTestResults(
-                        invocation.page,
-                    ),
+                    PrimitiveRequest::RecentTestResults(invocation.page),
                     observed_at,
                     deadline,
                     cancellation_context,

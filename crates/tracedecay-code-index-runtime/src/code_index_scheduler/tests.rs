@@ -1497,6 +1497,77 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
     restarted.shutdown().await;
 }
 
+/// A restart over a dirty checkout must seat the retained complete generation
+/// before the successor rebuild finishes. Waiting for that rebuild left remount
+/// serving empty (`last_reconcile_micros` unset, no seated publication) while
+/// a sealed artifact was already on disk.
+#[tokio::test]
+async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let first = CodeIndexSchedulerRegistryV1::new(1);
+    first
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let sealed = wait_for_live_complete_generation(&first, fixture.path()).await;
+    let sealed_id = sealed.generation().manifest().generation_id.clone();
+    first.shutdown().await;
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+
+    let restarted = CodeIndexSchedulerRegistryV1::new(1);
+    restarted
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("remount worktree over a dirty checkout");
+    let seated = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = restarted
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+            {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("dirty remount must seat the retained generation before the successor rebuild");
+    assert_eq!(
+        seated.generation().manifest().generation_id,
+        sealed_id,
+        "the empty serving slot takes the retained generation, not the in-flight rebuild"
+    );
+
+    let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(latest) = restarted
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+                && latest.generation().manifest().generation_id != sealed_id
+            {
+                break latest.generation().manifest().generation_id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("dirty remount must still publish the successor generation");
+    assert_ne!(rebuilt, sealed_id, "the dirty checkout must rebuild");
+    restarted.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -1822,7 +1893,7 @@ fn duplicate_save_and_overflow_equals_clean_scan() {
         hinted_publish.snapshot_content_identity,
         clean_publish.snapshot_content_identity
     );
-    assert_eq!(hinted_publish._lane_digest, clean_publish._lane_digest);
+    assert_eq!(hinted_publish.lane_digest, clean_publish.lane_digest);
     assert!(hinted_publish.overflow_reconciled);
 }
 
@@ -1875,7 +1946,7 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         second_publish.snapshot_content_identity
     );
     assert_ne!(
-        first_publish._file_occurrence_ids, second_publish._file_occurrence_ids,
+        first_publish.file_occurrence_ids, second_publish.file_occurrence_ids,
         "shared artifacts must never alias worktree occurrence identity"
     );
     assert_ne!(first_publish.generation_id, second_publish.generation_id);
@@ -2312,7 +2383,7 @@ fn superseding_notifies_publish_only_latest_content() {
         superseded.snapshot_content_identity, expected.snapshot_content_identity,
         "fair supersession must publish only the latest reconciled content"
     );
-    assert_eq!(superseded._lane_digest, expected._lane_digest);
+    assert_eq!(superseded.lane_digest, expected.lane_digest);
     assert!(superseded.overflow_reconciled);
 }
 
@@ -4953,11 +5024,10 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
     registry.shutdown().await;
 }
 
-/// The resolution-order defect: asking the ready gate first made every query
-/// queue on the single-flight decode of the generation being activated, so a
-/// query holding a perfectly servable generation still paid an O(store) sweep
-/// before it could reach the stale fallback. Await-new must never preempt
-/// serve-old.
+/// The resolution-order defect: asking the graph-ready gate first made every
+/// query queue on the single-flight decode of the generation being activated,
+/// so a query with a current text owner still paid an O(store) sweep. Optional
+/// graph enrichment must neither block nor mark that text owner stale.
 ///
 /// This occupies the decode barrier exactly as activation of a new generation
 /// does — pinned slot empty, one decode in flight — and deliberately leaves the
@@ -5004,7 +5074,7 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
         "the last complete generation is still held and needs no decode"
     );
 
-    let stale = tokio::time::timeout(
+    let current = tokio::time::timeout(
         Duration::from_secs(30),
         registry.execute_query_search(&scope, core_search_request("main")),
     )
@@ -5012,16 +5082,16 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
     .expect("a servable generation must never queue on the decode barrier")
     .expect("search serves through the activation window");
     assert!(
-        stale.served_stale,
-        "a fallback answer must be reported stale, never as current"
+        !current.served_stale,
+        "a current text authority must stay fresh while optional graph decode is in flight"
     );
     assert_eq!(
-        stale.generation, fresh_generation,
-        "the stale answer names the complete generation that actually answered"
+        current.generation, fresh_generation,
+        "the current answer names the complete generation that actually answered"
     );
     assert_eq!(
-        stale.authorized.fallback.ordered_candidates, fresh_candidates,
-        "serving stale changes only the coverage marker, not ranking identity"
+        current.authorized.fallback.ordered_candidates, fresh_candidates,
+        "optional graph decode cannot change exact and lexical ranking identity"
     );
     assert_eq!(
         scheduler
@@ -5030,6 +5100,60 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
             .sealed_decode_count(),
         decodes_before,
         "the serving path must not enter the sealed decode at all"
+    );
+
+    drop(held_decode);
+    registry.shutdown().await;
+}
+
+/// A seated graph generation is already the decoded serving authority. Root
+/// graph/status reads must not ask the publication decoder cache to prove that
+/// fact again: the cache may be temporarily claimed by unrelated activation
+/// work while the immutable serving handle remains fully usable.
+#[tokio::test]
+async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let serving = registry
+        .latest_complete_serving_for_scope(&scope)
+        .await
+        .expect("mounted graph generation serves");
+    serving
+        .production_graph_serving()
+        .expect("the serving generation has activated its graph lane");
+    let generation_id = serving.generation().manifest().generation_id.clone();
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let held_decode = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hold_active_decode();
+
+    let ready = tokio::time::timeout(
+        Duration::from_secs(30),
+        registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope),
+    )
+    .await
+    .expect("root graph readiness must not wait for the decode cache")
+    .expect("the seated graph generation remains ready");
+    assert_eq!(
+        ready.generation().manifest().generation_id,
+        generation_id,
+        "the exact seated generation remains authoritative"
+    );
+    assert_eq!(
+        held_decode.waiter_count(),
+        0,
+        "root graph readiness must not join the publication decode flight"
     );
 
     drop(held_decode);
@@ -7874,7 +7998,7 @@ fn rename_reconciliation_matches_clean_scan() {
         "rename reconciliation must capture the same final tree as a clean scan"
     );
     assert_eq!(
-        renamed._lane_digest, clean._lane_digest,
+        renamed.lane_digest, clean.lane_digest,
         "rename reconciliation must publish byte-identical code lanes"
     );
     let latest = incremental.latest_complete().expect("renamed generation");
@@ -7938,7 +8062,7 @@ fn index_only_reconciliation_matches_clean_scan() {
         "staged-only reconciliation must capture the same final tree as a clean scan"
     );
     assert_eq!(
-        staged._lane_digest, clean._lane_digest,
+        staged.lane_digest, clean.lane_digest,
         "staged-only reconciliation must publish byte-identical code lanes"
     );
 }
@@ -7986,7 +8110,7 @@ fn deleting_a_file_tombstones_its_prior_chunks() {
     );
     assert!(
         !after
-            ._file_occurrence_ids
+            .file_occurrence_ids
             .iter()
             .any(|occurrence| gone_occurrences.contains(occurrence)),
         "the deleted file's occurrence must be absent from the new generation"
@@ -8268,7 +8392,7 @@ fn reparse_matches_full_parse_chunks() {
         "identical final content yields identical snapshot identity"
     );
     assert_eq!(
-        second._lane_digest, full_publish._lane_digest,
+        second.lane_digest, full_publish.lane_digest,
         "sequential-edit and fresh-store reconcile produce byte-identical chunk lanes"
     );
 }
@@ -9607,7 +9731,7 @@ fn real_branch_switch_reconcile_matches_clean_scan() {
         switched.snapshot_content_identity,
         clean_publish.snapshot_content_identity
     );
-    assert_eq!(switched._lane_digest, clean_publish._lane_digest);
+    assert_eq!(switched.lane_digest, clean_publish.lane_digest);
     assert_eq!(
         main_snapshot.reference.as_ref().map(RefId::as_str),
         Some("refs/heads/main")
@@ -9683,7 +9807,7 @@ fn real_rebase_reconcile_matches_clean_scan() {
         rebased.snapshot_content_identity,
         clean_publish.snapshot_content_identity
     );
-    assert_eq!(rebased._lane_digest, clean_publish._lane_digest);
+    assert_eq!(rebased.lane_digest, clean_publish.lane_digest);
     assert_eq!(
         rebased_generation
             .generation()
@@ -11583,6 +11707,15 @@ async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() 
         .latest_text_serving_for_scope(&scope)
         .await
         .is_some_and(|text| text.query_owners_are_warm());
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness during held graph activation");
+    assert_ne!(
+        freshness.staleness_state.as_deref(),
+        Some("fresh"),
+        "dashboard must not claim a terminal generation while native graph activation is still held: {freshness:?}"
+    );
     activation_gate.release();
 
     assert_ne!(

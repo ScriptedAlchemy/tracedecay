@@ -8,6 +8,9 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
 use tracedecay_daemon_protocol::DaemonLivenessProbe;
+use tracedecay_daemon_protocol::wire::{
+    WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
+};
 
 pub use tracedecay_daemon_protocol::{
     DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
@@ -238,8 +241,6 @@ pub(crate) async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    use tracedecay_sessions::admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
-
     // Pin one frame-read future for the whole wait. Liveness polls must not
     // recreate `read_bounded_mcp_line`: that future owns the partial-frame
     // accumulator after bytes have already been consumed from `reader`.
@@ -253,8 +254,7 @@ where
                     Err(error) if is_wire_oversized_io_error(&error) => {
                         Err(TraceDecayError::Config {
                             message: format!(
-                                "daemon {request_label} response exceeded wire message bound ({})",
-                                tracedecay_sessions::admission::WIRE_RECORD_TOO_LARGE
+                                "daemon {request_label} response exceeded wire message bound ({WIRE_RECORD_TOO_LARGE})"
                             ),
                         })
                     }

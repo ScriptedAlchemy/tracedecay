@@ -36,8 +36,9 @@ pub trait SessionTemporalRefreshWakePort: Send + Sync {
     fn wake_and_wait_until_idle(&self, timeout: Duration) -> SessionTemporalRefreshWakeFuture<'_>;
 }
 
-/// Refresh wake that never has a live worker. Tests and unmounted servers
-/// install this instead of fabricating a daemon scheduler.
+/// Refresh wake that never has a live worker. Tests install this instead of
+/// fabricating a daemon scheduler. Unmounted servers leave the port absent
+/// (`None`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UnavailableSessionTemporalRefreshWake;
 

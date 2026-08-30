@@ -6,7 +6,10 @@ use super::dispatch_settlement::{
 };
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::{
+    ToolResult, mark_semantic_tool_error, semantic_failure_reason, tool_error_response,
+    tool_result_has_semantic_error,
+};
 
 mod tool_dispatch;
 

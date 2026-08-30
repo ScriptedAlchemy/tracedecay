@@ -1,6 +1,4 @@
-#![allow(clippy::option_env_unwrap)]
-
-mod common;
+use crate::common;
 
 use std::process::{Command, Output};
 

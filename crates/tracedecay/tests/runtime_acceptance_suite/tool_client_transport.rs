@@ -1,6 +1,4 @@
-#![cfg(unix)]
-
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -11,7 +9,7 @@ use std::sync::{Arc, Barrier, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use common::{canonical_existing_path, tracedecay_command_with_home};
+use crate::common::{canonical_existing_path, tracedecay_command_with_home};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

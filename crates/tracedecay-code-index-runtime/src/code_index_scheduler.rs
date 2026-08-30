@@ -1211,6 +1211,25 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(self.cache.lock_state()?.active.as_ref().map(Arc::clone))
     }
 
+    /// Prove that an already-decoded serving handle still names the durable
+    /// active publication without reading or decoding its sealed payload.
+    fn active_pointer_matches_generation(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
+        let Some(pointer) = self.read_publication_pointer()? else {
+            return Ok(false);
+        };
+        Ok(
+            pointer.generation_id == generation.manifest().generation_id.as_str()
+                && pointer.snapshot_content_identity
+                    == generation.snapshot().content_identity.as_str()
+                && pointer.publication_digest
+                    == generation.projection().publication_digest().as_str()
+                && pointer.sealed_at_micros == generation.manifest().seal.sealed_at.0,
+        )
+    }
+
     /// Occupy the active-generation decode barrier exactly as a cold activation
     /// does: the pinned slot is empty and one decode is in flight. Restores both
     /// on drop, so a parked reader is never stranded.
@@ -1857,10 +1876,10 @@ pub struct CodeIndexPublishEvidenceV1 {
     pub snapshot_content_identity: ContentDigest,
     /// Publication receipt evidence: asserted by determinism tests, not read
     /// on any production path.
-    pub _lane_digest: ManifestDigest,
+    pub lane_digest: ManifestDigest,
     /// Publication receipt evidence: asserted by determinism tests, not read
     /// on any production path.
-    pub _file_occurrence_ids: Vec<FileOccurrenceId>,
+    pub file_occurrence_ids: Vec<FileOccurrenceId>,
     pub reextracted_files: usize,
     pub changed_chunks: usize,
     pub reused_chunks: usize,
@@ -4071,7 +4090,7 @@ pub enum CodeIndexSchedulerErrorV1 {
     SnapshotMemoryCapacityUnavailable,
     #[error("code-index worker plan refused: {0}")]
     WorkerPlan(#[from] tracedecay_code_index::parallelism::CodeIndexWorkerPlanInstallErrorV1),
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-helpers")))]
     #[error("code-index worker plan is not installed")]
     WorkerPlanNotInstalled,
 }
@@ -4116,7 +4135,7 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::SnapshotMemoryAdmission(_)
             | Self::SnapshotMemoryCapacityUnavailable
             | Self::WorkerPlan(_) => false,
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-helpers")))]
             Self::WorkerPlanNotInstalled => false,
         }
     }
@@ -4634,7 +4653,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
             return Ok(());
         }
-        #[cfg(test)]
+        // The shared scheduler test sources also compile into the composition
+        // root's test binary, where this crate is a dependency built with
+        // `test-helpers` instead of `cfg(test)`; both spellings are the same
+        // fixture surface, so the auto-install fallback must cover both.
+        #[cfg(any(test, feature = "test-helpers"))]
         {
             let snapshot = self.resident_memory.snapshot();
             tracedecay_code_index::parallelism::install_worker_plan(
@@ -4643,7 +4666,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             )?;
             Ok(())
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-helpers")))]
         {
             Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
         }
@@ -4820,6 +4843,49 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
+    /// Seat the already-sealed active generation when the serving slot is empty.
+    ///
+    /// Quiet remounts persist a freshness witness through
+    /// [`Self::activate_retained_generation_from_frontier`]. A dirty remount
+    /// (cancelled mid-batch, uncommitted files, overflow) fails that witness
+    /// check, and falling through into a successor rebuild left restart
+    /// remounts warming with `last_reconcile_micros` unset and no
+    /// `code_index_serving_generation_seated` event. Historical convergence and
+    /// the dirty-tree rebuild stay later passes; this pass only makes the
+    /// retained artifact serve.
+    ///
+    /// Does not claim source freshness or persist a restore witness. It leaves
+    /// an overflow wake behind so the next pass must still observe the dirty
+    /// tree and publish its successor.
+    fn seat_retained_generation_on_empty_serving(
+        &mut self,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        if let Some(outcome) = self.activate_retained_generation_from_frontier()? {
+            return Ok(Some(outcome));
+        }
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        let Some(generation) = self
+            .publication
+            .load_active_shared()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+        else {
+            return Ok(None);
+        };
+        self.validate_generation_identity(&generation)?;
+        self.adopt_ignored_source_roster(&generation);
+        let snapshot_content_identity = generation.snapshot().content_identity.clone();
+        self.latest_content_identity = Some(snapshot_content_identity.clone());
+        self.request_background_reconcile();
+        Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
+            CodeIndexNoopEvidenceV1 {
+                snapshot_content_identity,
+                overflow_reconciled: false,
+            },
+        )))
+    }
+
     /// Verify an unchanged retained text generation without decoding the full
     /// graph-bearing generation.
     ///
@@ -4900,8 +4966,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 generation_id: pending.manifest().generation_id.clone(),
                 repository_id: self.repository_id.clone(),
                 snapshot_content_identity,
-                _lane_digest: lane_digest,
-                _file_occurrence_ids: pending
+                lane_digest,
+                file_occurrence_ids: pending
                     .snapshot()
                     .files
                     .iter()
@@ -4915,9 +4981,18 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
+    #[cfg(test)]
     fn reconcile_retained_text_generation(
         &mut self,
         metadata: &VerifiedSealedTextGenerationMetadataV1,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        self.reconcile_retained_text_generation_with(metadata, true)
+    }
+
+    fn reconcile_retained_text_generation_with(
+        &mut self,
+        metadata: &VerifiedSealedTextGenerationMetadataV1,
+        rebuild_changed_source_without_decode: bool,
     ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
@@ -4972,6 +5047,13 @@ impl CodeIndexWorktreeSchedulerV1 {
                     overflow_reconciled: false,
                 },
             )));
+        }
+
+        // Witness did not prove a quiet tree. Graph-on remounts fall through
+        // to `reconcile_now` so the successor rebuild reuses the sealed
+        // generation instead of extracting the whole worktree on this path.
+        if !rebuild_changed_source_without_decode {
+            return Ok(None);
         }
 
         let _worker_memory = self.reserve_incremental_rebuild_memory()?;
@@ -5097,8 +5179,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 generation_id: generation.manifest().generation_id.clone(),
                 repository_id: self.repository_id.clone(),
                 snapshot_content_identity: generation.snapshot().content_identity.clone(),
-                _lane_digest: lane_digest,
-                _file_occurrence_ids: generation
+                lane_digest,
+                file_occurrence_ids: generation
                     .snapshot()
                     .files
                     .iter()
@@ -5543,8 +5625,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                     generation_id: generation.manifest().generation_id.clone(),
                     repository_id: self.repository_id.clone(),
                     snapshot_content_identity: generation.snapshot().content_identity.clone(),
-                    _lane_digest: lane_digest,
-                    _file_occurrence_ids: generation
+                    lane_digest,
+                    file_occurrence_ids: generation
                         .snapshot()
                         .files
                         .iter()
@@ -5661,10 +5743,21 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// matches the signature sealed by the last reconcile. Workspace-wide
     /// completeness needs this stronger fence because a file can be added
     /// inside the ordinary bounded-staleness window.
+    #[cfg(test)]
     fn latest_complete_ready_for_exact_source_with(
         &mut self,
         admission: GenerationDecodeAdmissionV1,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
+        if !self.exact_source_is_ready()? {
+            return Ok(None);
+        }
+        Ok(self.latest_complete_with(admission))
+    }
+
+    /// Run the exact-source freshness fence without resolving a generation.
+    /// Callers that already own the immutable serving handle must not consult
+    /// the publication decoder cache merely to prove that handle is current.
+    fn exact_source_is_ready(&mut self) -> Result<bool, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
@@ -5673,7 +5766,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .differs_from(&self.git_metadata)
         {
             self.request_background_reconcile();
-            return Ok(None);
+            return Ok(false);
         }
         match self.worktree_stat_signature() {
             Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
@@ -5682,13 +5775,30 @@ impl CodeIndexWorktreeSchedulerV1 {
                 // reconcile receipt or wall timestamp is fabricated, and a
                 // clean status census cannot turn into a full capture loop.
                 self.last_reconciled_at = Instant::now();
-                Ok(self.latest_complete_with(admission))
+                Ok(true)
             }
             _ => {
                 self.request_background_reconcile();
-                Ok(None)
+                Ok(false)
             }
         }
+    }
+
+    /// Admit the already-decoded serving generation under the exact source
+    /// and durable-publication fences. This is intentionally independent of
+    /// the publication decoder cache: the serving slot itself owns the
+    /// decoded generation and its activated graph authority.
+    fn serving_generation_ready_for_exact_source(
+        &mut self,
+        serving: &LatestCompleteCodeIndexV1,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        if !self.exact_source_is_ready()? {
+            return Ok(false);
+        }
+        self.publication
+            .active_pointer_matches_generation(serving.generation())
+            .map_err(CodeIndexProductionErrorV1::Publication)
+            .map_err(Into::into)
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source

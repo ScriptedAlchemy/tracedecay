@@ -13,16 +13,11 @@ use tokio::io::AsyncRead;
 use tokio::time::Instant;
 use tokio_util::bytes::{Buf, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, FramedRead};
+use tracedecay_daemon_protocol::{FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES};
 
-/// Hard JSON-RPC payload limit for one bridged frame.
-pub const MAX_LSP_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// A framing header is metadata, not an unbounded side channel.
 pub const MAX_LSP_HEADER_BYTES: usize = 16 * 1024;
 const STDIO_READ_BUFFER_BYTES: usize = 8 * 1024;
-
-/// An opaque LSP JSON-RPC payload. Framing adapters remove and restore the
-/// `Content-Length` envelope; the bridge never parses the JSON body.
-pub type LspFrame = Vec<u8>;
 
 /// Strict LSP `Content-Length` envelope failures.
 ///
@@ -386,20 +381,6 @@ where
         self.pending_write = None;
         Ok(FrameSend::Sent)
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FramePoll {
-    Frame(LspFrame),
-    Pending,
-    Closed,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FrameSend {
-    Sent,
-    Backpressured,
-    Closed,
 }
 
 /// The host-side stdio framing adapter.

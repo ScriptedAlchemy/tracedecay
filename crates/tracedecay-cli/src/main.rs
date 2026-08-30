@@ -170,6 +170,8 @@ const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
 const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
 #[cfg(feature = "hotpath")]
 const HOTPATH_FOCUS_ENV: &str = "HOTPATH_FOCUS";
+#[cfg(feature = "hotpath")]
+const HOTPATH_METRICS_SERVER_OFF_ENV: &str = "HOTPATH_METRICS_SERVER_OFF";
 const MIN_SERVING_BLOCKING_RESERVE: usize = 4;
 const DEFAULT_MAX_DAEMON_CPU_THREADS: usize = 16;
 const DAEMON_CPU_THREADS_ENV: &str = "TRACEDECAY_DAEMON_CPU_THREADS";
@@ -343,6 +345,15 @@ fn hotpath_requires_protocol_safe_output(
 #[cfg(feature = "hotpath")]
 fn configure_hotpath_output(args: &[std::ffi::OsString]) -> Result<(), String> {
     let hook_protocol = hook_capture_cmd::is_hook_protocol_invocation(args);
+    if hook_protocol {
+        // Hook stderr belongs to the host and the process serves exactly one
+        // request, so the live metrics endpoint has no consumer here. Losing
+        // the fixed-port race would print a hotpath error onto the host's
+        // stderr stream, which hosts read as a hook failure.
+        unsafe {
+            std::env::set_var(HOTPATH_METRICS_SERVER_OFF_ENV, "1");
+        }
+    }
     let output_path = std::env::var_os(HOTPATH_OUTPUT_PATH_ENV);
     let output_format = std::env::var_os(HOTPATH_OUTPUT_FORMAT_ENV);
     let focus = std::env::var_os(HOTPATH_FOCUS_ENV);
@@ -400,7 +411,17 @@ fn configure_hotpath_output(args: &[std::ffi::OsString]) -> Result<(), String> {
 
 #[cfg(feature = "hotpath")]
 fn hotpath_guard() -> hotpath::HotpathGuard {
-    hotpath::HotpathGuardBuilder::new("tracedecay").build()
+    // The CPU report section autospawns an external `hotpath-samply`/`samply`
+    // profiler that SIGSTOPs this process while it attaches perf sampling and
+    // SIGCONTs it only once the attach succeeds. A profiler failure inside
+    // that window leaves the process stopped forever, so headless invocations
+    // (hooks, `--yes` flows, protocol streams) must never enter it implicitly.
+    // CPU sampling remains available only by explicit operator request:
+    // `HOTPATH_REPORT` (e.g. `functions-cpu`) takes precedence over this
+    // default exclusion.
+    hotpath::HotpathGuardBuilder::new("tracedecay")
+        .sections_exclude(vec![hotpath::Section::FunctionsCpu])
+        .build()
 }
 
 fn main() -> ExitCode {
