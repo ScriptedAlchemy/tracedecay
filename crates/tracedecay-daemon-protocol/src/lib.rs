@@ -75,7 +75,7 @@ pub use client::{
     application_delivery_route, application_response, deadline_remaining, invocation_now_micros,
     map_invocation_error, resolve_dispatch, wait_for_cancellation,
 };
-pub use client_identity::DaemonClientIdentity;
+pub use client_identity::{DaemonClientIdentity, current_daemon_client_identity};
 pub use connection::{
     DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_TOOL_REQUEST_DEADLINE,

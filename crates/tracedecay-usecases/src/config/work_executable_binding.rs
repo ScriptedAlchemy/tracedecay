@@ -18,7 +18,7 @@ use tracedecay_domain::{
 use super::PinnedRuntimeConfiguration;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedWorkExecutableBinding {
+pub struct ResolvedWorkExecutableBinding {
     canonical_path: PathBuf,
     executable: WorkExecutableReference,
     backend: WorkProviderBackendV1,
@@ -30,7 +30,7 @@ pub(crate) struct ResolvedWorkExecutableBinding {
 }
 
 impl ResolvedWorkExecutableBinding {
-    pub(crate) fn canonical_path(&self) -> &Path {
+    pub fn canonical_path(&self) -> &Path {
         &self.canonical_path
     }
 
@@ -57,7 +57,7 @@ impl ResolvedWorkExecutableBinding {
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub(crate) enum WorkExecutableBindingError {
+pub enum WorkExecutableBindingError {
     #[error("no configured executable binding exists for {executable_id}")]
     Absent { executable_id: String },
     #[error("the configured executable binding for {executable_id} is stale")]
@@ -70,7 +70,7 @@ pub(crate) enum WorkExecutableBindingError {
     Unavailable { executable_id: String },
 }
 
-pub(crate) trait WorkExecutableBindingResolver {
+pub trait WorkExecutableBindingResolver {
     fn resolve(
         &self,
         reference: &WorkExecutableReference,
@@ -80,14 +80,14 @@ pub(crate) trait WorkExecutableBindingResolver {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct PinnedWorkExecutableBindingResolver {
+pub struct PinnedWorkExecutableBindingResolver {
     bindings: BTreeMap<String, WorkExecutableBindingV1>,
     configuration_revision_id: ConfigurationRevisionId,
     configuration_snapshot_id: ConfigurationSnapshotId,
 }
 
 impl PinnedWorkExecutableBindingResolver {
-    pub(crate) fn from_configuration(
+    pub fn from_configuration(
         configuration: &PinnedRuntimeConfiguration,
     ) -> Result<Self, WorkExecutableBindingError> {
         let key = SettingKey::new(WORK_EXECUTABLE_BINDINGS_SETTING_KEY).map_err(|_| {
@@ -222,16 +222,16 @@ mod tests {
         ManifestDigest, ProjectId, WorkExecutableReference, WorkProviderBackendV1,
         WorkProviderProtocol,
     };
-
-    use crate::config::registry::ConfigurationRegistry;
-    use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
-    use crate::config::{
-        PinnedRuntimeConfiguration, RuntimeConfigurationTarget,
-        work_executable_binding::{
-            PinnedWorkExecutableBindingResolver, WorkExecutableBindingError,
-            WorkExecutableBindingResolver,
-        },
+    use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
+    use tracedecay_global_db::configuration::resolver::{
+        ConfigurationLayerV1, resolve_configuration,
     };
+
+    use super::{
+        PinnedWorkExecutableBindingResolver, WorkExecutableBindingError,
+        WorkExecutableBindingResolver,
+    };
+    use crate::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
     fn digest(bytes: &[u8]) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))).unwrap()

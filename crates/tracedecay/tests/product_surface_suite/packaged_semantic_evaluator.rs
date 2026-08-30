@@ -1,4 +1,30 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Resolve a search-eval package binary without pulling `tests/common`
+/// (that module requires `test-helpers`, which this default-feature suite
+/// does not enable).
+fn search_eval_direct_bin() -> PathBuf {
+    const NAME: &str = "tracedecay-search-eval-direct";
+    const OVERRIDE: &str = "TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN";
+    let binary = std::env::var_os(OVERRIDE)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let test_executable =
+                std::env::current_exe().expect("test executable path should resolve");
+            let profile_dir = test_executable
+                .parent()
+                .and_then(Path::parent)
+                .expect("integration test should run from a Cargo profile directory");
+            profile_dir.join(format!("{NAME}{}", std::env::consts::EXE_SUFFIX))
+        });
+    assert!(
+        binary.is_file(),
+        "search-eval binary `{NAME}` is missing at {}; build it with `kache cargo -- build -p tracedecay-search-eval --bin {NAME}` or set {OVERRIDE}",
+        binary.display()
+    );
+    binary
+}
 
 #[test]
 fn packaged_evaluator_binary_validates_without_a_source_checkout() {
@@ -16,7 +42,7 @@ fn packaged_evaluator_binary_validates_without_a_source_checkout() {
             .exists()
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay-search-eval-direct"))
+    let output = Command::new(search_eval_direct_bin())
         .current_dir(project.path())
         .arg("validate")
         .arg("--repo-root")
@@ -43,7 +69,7 @@ fn qualify_native_rejects_an_unparseable_candidate_without_writing_output() {
     let output_path = project.path().join("qualification.json");
     std::fs::write(&candidate, b"not semantic candidate JSON").expect("invalid candidate");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay-search-eval-direct"))
+    let output = Command::new(search_eval_direct_bin())
         .current_dir(project.path())
         .args(["qualify-native", "--project-root"])
         .arg(project.path())

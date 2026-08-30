@@ -225,7 +225,7 @@ fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
         artifact_path: PathBuf::from("/fixture/semantic-model"),
     };
     let disabled = crate::config::SemanticConfig {
-        selected_model: Some(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+        selected_model: Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
         auto_download: false,
         active_profile: None,
         rollback_profile: None,

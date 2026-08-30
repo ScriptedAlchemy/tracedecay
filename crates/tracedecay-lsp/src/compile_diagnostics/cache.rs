@@ -91,7 +91,7 @@ impl DiagnosticsCache {
             .await
     }
 
-    #[hotpath::measure(label = "diagnostics.cache.run", future = true)]
+    #[hotpath::measure(label = "compile_diagnostics.cache.run", future = true)]
     pub(crate) async fn run_with<F, Fut>(
         &self,
         project_root: &Path,

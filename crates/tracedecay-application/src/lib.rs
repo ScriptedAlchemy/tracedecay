@@ -24,6 +24,8 @@
 pub mod advisory;
 pub mod authorization;
 mod bearer_token;
+#[cfg(feature = "native-git")]
+pub mod branch_snapshots;
 pub mod clock;
 pub mod configuration;
 mod configuration_wire;

@@ -26,6 +26,7 @@ tokio = { version = "1", features = ["sync", "rt", "time"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 url = "2"
 # Library-first FastEmbed: disable hub/image defaults so the adapter can only
 # construct from local verified artifact bytes (no model-hub / cache discovery).
@@ -63,6 +64,7 @@ hotpath = [
     "hotpath/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-query/hotpath",
+    "tracedecay-runtime-core/hotpath",
 ]
 hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
@@ -70,6 +72,7 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
 ]
 hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
@@ -77,6 +80,7 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
 ]
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
 # image defaults disabled. Runtime inference still loads only from locally

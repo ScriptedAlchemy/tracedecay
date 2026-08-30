@@ -37,8 +37,6 @@ use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_usecases::config::retrieval;
-pub mod topology;
-pub(crate) mod work_executable_binding;
 
 /// Name of the legacy configuration migration input stored inside the data
 /// directory. It is not a runtime authority and production code must never

@@ -9,6 +9,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/assets/**", "/src/**"]
 
 [dependencies]
+clap = { version = "4.6", features = ["derive"] }
 flate2 = "1"
 gix = { version = "=0.86.0", default-features = false, features = [
     "revision",
@@ -25,14 +26,18 @@ serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = [
     "native-git",
 ] }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["eval-helpers"] }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 
 [features]
 # Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
@@ -43,8 +48,11 @@ hotpath = [
     "tracedecay-application/hotpath",
     "tracedecay-capture/hotpath",
     "tracedecay-code-index/hotpath",
+    "tracedecay-daemon-protocol/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-query/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-sessions/hotpath",
 ]
 hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
@@ -53,8 +61,11 @@ hotpath-alloc = [
     "tracedecay-application/hotpath-alloc",
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
 ]
 hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
@@ -63,8 +74,11 @@ hotpath-cpu = [
     "tracedecay-application/hotpath-cpu",
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
 ]
 # Language tiers forwarded to the code-index owner the evaluator mounts. Off by
 # default so a composing binary keeps its own tier selection authoritative; the
@@ -79,3 +93,11 @@ evaluator-corpus-languages = ["lite", "lang-dockerfile"]
 # Self dev-dependency: the crate's own test build needs the extraction tiers
 # the checked-in corpus declares. Composing binaries still choose their own.
 tracedecay-search-eval = { path = ".", features = ["evaluator-corpus-languages"] }
+
+[[bin]]
+name = "tracedecay-search-eval"
+path = "src/bin/tracedecay-search-eval.rs"
+
+[[bin]]
+name = "tracedecay-search-eval-direct"
+path = "src/bin/tracedecay-search-eval-direct.rs"

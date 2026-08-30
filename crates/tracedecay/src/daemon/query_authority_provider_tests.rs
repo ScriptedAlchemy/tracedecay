@@ -4,7 +4,7 @@ use crate::config::retrieval::{
     RetrievalProfileStateSnapshotV1, RetrievalRuntimeCompatibilityV1, SemanticCompatibilityPinsV1,
     SemanticResourceRequirementV1,
 };
-use crate::search_eval::{
+use tracedecay_search_eval::{
     DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
     DirectQualityMetricsV1, DirectRatioMetricV1, EvaluationExecutionContractV1,
     OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
@@ -91,7 +91,7 @@ fn passing_report(evaluated_profile_id: &str) -> DirectEvaluationReportV1 {
             fusion_revision: "fusion.aggregate-only-test.v1".to_owned(),
             runtime_revision: "runtime.aggregate-only-test.v1".to_owned(),
             cache_state: "empty".to_owned(),
-            concurrency: crate::search_eval::candidate_output::EvaluationConcurrencyContractV1 {
+            concurrency: tracedecay_search_eval::candidate_output::EvaluationConcurrencyContractV1 {
                 query_workers: 1,
                 projection_workers: 1,
                 query_execution: "serial".to_owned(),

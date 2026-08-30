@@ -25,7 +25,7 @@ async fn semantic_scheduler_is_daemon_private_retained_state_not_a_wire_operatio
     let service = DaemonInvocationService::default();
     let registrar = DaemonSemanticRuntimeRegistrar::new(&service);
     let project_root = PathBuf::from("/project/semantic-runtime");
-    let handle = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20)
+    let handle = tracedecay_semantic::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20)
         .expect("semantic scheduler");
 
     registrar
@@ -35,11 +35,11 @@ async fn semantic_scheduler_is_daemon_private_retained_state_not_a_wire_operatio
     assert_eq!(
         service
             .project_runtimes
-            .get::<crate::semantic_code::DaemonSemanticRuntimeHandleV1>(&project_root)
+            .get::<tracedecay_semantic::DaemonSemanticRuntimeHandleV1>(&project_root)
             .await
             .expect("retained semantic scheduler")
             .status(),
-        crate::semantic_code::SemanticRuntimeScheduleStatusV1::Unavailable
+        tracedecay_semantic::SemanticRuntimeScheduleStatusV1::Unavailable
     );
     assert!(matches!(
         registrar.register(project_root, handle).await,

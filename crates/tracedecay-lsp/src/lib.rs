@@ -29,6 +29,7 @@
 //! implementations.
 
 pub mod analyzer;
+pub mod compile_diagnostics;
 
 mod bridge;
 mod capabilities;
@@ -57,6 +58,10 @@ pub use capabilities::{
     CapabilityUnavailableReason, ClientCapabilities, EffectiveCapabilities, GatewayCapabilities,
     LSP_PROTOCOL_VERSION, PositionEncoding, SemanticCapability, TextDocumentSync,
     UpstreamCapabilities, negotiate_capabilities,
+};
+pub use compile_diagnostics::{
+    Diagnostic, DiagnosticsCache, Driver, Scope, is_rust_diagnostics_cold,
+    rust_diagnostics_target_dir, run_all, spawn_rust_diagnostics_prewarm,
 };
 pub use context::{
     CanonicalContextProjectionAuthority, ContextCoverage, ContextExpansionEnvelope,

@@ -7,6 +7,8 @@
 pub mod analyzer;
 pub mod retrieval;
 pub mod scope_control;
+pub mod topology;
+pub mod work_executable_binding;
 
 pub use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
 pub use tracedecay_global_db::configuration::semantic::{

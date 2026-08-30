@@ -91,8 +91,9 @@ pub use production::{
     SemanticEvaluationPublicationLeaseV1, SemanticVectorPublicationLeaseV1,
     SemanticVerifiedEvaluationTargetSnapshotV1, lifecycle_to_runtime_state,
     prefer_lifecycle_over_generic_unavailable, production_saved_generation_schedule_hook,
-    project_semantic_application_status, project_semantic_production_runtime,
-    project_semantic_source_generation, register_project_semantic_runtime,
+    project_or_shared_lifecycle_status, project_semantic_application_status,
+    project_semantic_production_runtime, project_semantic_source_generation,
+    register_project_semantic_runtime, resolve_project_semantic_runtime_status,
     resolve_semantic_application_status, unbind_project_semantic_cache_if_current,
     unregister_project_semantic_runtime,
 };

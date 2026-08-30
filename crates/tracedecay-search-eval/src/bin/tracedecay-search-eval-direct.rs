@@ -2,16 +2,20 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracedecay::search_eval::{
+use tracedecay_application::CancellationSignal;
+use tracedecay_daemon_protocol::{
+    DaemonConnection, DaemonEndpoint, DaemonHandshake, DaemonInvocationClient, MovedStoreAdoption,
+    SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS, current_daemon_client_identity,
+};
+use tracedecay_runtime_core::errors::{Result as RuntimeResult, TraceDecayError};
+use tracedecay_search_eval::{
     DirectEvaluationStatusV1, DirectWorkloadSummaryV1, GenerateCandidateOutputsOptions,
     SearchEvalError, compare_default_direct, compare_direct, generate_candidate_outputs,
     root_admitted_corpus_scope, validate_default_activation_workload, validate_direct_workload,
     write_daemon_native_qualification, write_generate_outputs,
 };
-use tracedecay_application::CancellationSignal;
-use tracedecay_daemon_protocol::SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS;
 
 #[cfg(feature = "hotpath")]
 const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
@@ -239,16 +243,11 @@ fn evaluate_and_publish(project_root: PathBuf, evaluated_profile_id: String) -> 
     #[cfg(feature = "hotpath")]
     hotpath::tokio_runtime!(runtime.handle());
     runtime.block_on(async move {
-        let handshake = match tracedecay::daemon::handshake_for_current_client(
-            Some(project_root),
-            None,
-            false,
-            false,
-        ) {
+        let handshake = match handshake_for_eval_client(project_root) {
             Ok(handshake) => handshake,
             Err(error) => return invalid("evaluate_and_publish", error),
         };
-        let client = match tracedecay::daemon::invocation_client_for_current(handshake) {
+        let client = match invocation_client_for_eval(handshake) {
             Ok(client) => client,
             Err(error) => return invalid("evaluate_and_publish", error),
         };
@@ -280,16 +279,11 @@ fn qualify_native(
     #[cfg(feature = "hotpath")]
     hotpath::tokio_runtime!(runtime.handle());
     runtime.block_on(async move {
-        let handshake = match tracedecay::daemon::handshake_for_current_client(
-            Some(project_root),
-            None,
-            false,
-            false,
-        ) {
+        let handshake = match handshake_for_eval_client(project_root) {
             Ok(handshake) => handshake,
             Err(error) => return invalid("qualify_native", error),
         };
-        let client = match tracedecay::daemon::invocation_client_for_current(handshake) {
+        let client = match invocation_client_for_eval(handshake) {
             Ok(client) => client,
             Err(error) => return invalid("qualify_native", error),
         };
@@ -347,6 +341,85 @@ fn emit(value: &impl Serialize, exit: ExitCode) -> ExitCode {
     exit
 }
 
+fn handshake_for_eval_client(project_root: PathBuf) -> RuntimeResult<DaemonHandshake> {
+    Ok(DaemonHandshake {
+        project_path: Some(project_root),
+        scope_prefix: None,
+        timings: false,
+        allow_init: false,
+        allow_initialize_root_routing: false,
+        client_identity: current_daemon_client_identity()?,
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
+        tool_list_changed_capable: false,
+        catalog_version: String::new(),
+        moved_store_adoption: MovedStoreAdoption::Never,
+    })
+}
+
+/// Consume the composition-root daemon authority record. Discovery stays
+/// owned by that record; this binary does not mint a second endpoint.
+fn invocation_client_for_eval(handshake: DaemonHandshake) -> RuntimeResult<DaemonInvocationClient> {
+    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
+        TraceDecayError::Config {
+            message: "could not determine TraceDecay user data directory".to_string(),
+        }
+    })?;
+    let record =
+        read_daemon_authority_record(&profile_root)?.ok_or_else(|| TraceDecayError::Config {
+            message:
+                "TraceDecay daemon authority record is not available. Start or restart the daemon."
+                    .to_string(),
+        })?;
+    Ok(DaemonInvocationClient::new(
+        DaemonConnection::new(record.endpoint, Some(record.auth_token))
+            .with_daemon_version(record.version),
+        handshake,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct DaemonAuthorityRecordView {
+    #[serde(alias = "socket_path")]
+    endpoint: DaemonEndpoint,
+    auth_token: String,
+    version: String,
+}
+
+fn read_daemon_authority_record(
+    profile_root: &std::path::Path,
+) -> RuntimeResult<Option<DaemonAuthorityRecordView>> {
+    let path = {
+        #[cfg(windows)]
+        {
+            profile_root
+                .join("daemon-authority")
+                .join("daemon-authority.json")
+        }
+        #[cfg(not(windows))]
+        {
+            profile_root.join("daemon-authority.json")
+        }
+    };
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("read daemon authority record '{}': {error}", path.display()),
+            });
+        }
+    };
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "invalid daemon authority record '{}': {error}",
+                path.display()
+            ),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -368,7 +441,7 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(std::path::Path::parent)
-                .expect("workspace root above crates/tracedecay"),
+                .expect("workspace root above crates/tracedecay-search-eval"),
             None,
         )
         .expect("checked-in activation workload validates");
