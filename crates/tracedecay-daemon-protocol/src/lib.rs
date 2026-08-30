@@ -44,6 +44,14 @@
 #![allow(clippy::large_futures)]
 #![allow(unreachable_pub)]
 #![allow(clippy::large_enum_variant)]
+// Pedantic style lints allowed crate-wide, matching the posture this wire
+// contract carried in the composition root before extraction: these are
+// non-correctness stylistic findings whose "fixes" churn moved code.
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::match_same_arms)]
 
 pub mod client;
 pub mod client_identity;
@@ -73,8 +81,8 @@ pub use connection::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_TOOL_REQUEST_DEADLINE,
     DaemonConnection, DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
     connect_to_daemon_connection, daemon_connect_failure, daemon_response_stalled,
-    daemon_tool_response_bound, next_daemon_response_line, tool_request_deadline,
-    write_daemon_preamble,
+    daemon_response_stalled_during, daemon_tool_response_bound, next_daemon_response_line,
+    tool_request_deadline, write_daemon_preamble,
 };
 pub use contract::{
     CanonicalQualificationBlob, CanonicalQualificationBlobError, DAEMON_INVOCATION_PROTOCOL,
