@@ -61,9 +61,8 @@ use tracedecay_lsp::{
     AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace, ClientFrameAdmission,
     DaemonLspRuntimeSession, DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest,
     FeedbackCycleRuntimePort, GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError,
-    LspRuntimeFailure, LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort,
-    LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
-    SessionLifecycle, UpstreamCapabilities,
+    LspRuntimeFailure, LspRuntimeFuture, LspSessionAdmissionPort, LspSessionOpenRequest,
+    LspSessionRegistry, SessionLifecycle, UpstreamCapabilities,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -160,8 +159,8 @@ pub(crate) use tracedecay_daemon_protocol::{
     DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
-    HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, WorkApplicationInvocationV1,
-    WorkApplicationOutcomeV1,
+    HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, LspSessionAccess,
+    LspSessionCredential, LspSessionId, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
 };
 use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
 use tracedecay_runtime_core::db::Database;
@@ -187,6 +186,7 @@ mod primitive;
 pub(crate) use primitive::callable_code_request_context;
 mod registrars;
 mod retained;
+mod semantic_activation;
 pub(in crate::daemon) mod semantic_evaluation;
 #[cfg(test)]
 mod tests;

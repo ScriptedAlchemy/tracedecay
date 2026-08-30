@@ -1497,6 +1497,77 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
     restarted.shutdown().await;
 }
 
+/// A restart over a dirty checkout must seat the retained complete generation
+/// before the successor rebuild finishes. Waiting for that rebuild left remount
+/// serving empty (`last_reconcile_micros` unset, no seated publication) while
+/// a sealed artifact was already on disk.
+#[tokio::test]
+async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let first = CodeIndexSchedulerRegistryV1::new(1);
+    first
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let sealed = wait_for_live_complete_generation(&first, fixture.path()).await;
+    let sealed_id = sealed.generation().manifest().generation_id.clone();
+    first.shutdown().await;
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+
+    let restarted = CodeIndexSchedulerRegistryV1::new(1);
+    restarted
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("remount worktree over a dirty checkout");
+    let seated = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = restarted
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+            {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("dirty remount must seat the retained generation before the successor rebuild");
+    assert_eq!(
+        seated.generation().manifest().generation_id,
+        sealed_id,
+        "the empty serving slot takes the retained generation, not the in-flight rebuild"
+    );
+
+    let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(latest) = restarted
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+                && latest.generation().manifest().generation_id != sealed_id
+            {
+                break latest.generation().manifest().generation_id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("dirty remount must still publish the successor generation");
+    assert_ne!(rebuilt, sealed_id, "the dirty checkout must rebuild");
+    restarted.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -5982,22 +6053,21 @@ fn exact_source_readiness_abstains_when_a_file_is_added_inside_freshness_window(
     published(scheduler.reconcile_now().expect("initial publish"));
     assert!(
         scheduler
-            .latest_complete_ready_for_exact_source_with(
-                GenerationDecodeAdmissionV1::AlreadyDecoded,
-            )
+            .exact_source_is_ready()
             .expect("exact source readiness")
+    );
+    assert!(
+        scheduler
+            .latest_complete_with(GenerationDecodeAdmissionV1::AlreadyDecoded)
             .is_some()
     );
 
     fixture.edit("src/added.rs", "pub fn added() {}\n");
 
     assert!(
-        scheduler
-            .latest_complete_ready_for_exact_source_with(
-                GenerationDecodeAdmissionV1::AlreadyDecoded,
-            )
-            .expect("exact source readiness after file add")
-            .is_none(),
+        !scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness after file add"),
         "workspace completeness must abstain before the added file is published"
     );
 }
@@ -10675,7 +10745,7 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
         .metadata()
         .clone();
     let outcome = reopened
-        .reconcile_retained_text_generation(&metadata)
+        .reconcile_retained_text_generation_with(&metadata, true)
         .expect("graph-off retained reconcile")
         .expect("stale witness must be verified by text-only capture");
     let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome else {
@@ -10743,7 +10813,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
     );
     let tight = Arc::new(ProcessResidentMemoryV1::new(tight_limit));
     scheduler.bind_resident_memory(Arc::clone(&tight));
-    let denied = scheduler.reconcile_retained_text_generation(&metadata_a);
+    let denied = scheduler.reconcile_retained_text_generation_with(&metadata_a, true);
     assert!(
         matches!(
             denied,
@@ -10771,7 +10841,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
     ));
     scheduler.bind_resident_memory(Arc::clone(&adequate));
     let outcome = scheduler
-        .reconcile_retained_text_generation(&metadata_a)
+        .reconcile_retained_text_generation_with(&metadata_a, true)
         .expect("adequately funded graph-off retry")
         .expect("graph-off retry outcome");
     let generation_b = published(outcome);

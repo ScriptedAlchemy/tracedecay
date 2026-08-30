@@ -32,6 +32,7 @@ mod lsp_cmd;
 mod monitor_cmd;
 mod project_cmd;
 mod remote_command;
+mod semantic_cmd;
 mod serve_cmd;
 mod sessions_cmd;
 mod status_cmd;
@@ -796,6 +797,7 @@ impl CommandFamily {
             Commands::Tool { .. }
             | Commands::Work { .. }
             | Commands::Workflow { .. }
+            | Commands::Semantic { .. }
             | Commands::Lsp { .. }
             | Commands::Remote { .. }
             | Commands::Dashboard { .. }
@@ -1102,6 +1104,7 @@ async fn dispatch_runtime_command(
         }
         Commands::Work { invocation } => work_command::run(invocation).await?,
         Commands::Workflow { invocation } => workflow_command::run(invocation).await?,
+        Commands::Semantic { action } => semantic_cmd::run(action).await?,
         Commands::Remote { action } => {
             hotpath::measure_block!("cli.remote.run", crate::remote_command::run(action.into()))?;
         }
@@ -1742,6 +1745,7 @@ impl CommandStartupPolicy {
             Commands::Tool { .. }
             | Commands::Work { .. }
             | Commands::Workflow { .. }
+            | Commands::Semantic { .. }
             | Commands::Remote { .. }
             | Commands::Git { .. } => Self::SkipAll,
             // Explicit lifecycle/maintenance commands manage their own work.
