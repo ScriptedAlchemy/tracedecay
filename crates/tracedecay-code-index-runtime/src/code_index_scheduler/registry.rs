@@ -618,6 +618,26 @@ fn dashboard_freshness_identity(
     identity
 }
 
+/// Whether status may report this worktree as terminal (`fresh` / `current`).
+///
+/// Exact and lexical serve from the text owner while native graph activation
+/// is still in flight. Search on that text-only path reports
+/// `retriever_unavailable` for the graph lane. Dashboard `current` must wait
+/// for the seated serving generation whose graph is Ready or Refused so a
+/// terminal receipt is one search can actually complete. Graph-off worktrees
+/// keep the text-owner receipt.
+fn dashboard_generation_is_ready(
+    latest: Option<&LatestCompleteCodeIndexV1>,
+    text_ready: bool,
+    graph_activation_enabled: bool,
+) -> bool {
+    if graph_activation_enabled {
+        latest.is_some_and(|latest| !latest.graph_activation_is_pending())
+    } else {
+        latest.is_some() || text_ready
+    }
+}
+
 fn dashboard_text_freshness_identity(
     latest: Option<&LatestCodeTextGenerationV1>,
 ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
@@ -4186,6 +4206,7 @@ impl CodeIndexSchedulerRegistryV1 {
             text_generation,
             build_progress,
             hints,
+            graph_activation_enabled,
         ) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&canonical_root)?;
@@ -4197,6 +4218,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
+                worktree.graph_activation.policy().is_enabled(),
             )
         };
         tokio::task::spawn_blocking(move || {
@@ -4242,7 +4264,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .count();
-                    let ready = latest.is_some() || text_ready;
+                    let ready = dashboard_generation_is_ready(
+                        latest.as_ref(),
+                        text_ready,
+                        graph_activation_enabled,
+                    );
                     let stale = hook_hint_count != Some(0);
                     let last_reconcile_micros = match last_reconciled_at_micros
                         .load(Ordering::Acquire)
@@ -4254,10 +4280,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         worktree_root: canonical_root.display().to_string(),
                         last_reconcile_micros,
                         staleness_state: Some(
-                            if ready && last_reconcile_micros.is_some() && !stale {
-                                "fresh"
-                            } else if refreshing && ready {
-                                "refreshing"
+                            if refreshing {
+                                if ready {
+                                    "refreshing"
+                                } else {
+                                    "indexing"
+                                }
                             } else if stale && ready {
                                 "stale"
                             } else if ready {
@@ -4295,19 +4323,24 @@ impl CodeIndexSchedulerRegistryV1 {
                 .as_ref()
                 .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
             let hook_hint_count = scheduler.pending_hint_count();
+            let ready = dashboard_generation_is_ready(
+                latest.as_ref(),
+                text_ready,
+                graph_activation_enabled,
+            );
             let staleness_state = if refreshing {
-                if latest.is_some() || text_ready {
+                if ready {
                     "refreshing"
                 } else {
                     "indexing"
                 }
             } else if stale || hook_hint_count != Some(0) {
-                if latest.is_some() || text_ready {
+                if ready {
                     "stale"
                 } else {
                     "indexing"
                 }
-            } else if latest.is_some() || text_ready {
+            } else if ready {
                 "fresh"
             } else {
                 "indexing"
@@ -4322,7 +4355,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
                 staleness_state: Some(staleness_state.to_owned()),
                 hook_hint_count,
-                coverage: if !verified {
+                coverage: if refreshing {
+                    "partial_refresh_in_progress"
+                } else if !verified {
                     "partial_unverified_restore"
                 } else if hook_hint_count.is_some() {
                     "complete"
