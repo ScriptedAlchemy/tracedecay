@@ -23,7 +23,6 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
-use crate::mcp::server::McpProjectServerResolvePort;
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};

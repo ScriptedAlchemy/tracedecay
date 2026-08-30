@@ -38,7 +38,7 @@ fn projectless_runtime_rejects_project_database_actions() {
 #[test]
 fn session_authority_roles_fail_closed_independently() {
     let none = SessionAuthorities::default();
-    assert!(required_project_db(none).is_err());
+    assert!(required_project_db(none.clone()).is_err());
     assert!(required_user_db(none).is_err());
 }
 

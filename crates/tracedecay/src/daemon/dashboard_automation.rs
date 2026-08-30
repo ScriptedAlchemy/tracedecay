@@ -30,9 +30,7 @@ use tracedecay_dashboard_api::{
 };
 use tracedecay_domain::configuration::UserProfileId;
 
-use crate::mcp::server::{
-    McpProjectServerResolvePort, RetainedProjectGraphRequest, RetainedProjectServerResolver,
-};
+use crate::mcp::server::{RetainedProjectGraphRequest, RetainedProjectServerResolver};
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
