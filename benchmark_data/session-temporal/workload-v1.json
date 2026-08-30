@@ -3,7 +3,7 @@
   "file_inventory": [
     {
       "path": "crates/tracedecay/benches/session_temporal.rs",
-      "sha256": "e5c8477b50da6eb7e9ab05dac2c4ab9dc7147cf23ccab57d93860805de988e92"
+      "sha256": "702110be99e0744ee939065e7cf98cbf10bc712ebd4ed2db2cd93d486aa8a490"
     },
     {
       "path": "crates/tracedecay/src/session_temporal_benchmark.rs",
@@ -11,7 +11,7 @@
     },
     {
       "path": "crates/tracedecay/src/session_temporal_benchmark/root_relation_fixture.rs",
-      "sha256": "b8c4bc575b78826372676976729551800ca290e6efd76b92398bd0c4b5e129fd"
+      "sha256": "77edcadbc8164df06feb078110db10cb7a393c70e33f95b2288a085791783764"
     },
     {
       "path": "scripts/run-session-temporal-benchmark.sh",

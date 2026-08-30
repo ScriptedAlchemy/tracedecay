@@ -35,7 +35,7 @@ fn main() {
             })
         }
         _ => Err(
-            "usage: cargo test --bench session_temporal | cargo bench --bench session_temporal -- --run|--refresh-contract"
+            "usage: cargo bench -p tracedecay --bench session_temporal --features test-helpers [-- --run|--refresh-contract]"
                 .to_owned(),
         ),
     };

@@ -1928,10 +1928,10 @@ fn any_pattern_matches(patterns: &[String], candidates: &[&str]) -> bool {
 /// Single source of truth: [`tracedecay_runtime_core::config`] owns the lock,
 /// [`lock_user_data_dir_test_env`], and `PinnedUserDataDir`; this module only
 /// re-exports them so every historical `crate::config::…` call site keeps
-/// resolving. The lock and its accessor are unconditional there (not gated
-/// behind `cfg(test)` / `feature = "test-helpers"`) because non-test code —
-/// `src/session_temporal_benchmark.rs`, which is always compiled and
-/// backs `cargo bench` — takes this lock outside a test build.
+/// resolving. The re-export follows the same gate as its only non-test
+/// consumer, `session_temporal_benchmark`, so a production build carries
+/// neither the harness nor its accessor.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) use tracedecay_runtime_core::config::lock_user_data_dir_test_env;
 
 /// Pins [`USER_DATA_DIR_ENV`] and agent home discovery to an isolated temp

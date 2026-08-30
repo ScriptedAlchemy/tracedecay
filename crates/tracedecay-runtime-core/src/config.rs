@@ -211,12 +211,12 @@ fn paths_same(left: &Path, right: &Path) -> bool {
 pub use tracedecay_domain::source_path_policy::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
 
 // Deliberately unconditional (not gated behind `cfg(test)` /
-// `feature = "test-helpers"`): some non-test call sites — e.g. the root
-// crate's `src/session_temporal_benchmark.rs`, which backs
-// `cargo bench` and is always compiled as part of the lib — need this lock
-// outside a test build. The mutex and accessor are trivial and side-effect
-// free, so keeping them unconditional costs nothing while guaranteeing every
-// consumer, test or not, serializes on the same lock.
+// `feature = "test-helpers"`): some call sites reach it from a non-test build
+// — e.g. the root crate's `session_temporal_benchmark`, which backs
+// `cargo bench` and compiles as an optimized bench profile, not under
+// `cfg(test)`. The mutex and accessor are trivial and side-effect free, so
+// keeping them unconditional costs nothing while guaranteeing every consumer,
+// test or not, serializes on the same lock.
 static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Serializes tests (and benchmark harnesses) that mutate process-wide

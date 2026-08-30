@@ -84,6 +84,10 @@ pub mod serve;
 #[cfg(test)]
 #[path = "sessions/ingest_tests.rs"]
 mod session_ingest_tests;
+// Benchmark harness, not product surface: the shipped library must not carry
+// its fixture provisioning or process-environment mutation. The `session_temporal`
+// bench target and the `test-helpers` integration lanes select it explicitly.
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod session_temporal_benchmark;
 pub mod tracedecay;
 #[doc(hidden)]
