@@ -481,7 +481,9 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             max_wait,
             interrupted,
         )?;
-        lease.read_table_sizes()
+        // `max_wait` bounds the lane acquisition above and, separately, the
+        // worker reply below, so one call blocks at most twice that budget.
+        lease.read_table_sizes(max_wait)
     }
 
     /// Releases page cache on every live reader worker this pool owns.
