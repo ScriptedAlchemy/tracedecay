@@ -18,6 +18,7 @@ hotpath = [
     "hotpath/tokio",
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
+    "tracedecay-daemon-protocol/hotpath",
     "tracedecay-domain/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-runtime-core/hotpath",
@@ -30,6 +31,7 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
+    "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
@@ -42,6 +44,7 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
+    "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
@@ -62,6 +65,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "sync"] }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }

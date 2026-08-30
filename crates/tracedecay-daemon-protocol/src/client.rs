@@ -32,7 +32,7 @@ use tracedecay_usecases::request_identity::{
 
 pub type ScopeSelector = InvocationTarget;
 
-pub use tracedecay_mcp::{RequestedOutputFormat, requested_output_format};
+use crate::output_format::RequestedOutputFormat;
 
 /// The shared cancellation reference carried into an application invocation.
 pub type CancellationRef = CancellationSignal;
