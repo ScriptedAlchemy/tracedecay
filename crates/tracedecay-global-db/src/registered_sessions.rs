@@ -12,7 +12,8 @@ use super::{
     RegisteredGlobalDb, SESSION_MESSAGE_SEARCH_MAX_FETCH, SessionActivityRow, SessionIngestHealth,
     SessionMessageRecord, SessionMessageSearchResult, SessionProviderCoverage,
     SessionProviderCoverageState, SessionRecord, UNIX_TIMESTAMP_MILLIS_THRESHOLD,
-    downrank_inventory_messages, interleave_workflow_search_results, session_fts_query,
+    downrank_inventory_messages, global_db_operation_error, global_db_operation_message,
+    interleave_workflow_search_results, session_fts_query,
 };
 
 const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
@@ -362,8 +363,16 @@ impl RegisteredGlobalDb {
         Ok(out)
     }
 
+    /// Unix seconds of the most recent session activity.
+    ///
+    /// `Ok(None)` is the truthful "this store holds no timestamped messages";
+    /// a failed query or an unreadable timestamp stays an error rather than
+    /// masquerading as an idle store.
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.activity")]
-    pub async fn latest_session_activity_secs(&self) -> Option<i64> {
+    pub async fn latest_session_activity_secs(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Option<i64>> {
+        const OPERATION: &str = "read latest session activity";
         let mut rows = self
             .read_connection()
             .query(
@@ -386,10 +395,16 @@ impl RegisteredGlobalDb {
                 [UNIX_TIMESTAMP_MILLIS_THRESHOLD],
             )
             .await
-            .ok()?;
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let mut latest: Option<i64> = None;
-        while let Some(row) = rows.next().await.ok()? {
-            let timestamp = row.get::<i64>(0).ok()?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            let timestamp = row
+                .get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
             let normalized = if timestamp >= UNIX_TIMESTAMP_MILLIS_THRESHOLD {
                 timestamp / 1000
             } else {
@@ -397,16 +412,19 @@ impl RegisteredGlobalDb {
             };
             latest = Some(latest.map_or(normalized, |current| current.max(normalized)));
         }
-        latest
+        Ok(latest)
     }
 
+    /// Reads one message by provider and id. `Ok(None)` is truthful absence;
+    /// snapshot, query, and row-decode failures stay typed errors.
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.get")]
     pub async fn get_session_message(
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<SessionMessageRecord> {
-        let snapshot = self.read_snapshot().await.ok()?;
+    ) -> tracedecay_runtime_core::errors::Result<Option<SessionMessageRecord>> {
+        const OPERATION: &str = "read registered session message";
+        let snapshot = self.read_snapshot().await?;
         let mut rows = snapshot
             .query(
                 "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
@@ -415,11 +433,23 @@ impl RegisteredGlobalDb {
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await
-            .ok()?;
-        row_to_message(&rows.next().await.ok()??, 0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        else {
+            return Ok(None);
+        };
+        row_to_message(&row, 0)
+            .map(Some)
+            .map_err(|message| global_db_operation_message(OPERATION, message))
     }
 
     /// Searches message text for a provider, optionally constrained to one project.
+    ///
+    /// `Ok(vec![])` is the truthful "nothing matched"; snapshot, query, and
+    /// row-decode failures are typed errors instead of an empty result page.
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.search")]
     pub async fn search_session_messages(
         &self,
@@ -427,10 +457,11 @@ impl RegisteredGlobalDb {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> Vec<SessionMessageSearchResult> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
+        const OPERATION: &str = "search registered session messages";
         let fts_query = session_fts_query(query);
         if fts_query.is_empty() || limit == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let literal_terms = query
             .split_whitespace()
@@ -438,10 +469,7 @@ impl RegisteredGlobalDb {
             .map(str::to_lowercase)
             .collect::<Vec<_>>();
         let fetch_limit = rerank_fetch_limit(limit, SESSION_MESSAGE_SEARCH_MAX_FETCH);
-        let snapshot = match self.read_snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(_) => return Vec::new(),
-        };
+        let snapshot = self.read_snapshot().await?;
 
         let mut sql = "SELECT
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
@@ -484,39 +512,31 @@ impl RegisteredGlobalDb {
         );
 
         let mut transcript_results = Vec::new();
-        if let Ok(mut rows) = snapshot.query(&sql, query_params).await {
-            loop {
-                let row = match rows.next().await {
-                    Ok(Some(row)) => row,
-                    Ok(None) => break,
-                    Err(error) => {
-                        tracing::warn!(error = %error, "session message search row iteration failed");
-                        break;
-                    }
-                };
-                let Some(session) = row_to_session(&row) else {
-                    tracing::warn!(
-                        "session message search dropped a row with an unreadable session"
-                    );
-                    continue;
-                };
-                let Some(message) = row_to_message(&row, 13) else {
-                    tracing::warn!(
-                        "session message search dropped a row with an unreadable message"
-                    );
-                    continue;
-                };
-                let score = row.get::<f64>(26).map_or(0.0, |rank| -rank);
-                transcript_results.push(SessionMessageSearchResult {
-                    session,
-                    message,
-                    score,
-                });
-            }
+        let mut rows = snapshot
+            .query(&sql, query_params)
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            let session = row_to_session(&row)
+                .map_err(|message| global_db_operation_message(OPERATION, message))?;
+            let message = row_to_message(&row, 13)
+                .map_err(|message| global_db_operation_message(OPERATION, message))?;
+            let score = -row
+                .get::<f64>(26)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            transcript_results.push(SessionMessageSearchResult {
+                session,
+                message,
+                score,
+            });
         }
 
         let workflow_results =
-            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await;
+            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await?;
         let mut results = interleave_workflow_search_results(transcript_results, workflow_results);
         results = dedupe_related_message_copies(results, |result| RelatedMessageCopyIdentity {
             provider: &result.session.provider,
@@ -531,23 +551,23 @@ impl RegisteredGlobalDb {
         });
         downrank_inventory_messages(&mut results);
         results.truncate(limit);
-        results
+        Ok(results)
     }
 
     /// Lists each session's latest canonical goal state, newest first.
+    /// Goals with no native timestamp rank after all timestamped goals
+    /// instead of being assigned a fabricated epoch-zero time.
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.goals")]
     pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
         limit: usize,
-    ) -> Vec<SessionMessageSearchResult> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
+        const OPERATION: &str = "list recent registered session goals";
         if limit == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let snapshot = match self.read_snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(_) => return Vec::new(),
-        };
+        let snapshot = self.read_snapshot().await?;
         let mut sql = "WITH ranked_goals AS (
                 SELECT w.*,
                        ROW_NUMBER() OVER (
@@ -583,37 +603,31 @@ impl RegisteredGlobalDb {
         query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
             sql,
-            " ORDER BY COALESCE(w.native_timestamp, 0) DESC,
+            " ORDER BY (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
                        w.observation_sequence DESC, w.fact_ordinal DESC
               LIMIT ?{}",
             query_params.len()
         );
 
         let mut results = Vec::new();
-        if let Ok(mut rows) = snapshot.query(&sql, query_params).await {
-            loop {
-                let row = match rows.next().await {
-                    Ok(Some(row)) => row,
-                    Ok(None) => break,
-                    Err(error) => {
-                        tracing::warn!(error = %error, "workflow fact search row iteration failed");
-                        break;
-                    }
-                };
-                let Some(session) = row_to_session(&row) else {
-                    tracing::warn!("workflow fact search dropped a row with an unreadable session");
-                    continue;
-                };
-                let Some(message) = row_to_workflow_message(&row, 13) else {
-                    tracing::warn!("workflow fact search dropped a row with an unreadable message");
-                    continue;
-                };
-                results.push(SessionMessageSearchResult {
-                    session,
-                    message,
-                    score: 0.0,
-                });
-            }
+        let mut rows = snapshot
+            .query(&sql, query_params)
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            let session = row_to_session(&row)
+                .map_err(|message| global_db_operation_message(OPERATION, message))?;
+            let message = row_to_workflow_message(&row, 13)
+                .map_err(|message| global_db_operation_message(OPERATION, message))?;
+            results.push(SessionMessageSearchResult {
+                session,
+                message,
+                score: 0.0,
+            });
         }
 
         let mut legacy_sql = "SELECT
@@ -651,49 +665,35 @@ impl RegisteredGlobalDb {
         legacy_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
             legacy_sql,
-            " ORDER BY COALESCE(m.timestamp, 0) DESC, m.ordinal DESC LIMIT ?{}",
+            " ORDER BY (m.timestamp IS NULL) ASC, m.timestamp DESC, m.ordinal DESC LIMIT ?{}",
             legacy_params.len()
         );
-        if let Ok(mut rows) = snapshot.query(&legacy_sql, legacy_params).await {
-            loop {
-                let row = match rows.next().await {
-                    Ok(Some(row)) => row,
-                    Ok(None) => break,
-                    Err(error) => {
-                        tracing::warn!(error = %error, "legacy session search row iteration failed");
-                        break;
-                    }
-                };
-                let Some(session) = row_to_session(&row) else {
-                    tracing::warn!(
-                        "legacy session search dropped a row with an unreadable session"
-                    );
-                    continue;
-                };
-                let Some(message) = row_to_message(&row, 13) else {
-                    tracing::warn!(
-                        "legacy session search dropped a row with an unreadable message"
-                    );
-                    continue;
-                };
-                results.push(SessionMessageSearchResult {
-                    session,
-                    message,
-                    score: 0.0,
-                });
-            }
+        let mut rows = snapshot
+            .query(&legacy_sql, legacy_params)
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            let session = row_to_session(&row)
+                .map_err(|message| global_db_operation_message(OPERATION, message))?;
+            let message = row_to_message(&row, 13)
+                .map_err(|message| global_db_operation_message(OPERATION, message))?;
+            results.push(SessionMessageSearchResult {
+                session,
+                message,
+                score: 0.0,
+            });
         }
         results.sort_by(|left, right| {
-            right
-                .message
-                .timestamp
-                .unwrap_or_default()
-                .cmp(&left.message.timestamp.unwrap_or_default())
+            descending_timestamp(left.message.timestamp, right.message.timestamp)
                 .then_with(|| right.message.ordinal.cmp(&left.message.ordinal))
                 .then_with(|| left.message.message_id.cmp(&right.message.message_id))
         });
         results.truncate(limit);
-        results
+        Ok(results)
     }
 
     /// Reads the canonical workflow fact columns used by projection acceptance.
@@ -754,6 +754,17 @@ impl RegisteredGlobalDb {
     }
 }
 
+/// Newest-first ordering where a missing timestamp ranks after every known
+/// timestamp instead of being compared as a fabricated epoch-zero time.
+fn descending_timestamp(left: Option<i64>, right: Option<i64>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => right.cmp(&left),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
 #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_search")]
 async fn search_workflow_facts(
     snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
@@ -761,7 +772,8 @@ async fn search_workflow_facts(
     project_key: Option<&str>,
     query: &str,
     limit: usize,
-) -> Vec<SessionMessageSearchResult> {
+) -> tracedecay_runtime_core::errors::Result<Vec<SessionMessageSearchResult>> {
+    const OPERATION: &str = "search registered workflow facts";
     let terms = query
         .split_whitespace()
         .map(|term| {
@@ -773,7 +785,7 @@ async fn search_workflow_facts(
         .filter(|term| !term.is_empty())
         .collect::<Vec<_>>();
     if terms.is_empty() || limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut sql = "SELECT
@@ -812,105 +824,205 @@ async fn search_workflow_facts(
     let _ = write!(
         sql,
         " ORDER BY CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END,
-                  w.item_order, COALESCE(w.native_timestamp, 0) DESC,
+                  w.item_order, (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
                   w.observation_sequence DESC, w.fact_ordinal
           LIMIT ?{}",
         query_params.len()
     );
 
-    let Ok(mut rows) = snapshot.query(&sql, query_params).await else {
-        return Vec::new();
-    };
+    let mut rows = snapshot
+        .query(&sql, query_params)
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
     let mut results = Vec::new();
-    loop {
-        let row = match rows.next().await {
-            Ok(Some(row)) => row,
-            Ok(None) => break,
-            Err(error) => {
-                tracing::warn!(error = %error, "workflow fact helper row iteration failed");
-                break;
-            }
-        };
-        let Some(session) = row_to_session(&row) else {
-            tracing::warn!("workflow fact helper dropped a row with an unreadable session");
-            continue;
-        };
-        let Some(message) = row_to_workflow_message(&row, 13) else {
-            tracing::warn!("workflow fact helper dropped a row with an unreadable message");
-            continue;
-        };
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        let session = row_to_session(&row)
+            .map_err(|message| global_db_operation_message(OPERATION, message))?;
+        let message = row_to_workflow_message(&row, 13)
+            .map_err(|message| global_db_operation_message(OPERATION, message))?;
         results.push(SessionMessageSearchResult {
             session,
             message,
             score: 0.0,
         });
     }
-    results
+    Ok(results)
 }
 
-fn row_to_session(row: &tracedecay_runtime_core::db::engine::Row) -> Option<SessionRecord> {
-    Some(SessionRecord {
-        provider: row.get(0).ok()?,
-        session_id: row.get(1).ok()?,
-        project_key: row.get(2).ok()?,
-        project_path: row.get(3).ok()?,
-        title: row.get(4).ok(),
-        started_at: row.get(5).ok(),
-        ended_at: row.get(6).ok(),
-        transcript_path: row.get(7).ok(),
-        metadata_json: row.get(8).ok(),
-        parent_session_id: row.get(9).ok(),
-        is_subagent: row.get::<i64>(10).ok()? != 0,
-        agent_id: row.get(11).ok(),
-        parent_tool_use_id: row.get(12).ok(),
+fn session_column_error(column: &str, error: &dyn std::fmt::Display) -> String {
+    format!("failed to decode session column '{column}': {error}")
+}
+
+fn message_column_error(column: &str, error: &dyn std::fmt::Display) -> String {
+    format!("failed to decode session message column '{column}': {error}")
+}
+
+fn row_to_session(
+    row: &tracedecay_runtime_core::db::engine::Row,
+) -> std::result::Result<SessionRecord, String> {
+    Ok(SessionRecord {
+        provider: row
+            .get(0)
+            .map_err(|error| session_column_error("provider", &error))?,
+        session_id: row
+            .get(1)
+            .map_err(|error| session_column_error("session_id", &error))?,
+        project_key: row
+            .get(2)
+            .map_err(|error| session_column_error("project_key", &error))?,
+        project_path: row
+            .get(3)
+            .map_err(|error| session_column_error("project_path", &error))?,
+        title: row
+            .get(4)
+            .map_err(|error| session_column_error("title", &error))?,
+        started_at: row
+            .get(5)
+            .map_err(|error| session_column_error("started_at", &error))?,
+        ended_at: row
+            .get(6)
+            .map_err(|error| session_column_error("ended_at", &error))?,
+        transcript_path: row
+            .get(7)
+            .map_err(|error| session_column_error("transcript_path", &error))?,
+        metadata_json: row
+            .get(8)
+            .map_err(|error| session_column_error("metadata_json", &error))?,
+        parent_session_id: row
+            .get(9)
+            .map_err(|error| session_column_error("parent_session_id", &error))?,
+        is_subagent: row
+            .get::<i64>(10)
+            .map_err(|error| session_column_error("is_subagent", &error))?
+            != 0,
+        agent_id: row
+            .get(11)
+            .map_err(|error| session_column_error("agent_id", &error))?,
+        parent_tool_use_id: row
+            .get(12)
+            .map_err(|error| session_column_error("parent_tool_use_id", &error))?,
     })
 }
 
 fn row_to_message(
     row: &tracedecay_runtime_core::db::engine::Row,
     offset: i32,
-) -> Option<SessionMessageRecord> {
-    Some(SessionMessageRecord {
-        provider: row.get(offset).ok()?,
-        message_id: row.get(offset + 1).ok()?,
-        session_id: row.get(offset + 2).ok()?,
-        role: row.get(offset + 3).ok()?,
-        timestamp: row.get(offset + 4).ok(),
-        ordinal: row.get(offset + 5).ok()?,
-        text: row.get(offset + 6).ok()?,
-        kind: row.get(offset + 7).ok(),
-        model: row.get(offset + 8).ok(),
-        tool_names: row.get(offset + 9).ok(),
-        source_path: row.get(offset + 10).ok(),
-        source_offset: row.get(offset + 11).ok(),
-        metadata_json: row.get(offset + 12).ok(),
+) -> std::result::Result<SessionMessageRecord, String> {
+    Ok(SessionMessageRecord {
+        provider: row
+            .get(offset)
+            .map_err(|error| message_column_error("provider", &error))?,
+        message_id: row
+            .get(offset + 1)
+            .map_err(|error| message_column_error("message_id", &error))?,
+        session_id: row
+            .get(offset + 2)
+            .map_err(|error| message_column_error("session_id", &error))?,
+        role: row
+            .get(offset + 3)
+            .map_err(|error| message_column_error("role", &error))?,
+        timestamp: row
+            .get(offset + 4)
+            .map_err(|error| message_column_error("timestamp", &error))?,
+        ordinal: row
+            .get(offset + 5)
+            .map_err(|error| message_column_error("ordinal", &error))?,
+        text: row
+            .get(offset + 6)
+            .map_err(|error| message_column_error("text", &error))?,
+        kind: row
+            .get(offset + 7)
+            .map_err(|error| message_column_error("kind", &error))?,
+        model: row
+            .get(offset + 8)
+            .map_err(|error| message_column_error("model", &error))?,
+        tool_names: row
+            .get(offset + 9)
+            .map_err(|error| message_column_error("tool_names", &error))?,
+        source_path: row
+            .get(offset + 10)
+            .map_err(|error| message_column_error("source_path", &error))?,
+        source_offset: row
+            .get(offset + 11)
+            .map_err(|error| message_column_error("source_offset", &error))?,
+        metadata_json: row
+            .get(offset + 12)
+            .map_err(|error| message_column_error("metadata_json", &error))?,
     })
+}
+
+fn workflow_column_error(column: &str, error: &dyn std::fmt::Display) -> String {
+    format!("failed to decode workflow fact column '{column}': {error}")
 }
 
 fn row_to_workflow_message(
     row: &tracedecay_runtime_core::db::engine::Row,
     offset: i32,
-) -> Option<SessionMessageRecord> {
-    let provider: String = row.get(offset).ok()?;
-    let observation_id: String = row.get(offset + 1).ok()?;
-    let fact_ordinal: i64 = row.get(offset + 2).ok()?;
-    let session_id: String = row.get(offset + 3).ok()?;
-    let semantic_kind: String = row.get(offset + 4).ok()?;
-    let provider_reference: Option<String> = row.get(offset + 5).ok();
-    let item_id: Option<String> = row.get(offset + 6).ok();
-    let parent_reference: Option<String> = row.get(offset + 7).ok();
-    let list_reference: Option<String> = row.get(offset + 8).ok();
-    let state: Option<String> = row.get(offset + 9).ok();
-    let status: Option<String> = row.get(offset + 10).ok();
-    let item_order: Option<i64> = row.get(offset + 11).ok();
-    let revision: Option<String> = row.get(offset + 12).ok();
-    let event_sequence: Option<i64> = row.get(offset + 13).ok();
-    let source_sequence: Option<i64> = row.get(offset + 14).ok();
-    let native_timestamp: Option<i64> = row.get(offset + 15).ok();
-    let observation_sequence: i64 = row.get(offset + 16).ok()?;
-    let ordering_domain: String = row.get(offset + 17).ok()?;
-    let content_json: Option<String> = row.get(offset + 18).ok();
-    let content_text: String = row.get(offset + 19).ok()?;
+) -> std::result::Result<SessionMessageRecord, String> {
+    let provider: String = row
+        .get(offset)
+        .map_err(|error| workflow_column_error("provider", &error))?;
+    let observation_id: String = row
+        .get(offset + 1)
+        .map_err(|error| workflow_column_error("observation_id", &error))?;
+    let fact_ordinal: i64 = row
+        .get(offset + 2)
+        .map_err(|error| workflow_column_error("fact_ordinal", &error))?;
+    let session_id: String = row
+        .get(offset + 3)
+        .map_err(|error| workflow_column_error("session_id", &error))?;
+    let semantic_kind: String = row
+        .get(offset + 4)
+        .map_err(|error| workflow_column_error("semantic_kind", &error))?;
+    let provider_reference: Option<String> = row
+        .get(offset + 5)
+        .map_err(|error| workflow_column_error("provider_reference", &error))?;
+    let item_id: Option<String> = row
+        .get(offset + 6)
+        .map_err(|error| workflow_column_error("item_id", &error))?;
+    let parent_reference: Option<String> = row
+        .get(offset + 7)
+        .map_err(|error| workflow_column_error("parent_reference", &error))?;
+    let list_reference: Option<String> = row
+        .get(offset + 8)
+        .map_err(|error| workflow_column_error("list_reference", &error))?;
+    let state: Option<String> = row
+        .get(offset + 9)
+        .map_err(|error| workflow_column_error("state", &error))?;
+    let status: Option<String> = row
+        .get(offset + 10)
+        .map_err(|error| workflow_column_error("status", &error))?;
+    let item_order: Option<i64> = row
+        .get(offset + 11)
+        .map_err(|error| workflow_column_error("item_order", &error))?;
+    let revision: Option<String> = row
+        .get(offset + 12)
+        .map_err(|error| workflow_column_error("native_revision", &error))?;
+    let event_sequence: Option<i64> = row
+        .get(offset + 13)
+        .map_err(|error| workflow_column_error("event_sequence", &error))?;
+    let source_sequence: Option<i64> = row
+        .get(offset + 14)
+        .map_err(|error| workflow_column_error("source_sequence", &error))?;
+    let native_timestamp: Option<i64> = row
+        .get(offset + 15)
+        .map_err(|error| workflow_column_error("native_timestamp", &error))?;
+    let observation_sequence: i64 = row
+        .get(offset + 16)
+        .map_err(|error| workflow_column_error("observation_sequence", &error))?;
+    let ordering_domain: String = row
+        .get(offset + 17)
+        .map_err(|error| workflow_column_error("ordering_domain", &error))?;
+    let content_json: Option<String> = row
+        .get(offset + 18)
+        .map_err(|error| workflow_column_error("content_json", &error))?;
+    let content_text: String = row
+        .get(offset + 19)
+        .map_err(|error| workflow_column_error("content_text", &error))?;
 
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -944,13 +1056,13 @@ fn row_to_workflow_message(
             metadata.insert(key.to_owned(), JsonValue::from(value));
         }
     }
-    if let Some(content_json) = content_json
-        && let Ok(content) = serde_json::from_str(&content_json)
-    {
+    if let Some(content_json) = content_json {
+        let content = serde_json::from_str(&content_json)
+            .map_err(|error| workflow_column_error("content_json", &error))?;
         metadata.insert("content".to_owned(), content);
     }
 
-    Some(SessionMessageRecord {
+    Ok(SessionMessageRecord {
         provider,
         message_id: format!("workflow/{observation_id}/{fact_ordinal}"),
         session_id,

@@ -549,10 +549,9 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         message_id: &str,
     ) -> Result<Option<tracedecay_sessions::runtime::SessionMessageRecord>> {
-        Ok(self
-            .session_database_for_test(scope)?
+        self.session_database_for_test(scope)?
             .get_session_message(provider, message_id)
-            .await)
+            .await
     }
 
     #[doc(hidden)]
