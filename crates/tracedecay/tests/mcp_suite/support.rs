@@ -26,7 +26,6 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
-use tracedecay::storage::PrivateStoreIo;
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
@@ -46,6 +45,7 @@ use tracedecay_mcp::McpTransport;
 use tracedecay_mcp::ToolResult;
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]

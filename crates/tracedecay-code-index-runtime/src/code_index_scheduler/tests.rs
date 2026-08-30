@@ -207,7 +207,7 @@ fn scheduler(
 
 fn build_progress_snapshot(
     scheduler: &CodeIndexWorktreeSchedulerV1,
-) -> Arc<crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1> {
+) -> Arc<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1> {
     scheduler
         .build_progress_slot()
         .read()
@@ -219,14 +219,15 @@ fn build_progress_snapshot(
 fn progress_snapshot_for_generation(
     generation_id: &CodeGenerationId,
     committed_pages: u64,
-) -> crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
-    crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
+) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1 {
+    tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1 {
         generation_id: generation_id.as_str().to_owned(),
         daemon_incarnation: 1,
         producer_incarnation: 1,
         progress_epoch: 0,
         sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
-        phase: crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        phase:
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
         committed_pages,
         committed_chunks: committed_pages,
         committed_imports: 0,
@@ -2436,7 +2437,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         let progress = build_progress_snapshot(&scheduler);
         assert_eq!(
             progress.phase,
-            crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
         );
         progress
     };
@@ -2500,7 +2501,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     let completed_after_restart = build_progress_snapshot(&scheduler);
     assert_eq!(
         completed_after_restart.phase,
-        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
     );
     assert_eq!(
         completed_after_restart.generation_id,
@@ -2686,7 +2687,7 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
     let scan = build_progress_snapshot(&reopened);
     assert_eq!(
         scan.phase,
-        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::SourceScan
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::SourceScan
     );
     assert!(scan.total_lexical_bytes > 0);
     assert_eq!(scan.completed_lexical_bytes, scan.total_lexical_bytes);
@@ -3879,7 +3880,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
                 .snapshot()
                 .is_some_and(|snapshot| {
                     snapshot.phase
-                        == crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+                        == tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
                 });
             if cancel {
                 self.observed_bulk_commit
@@ -3967,7 +3968,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
     let dashboard_after = build_progress_snapshot(&scheduler);
     assert_eq!(
         dashboard_after.phase,
-        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
     );
     assert_eq!(dashboard_after.current_batch_pages, 1);
     assert_eq!(
@@ -3988,7 +3989,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
     let dashboard_ready = build_progress_snapshot(&scheduler);
     assert_eq!(
         dashboard_ready.phase,
-        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
     );
     assert!(dashboard_ready.progress_epoch > dashboard_after.progress_epoch);
 }
@@ -4233,7 +4234,7 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
     );
     assert!(replacement_progress.progress_epoch > original_progress.progress_epoch);
     original.publish_text_progress_phase(
-        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
         99,
         99,
     );
@@ -10139,7 +10140,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     let (scope, privacy_domain) = {
         let mut scheduler = scheduler(
             &fixture,
-            scoped_store,
+            scoped_store.clone(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
         published(scheduler.reconcile_now().expect("seed retained generation"));
@@ -10156,11 +10157,13 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             latest.generation.manifest().privacy_domain.clone(),
         )
     };
-    std::fs::remove_file(
-        super::scoped_code_index_store_root(store.path(), fixture.path())
-            .join("freshness_witness.v1"),
-    )
-    .expect("remove restore witness to reproduce a cold preserved-profile mount");
+    let freshness_witness = scoped_store.join("freshness_witness.v1");
+    assert!(
+        freshness_witness.is_file(),
+        "seeding the preserved profile persists its restore witness"
+    );
+    std::fs::remove_file(freshness_witness)
+        .expect("remove restore witness to reproduce a cold preserved-profile mount");
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
@@ -10202,7 +10205,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         if let (owner_epoch, Some(progress)) = observed
             && progress.committed_pages > 0
             && progress.phase
-                != crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+                != tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
         {
             break (owner_epoch, progress);
         }
@@ -10363,19 +10366,17 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     assert!(progress_after_overflow.committed_pages >= progress_before_overflow.committed_pages);
     assert_eq!(
         progress_after_overflow.phase,
-        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
     );
     assert_eq!(
         decode_count, 0,
         "graph-off text serving must not decode the full generation"
     );
-    let artifact_names = std::fs::read_dir(super::code_text_artifacts_root(
-        &super::scoped_code_index_store_root(store.path(), fixture.path()),
-    ))
-    .expect("read text artifact root")
-    .filter_map(Result::ok)
-    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-    .collect::<Vec<_>>();
+    let artifact_names = std::fs::read_dir(super::code_text_artifacts_root(&scoped_store))
+        .expect("read text artifact root")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     assert_eq!(
         artifact_names
             .iter()
@@ -10429,7 +10430,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             .as_ref()
             .expect("ready progress stays observable")
             .phase,
-        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
     );
     let current = registry
         .execute_query_search(&scope, core_search_request("alpha_0000"))
@@ -11385,7 +11386,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         if let (Some(text), (owner_epoch, Some(progress))) = (text, observed)
             && progress.committed_pages > 0
             && progress.phase
-                != crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+                != tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
         {
             break (text, owner_epoch, progress);
         }
@@ -11462,7 +11463,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         assert_ne!(progress.generation_id, progress_before_retry.generation_id);
         assert_eq!(
             progress.phase,
-            crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
         );
     }
     assert!(

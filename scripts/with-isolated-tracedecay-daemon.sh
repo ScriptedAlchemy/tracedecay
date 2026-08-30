@@ -108,7 +108,7 @@ mkdir -p "$TRACEDECAY_DATA_DIR"
 print_daemon_log() {
   echo "----- tracedecay daemon log -----" >&2
   if [[ -s "$daemon_log" ]]; then
-    cat "$daemon_log" >&2 || true
+    tail -c 16384 "$daemon_log" >&2 || true
   else
     echo "(no daemon output captured)" >&2
   fi
@@ -132,14 +132,18 @@ stop_daemon() {
     fi
   fi
   wait "$daemon_pid" 2>/dev/null || true
+  return "$stop_status"
 }
 
 cleanup() {
-  local status=$?
+  local status=$? stop_status=0
 
   trap - EXIT INT TERM
-  stop_daemon
-  if ((status != 0)); then
+  stop_daemon || stop_status=$?
+  if ((status == 0 && stop_status != 0)); then
+    status="$stop_status"
+  fi
+  if ((status != 0 || stop_status != 0)); then
     print_daemon_log
   fi
   rm -rf "$run_dir"

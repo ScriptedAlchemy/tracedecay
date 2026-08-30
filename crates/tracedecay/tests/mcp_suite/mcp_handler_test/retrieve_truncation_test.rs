@@ -21,7 +21,7 @@ async fn retrieve_tool_returns_full_stored_response() {
     .unwrap();
 
     let response_handle_root =
-        tracedecay::storage::resolve_response_handle_root(cg.project_root()).unwrap();
+        tracedecay_runtime_core::storage::resolve_response_handle_root(cg.project_root()).unwrap();
     let stored_payload: Value = serde_json::from_str(
         &fs::read_to_string(response_handle_root.join(format!("{}.json", stored.handle))).unwrap(),
     )
@@ -132,7 +132,8 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
             .contains("Re-run the original MCP tool")
     );
 
-    let identity_path = tracedecay::storage::repository_identity_path(cg.project_root()).unwrap();
+    let identity_path =
+        tracedecay_runtime_core::storage::repository_identity_path(cg.project_root()).unwrap();
     fs::write(
         &identity_path,
         r#"{"schema_version":1,"project_id":"../operator-private"}"#,

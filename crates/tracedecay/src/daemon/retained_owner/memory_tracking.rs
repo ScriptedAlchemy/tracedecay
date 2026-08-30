@@ -11,7 +11,7 @@ use tracedecay_usecases::memory::MemoryApplication;
 use super::memory::{bounded_memory_operation, fact_write_control};
 use super::memory_mapping;
 use super::memory_mutation::{MemoryMutationSettlement, memory_mutation_settlement};
-use crate::store::DatabaseFactStore;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 #[derive(Default)]
 pub(super) struct TrackedExplicitSearch {

@@ -232,7 +232,11 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
     // Empty discovery means PR 5 closed, but no scheduler retirement authority
     // is injected into this state-only fixture. Reconciliation must fail closed
     // without deleting its durable state or Git-adjacent artifacts.
-    let identity = crate::daemon::profile_identity::load_or_create(data_root.path()).unwrap();
+    // The profile identity root must be a directory `load_or_create` creates
+    // (and restricts to 0700) itself; a umask-default tempdir trips the
+    // fail-closed private-root validation.
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&data_root.path().join("profile")).unwrap();
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,
@@ -525,7 +529,10 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
             .expect("manual branch activation");
 
     assert_eq!(activation.branch, "feature-manual");
-    assert_eq!(activation.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_eq!(
+        activation.outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
     assert!(
         activation.worktree.is_dir(),
         "branch head must be checked out"
@@ -538,7 +545,7 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
         repo.path(),
         "refs/tracedecay/branch/feature-manual"
     ));
-    let synthetic_branch = crate::branch::current_branch(&activation.worktree)
+    let synthetic_branch = tracedecay_runtime_core::branch::current_branch(&activation.worktree)
         .expect("manual worktree has an attached synthetic branch");
     let source = crate::daemon::branch_add::capture_exact_branch_source(
         &graph,
@@ -738,8 +745,14 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
             .await
             .expect("underscore branch activation");
 
-    assert_eq!(slashed.outcome, crate::branch::BranchAddOutcome::Added);
-    assert_eq!(underscored.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_eq!(
+        slashed.outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
+    assert_eq!(
+        underscored.outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
     assert_ne!(slashed.worktree, underscored.worktree);
     assert_ne!(
         manual_branch_worktree_path(&data_root, "feature/a"),
@@ -798,7 +811,10 @@ async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advanc
         .output()
         .unwrap();
 
-    assert_eq!(replay.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_eq!(
+        replay.outcome,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
     assert_ne!(initial.head_sha, replay.head_sha);
     assert_eq!(
         String::from_utf8_lossy(&advanced_head.stdout).trim(),

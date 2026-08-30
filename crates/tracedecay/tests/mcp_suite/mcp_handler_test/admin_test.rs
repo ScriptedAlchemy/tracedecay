@@ -491,7 +491,7 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
     // Both graphs and the registry share one profile: a test runtime only
     // mounts stores inside its own profile root, so a registry parked in a
     // separate directory could never reach either graph.
-    let profile_root = tracedecay::storage::default_profile_root().unwrap();
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let target_dir = test_temp_dir();
     let target_project = target_dir.path();
 

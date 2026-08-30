@@ -274,8 +274,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         .await;
     assert!(matches!(
         primary_automation,
-        crate::dashboard::AutomationSchedulerReconcileOutcome::Started
-            | crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified
+        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Started
+            | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
     ));
     let linked_automation = engine
         .reconcile_automation_scheduler_locked(
@@ -286,8 +286,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         .await;
     assert!(matches!(
         linked_automation,
-        crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified
-            | crate::dashboard::AutomationSchedulerReconcileOutcome::Exiting
+        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
+            | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Exiting
     ));
     assert_eq!(
         engine
@@ -338,11 +338,11 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
                 primary_handshake.clone(),
             )
             .await,
-        crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified
-            | crate::dashboard::AutomationSchedulerReconcileOutcome::Exiting
+        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
+            | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Exiting
     ));
     assert!(
-        crate::storage::read_legacy_enrollment_marker(&linked)
+        tracedecay_runtime_core::storage::read_legacy_enrollment_marker(&linked)
             .expect("read linked legacy marker")
             .is_some_and(|marker| marker.project_id == stale_project_id),
         "routing must ignore, not rewrite or delete, a stale legacy worktree-local marker"

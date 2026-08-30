@@ -11,8 +11,8 @@ use serde_json::Value;
 use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 
 use crate::mcp::tools::mcp_dispatch_contract;
-use crate::support::weak_registry::WeakRegistry;
 use tracedecay_mcp::ToolResult;
+use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
 #[cfg(feature = "hotpath")]
 type ReadFlightStateMutex<T> = hotpath::mutexes::Mutex<T>;

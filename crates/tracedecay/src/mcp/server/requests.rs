@@ -842,7 +842,7 @@ impl McpServer {
         &self,
         tool_name: &str,
         cg: &Arc<TraceDecay>,
-        live_branch: &crate::branch::BranchMemo,
+        live_branch: &tracedecay_runtime_core::branch::BranchMemo,
         project_reader_preselected: bool,
         publish_activity: bool,
     ) {

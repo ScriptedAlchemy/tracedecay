@@ -214,9 +214,10 @@ async fn read_journal_values_for_keys(
             )
             .await
             .map_err(|error| global_db_operation_error("read session sync journal value", error))?;
-        let Some(row) = rows.next().await.map_err(|error| {
-            global_db_operation_error("step session sync journal value", error)
-        })?
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error("step session sync journal value", error))?
         else {
             // The key came from the same snapshot, so its row cannot vanish.
             return Err(global_db_operation_message(

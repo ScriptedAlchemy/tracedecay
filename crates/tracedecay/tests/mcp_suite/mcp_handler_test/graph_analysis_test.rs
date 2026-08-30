@@ -10,10 +10,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_mcp::ToolResult;
 use tracedecay_runtime_core::errors::{Result as TraceDecayResult, TraceDecayError};
+use tracedecay_runtime_core::storage::resolve_layout_for_current_profile;
 
 struct MountedProductionProject {
     harness: ProductionProjectCompositionHarnessV1,

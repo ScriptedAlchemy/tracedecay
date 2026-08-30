@@ -9,6 +9,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
 use tracedecay_daemon_protocol::DaemonLivenessProbe;
 
+pub use tracedecay_daemon_protocol::{
+    DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
+    DEFAULT_TOOL_REQUEST_DEADLINE, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
+    tool_request_deadline,
+};
+
 #[cfg(unix)]
 use super::unavailable_error;
 use super::{
@@ -276,7 +282,7 @@ pub(crate) fn client_connection(socket_path: &Path) -> Result<DaemonConnection> 
 }
 
 pub(crate) async fn write_daemon_preamble(
-    writer: &mut tokio::io::WriteHalf<BrokerStream>,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     connection: &DaemonConnection,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
@@ -376,12 +382,19 @@ async fn connect_with_restart_grace_resolving(
             Ok(stream) => return Ok((connection, stream)),
             Err(TraceDecayError::Io(err)) => {
                 if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
-                    return Err(TraceDecayError::Config {
-                        message: format!(
-                            "could not connect to TraceDecay daemon endpoint '{}': {err}. {}",
-                            connection.endpoint,
-                            daemon_connect_failure_advice(err.kind())
-                        ),
+                    return Err(if is_transient_daemon_connect_error(err.kind()) {
+                        tracedecay_daemon_protocol::daemon_connect_failure(
+                            &connection.endpoint,
+                            &err,
+                        )
+                    } else {
+                        TraceDecayError::Config {
+                            message: format!(
+                                "could not connect to TraceDecay daemon endpoint '{}': {err}. {}",
+                                connection.endpoint,
+                                daemon_connect_failure_advice(err.kind())
+                            ),
+                        }
                     });
                 }
                 tokio::time::sleep(poll_interval).await;
@@ -420,7 +433,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
         }
         None => connect_to_current_daemon_within(socket_path, None).await?,
     };
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = stream.into_owned_split();
     let id = json!(1);
     let mut params = json!({
         "name": tool_name,
@@ -517,6 +530,9 @@ pub(crate) async fn call_tool_with_liveness_poll(
     }
 }
 
+/// Unbounded one-shot call. Production clients use [`call_default_tool`] or
+/// [`call_tool_within`]; this primitive stays for tests and harnesses that
+/// supply their own outer deadline.
 pub async fn call_tool(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -597,20 +613,38 @@ async fn call_tool_with_project_open_retry(
     }
 }
 
+/// Calls a daemon tool with the shared [`tool_request_deadline`] envelope.
+///
+/// Production one-shot clients must not read forever against a stalled-but
+/// accepting daemon. The request deadline travels on the wire; the local read
+/// waits that deadline plus the 30s response grace. A warming project still
+/// retries for at most the 15s open grace, never past this envelope. Callers
+/// that need a different budget use [`call_default_tool_within`] or
+/// [`call_default_tool_awaiting_project_open`].
 pub async fn call_default_tool(
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
-    match call_tool(&socket_path, handshake, tool_name, arguments.clone()).await {
+    let deadline = Instant::now() + tool_request_deadline()?;
+    match call_tool_within(
+        &socket_path,
+        handshake,
+        tool_name,
+        arguments.clone(),
+        deadline,
+    )
+    .await
+    {
         Err(error) if is_project_open_retryable_error(&error) => {
+            let retry_deadline = Instant::now() + PROJECT_OPEN_RETRY_GRACE;
             call_tool_with_project_open_retry(
                 &socket_path,
                 handshake,
                 tool_name,
                 arguments,
-                Instant::now() + PROJECT_OPEN_RETRY_GRACE,
+                retry_deadline.min(deadline),
             )
             .await
         }

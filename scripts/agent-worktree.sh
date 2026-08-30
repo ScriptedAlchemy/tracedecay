@@ -9,9 +9,11 @@ usage() {
     cat <<'EOF'
 usage: scripts/agent-worktree.sh <path> [-b <branch>] [<start-point>]
 
-Create a linked Git worktree and seed dashboard/app-dist from the primary
-checkout. Symlink node_modules when the primary has one. Prints the
-recommended env (CARGO_TARGET_DIR under /fast/tmp, TRACEDECAY_SKIP_DASHBOARD_BUILD=1).
+Create a linked Git worktree, lock it as an active agent lane, and seed
+dashboard/app-dist from the primary checkout. Symlink root and
+dashboard/node_modules when the primary has them. Prints the unlock+remove
+one-liner for the owning lane and the recommended env
+(CARGO_TARGET_DIR under /fast/tmp, TRACEDECAY_SKIP_DASHBOARD_BUILD=1).
 EOF
 }
 
@@ -80,6 +82,9 @@ fi
 if [[ "$path" != /* ]]; then
     path="$caller_cwd/$path"
 fi
+if [[ -d "$(dirname -- "$path")" ]]; then
+    path="$(cd -- "$(dirname -- "$path")" && pwd)/$(basename -- "$path")"
+fi
 
 cd -- "$script_root"
 primary_root="$(primary_root_from_git)"
@@ -112,15 +117,31 @@ if [[ -d "$primary_root/node_modules" && ! -e "$worktree/node_modules" ]]; then
     linked_node_modules=1
 fi
 
+linked_dashboard_node_modules=0
+if [[ -d "$primary_root/dashboard/node_modules" && ! -e "$worktree/dashboard/node_modules" ]]; then
+    ln -s "$primary_root/dashboard/node_modules" "$worktree/dashboard/node_modules"
+    linked_dashboard_node_modules=1
+fi
+
+git worktree lock "$worktree" --reason "active agent lane"
+
 target_dir="/fast/tmp/$(basename -- "$worktree")-target"
 
-echo "Worktree created: $worktree"
+echo "Worktree created and locked: $worktree"
 echo "Seeded dashboard/app-dist from $src_app_dist"
 if [[ "$linked_node_modules" -eq 1 ]]; then
     echo "Linked node_modules -> $primary_root/node_modules"
 else
     echo "Primary has no node_modules; skipped symlink"
 fi
+if [[ "$linked_dashboard_node_modules" -eq 1 ]]; then
+    echo "Linked dashboard/node_modules -> $primary_root/dashboard/node_modules"
+else
+    echo "Primary has no dashboard/node_modules; skipped symlink"
+fi
+echo
+echo "When this lane is finished, unlock and remove the exact path:"
+echo "  git worktree unlock $worktree && git worktree remove $worktree"
 echo
 echo "Recommended env:"
 echo "  export TRACEDECAY_SKIP_DASHBOARD_BUILD=1"

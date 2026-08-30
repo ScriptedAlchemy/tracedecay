@@ -53,7 +53,7 @@ fn fact_store_creates_profile_store_on_first_touch() {
         String::from_utf8_lossy(&output.stderr)
     );
     let graph_db_path =
-        tracedecay::storage::resolve_layout(&profile, &home_path.join(".tracedecay"))
+        tracedecay_runtime_core::storage::resolve_layout(&profile, &home_path.join(".tracedecay"))
             .unwrap()
             .graph_db_path;
     assert!(

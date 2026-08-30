@@ -309,17 +309,19 @@ pub struct McpServer {
     /// Registry-read service handed to MCP handlers so they read registered
     /// projects through a port instead of holding [`Self::registry_db`].
     project_registry_reads: Option<Arc<dyn ProjectRegistryReadPort>>,
-    automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    automation_scheduler_reconciler:
+        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
-    dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     remote_operational_status:
         Option<Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>>,
-    dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
-        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
-    dashboard_explorer_semantic_reader: Option<crate::dashboard::ExplorerSemanticReader>,
-    dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
+        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+    dashboard_explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
+    dashboard_feedback_status_reader:
+        Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
     /// scheduler queue. `None` for direct servers with no scheduler registry.
@@ -340,7 +342,7 @@ pub struct McpServer {
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
     generation_census_reader:
-        tokio::sync::OnceCell<crate::runtime_telemetry::GenerationCensusReader>,
+        tokio::sync::OnceCell<tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -549,7 +551,7 @@ impl McpServer {
         use_default_profile_root: bool,
     ) -> Arc<Self> {
         let profile_root = use_default_profile_root
-            .then(crate::storage::default_profile_root)
+            .then(tracedecay_runtime_core::storage::default_profile_root)
             .and_then(std::result::Result::ok);
         let context =
             Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
@@ -1139,10 +1141,10 @@ impl McpServer {
 
     pub(crate) async fn reconcile_automation_scheduler(
         &self,
-    ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
+    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
         match &self.automation_scheduler_reconciler {
             Some(reconcile) => reconcile().await,
-            None => crate::dashboard::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
+            None => tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
         }
     }
 

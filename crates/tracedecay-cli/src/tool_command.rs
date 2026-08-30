@@ -102,18 +102,17 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_expand_query",
 ];
 
-const DEFAULT_TOOL_DEADLINE: Duration = Duration::from_secs(120);
-const MAX_TOOL_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
-const TOOL_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
-
 fn tool_deadline_range_error() -> TraceDecayError {
     TraceDecayError::Config {
-        message: format!("{TOOL_DEADLINE_ENV} exceeds the supported monotonic deadline range"),
+        message: format!(
+            "{} exceeds the supported monotonic deadline range",
+            tracedecay::daemon::TOOL_REQUEST_DEADLINE_ENV
+        ),
     }
 }
 
 fn tool_command_deadline() -> Result<Duration> {
-    crate::commands::env_duration_ms(TOOL_DEADLINE_ENV, DEFAULT_TOOL_DEADLINE, MAX_TOOL_DEADLINE)
+    tracedecay::daemon::tool_request_deadline()
 }
 
 fn tool_timeout_error(tool_name: &str) -> TraceDecayError {
@@ -544,7 +543,7 @@ fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
 }
 
 fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDecayError {
-    if tracedecay::daemon::error_message_is_read_deadline(&error.to_string()) {
+    if tracedecay::daemon::error_is_read_deadline(&error) {
         tool_timeout_error(tool_name)
     } else {
         error

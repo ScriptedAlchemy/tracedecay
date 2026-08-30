@@ -19,12 +19,12 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::graph::health::{
+use crate::tracedecay::TraceDecay;
+use tracedecay_domain::code_intelligence::NodeKind;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_usecases::graph::health::{
     dependency_depth, depth_score, dsm_clusters, gini_coefficient, gini_label,
 };
-use crate::tracedecay::TraceDecay;
-use crate::types::NodeKind;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::support::{
     effective_path, generic_tool_result, rendered_tool_result, unique_file_paths,

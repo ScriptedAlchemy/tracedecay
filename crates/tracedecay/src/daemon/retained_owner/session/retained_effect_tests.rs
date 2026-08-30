@@ -36,8 +36,8 @@ use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshSch
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::{DaemonSessionRefreshService, DaemonWorkflowIndexReadService};
 use crate::mcp::tools::{SessionRefreshServiceOutcome, SessionRefreshServicePort};
-use crate::store::GlobalDbSessionTemporalStore;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 
 const DIGEST: &str = "sha256:6161616161616161616161616161616161616161616161616161616161616161";
 const BRANCH_ID: &str = "branch.project.test";
