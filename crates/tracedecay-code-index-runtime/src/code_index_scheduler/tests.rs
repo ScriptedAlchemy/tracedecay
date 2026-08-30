@@ -5162,6 +5162,72 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
     registry.shutdown().await;
 }
 
+/// The cold-restore window: a sealed active generation is on disk and the
+/// freshness fences pass, but the serving slot is empty because activation has
+/// not seated anything yet. The typed refusal is already determined — the
+/// activation gate can only ever admit the seated slot — so search resolution
+/// must deliver that verdict without joining (or starting) the single-flight
+/// O(store) decode. Before the reorder, a cold `search` against a rebuilding
+/// generation parked on that decode for 76 s before returning the refusal the
+/// daemon already knew; the same refusal is sub-second once delivered
+/// decode-free.
+#[tokio::test]
+async fn search_refusal_with_nothing_servable_never_joins_the_decode() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    // Baseline: the mounted worktree serves before the window opens.
+    registry
+        .execute_query_search(&scope, core_search_request("main"))
+        .await
+        .expect("ready generation serves the fresh path");
+
+    // Enter the window: nothing seated, and the active-generation decode is
+    // owned by an in-flight activation that has not completed.
+    registry.clear_serving_generation_for_scope(&scope).await;
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let held_decode = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hold_active_decode();
+
+    let refusal = match tokio::time::timeout(
+        Duration::from_secs(5),
+        registry.execute_query_search(&scope, core_search_request("main")),
+    )
+    .await
+    .expect("a refusal the scheduler already knows must not wait on the decode")
+    {
+        Err(refusal) => refusal,
+        Ok(_) => panic!("nothing servable stays a typed refusal"),
+    };
+    assert!(
+        matches!(
+            refusal,
+            super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable
+                | super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnverified
+        ),
+        "the verdict itself is unchanged: {refusal:?}"
+    );
+    assert_eq!(
+        held_decode.waiter_count(),
+        0,
+        "the refusal path must not park on the publication decode flight"
+    );
+
+    drop(held_decode);
+    registry.shutdown().await;
+}
+
 /// A seated graph generation is already the decoded serving authority. Root
 /// graph/status reads must not ask the publication decoder cache to prove that
 /// fact again: the cache may be temporarily claimed by unrelated activation
