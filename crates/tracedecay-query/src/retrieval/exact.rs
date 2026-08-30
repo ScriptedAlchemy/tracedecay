@@ -15,7 +15,9 @@ use tracedecay_domain::{
     ExactAdmissionProof, ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1,
     FixedPointScore, RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest,
     Retriever, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome,
+    RetrieverOutcome, exact_search_canonical, is_cli_flag_token, is_commit_hash,
+    is_compiler_error_code_token, is_configuration_key_token, is_identifier_token, is_path_shape,
+    is_qualified_name_token, is_runtime_error_code_token, is_tool_name_token,
 };
 
 use super::ports::{
@@ -460,14 +462,7 @@ fn exact_field_accepts(field: ExactFieldV1, value: &str) -> bool {
 }
 
 fn canonicalize_exact(field: ExactFieldV1, value: &str) -> (Vec<u8>, Vec<String>) {
-    let canonical = match field {
-        ExactFieldV1::CliFlag
-        | ExactFieldV1::ToolName
-        | ExactFieldV1::ConfigurationKey
-        | ExactFieldV1::CommitIdentifier => value.to_ascii_lowercase(),
-        ExactFieldV1::DiagnosticCode => value.to_ascii_uppercase(),
-        _ => value.to_owned(),
-    };
+    let canonical = exact_search_canonical(field, value);
     let steps = if canonical == value {
         Vec::new()
     } else if field == ExactFieldV1::DiagnosticCode {
@@ -475,77 +470,54 @@ fn canonicalize_exact(field: ExactFieldV1, value: &str) -> (Vec<u8>, Vec<String>
     } else {
         vec!["ascii_lowercase".to_owned()]
     };
-    (canonical.into_bytes(), steps)
+    (canonical.into_owned().into_bytes(), steps)
 }
 
 fn is_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    is_identifier_token(value)
 }
 
 fn is_qualified_name(value: &str) -> bool {
-    value.contains("::") && value.split("::").all(is_identifier)
+    is_qualified_name_token(value)
 }
 
+/// Deliberate divergence from the extraction Path grammar, which requires a
+/// dotted filename: the exact projection also mints a Path posting for every
+/// chunk's logical path, so extensionless real files (`Makefile`, `LICENSE`)
+/// stay reachable through exact logical-path equality.
 fn is_path(value: &str) -> bool {
-    value.contains('/')
-        && value.split('/').all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
-        })
+    value.contains('/') && is_path_shape(value)
 }
 
+/// Case bridge over the extraction CLI-flag grammar: posting keys are the
+/// lowercase extraction canonical and [`canonicalize_exact`] lowercases
+/// admitted flags, so mixed-case input admits exactly the mintable flags.
 fn is_cli_flag(value: &str) -> bool {
-    value.starts_with('-')
-        && value.len() > 1
-        && value[1..]
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    is_cli_flag_token(&value.to_ascii_lowercase())
 }
 
+/// Case bridge over the extraction diagnostic-code grammars: posting keys
+/// are uppercased and [`canonicalize_exact`] uppercases admitted codes, so
+/// `e0308`/`ts1234`/`err_x` admit exactly the mintable codes.
 fn is_diagnostic_code(value: &str) -> bool {
-    (value.len() > 1
-        && value
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'e'))
-        && value[1..].chars().all(|ch| ch.is_ascii_digit()))
-        || (value.len() > 4
-            && value[..4].eq_ignore_ascii_case("err_")
-            && value[4..]
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
-        || (value.get(..2).is_some_and(|prefix| {
-            prefix.eq_ignore_ascii_case("ts") || prefix.eq_ignore_ascii_case("cs")
-        }) && value.get(2..).is_some_and(|suffix| {
-            !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
-        }))
+    let uppercase = value.to_ascii_uppercase();
+    is_compiler_error_code_token(&uppercase) || is_runtime_error_code_token(&uppercase)
 }
 
+/// Deliberate bridge over the extraction commit-identifier grammar:
+/// extraction mints `commit:`-prefixed identifiers and the projection strips
+/// the prefix from posting keys, so queries admit the bare hash in the
+/// mintable range.
 fn is_commit_identifier(value: &str) -> bool {
-    (7..=64).contains(&value.len()) && value.chars().all(|ch| ch.is_ascii_hexdigit())
+    is_commit_hash(value)
 }
 
 fn is_configuration_key(value: &str) -> bool {
-    value.contains('.')
-        && value.split('.').all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .chars()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
-        })
+    is_configuration_key_token(value)
 }
 
 fn is_known_tool(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "cargo" | "rustc" | "tracedecay" | "pytest" | "kubectl" | "fastembed" | "ast-grep" | "git"
-    )
+    is_tool_name_token(value)
 }
 
 /// Fixed-point score contributed by one admitted matched literal.
