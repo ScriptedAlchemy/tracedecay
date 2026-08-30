@@ -1369,6 +1369,9 @@ mod destination_routing_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::runtime::shared::{ProjectRootMatcher, StoredCursor};
+    use tracedecay_runtime_core::git_discovery::{
+        GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
+    };
 
     use super::super::ingest::HermesProfileSource;
     use super::super::routing::turn_project_locations_for_destinations;
@@ -1376,20 +1379,19 @@ mod destination_routing_tests {
 
     static IDENTITY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
-    fn retrying_identity(path: &Path) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome {
+    fn retrying_identity(path: &Path) -> GitRepositoryIdentityOutcome {
         let root = path
             .ancestors()
             .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
             .unwrap_or(path);
         if IDENTITY_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
-            return tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Unknown;
+            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
         }
-        tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Resolved(
-            tracedecay_runtime_core::worktree::GitRepoIdentity {
-                worktree_root: root.to_path_buf(),
-                common_dir: root.join(".git"),
-            },
-        )
+        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
+            worktree_root: root.to_path_buf(),
+            git_dir: root.join(".git"),
+            common_dir: root.join(".git"),
+        })
     }
 
     fn row_with_cwd(cwd: &Path) -> HermesRow {

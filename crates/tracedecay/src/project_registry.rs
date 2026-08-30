@@ -214,7 +214,7 @@ fn project_kind(project: &CodeProjectRecord) -> String {
 /// given" — when `project_root` already *is* the primary checkout, isn't a
 /// git checkout at all, or the primary checkout no longer exists (a
 /// worktree-only project is legitimate and must keep registering itself).
-pub use tracedecay_runtime_core::project_registry::primary_checkout_root;
+pub use tracedecay_runtime_core::worktree::primary_checkout_root;
 
 /// Registry reap contract: root shim over the canonical copy beside its
 /// producer in `tracedecay_global_db::project_registry`.
