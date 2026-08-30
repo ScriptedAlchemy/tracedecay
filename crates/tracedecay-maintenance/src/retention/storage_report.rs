@@ -209,8 +209,11 @@ impl StorageReport {
 pub struct CodeGenerationRetentionDryRunEntry {
     pub project_id: String,
     pub store_root: String,
-    pub active_generation_id: String,
-    pub active_generation_file: String,
+    /// Both are `None` for an unpublished store: sealed crash debris exists
+    /// but no active publication pointer was ever written, and every
+    /// generation in the store is collectable.
+    pub active_generation_id: Option<String>,
+    pub active_generation_file: Option<String>,
     pub vector_readable_sources: Vec<String>,
     pub rollback_floor: usize,
     pub superseded_generation_count: usize,
@@ -718,8 +721,11 @@ fn append_project_report(
     code_generation_retention.push(CodeGenerationRetentionDryRunEntry {
         project_id: project_id.to_owned(),
         store_root: code_index_store_root.display().to_string(),
-        active_generation_id: plan.active_generation_id.as_str().to_owned(),
-        active_generation_file: plan.active_generation_file().to_owned(),
+        active_generation_id: plan
+            .active_generation_id
+            .as_ref()
+            .map(|generation| generation.as_str().to_owned()),
+        active_generation_file: plan.active_generation_file().map(str::to_owned),
         vector_readable_sources: plan
             .vector_readable_sources
             .iter()
