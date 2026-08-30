@@ -94,7 +94,6 @@ pub mod path_scope;
 pub mod privacy;
 mod profiled_lock;
 pub mod project_registry;
-pub mod redundancy;
 pub mod resident_memory;
 pub mod runtime_identity;
 pub mod serde_util;
