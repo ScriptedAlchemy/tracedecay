@@ -1209,21 +1209,23 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         )
         .await
         .expect("retain the reconcile code graph runtime");
-    // Cross-instance exclusivity is one registry-owned gate cell per code
-    // shard; a per-instance gate would silently reintroduce the publication
-    // race this gate exists to prevent.
+    // Cross-instance exclusivity is one registry-owned lock cell per code
+    // shard; per-instance locks would silently reintroduce the publication
+    // race the flight table and gate exist to prevent.
     assert!(Arc::ptr_eq(
-        &seat.publication_gate,
-        &reconcile.publication_gate
+        &seat.publication_locks,
+        &reconcile.publication_locks
     ));
 
-    // A publisher cancelled while another instance holds the gate answers
-    // typed cancellation and leaves the publication journal untouched,
-    // whether the cancellation lands during the pre-gate projection or in the
-    // post-wait interruption check.
+    // A publisher cancelled while another instance holds the serving gate
+    // answers typed cancellation and leaves the publication journal
+    // untouched: the classification slice blocks on the gate before any
+    // journal read or write, and observes the typed interruption first thing
+    // after acquiring it.
     let cancelled = Arc::new(AtomicBool::new(false));
     let held = seat
-        .publication_gate
+        .publication_locks
+        .gate
         .lock()
         .expect("hold the publication gate");
     let outcome = std::thread::scope(|scope| {

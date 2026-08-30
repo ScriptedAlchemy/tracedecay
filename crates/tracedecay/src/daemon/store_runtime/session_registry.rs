@@ -2859,13 +2859,19 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
         >,
     >,
     project_owners: ProjectRuntimeOwnerRegistryV1,
-    /// One graph-publication gate per code shard. The seat pass and the
-    /// background reconcile can both activate the same sealed generation, and
-    /// unserialized they race the graph database into Conflicts that burn the
-    /// whole activation window. The gate lives here because the retained code
+    /// One set of graph-publication locks per code shard. The seat pass and
+    /// the background reconcile can both activate the same sealed generation,
+    /// and unserialized they race the graph database into Conflicts that burn
+    /// the whole activation window: the flight table dedupes same-key
+    /// publishers while the serving gate covers only the short
+    /// storage-ordered slices. The locks live here because the retained code
     /// graph runtime itself is minted fresh per activation call.
-    code_graph_publication_gates:
-        StdMutex<BTreeMap<tracedecay_store::StoreShardIdV1, Arc<StdMutex<()>>>>,
+    code_graph_publication_gates: StdMutex<
+        BTreeMap<
+            tracedecay_store::StoreShardIdV1,
+            Arc<code_graph::CodeGraphShardPublicationLocksV1>,
+        >,
+    >,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     retained_hook_tasks: RetainedHookTasks,
     session_sync_service:

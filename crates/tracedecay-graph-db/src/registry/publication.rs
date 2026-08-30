@@ -4,9 +4,9 @@ use std::sync::Arc;
 use tracedecay_store::runtime::{
     GraphProjectionIdentityV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
-    GraphPublicationReplayPageRequestV1, GraphPublicationReplayRetirementV1,
-    GraphPublicationRetiredCleanupPageRequestV1, GraphPublicationStoreV1,
-    GraphRecoveredGenerationDigestV1, GraphReplayRetirementOutcomeV1,
+    GraphPublicationReplayPageRequestV1, GraphPublicationReplayRecordV1,
+    GraphPublicationReplayRetirementV1, GraphPublicationRetiredCleanupPageRequestV1,
+    GraphPublicationStoreV1, GraphRecoveredGenerationDigestV1, GraphReplayRetirementOutcomeV1,
     GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
     GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
     MAX_GRAPH_PUBLICATION_PROJECTION_PAGE_RECORDS_V1, MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
@@ -44,6 +44,41 @@ struct GraphPublishModeV1 {
     /// This call writes a durable staging page, so it retries across the
     /// boundary to prove the exact commit rather than assuming it landed.
     durable_stage_boundary: bool,
+}
+
+/// A publication whose durable generation proof completed but whose
+/// relational verified-head CAS has not yet run.
+///
+/// This is the boundary that lets a serving gate cover only the atomic swap:
+/// everything in here — native staging, the sealed-store build, and the
+/// recovered-digest proof — reads the immutable staged generation and writes
+/// derived artifacts, so it runs without any publication gate held. The CAS
+/// and the read-side lease install in
+/// [`GraphDbRegistry::complete_verified_publication`] are the only phases a
+/// caller needs to serialize against readers of the freshly published head.
+///
+/// The retained lease pins the exact mounted database instance the proof ran
+/// on; completion re-validates that the lease still names the current
+/// registry owner, so a store that was retired and remounted between the two
+/// phases answers a typed conflict instead of installing an instance-foreign
+/// proof.
+pub struct ProvenGraphPublicationV1 {
+    database: GraphDbLeaseV1,
+    identity: GraphGenerationManifestIdentity,
+    dependencies: BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>,
+    commit: GraphCommit,
+    recovered_digest: GraphRecoveredGenerationDigestV1,
+    replay: GraphPublicationReplayRecordV1,
+}
+
+/// Outcome of [`GraphDbRegistry::prepare_verified_publication`].
+pub enum GraphPublicationPreparationV1 {
+    /// The publication was already durably linearized (an idempotent replay
+    /// or a historical head); the snapshot is ready and no CAS is pending.
+    Settled(VerifiedGraphCommit),
+    /// The durable proof completed; the relational CAS and read-side install
+    /// remain, through [`GraphDbRegistry::complete_verified_publication`].
+    Proven(Box<ProvenGraphPublicationV1>),
 }
 
 impl GraphDbRegistry {
@@ -547,6 +582,56 @@ impl GraphDbRegistry {
         )
     }
 
+    /// Runs the gateless phase of one verified publication — replay
+    /// resolution, native staging, the sealed-store build, and the durable
+    /// recovered-digest proof — without advancing the relational verified
+    /// head or installing a read-side lease.
+    ///
+    /// A publication that turns out to be already durably linearized
+    /// (an idempotent replay of the current head, or superseded history)
+    /// settles here with its snapshot; otherwise the returned proof completes
+    /// through [`Self::complete_verified_publication`], which is the only
+    /// phase a publication gate needs to cover.
+    pub fn prepare_verified_publication(
+        &self,
+        registration: GraphDbRegistration,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        publication_key: &GraphPublicationKeyV1,
+        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
+        durable_stage_boundary: bool,
+    ) -> Result<GraphPublicationPreparationV1, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        self.prepare_verified_publication_inner(
+            &operation,
+            authority,
+            context,
+            publication_key,
+            GraphPublishModeV1 {
+                supplied_manifest,
+                reopen_metadata: false,
+                durable_stage_boundary,
+            },
+        )
+    }
+
+    /// Completes a prepared publication: the relational verified-head
+    /// compare-and-swap and the read-side lease install.
+    ///
+    /// The proof's retained lease must still name the current registry owner
+    /// of the same mounted instance; a store retired and remounted between
+    /// the phases answers a typed conflict, and the caller re-prepares.
+    pub fn complete_verified_publication(
+        &self,
+        registration: GraphDbRegistration,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        proven: ProvenGraphPublicationV1,
+    ) -> Result<VerifiedGraphCommit, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        self.complete_verified_publication_inner(&operation, authority, context, proven)
+    }
+
     /// Publishes through an already-issued, registry-validated graph lease.
     ///
     /// The caller retains the exact operation lease through the publication;
@@ -603,6 +688,35 @@ impl GraphDbRegistry {
         publication_key: &GraphPublicationKeyV1,
         mode: GraphPublishModeV1,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
+        match self.prepare_verified_publication_inner(
+            operation,
+            authority,
+            context,
+            publication_key,
+            mode,
+        )? {
+            GraphPublicationPreparationV1::Settled(commit) => Ok(commit),
+            GraphPublicationPreparationV1::Proven(proven) => {
+                self.complete_verified_publication_inner(operation, authority, context, *proven)
+            }
+        }
+    }
+
+    /// The gateless phase of one verified publication: replay resolution,
+    /// native staging, the sealed-store build, and the durable
+    /// recovered-digest proof. Nothing here advances the relational verified
+    /// head or installs a read-side lease, so a caller that serializes
+    /// publication against readers holds its gate only across
+    /// [`Self::complete_verified_publication`].
+    #[hotpath::measure(label = "graph_db.generation.publish.prepare", impl_type = "GraphDbRegistry")]
+    fn prepare_verified_publication_inner(
+        &self,
+        operation: &RegisteredGraphDbOperationV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        publication_key: &GraphPublicationKeyV1,
+        mode: GraphPublishModeV1,
+    ) -> Result<GraphPublicationPreparationV1, GraphDbError> {
         let GraphPublishModeV1 {
             supplied_manifest,
             reopen_metadata,
@@ -717,7 +831,8 @@ impl GraphDbRegistry {
                         is_current_head,
                         commit,
                         recovered_digest,
-                    );
+                    )
+                    .map(GraphPublicationPreparationV1::Settled);
                 }
                 let mut visiting = BTreeSet::new();
                 let dependencies = self.load_dependencies(
@@ -823,7 +938,8 @@ impl GraphDbRegistry {
                     is_current_head,
                     historical_commit,
                     recovered_digest,
-                );
+                )
+                .map(GraphPublicationPreparationV1::Settled);
             }
             return Err(GraphDbError::Conflict);
         }
@@ -912,6 +1028,50 @@ impl GraphDbRegistry {
         database
             .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::NativeVerified);
         operation.check(self, context)?;
+        Ok(GraphPublicationPreparationV1::Proven(Box::new(
+            ProvenGraphPublicationV1 {
+                database,
+                identity,
+                dependencies,
+                commit,
+                recovered_digest,
+                replay,
+            },
+        )))
+    }
+
+    /// The linearization phase of one verified publication: the relational
+    /// verified-head compare-and-swap and the read-side lease install. This
+    /// is the only publication phase that changes what readers observe, so a
+    /// caller that gates publication against reads holds its gate across
+    /// exactly this call.
+    #[hotpath::measure(
+        label = "graph_db.generation.publish.complete",
+        impl_type = "GraphDbRegistry"
+    )]
+    fn complete_verified_publication_inner(
+        &self,
+        operation: &RegisteredGraphDbOperationV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        proven: ProvenGraphPublicationV1,
+    ) -> Result<VerifiedGraphCommit, GraphDbError> {
+        let ProvenGraphPublicationV1 {
+            database,
+            identity,
+            dependencies,
+            commit,
+            recovered_digest,
+            replay,
+        } = proven;
+        operation.check(self, context)?;
+        operation.require_publication_binding(&replay.publication.key)?;
+        // The proof is bound to the exact mounted instance it streamed; a
+        // completion arriving through a different instance of the same store
+        // must not install it.
+        if !database.shares_runtime_with(operation.database()) {
+            return Err(GraphDbError::Conflict);
+        }
         let cas = GraphVerifiedHeadCompareAndSwapV1 {
             publication_key: replay.publication.key.clone(),
             input_digest: replay.publication.input_digest.clone(),
