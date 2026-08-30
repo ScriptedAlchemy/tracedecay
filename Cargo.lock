@@ -6382,6 +6382,7 @@ dependencies = [
  "grafeo-storage",
  "hex",
  "hotpath",
+ "libc",
  "parking_lot",
  "rusqlite",
  "serde",
