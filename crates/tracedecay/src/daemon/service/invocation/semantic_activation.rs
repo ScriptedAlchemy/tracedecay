@@ -62,6 +62,25 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         };
+        // Admission stays the outermost gate, exactly as on the evaluation
+        // route: an unregistered or quiesced project refuses before any
+        // lifecycle read or evaluation work.
+        let Some(registered) = self.configuration_runtime(project_root).await else {
+            hotpath::gauge!(
+                "daemon.service.semantic.activate.unavailable.configuration_runtime_total"
+            )
+            .inc(1_u64);
+            tracing::warn!(
+                event = "semantic_activation_admission",
+                outcome = "unavailable",
+                reason = "configuration_runtime",
+                "semantic activation configuration runtime is not registered"
+            );
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        };
         // Preflight the installed material before the multi-minute native
         // evaluation so a missing model is a fast typed refusal, not a
         // late one.
@@ -101,17 +120,6 @@ impl DaemonInvocationService {
                     outcome,
                 };
             }
-        };
-
-        let Some(registered) = self.configuration_runtime(project_root).await else {
-            hotpath::gauge!(
-                "daemon.service.semantic.activate.unavailable.configuration_runtime_total"
-            )
-            .inc(1_u64);
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
         };
         let current = match registered.runtime.client().current().await {
             Ok(current) => current,

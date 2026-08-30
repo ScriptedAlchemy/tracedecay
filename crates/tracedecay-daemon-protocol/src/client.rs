@@ -714,6 +714,101 @@ impl DaemonInvocationClient {
         .await
     }
 
+    /// Run the composed activation journey: evaluate the profile natively,
+    /// publish the accepted evaluation, and compare-and-swap it into
+    /// `active_profile`. The daemon owns every stage; the evaluation phase
+    /// dominates the deadline.
+    pub async fn activate_semantic_profile(
+        &self,
+        evaluated_profile_id: &str,
+        set_rollback: bool,
+    ) -> tracedecay_runtime_core::errors::Result<SemanticActivationResultV1> {
+        self.activate_semantic_profile_until(
+            evaluated_profile_id,
+            set_rollback,
+            SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
+        )
+        .await
+    }
+
+    pub async fn activate_semantic_profile_until(
+        &self,
+        evaluated_profile_id: &str,
+        set_rollback: bool,
+        deadline_micros: i64,
+    ) -> tracedecay_runtime_core::errors::Result<SemanticActivationResultV1> {
+        let request_id =
+            mint_global_request_id(GlobalRequestSurface::SemanticEvaluation).map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: error.to_string(),
+                }
+            })?;
+        let observed_at = current_system_micros().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "semantic activation clock is unavailable".to_owned(),
+            }
+        })?;
+        let deadline = Deadline::new(UtcMicros(
+            observed_at.0.checked_add(deadline_micros).ok_or_else(|| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: "semantic activation deadline is unavailable".to_owned(),
+                }
+            })?,
+        ))
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: error.to_string(),
+            },
+        )?;
+        let cancellation = CancellationContext::active(format!(
+            "cancellation.semantic-activation.{}",
+            request_id.as_str()
+        ))
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: error.to_string(),
+            },
+        )?;
+        let response = self
+            .invoke(crate::contract::DaemonInvocationRequest::semantic_activate(
+                request_id.as_str(),
+                evaluated_profile_id.to_owned(),
+                set_rollback,
+                observed_at,
+                deadline,
+                cancellation,
+            ))
+            .await?;
+        match response.outcome {
+            crate::contract::DaemonInvocationOutcome::SemanticProfileActivated {
+                scope,
+                profile_digest,
+                report_digest,
+                configuration_revision,
+                rollback_profile_id,
+                runtime_state,
+            } => Ok(SemanticActivationResultV1 {
+                project_id: scope.project_id.as_str().to_owned(),
+                profile_digest: profile_digest.as_str().to_owned(),
+                report_digest: report_digest.as_str().to_owned(),
+                configuration_revision: configuration_revision.to_string(),
+                rollback_profile_id,
+                runtime_state,
+            }),
+            crate::contract::DaemonInvocationOutcome::Problem { problem } => {
+                Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: format!("semantic activation rejected: {problem:?}"),
+                })
+            }
+            crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                Err(semantic_activation_application_problem(problem))
+            }
+            _ => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "daemon returned an invalid semantic activation response".to_owned(),
+            }),
+        }
+    }
+
     pub async fn evaluate_and_publish_semantic_profile_until(
         &self,
         evaluated_profile_id: &str,
@@ -1267,6 +1362,97 @@ fn with_daemon_version_skew_context(
     )
 }
 
+/// Map a typed activation-journey problem onto the client error surface.
+///
+/// The stage that refused is carried by the diagnostic the daemon attached
+/// (evaluation problems come from the semantic evaluation route,
+/// configuration problems from the mutation route); this mapping preserves
+/// that detail instead of flattening it into a generic message.
+fn semantic_activation_application_problem(
+    problem: ApplicationProblem,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
+    let retryable = problem.retry() != RetryDirective::Never;
+    let detail = problem
+        .diagnostic()
+        .map(|diagnostic| format!(" ({}: {})", diagnostic.code, diagnostic.message))
+        .unwrap_or_default();
+    match problem.kind() {
+        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
+            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                "semantic_activation_conflict",
+                retryable,
+                format!(
+                    "Semantic activation lost its configuration compare-and-swap; \
+                     the configuration changed while the profile evaluated — re-run \
+                     the activation{detail}"
+                ),
+            )
+        }
+        ApplicationProblemKind::Cancelled => {
+            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                "semantic_activation_cancelled",
+                retryable,
+                format!("Semantic activation was cancelled{detail}"),
+            )
+        }
+        ApplicationProblemKind::TimedOut => {
+            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                "semantic_activation_deadline_exceeded",
+                retryable,
+                format!("Semantic activation exceeded its deadline{detail}"),
+            )
+        }
+        ApplicationProblemKind::Unavailable | ApplicationProblemKind::Saturated => {
+            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                "semantic_activation_unavailable",
+                retryable,
+                format!("Semantic activation is unavailable{detail}"),
+            )
+        }
+        ApplicationProblemKind::PartialEffect => {
+            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                "semantic_activation_partial_effect",
+                retryable,
+                format!("Semantic activation committed only part of its effect{detail}"),
+            )
+        }
+        ApplicationProblemKind::ExecutionFailed => {
+            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                "semantic_activation_execution_failed",
+                false,
+                format!("Semantic activation execution failed{detail}"),
+            )
+        }
+        ApplicationProblemKind::ResetRequired => {
+            tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                "semantic activation",
+                problem.diagnostic().map_or(
+                    "the semantic activation authority requires reset",
+                    |diagnostic| diagnostic.message.as_str(),
+                ),
+            )
+        }
+        ApplicationProblemKind::NotFoundOrNotAuthorized => {
+            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                "semantic_activation_denied",
+                retryable,
+                format!("Semantic activation was not found or not authorized{detail}"),
+            )
+        }
+        ApplicationProblemKind::InvalidRequest | ApplicationProblemKind::Unsupported => {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!(
+                    "semantic activation rejected: {}",
+                    problem.diagnostic().map_or_else(
+                        || format!("{problem:?}"),
+                        |diagnostic| diagnostic.message.clone(),
+                    )
+                ),
+            }
+        }
+    }
+}
+
 fn semantic_qualification_daemon_problem(
     problem: crate::contract::DaemonInvocationProblem,
 ) -> tracedecay_runtime_core::errors::TraceDecayError {
@@ -1389,6 +1575,17 @@ pub struct SemanticEvaluationPublicationResultV1 {
     pub report: serde_json::Value,
     pub source_generation: String,
     pub snapshot_digest: String,
+}
+
+/// Terminal receipt of the composed semantic activation journey.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SemanticActivationResultV1 {
+    pub project_id: String,
+    pub profile_digest: String,
+    pub report_digest: String,
+    pub configuration_revision: String,
+    pub rollback_profile_id: Option<String>,
+    pub runtime_state: tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
