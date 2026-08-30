@@ -796,11 +796,17 @@ fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
     let crash_sidecar = sidecar_wal_path(&crash_path);
     let debt_segment = newest_wal_segment(&crash_sidecar)
         .expect("the crash image carries staged history in the sidecar WAL");
+    // Earlier checkpoints may exist (the sealed-store build checkpoints g1's
+    // history under `graph-sealed-store`); the debt is that none of them
+    // covers the staged g2 segments.
+    let checkpoint_before = grafeo_storage::wal::WalRecovery::new(&crash_sidecar).checkpoint();
     assert!(
-        grafeo_storage::wal::WalRecovery::new(&crash_sidecar)
-            .checkpoint()
-            .is_none(),
-        "no checkpoint covers the staged history in the crash image"
+        checkpoint_before
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.log_sequence < debt_segment),
+        "no checkpoint covers the staged history in the crash image \
+         (checkpoint {:?} vs newest segment {debt_segment})",
+        checkpoint_before.map(|checkpoint| checkpoint.log_sequence),
     );
     let container_before = std::fs::metadata(&crash_path).unwrap().len();
 
