@@ -110,6 +110,30 @@ pub struct CodeIndexBuildProgressV1 {
     pub blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
 }
 
+/// A deterministic contract violation that parked background convergence.
+///
+/// Parked is not dead: the worker keeps re-observing the violation on its
+/// ordinary wake cadence, so an operator fix (for example restoring an
+/// owner-private mode) is picked up on the next wake without a restart. The
+/// state exists so `status`, doctor, and the dashboard report the violation
+/// typed instead of an indefinite "warming".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexConvergenceParkedV1 {
+    /// Exact typed failure that parked convergence.
+    pub reason: String,
+    /// Operator action that clears the violation.
+    pub remediation: String,
+    /// When the violation was first observed (microseconds since the Unix epoch).
+    pub parked_at_micros: i64,
+    /// Background passes that re-observed the violation since parking.
+    pub observed_passes: u64,
+    /// Whether the worker re-checks this violation on every ordinary wake.
+    /// True for filesystem/contract violations an operator fix clears in
+    /// place; false for an abnormal task failure that only changed input (a
+    /// new sealed generation) retries.
+    pub retries_on_wake: bool,
+}
+
 /// Freshness/generation state for one mounted worktree.
 ///
 /// `Deserialize` is part of the wire contract: the CLI status command decodes
@@ -145,6 +169,10 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub coverage: String,
     /// Latest committed progress for the active generation, if one is mounted.
     pub progress: Option<CodeIndexBuildProgressV1>,
+    /// Deterministic contract violation currently parking background
+    /// convergence, when one is observed. `staleness_state` reads `parked`
+    /// while this is set and no generation serves.
+    pub parked: Option<CodeIndexConvergenceParkedV1>,
 }
 
 pub type CodeIndexFreshnessReadFuture =
@@ -204,6 +232,28 @@ async fn project_code_index_freshness(
             DashboardEnvelopeV1::ready(
                 scope_from_state(state),
                 DashboardCoverageV1::complete(1, "mounted_worktree"),
+                payload,
+            )
+        }
+        // A parked deterministic contract violation with nothing serving is a
+        // typed error surface, not an indefinite loading spinner: the reason
+        // and remediation ride in the worktree payload.
+        Some(worktree) if worktree.parked.is_some() && worktree.latest_generation_id.is_none() => {
+            let reason = worktree
+                .parked
+                .as_ref()
+                .map(|parked| parked.reason.clone())
+                .unwrap_or_default();
+            DashboardEnvelopeV1::new(
+                scope_from_state(state),
+                DashboardDomainStateV1::Error,
+                DashboardCoverageV1::partial(
+                    1,
+                    0,
+                    "mounted_worktree",
+                    vec![format!("background convergence is parked: {reason}")],
+                ),
+                DashboardFreshnessV1::unknown(),
                 payload,
             )
         }
@@ -291,6 +341,7 @@ mod tests {
                     hook_hint_count: Some(0),
                     coverage: "complete".to_owned(),
                     progress: None,
+                    parked: None,
                 })
             })
         }));
@@ -329,6 +380,7 @@ mod tests {
                     hook_hint_count: Some(0),
                     coverage: "complete".to_owned(),
                     progress: None,
+                    parked: None,
                 })
             })
         }));
@@ -383,6 +435,7 @@ mod tests {
                         last_progress_micros: 43,
                         blocked_reason: None,
                     }),
+                    parked: None,
                 })
             })
         }));

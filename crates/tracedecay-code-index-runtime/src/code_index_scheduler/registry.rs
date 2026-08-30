@@ -21,6 +21,7 @@ use std::{
 use std::sync::Condvar;
 
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexConvergenceParkedV1;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::LspRuntimeFailure;
@@ -42,6 +43,8 @@ use super::{CodeIndexBytePoolStatsV1, CodeIndexCadenceReadModelV1};
 
 #[cfg(test)]
 mod cold_read_wake_tests;
+#[cfg(all(test, unix))]
+mod convergence_park_tests;
 mod ignored_dependencies;
 mod lsp_projection;
 #[cfg(test)]
@@ -495,6 +498,12 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// reads this when the scheduler mutex would block.
     pub last_reconciled_at_micros: Arc<AtomicI64>,
     pub text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
+    /// Deterministic contract violation currently parking background
+    /// convergence. The worker stamps it when a text-projection pass fails on
+    /// a violation unchanged input reproduces (for example a store path that
+    /// is not owner-private) and clears it when a pass progresses, so status
+    /// and doctor report a typed parked state instead of indefinite warming.
+    convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
     /// Durable id from the last `Published` broadcast. Serving and text can
     /// lag until graph/text seating; observers of "latest" must not stay on
     /// the prior seated generation after a new id is published.
@@ -583,6 +592,70 @@ pub fn unique_mounted_for_scope<'a>(
         Some((root, worktree)) => UniqueMountedWorktree::One { root, worktree },
         None => UniqueMountedWorktree::None,
     }
+}
+
+/// Remediation reported beside a parked deterministic contract violation.
+/// The reason names the exact violation (path, observed mode, required mode);
+/// this names the operator journey and the automatic recovery cadence.
+const CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1: &str = "remove the named contract violation \
+     (for example restore owner-only access on the named path, or re-enroll the store); \
+     background convergence re-checks on every wake and resumes automatically once the \
+     contract holds";
+
+/// Remediation reported when the text-projection task itself failed
+/// abnormally. Unchanged input reproduces the failure, so only changed input
+/// (a new sealed generation) retries it.
+const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon log for the \
+     abnormal text-projection failure; indexing retries when a new generation seals over \
+     changed input";
+
+/// Record one observation of a deterministic contract violation on a mounted
+/// worktree's park slot. The first observation stamps the park, an identical
+/// reason increments the pass counter, and a different reason replaces the
+/// park so the surfaced state always names the current obstacle.
+fn park_convergence(
+    slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
+    reason: String,
+    remediation: &str,
+    retries_on_wake: bool,
+) {
+    let mut slot = slot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match slot.as_mut() {
+        Some(parked) if parked.reason == reason => {
+            parked.observed_passes = parked.observed_passes.saturating_add(1);
+        }
+        _ => {
+            *slot = Some(CodeIndexConvergenceParkedV1 {
+                reason,
+                remediation: remediation.to_owned(),
+                parked_at_micros: now_micros().0,
+                observed_passes: 1,
+                retries_on_wake,
+            });
+        }
+    }
+}
+
+/// Whether the current park re-checks on every wake (a contract violation an
+/// operator fix clears in place), as opposed to a terminal task failure.
+fn convergence_park_retries_on_wake(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) -> bool {
+    slot.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|parked| parked.retries_on_wake)
+}
+
+/// Clear the park after a pass progressed or completed: the previously parked
+/// violation is no longer the current convergence obstacle.
+fn clear_convergence_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
+    if slot
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_none()
+    {
+        return;
+    }
+    *slot.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 /// The sealed-generation identity half of a freshness reading. Every other
@@ -2527,6 +2600,8 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::new(RwLock::new(None));
         let text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>> =
             Arc::new(RwLock::new(None));
+        let convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>> =
+            Arc::new(RwLock::new(None));
         let published_generation_id: Arc<RwLock<Option<CodeGenerationId>>> =
             Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
@@ -2546,6 +2621,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_text_generation = Arc::clone(&text_generation);
+        let worker_convergence_park = Arc::clone(&convergence_park);
         let worker_published_generation_id = Arc::clone(&published_generation_id);
         let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let worker_wake = Arc::clone(&wake);
@@ -2703,10 +2779,44 @@ impl CodeIndexSchedulerRegistryV1 {
                 // never misreads in-flight owner work as plain unavailability.
                 let _reconcile_pass =
                     super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
-                let text_generation = worker_text_generation
+                let mut text_generation = worker_text_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
+                // A query-driven advance can finish the build between worker
+                // passes; a park observed earlier must not outlive the
+                // violation it named.
+                if text_generation
+                    .as_ref()
+                    .is_some_and(|latest| latest.text_serving_is_ready())
+                {
+                    clear_convergence_park(&worker_convergence_park);
+                } else if convergence_park_retries_on_wake(&worker_convergence_park)
+                    && text_generation
+                        .as_ref()
+                        .is_some_and(|latest| !latest.text_serving_needs_work())
+                {
+                    // A deterministic contract violation latched this text
+                    // handle failed, and a latched handle never advances
+                    // again. Withdraw it so the ordinary restore below
+                    // re-creates a fresh handle from the durable pointer:
+                    // every external wake re-checks the parked violation, and
+                    // an operator fix (for example chmod 700 on the artifacts
+                    // root) is picked up without a remount. The park itself
+                    // never self-schedules a wake, so this stays one bounded
+                    // retry per ordinary wake, not a hot loop.
+                    if let Some(withdrawn) = text_generation.take() {
+                        let mut current = worker_text_generation
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if current
+                            .as_ref()
+                            .is_some_and(|current| current.same_text_owner(&withdrawn))
+                        {
+                            *current = None;
+                        }
+                    }
+                }
                 let mut text_slice_incomplete = false;
                 if let Some(latest) = text_generation
                     && latest.text_serving_needs_work()
@@ -2720,8 +2830,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     )
                     .await;
                     match build {
-                        Ok(Ok(true)) => {}
+                        Ok(Ok(true)) => {
+                            clear_convergence_park(&worker_convergence_park);
+                        }
                         Ok(Ok(false)) => {
+                            clear_convergence_park(&worker_convergence_park);
                             worker_wake.notify_one();
                             text_slice_incomplete = true;
                         }
@@ -2740,14 +2853,42 @@ impl CodeIndexSchedulerRegistryV1 {
                                     *current = None;
                                 }
                             }
-                            tracing::warn!(
-                                event = "code_index_text_projection_failed",
-                                error = %error,
-                                "code-index background text projection failed"
-                            );
+                            if error.is_deterministic_contract() {
+                                // Unchanged input reproduces this on every
+                                // wake, so an unparked WARN would mask it as
+                                // warming forever. Park it typed; the wake
+                                // cadence still re-checks, so an operator fix
+                                // is picked up without a restart.
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    error.to_string(),
+                                    CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+                                    true,
+                                );
+                                tracing::warn!(
+                                    event = "code_index_convergence_parked",
+                                    path = "background_worker",
+                                    error = %error,
+                                    "code-index text projection parked on a deterministic \
+                                     contract violation; status reports it typed and every \
+                                     wake re-checks"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    event = "code_index_text_projection_failed",
+                                    error = %error,
+                                    "code-index background text projection failed"
+                                );
+                            }
                         }
                         Err(error) => {
                             failed_latest.mark_text_serving_failed();
+                            park_convergence(
+                                &worker_convergence_park,
+                                format!("code text projection task failed abnormally: {error}"),
+                                CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
+                                false,
+                            );
                             tracing::warn!(
                                 event = "code_index_text_projection_task_failed",
                                 error = %error,
@@ -2989,18 +3130,48 @@ impl CodeIndexSchedulerRegistryV1 {
                             )
                             .await
                             {
-                                Ok(Ok(true)) => break,
-                                Ok(Ok(false)) => {}
+                                Ok(Ok(true)) => {
+                                    clear_convergence_park(&worker_convergence_park);
+                                    break;
+                                }
+                                Ok(Ok(false)) => {
+                                    clear_convergence_park(&worker_convergence_park);
+                                }
                                 Ok(Err(error)) => {
-                                    tracing::warn!(
-                                        event = "code_index_text_projection_failed",
-                                        error = %error,
-                                        "published text projection failed before graph seating"
-                                    );
+                                    if error.is_deterministic_contract() {
+                                        park_convergence(
+                                            &worker_convergence_park,
+                                            error.to_string(),
+                                            CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+                                            true,
+                                        );
+                                        tracing::warn!(
+                                            event = "code_index_convergence_parked",
+                                            path = "background_worker",
+                                            error = %error,
+                                            "published text projection parked on a deterministic \
+                                             contract violation before graph seating; status \
+                                             reports it typed and every wake re-checks"
+                                        );
+                                    } else {
+                                        tracing::warn!(
+                                            event = "code_index_text_projection_failed",
+                                            error = %error,
+                                            "published text projection failed before graph seating"
+                                        );
+                                    }
                                     break;
                                 }
                                 Err(error) => {
                                     text.mark_text_serving_failed();
+                                    park_convergence(
+                                        &worker_convergence_park,
+                                        format!(
+                                            "code text projection task failed abnormally: {error}"
+                                        ),
+                                        CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
+                                        false,
+                                    );
                                     tracing::warn!(
                                         event = "code_index_text_projection_task_failed",
                                         error = %error,
@@ -3513,6 +3684,7 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_generation,
             last_reconciled_at_micros,
             text_generation,
+            convergence_park,
             published_generation_id,
             build_progress,
             serving_generation_epoch,
@@ -4230,6 +4402,7 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_generation,
             last_reconciled_at_micros,
             text_generation,
+            convergence_park,
             build_progress,
             hints,
             graph_activation_enabled,
@@ -4242,6 +4415,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.last_reconciled_at_micros),
                 Arc::clone(&worktree.text_generation),
+                Arc::clone(&worktree.convergence_park),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
                 worktree.graph_activation.policy().is_enabled(),
@@ -4266,6 +4440,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 progress
             });
             let refreshing = reconcile_in_progress.load(Ordering::Acquire) != 0;
+            let parked = convergence_park
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
@@ -4306,7 +4484,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         worktree_root: canonical_root.display().to_string(),
                         last_reconcile_micros,
                         staleness_state: Some(
-                            if refreshing {
+                            if parked.is_some() && !ready {
+                                "parked"
+                            } else if refreshing {
                                 if ready {
                                     "refreshing"
                                 } else {
@@ -4331,6 +4511,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                         .to_owned(),
                         progress,
+                        parked,
                         ..identity
                     };
                 }
@@ -4354,7 +4535,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 text_ready,
                 graph_activation_enabled,
             );
-            let staleness_state = if refreshing {
+            let staleness_state = if parked.is_some() && !ready {
+                "parked"
+            } else if refreshing {
                 if ready {
                     "refreshing"
                 } else {
@@ -4392,11 +4575,31 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 .to_owned(),
                 progress,
+                parked,
                 ..identity
             }
         })
         .await
         .ok()
+    }
+
+    /// The deterministic contract violation currently parking background
+    /// convergence for one mounted worktree, when the worker has observed one.
+    /// A status read for doctor/status projections, never an admission
+    /// boundary: it takes no scheduler lock and runs no probe.
+    pub async fn convergence_park(
+        &self,
+        project_root: &Path,
+    ) -> Option<CodeIndexConvergenceParkedV1> {
+        let canonical_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&canonical_root)?;
+        let parked = worktree
+            .convergence_park
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        parked
     }
 
     /// Query-admission entry point: serve only an already-decoded generation

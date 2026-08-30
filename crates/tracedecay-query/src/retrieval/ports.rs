@@ -42,6 +42,18 @@ pub enum RetrievalPortError {
     Contract(String),
 }
 
+impl RetrievalPortError {
+    /// True when this failure is a deterministic contract violation that the
+    /// same input reproduces on every pass — a wrong filesystem mode, a
+    /// symlinked or non-directory store path, a corrupt identity. Background
+    /// workers park these visibly instead of masking them as warming, unlike
+    /// transient capacity, availability, staleness, and cancellation failures
+    /// that a later pass can clear on its own.
+    pub fn is_deterministic_contract(&self) -> bool {
+        matches!(self, Self::Contract(_))
+    }
+}
+
 impl From<RetrievalPortError> for RetrievalError {
     fn from(error: RetrievalPortError) -> Self {
         match error {
