@@ -242,8 +242,10 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
             )
         }
         SessionRefreshServiceOutcome::Running(_) => RetainedSurfaceExecutionErrorV1::Conflict,
-        SessionRefreshServiceOutcome::Unavailable
-        | SessionRefreshServiceOutcome::Complete(_)
+        SessionRefreshServiceOutcome::Unavailable => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session refresh service is unavailable",
+        ),
+        SessionRefreshServiceOutcome::Complete(_)
         | SessionRefreshServiceOutcome::Failed(_)
         | SessionRefreshServiceOutcome::Cancelled(_)
         | SessionRefreshServiceOutcome::CancelledReconciliationRequired(_)
@@ -251,7 +253,9 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
         | SessionRefreshServiceOutcome::StartedReconciliationRequired { .. }
         | SessionRefreshServiceOutcome::Joined { .. }
         | SessionRefreshServiceOutcome::JoinedReconciliationRequired { .. } => {
-            RetainedSurfaceExecutionErrorV1::Unavailable
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the session refresh service returned an unexpected outcome shape",
+            )
         }
     }
 }
@@ -290,8 +294,11 @@ fn refresh_progress(
 fn refresh_receipt(
     value: SessionRefreshReceiptView,
 ) -> Result<SessionRefreshReceiptV1, RetainedSurfaceExecutionErrorV1> {
-    session_refresh_receipt_from_view(value)
-        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)
+    session_refresh_receipt_from_view(value).ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session refresh receipt could not be projected",
+        )
+    })
 }
 
 fn session_refresh_frontier_from_view(

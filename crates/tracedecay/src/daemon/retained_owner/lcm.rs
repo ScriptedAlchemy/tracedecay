@@ -341,7 +341,11 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                     &expected_shard,
                 )
                 .map(ResolvedRetainedLcmAuthority::Owned)
-                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)
+                .ok_or_else(|| {
+                    RetainedSurfaceExecutionErrorV1::unavailable(
+                        "the registered LCM authority could not be mounted for this profile shard",
+                    )
+                })
             }
         }
     }
@@ -371,7 +375,11 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 .await?;
                 let service =
                     DaemonSessionRetrievalService::new_admitted_profile(database, identity.clone())
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+                        .ok_or_else(|| {
+                            RetainedSurfaceExecutionErrorV1::unavailable(
+                                "the profile session retrieval service could not be admitted",
+                            )
+                        })?;
                 Ok(RetainedLcmRetrieval::Profile {
                     service: Box::new(service),
                     cancellation: context.cancellation_signal,
@@ -485,8 +493,11 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
             (LcmAuthorityOutcome::Ready, Some(LcmAuthorityPayload::Doctor(report))) => report,
             (outcome, _) => return Err(execution_error(outcome)),
         };
-        let report = serde_json::from_value(report)
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        let report = serde_json::from_value(report).map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the LCM doctor report could not be decoded: {error}"
+            ))
+        })?;
         let health = lcm_doctor_health(report);
         let status = match health.status {
             LcmDoctorHealthStatusV1::Complete => RetainedOutcomeStatusV1::Complete,
@@ -534,7 +545,9 @@ fn validate_receipt(
         || receipt.execution.effective_deadline != *request.deadline()
     {
         hotpath::gauge!("daemon.retained.lcm.authority.receipt_invalid").inc(1.0);
-        return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
+        return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+            "the LCM authority execution receipt did not match the admitted request",
+        ));
     }
     Ok(())
 }
@@ -557,12 +570,33 @@ fn execution_error(outcome: LcmAuthorityOutcome) -> RetainedSurfaceExecutionErro
                 tracedecay_application::CancellationStage::DuringRead,
             )
         }
-        LcmAuthorityOutcome::Ready
-        | LcmAuthorityOutcome::Unavailable { .. }
-        | LcmAuthorityOutcome::Failed { .. } => {
+        LcmAuthorityOutcome::Ready => {
             hotpath::gauge!("daemon.retained.lcm.authority.unavailable").inc(1.0);
-            RetainedSurfaceExecutionErrorV1::Unavailable
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the LCM authority reported ready without the expected payload",
+            )
         }
+        LcmAuthorityOutcome::Unavailable { reason } => {
+            hotpath::gauge!("daemon.retained.lcm.authority.unavailable").inc(1.0);
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the LCM authority is unavailable: {}",
+                lcm_unavailable_reason(reason)
+            ))
+        }
+        LcmAuthorityOutcome::Failed { diagnostic } => {
+            hotpath::gauge!("daemon.retained.lcm.authority.unavailable").inc(1.0);
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the LCM authority failed: {diagnostic}"
+            ))
+        }
+    }
+}
+
+const fn lcm_unavailable_reason(reason: LcmAuthorityUnavailableReason) -> &'static str {
+    match reason {
+        LcmAuthorityUnavailableReason::StoreAuthorityUnavailable => "store_authority_unavailable",
+        LcmAuthorityUnavailableReason::HostProtocolUnavailable => "host_protocol_unavailable",
+        LcmAuthorityUnavailableReason::HostPayloadUnavailable => "host_payload_unavailable",
     }
 }
 
@@ -573,16 +607,7 @@ fn lcm_authority_outcome(value: LcmAuthorityOutcome) -> LcmAuthorityOutcomeV1 {
         LcmAuthorityOutcome::Cancelled => LcmAuthorityOutcomeV1::Cancelled,
         LcmAuthorityOutcome::TimedOut => LcmAuthorityOutcomeV1::TimedOut,
         LcmAuthorityOutcome::Unavailable { reason } => LcmAuthorityOutcomeV1::Unavailable {
-            reason: match reason {
-                LcmAuthorityUnavailableReason::StoreAuthorityUnavailable => {
-                    "store_authority_unavailable"
-                }
-                LcmAuthorityUnavailableReason::HostProtocolUnavailable => {
-                    "host_protocol_unavailable"
-                }
-                LcmAuthorityUnavailableReason::HostPayloadUnavailable => "host_payload_unavailable",
-            }
-            .to_owned(),
+            reason: lcm_unavailable_reason(reason).to_owned(),
         },
         LcmAuthorityOutcome::Failed { diagnostic } => LcmAuthorityOutcomeV1::Failed { diagnostic },
     }

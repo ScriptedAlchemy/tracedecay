@@ -110,7 +110,11 @@ impl<'a> DirectProfileRetainedSessionPortV1<'a> {
             .await?;
         let retrieval =
             DaemonSessionRetrievalService::new_admitted_profile(database, self.identity.clone())
-                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+                .ok_or_else(|| {
+                    RetainedSurfaceExecutionErrorV1::unavailable(
+                        "the profile session retrieval service could not be admitted",
+                    )
+                })?;
         let outcome = retrieve_bounded(context, &retrieval, query).await?;
         let result = input.result(outcome, SessionRetrievalStoreScope::Profile)?;
         evidence_outcome(
@@ -455,8 +459,11 @@ impl MessageSearchInput {
         ))
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
         SessionTemporalQuery::new(
-            SessionId::new(MESSAGE_SEARCH_ROOT_SESSION_ID)
-                .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?,
+            SessionId::new(MESSAGE_SEARCH_ROOT_SESSION_ID).map_err(|_| {
+                RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the message-search root session anchor could not be constructed",
+                )
+            })?,
             self.provider.provider_id().map(str::to_owned),
             &self.query,
             self.cursor.clone(),
@@ -548,9 +555,15 @@ impl MessageSearchInput {
                     }
                 });
             }
-            SessionRetrievalServiceOutcome::Locked
-            | SessionRetrievalServiceOutcome::Unavailable(_) => {
-                return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
+            SessionRetrievalServiceOutcome::Locked => {
+                return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the session store is locked for retrieval",
+                ));
+            }
+            SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+                return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                    super::session_retrieval_unavailable_detail(&unavailable),
+                ));
             }
             SessionRetrievalServiceOutcome::CursorStale => {
                 return Err(RetainedSurfaceExecutionErrorV1::cursor_stale_refusal());
@@ -843,7 +856,9 @@ fn message_search_hit(
     result: SessionMessageSearchResult,
 ) -> Result<MessageSearchHitV1, RetainedSurfaceExecutionErrorV1> {
     if !result.score.is_finite() {
-        return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
+        return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+            "message search produced a non-finite relevance score",
+        ));
     }
     Ok(MessageSearchHitV1 {
         session: session_record(result.session),
