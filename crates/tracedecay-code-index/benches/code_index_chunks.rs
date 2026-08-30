@@ -832,6 +832,7 @@ fn rebind_artifact(
     artifact.chunks.document.generation_id = generation_id.clone();
     artifact.chunks.document.file_occurrence_id = occurrence.clone();
     for chunk in &mut artifact.chunks.chunks {
+        let chunk = std::sync::Arc::make_mut(chunk);
         chunk.anchor.generation_id = generation_id.clone();
         chunk.anchor.file_occurrence_id = occurrence.clone();
     }
