@@ -9,6 +9,19 @@ use tracedecay_runtime_core::errors::Result;
 
 use super::*;
 
+type ProjectlessPhaseFutureV1<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+#[inline(never)]
+fn boxed_projectless_phase<'a, T>(
+    future: impl std::future::Future<Output = T> + Send + 'a,
+) -> ProjectlessPhaseFutureV1<'a, T>
+where
+    T: Send + 'a,
+{
+    Box::pin(future)
+}
+
 /// Authenticated durable identity pinned once for a projectless connection.
 /// Request grants are issued only after the adapter supplies exact controls.
 struct ProjectlessConnectionStateV1 {
@@ -62,7 +75,14 @@ pub(super) async fn serve_projectless_client(
             break;
         };
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => projectless_response(&request, &connection, store_administration).await,
+            Ok(request) => {
+                boxed_projectless_phase(projectless_response(
+                    &request,
+                    &connection,
+                    store_administration,
+                ))
+                .await
+            }
             Err(e) => Some(JsonRpcResponse::error(
                 json!(null),
                 ErrorCode::ParseError,
@@ -102,12 +122,12 @@ async fn projectless_response(
             }),
         )),
         "tools/call" => Some(
-            projectless_tools_call_response_with_connection(
+            boxed_projectless_phase(projectless_tools_call_response_with_connection(
                 id,
                 request.params.as_ref(),
                 connection,
                 store_administration,
-            )
+            ))
             .await,
         ),
         "ping" | "logging/setLevel" => Some(JsonRpcResponse::success(id, json!({}))),
