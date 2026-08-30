@@ -134,6 +134,23 @@ pub struct CodeIndexConvergenceParkedV1 {
     pub retries_on_wake: bool,
 }
 
+/// Interactive graph-serving state for the latest sealed generation.
+///
+/// A sealed generation can expose truthful census statistics before its graph
+/// projection is ready to serve queries, so readiness is reported separately.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CodeGraphServingReadinessV1 {
+    /// No graph-serving authority exists for this worktree or generation.
+    Unavailable { reason: String },
+    /// The sealed generation exists, but graph activation has not completed.
+    Pending,
+    /// Graph activation completed without a serving projection.
+    Refused { reason: String },
+    /// The verified graph projection is installed for interactive reads.
+    Ready,
+}
+
 /// Freshness/generation state for one mounted worktree.
 ///
 /// `Deserialize` is part of the wire contract: the CLI status command decodes
@@ -153,6 +170,10 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub source_revision: Option<String>,
     /// Latest sealed generation identity, when a complete generation exists.
     pub latest_generation_id: Option<String>,
+    /// Whether that generation's verified graph projection can serve reads.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_graph_serving: Option<CodeGraphServingReadinessV1>,
     /// Content identity of the complete source snapshot.
     pub snapshot_content_identity: Option<String>,
     /// Time the complete generation was durably sealed.
@@ -309,6 +330,24 @@ mod tests {
         crate::events_api::dashboard_state_fixture("project.dashboard-code-index").await
     }
 
+    #[test]
+    fn graph_serving_readiness_is_additive_for_older_daemon_responses() {
+        let mut value = serde_json::to_value(CodeIndexWorktreeFreshnessV1::default())
+            .expect("freshness serializes");
+        value
+            .as_object_mut()
+            .expect("freshness object")
+            .remove("code_graph_serving");
+
+        let decoded: CodeIndexWorktreeFreshnessV1 =
+            serde_json::from_value(value).expect("older response remains readable");
+        assert_eq!(decoded.code_graph_serving, None);
+
+        let ready = serde_json::to_value(CodeGraphServingReadinessV1::Ready)
+            .expect("ready state serializes");
+        assert_eq!(ready, serde_json::json!({ "state": "ready" }));
+    }
+
     #[tokio::test]
     async fn freshness_route_is_typed_unsupported_without_daemon_authority() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
@@ -334,6 +373,7 @@ mod tests {
                     source_reference: Some("refs/heads/main".to_owned()),
                     source_revision: Some("commit.fixture".to_owned()),
                     latest_generation_id: Some("generation.fixture".to_owned()),
+                    code_graph_serving: Some(CodeGraphServingReadinessV1::Ready),
                     snapshot_content_identity: Some("sha256:fixture".to_owned()),
                     sealed_at_micros: Some(41),
                     last_reconcile_micros: Some(42),
@@ -373,6 +413,9 @@ mod tests {
                     source_reference: None,
                     source_revision: None,
                     latest_generation_id: None,
+                    code_graph_serving: Some(CodeGraphServingReadinessV1::Unavailable {
+                        reason: "generation_unavailable".to_owned(),
+                    }),
                     snapshot_content_identity: None,
                     sealed_at_micros: None,
                     last_reconcile_micros: Some(42),
@@ -404,6 +447,9 @@ mod tests {
                     source_reference: Some("refs/heads/main".to_owned()),
                     source_revision: Some("commit.fixture".to_owned()),
                     latest_generation_id: None,
+                    code_graph_serving: Some(CodeGraphServingReadinessV1::Unavailable {
+                        reason: "generation_unavailable".to_owned(),
+                    }),
                     snapshot_content_identity: None,
                     sealed_at_micros: None,
                     last_reconcile_micros: Some(42),

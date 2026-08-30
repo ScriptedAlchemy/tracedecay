@@ -379,7 +379,7 @@ fn current_loopback_authority(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(Path::to_path_buf)
-        .or_else(crate::config::user_data_dir)
+        .or_else(tracedecay_runtime_core::config::user_data_dir)
         .ok_or_else(|| TraceDecayError::Config {
             message: "could not determine TraceDecay user data directory".to_string(),
         })?;

@@ -20,6 +20,7 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
+use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
 const COALESCED_JOURNAL_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
@@ -132,13 +133,13 @@ impl DaemonSessionSyncService {
         context: Arc<SessionSyncProjectContext>,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncOutcomeV1 {
-        if crate::daemon::session_ingest_disabled() {
+        if session_ingest_disabled() {
             tracing::info!(
                 event = "session_sync_ingest_disabled",
                 "session sync refused: TRACEDECAY_SESSION_INGEST_DISABLED is set"
             );
             return SessionSyncOutcomeV1::Unavailable {
-                reason_code: crate::daemon::SESSION_INGEST_DISABLED_REASON_V1,
+                reason_code: SESSION_INGEST_DISABLED_REASON_V1,
             };
         }
         let observed_at = now_micros();

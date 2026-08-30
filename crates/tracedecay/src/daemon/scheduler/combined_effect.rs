@@ -1107,7 +1107,7 @@ mod tests {
                 .configuration_target()
                 .project_id
                 .clone();
-            let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+            let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
                 &project_root,
                 &project_id,
             )

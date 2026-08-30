@@ -21,7 +21,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
 
     let project_id = ProjectId::new("project.query-semantic-activation").expect("project id");
     let scope =
-        crate::daemon::project_open_owners::resolved_scope_for_project(project.path(), &project_id)
+        tracedecay_code_index_runtime::resolved_scope_for_project(project.path(), &project_id)
             .expect("resolved scope");
     let store = TempDir::new().expect("store root");
     let registry =
@@ -534,7 +534,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
 
     let project_id = ProjectId::new("project.query-deferred-core-restore").expect("project id");
     let scope =
-        crate::daemon::project_open_owners::resolved_scope_for_project(project.path(), &project_id)
+        tracedecay_code_index_runtime::resolved_scope_for_project(project.path(), &project_id)
             .expect("resolved scope");
     let store = TempDir::new().expect("store root");
     let registry =

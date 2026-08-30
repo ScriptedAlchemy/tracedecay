@@ -25,7 +25,7 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::feedback::GitHubPullRequestIdV1;
 use tracedecay_domain::{
-    ActorId, CapabilityId as DomainCapabilityId, LocatorDigest, ProjectId, RefId, UtcMicros,
+    ActorId, CapabilityId as DomainCapabilityId, LocatorDigest, ProjectId, UtcMicros,
     canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -529,7 +529,8 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
             message: "project-open source edit preview requires authoritative project identity"
                 .to_owned(),
         })?;
-    let scope = resolved_scope_for_project(project_root, &project_id).map_err(|error| {
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+        .map_err(|error| {
         TraceDecayError::Config {
             message: format!("project-open source edit preview scope denied: {error}"),
         }
@@ -569,7 +570,8 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
         .configuration_target()
         .project_id
         .clone();
-    let scope = resolved_scope_for_project(&project_root, &project_id).map_err(|error| {
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
+        .map_err(|error| {
         TraceDecayError::Config {
             message: format!("test project-open resolved scope denied: {error}"),
         }
@@ -628,7 +630,8 @@ pub(super) async fn register_project_open_production_owners(
             message: "project-open owners require the daemon-owned project session database"
                 .to_owned(),
         })?;
-    let scope = resolved_scope_for_project(project_root, &project_id).map_err(|error| {
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+        .map_err(|error| {
         TraceDecayError::Config {
             message: format!("project-open resolved scope denied: {error}"),
         }
@@ -1932,36 +1935,9 @@ impl tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeResolverV1
         ResolvedScope,
         tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeUnavailableV1,
     > {
-        resolved_scope_for_project(project_root, project_id)
+        tracedecay_code_index_runtime::resolved_scope_for_project(project_root, project_id)
             .map_err(|_| tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeUnavailableV1)
     }
-}
-
-pub(crate) fn resolved_scope_for_project(
-    project_root: &Path,
-    project_id: &ProjectId,
-) -> std::result::Result<ResolvedScope, ApplicationContractError> {
-    let repository_id =
-        tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
-            project_root,
-        )
-        .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "project-open repository id",
-        })?;
-    let worktree_id =
-        tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
-            project_root,
-        )
-        .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "project-open worktree id",
-        })?;
-    let reference = tracedecay_runtime_core::branch::current_branch(project_root)
-        .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
-    ResolvedScope::new(project_id.clone(), repository_id, worktree_id, reference).map_err(|_| {
-        ApplicationContractError::Inconsistent {
-            field: "project-open resolved scope",
-        }
-    })
 }
 
 #[cfg(test)]

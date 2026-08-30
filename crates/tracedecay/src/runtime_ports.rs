@@ -189,7 +189,7 @@ fn resolve_hook_scope(
     project_root: &Path,
     project_id: &tracedecay_domain::ProjectId,
 ) -> std::result::Result<tracedecay_application::ResolvedScope, String> {
-    crate::daemon::project_open_owners::resolved_scope_for_project(project_root, project_id)
+    tracedecay_code_index_runtime::resolved_scope_for_project(project_root, project_id)
         .map_err(|error| error.to_string())
 }
 

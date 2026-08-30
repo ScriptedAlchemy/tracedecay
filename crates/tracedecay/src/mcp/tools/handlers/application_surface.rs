@@ -214,6 +214,12 @@ fn application_surface_dispatch_error(
     use crate::application_surface::ApplicationSurfaceAdapterError as AdapterError;
     let (reason_code, retryable) = match &error {
         AdapterError::DaemonUnavailable => ("application_surface_unavailable", true),
+        // Keep the transport's own reason code (`daemon_connect_down` /
+        // `daemon_connect_saturated`) so every dispatch surface names the
+        // dead-daemon state identically.
+        AdapterError::DaemonUnreachable { reason_code, .. } => {
+            return TraceDecayError::project_route(reason_code.clone(), true, error.to_string());
+        }
         AdapterError::UnknownOrNotAuthorized => {
             ("application_surface_not_found_or_not_authorized", false)
         }

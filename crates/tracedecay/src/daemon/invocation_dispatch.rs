@@ -522,7 +522,7 @@ pub(super) async fn resolve_multi_root_projects(
             &selector.project_id,
         )
         .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
-        let scope = project_open_owners::resolved_scope_for_project(&root, &selector.project_id)
+        let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&root, &selector.project_id)
             .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
         if !service.lsp_owner_matches_scope(&root, &scope).await {
             return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);

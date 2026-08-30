@@ -2168,6 +2168,71 @@
       "description": "Strongly typed canonical identity: `CatalogGenerationId`.",
       "type": "string"
     },
+    "CodeGraphServingReadinessV1": {
+      "description": "Interactive graph-serving state for the latest sealed generation.\n\nA sealed generation can expose truthful census statistics before its graph\nprojection is ready to serve queries, so readiness is reported separately.",
+      "oneOf": [
+        {
+          "description": "No graph-serving authority exists for this worktree or generation.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The sealed generation exists, but graph activation has not completed.",
+          "properties": {
+            "state": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Graph activation completed without a serving projection.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "refused",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The verified graph projection is installed for interactive reads.",
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "CodeIndexBuildBlockedReasonV1": {
       "description": "A typed reason an otherwise active generation cannot make durable progress.",
       "enum": [
@@ -2540,6 +2605,17 @@
     "CodeIndexWorktreeFreshnessV1": {
       "description": "Freshness/generation state for one mounted worktree.\n\n`Deserialize` is part of the wire contract: the CLI status command decodes\nexactly this type back out of the daemon's `tracedecay_status` response,\nkeeping one authority for the freshness shape.",
       "properties": {
+        "code_graph_serving": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeGraphServingReadinessV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether that generation's verified graph projection can serve reads."
+        },
         "coverage": {
           "description": "Whether this read covers the complete mounted scheduler state.",
           "type": "string"

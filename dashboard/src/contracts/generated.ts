@@ -636,6 +636,23 @@ export type CapabilityId = z.infer<typeof CapabilityIdSchema>;
 export const CatalogGenerationIdSchema = z.string();
 export type CatalogGenerationId = z.infer<typeof CatalogGenerationIdSchema>;
 
+/** Interactive graph-serving state for the latest sealed generation.
+
+A sealed generation can expose truthful census statistics before its graph
+projection is ready to serve queries, so readiness is reported separately. */
+export const CodeGraphServingReadinessV1Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("pending"),
+}), z.object({
+  state: z.literal("ready"),
+}), z.object({
+  reason: z.string(),
+  state: z.literal("refused"),
+}), z.object({
+  reason: z.string(),
+  state: z.literal("unavailable"),
+})]);
+export type CodeGraphServingReadinessV1 = z.infer<typeof CodeGraphServingReadinessV1Schema>;
+
 /** A typed reason an otherwise active generation cannot make durable progress. */
 export const CodeIndexBuildBlockedReasonV1Schema = z.enum(["artifact_store_unavailable", "resident_memory", "retry_backoff", "source_unavailable"]);
 export type CodeIndexBuildBlockedReasonV1 = z.infer<typeof CodeIndexBuildBlockedReasonV1Schema>;
@@ -739,6 +756,7 @@ export type CodeIndexWorkerStatusV1 = z.infer<typeof CodeIndexWorkerStatusV1Sche
 exactly this type back out of the daemon's `tracedecay_status` response,
 keeping one authority for the freshness shape. */
 export const CodeIndexWorktreeFreshnessV1Schema = z.object({
+  code_graph_serving: z.union([z.lazy(() => CodeGraphServingReadinessV1Schema), z.null()]).optional(),
   coverage: z.string(),
   hook_hint_count: z.number().int().safe().min(0).nullable(),
   last_reconcile_micros: z.number().int().safe().nullable(),

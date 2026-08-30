@@ -18,6 +18,7 @@ use super::wake::{
 };
 use super::worker::run_session_temporal_refresh_scheduler;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_sessions::admission::session_ingest_disabled;
 
 #[derive(Default, Debug, Eq, PartialEq)]
 pub(super) struct SessionTemporalRefreshPassReport {
@@ -631,5 +632,3 @@ pub(super) fn session_refresh_retry_delay(
     };
     tracedecay_host_admission::replay_backoff(attempt, shift_cap)
 }
-
-use crate::daemon::session_ingest_disabled;

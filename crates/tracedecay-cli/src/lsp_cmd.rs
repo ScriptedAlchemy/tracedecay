@@ -431,6 +431,7 @@ fn lsp_invocation_error(
         InvocationError::InvalidRequest => "LSP gateway request was invalid".to_owned(),
         InvocationError::Conflict => "LSP gateway request conflicted with current state".to_owned(),
         InvocationError::Unavailable => "LSP gateway authority is unavailable".to_owned(),
+        InvocationError::Unreachable { detail, .. } => detail,
         InvocationError::Problem(problem) => match problem.diagnostic() {
             Some(diagnostic) => {
                 format!("LSP gateway request failed: {}", diagnostic.code)

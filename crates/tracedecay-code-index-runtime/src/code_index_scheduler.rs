@@ -1231,6 +1231,22 @@ impl DaemonCodeIndexPublicationStoreV1 {
         )
     }
 
+    /// Prove that the durable active publication sealed exactly the same
+    /// source content as an already-decoded serving handle, without reading
+    /// or decoding its sealed payload. A convergence or repair republication
+    /// advances the pointer to a successor generation built from unchanged
+    /// bytes; that successor supersedes the seat for publishers without
+    /// staling it for readers.
+    fn active_pointer_covers_snapshot_content(
+        &self,
+        content_identity: &ContentDigest,
+    ) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
+        let Some(pointer) = self.read_publication_pointer()? else {
+            return Ok(false);
+        };
+        Ok(pointer.snapshot_content_identity == content_identity.as_str())
+    }
+
     /// Occupy the active-generation decode barrier exactly as a cold activation
     /// does: the pinned slot is empty and one decode is in flight. Restores both
     /// on drop, so a parked reader is never stranded.
@@ -2128,13 +2144,17 @@ pub struct LatestCompleteCodeIndexV1 {
     generation: Arc<CodeIndexPublishedGenerationV1>,
     text: LatestCodeTextGenerationV1,
     record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
-    graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
 }
 
 #[derive(Clone)]
 pub struct LatestCodeTextGenerationV1 {
     metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
     query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
+    /// Native-graph readiness for this exact sealed text generation. Status
+    /// reads this authority even while an older generation still owns the
+    /// graph-serving slot, so old Ready state cannot mask current Pending or
+    /// terminal Unavailable state.
+    graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
     /// Generation-owned singleflight state for the durable text projection:
     /// the resumable partial build plus the head-open claim. Only the
     /// background scheduler advances it; foreground queries observe typed
@@ -2859,6 +2879,7 @@ struct ProductionCodeGraphServingV1 {
 enum CodeGraphActivationStateV1 {
     Pending,
     Refused(&'static str),
+    Unavailable(String),
     Ready(Arc<ProductionCodeGraphServingV1>),
 }
 
@@ -3111,6 +3132,7 @@ impl LatestCompleteCodeIndexV1 {
         &self,
     ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
         match &*self
+            .text
             .graph_activation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3118,6 +3140,9 @@ impl LatestCompleteCodeIndexV1 {
             CodeGraphActivationStateV1::Ready(serving) => Ok(Arc::clone(serving)),
             CodeGraphActivationStateV1::Refused(reason) => {
                 Err(RetrievalPortError::Contract((*reason).to_owned()))
+            }
+            CodeGraphActivationStateV1::Unavailable(reason) => {
+                Err(RetrievalPortError::AuthorityUnavailable(reason.clone()))
             }
             CodeGraphActivationStateV1::Pending => Err(RetrievalPortError::Contract(
                 "code graph projection has not completed activation".to_owned(),
@@ -3131,11 +3156,12 @@ impl LatestCompleteCodeIndexV1 {
     /// The activation state is shared by every handle bound to one sealed
     /// generation, so this answers for the handle already seated in the serving
     /// slot as much as for this one: a generation that reached serving through
-    /// the exact route, or whose activation failed earlier, reports pending
-    /// here while it serves text under the same generation id.
+    /// the exact route but has not attempted graph activation yet reports
+    /// pending here while it serves text under the same generation id.
     pub fn graph_activation_is_pending(&self) -> bool {
         matches!(
             &*self
+                .text
                 .graph_activation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
@@ -3143,14 +3169,20 @@ impl LatestCompleteCodeIndexV1 {
         )
     }
 
+    /// Snapshot graph-serving activation with one lock acquisition so status
+    /// cannot combine states from opposite sides of an activation transition.
+    pub fn code_graph_serving_readiness(
+        &self,
+    ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1 {
+        self.text.code_graph_serving_readiness()
+    }
+
     fn refuse_graph_activation(&self, reason: &'static str) {
-        let mut state = self
-            .graph_activation
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
-            *state = CodeGraphActivationStateV1::Refused(reason);
-        }
+        self.text.refuse_graph_activation(reason);
+    }
+
+    fn mark_graph_activation_unavailable(&self, reason: String) {
+        self.text.mark_graph_activation_unavailable(reason);
     }
 
     /// The retained verified-snapshot projection store for graph reads,
@@ -3175,6 +3207,55 @@ impl LatestCompleteCodeIndexV1 {
                 )
             })?;
         Ok(store)
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    pub fn code_graph_serving_readiness(
+        &self,
+    ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1 {
+        match &*self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Pending => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
+            }
+            CodeGraphActivationStateV1::Refused(reason) => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Refused {
+                    reason: (*reason).to_owned(),
+                }
+            }
+            CodeGraphActivationStateV1::Unavailable(reason) => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Unavailable {
+                    reason: reason.clone(),
+                }
+            }
+            CodeGraphActivationStateV1::Ready(_) => {
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+            }
+        }
+    }
+
+    fn refuse_graph_activation(&self, reason: &'static str) {
+        let mut state = self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+            *state = CodeGraphActivationStateV1::Refused(reason);
+        }
+    }
+
+    fn mark_graph_activation_unavailable(&self, reason: String) {
+        let mut state = self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+            *state = CodeGraphActivationStateV1::Unavailable(reason);
+        }
     }
 }
 
@@ -4049,6 +4130,7 @@ impl LatestCompleteCodeIndexV1 {
             _graph_authority: graph_authority,
         });
         *self
+            .text
             .graph_activation
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -4207,6 +4289,40 @@ impl Drop for ReconcilePassGuard {
     }
 }
 
+/// Direct evidence that one seated generation was proven current against the
+/// exact source, carried outside the scheduler mutex so verified reads can
+/// re-prove currency while a background reconcile owns the scheduler for its
+/// whole pass. The witness records the git-metadata fingerprint and stat
+/// signature the proving reconcile or probe established, plus the ignored
+/// admissions that signature was computed over; a busy read recomputes both
+/// against the live checkout, so drift after the proof refuses instead of
+/// serving a stale claim.
+#[derive(Clone, Debug)]
+pub(crate) struct ServingSourceWitnessV1 {
+    pub(crate) generation_id: CodeGenerationId,
+    git_fingerprint: identity::GitMetadataFingerprintV1,
+    stat_signature: String,
+    ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+}
+
+impl ServingSourceWitnessV1 {
+    /// Re-run the exact-source fences against the live checkout without the
+    /// scheduler mutex: the git-metadata fingerprint and the stat-level
+    /// signature must both still match what the proving pass established.
+    pub(crate) fn proves_current(&self, project_root: &Path) -> bool {
+        if identity::GitMetadataFingerprintV1::capture(project_root)
+            .differs_from(&self.git_fingerprint)
+        {
+            return false;
+        }
+        freshness_witness::worktree_stat_signature_for(
+            project_root,
+            &self.ignored_source_admissions,
+        )
+        .is_ok_and(|live| live == self.stat_signature)
+    }
+}
+
 pub struct CodeIndexWorktreeSchedulerV1 {
     project_id: ProjectId,
     project_root: PathBuf,
@@ -4319,6 +4435,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             text: LatestCodeTextGenerationV1 {
                 metadata,
                 query_owners: Arc::new(OnceLock::new()),
+                graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
                 text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
                 text_projection_failed: Arc::new(AtomicBool::new(false)),
                 text_control: GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
@@ -4344,7 +4461,6 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 publication_binding: None,
             },
             record_index: Arc::new(OnceLock::new()),
-            graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
         };
         if latest
             .text
@@ -5452,6 +5568,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         Some(LatestCodeTextGenerationV1 {
             metadata,
             query_owners: Arc::new(OnceLock::new()),
+            graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
             text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
             text_projection_failed: Arc::new(AtomicBool::new(false)),
             text_control,
@@ -5823,9 +5940,12 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Admit the already-decoded serving generation under the exact source
-    /// and durable-publication fences. This is intentionally independent of
-    /// the publication decoder cache: the serving slot itself owns the
-    /// decoded generation and its activated graph authority.
+    /// and durable-publication fences. Currency is measured against source
+    /// content, not pointer position: a same-content successor that has
+    /// published but not yet seated does not stale the seat. This is
+    /// intentionally independent of the publication decoder cache: the
+    /// serving slot itself owns the decoded generation and its activated
+    /// graph authority.
     fn serving_generation_ready_for_exact_source(
         &mut self,
         serving: &LatestCompleteCodeIndexV1,
@@ -5833,10 +5953,47 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !self.exact_source_is_ready()? {
             return Ok(false);
         }
-        self.publication
+        if self
+            .publication
             .active_pointer_matches_generation(serving.generation())
             .map_err(CodeIndexProductionErrorV1::Publication)
+            .map_err(CodeIndexSchedulerErrorV1::from)?
+        {
+            return Ok(true);
+        }
+        // The durable pointer names a successor. When that successor sealed
+        // exactly the same source content — a convergence or repair
+        // republication, not an edit — the seat still describes the bytes on
+        // disk: the stat fence above proved the live tree unchanged since the
+        // reconcile that published it. The seat keeps serving through the
+        // successor's O(store) decode and native activation, which on a
+        // production-scale corpus take minutes per generation. A successor
+        // sealed from different content means the seat lags the reconciled
+        // truth and stays refused.
+        self.publication
+            .active_pointer_covers_snapshot_content(&serving.generation().snapshot().content_identity)
+            .map_err(CodeIndexProductionErrorV1::Publication)
             .map_err(Into::into)
+    }
+
+    /// Mint the exact-source currency witness for one generation from the
+    /// freshness state the last completed reconcile proved against gix truth.
+    /// `None` is a typed abstention (nothing was ever proven), never a default:
+    /// a busy verified read holding no witness refuses instead of serving.
+    fn source_currency_witness_for(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Option<ServingSourceWitnessV1> {
+        if !self.verified_against_source {
+            return None;
+        }
+        let stat_signature = self.last_stat_signature.clone()?;
+        Some(ServingSourceWitnessV1 {
+            generation_id: generation_id.clone(),
+            git_fingerprint: self.git_metadata.clone(),
+            stat_signature,
+            ignored_source_admissions: self.ignored_source_admissions.clone(),
+        })
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
@@ -6075,8 +6232,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 progress_epoch,
                 interactive,
             )) if cached_id == &generation_id
-                && retained_text
-                    .is_none_or(|text| Arc::ptr_eq(build, &text.text_projection_build)) =>
+                && retained_text.is_none_or(|text| {
+                    Arc::ptr_eq(build, &text.text_projection_build)
+                        && Arc::ptr_eq(interactive, &text.graph_activation)
+                }) =>
             {
                 (
                     Arc::clone(owners),
@@ -6100,9 +6259,16 @@ impl CodeIndexWorktreeSchedulerV1 {
                     || Arc::new(OnceLock::new()),
                     |(_, _, index, ..)| Arc::clone(index),
                 );
-                let graph_activation = same_generation_cache.map_or_else(
-                    || Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
-                    |(_, _, _, _, _, _, _, _, graph_activation)| Arc::clone(graph_activation),
+                let graph_activation = retained_text.map_or_else(
+                    || {
+                        same_generation_cache.map_or_else(
+                            || Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
+                            |(_, _, _, _, _, _, _, _, graph_activation)| {
+                                Arc::clone(graph_activation)
+                            },
+                        )
+                    },
+                    |text| Arc::clone(&text.graph_activation),
                 );
                 let (owners, build, failed, control, progress, progress_epoch) =
                     if let Some(text) = retained_text {
@@ -6165,6 +6331,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .unwrap_or_else(|| LatestCodeTextGenerationV1 {
                 metadata,
                 query_owners,
+                graph_activation: Arc::clone(&graph_activation),
                 text_projection_build,
                 text_projection_failed,
                 text_control,
@@ -6190,7 +6357,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             generation,
             text,
             record_index,
-            graph_activation,
         }
     }
 

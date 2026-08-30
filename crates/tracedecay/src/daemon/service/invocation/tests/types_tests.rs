@@ -896,7 +896,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
         FeedbackCycleInput,
     }
 
-    let _pin = crate::config::PinnedUserDataDir::new();
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.feedback.atomic-publication").expect("project id");
     let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(

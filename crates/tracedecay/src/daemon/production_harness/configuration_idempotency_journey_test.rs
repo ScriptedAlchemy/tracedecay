@@ -60,7 +60,7 @@ async fn cli_configuration_set(
     let graph = harness.server(project).expect("project server").cg().await;
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope =
-        project_open_owners::resolved_scope_for_project(graph.project_root(), &target.project_id)
+        tracedecay_code_index_runtime::resolved_scope_for_project(graph.project_root(), &target.project_id)
             .expect("project application scope");
     let project_root = graph.project_root().to_path_buf();
     drop(graph);
@@ -148,7 +148,7 @@ async fn configuration_batch_via_surface(
     let graph = harness.server(project).expect("project server").cg().await;
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope =
-        project_open_owners::resolved_scope_for_project(graph.project_root(), &target.project_id)
+        tracedecay_code_index_runtime::resolved_scope_for_project(graph.project_root(), &target.project_id)
             .expect("project application scope");
     let project_root = graph.project_root().to_path_buf();
     drop(graph);
@@ -242,7 +242,7 @@ async fn configuration_http_sdk(
     let graph = harness.server(project).expect("project server").cg().await;
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope =
-        project_open_owners::resolved_scope_for_project(graph.project_root(), &target.project_id)
+        tracedecay_code_index_runtime::resolved_scope_for_project(graph.project_root(), &target.project_id)
             .expect("project application scope");
     let project_root = graph.project_root().to_path_buf();
     drop(graph);

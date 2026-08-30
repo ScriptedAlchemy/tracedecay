@@ -43,6 +43,7 @@ mod provider;
 pub mod repository_provenance;
 pub mod retrieval_content;
 pub mod runtime;
+pub mod serving;
 mod workflow;
 
 pub use authorization::{
@@ -53,6 +54,12 @@ pub use orchestration::{ProviderRunFailure, ProviderRunFold, ProviderRunOutcome}
 pub use provider::{
     EXPECTED_MESSAGE_SEARCH_PROVIDER, MESSAGE_SEARCH_PROVIDER_IDS, ProviderScope, SessionProvider,
     decode_kiro_workspace_path,
+};
+pub use serving::{
+    SessionProjectionServingState, SessionProjectionServingStatus,
+    SessionProjectionServingStatusPort, SessionProjectionStaleReason,
+    SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
+    SessionProjectionWorkerRetryClass,
 };
 pub use workflow::{
     WorkflowAgent, WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowReadError,

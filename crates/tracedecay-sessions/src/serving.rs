@@ -1,3 +1,6 @@
+//! Session-projection serving status: current / stale / unavailable, plus the
+//! port refresh workers implement so retrieval can surface a typed refusal.
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionProjectionServingState {
     Current,
@@ -48,4 +51,8 @@ pub struct SessionProjectionServingStatus {
     pub backlog: usize,
     pub blocker: Option<SessionProjectionWorkerBlocker>,
     pub retry_class: Option<SessionProjectionWorkerRetryClass>,
+}
+
+pub trait SessionProjectionServingStatusPort: Send + Sync {
+    fn serving_status(&self) -> SessionProjectionServingStatus;
 }

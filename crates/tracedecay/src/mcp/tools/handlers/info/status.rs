@@ -625,6 +625,24 @@ mod tests {
     }
 
     #[test]
+    fn status_freshness_preserves_typed_graph_serving_readiness() {
+        let freshness =
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/project".to_owned(),
+                code_graph_serving: Some(
+                    tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready,
+                ),
+                ..Default::default()
+            };
+
+        let value = serde_json::to_value(freshness).expect("freshness serializes");
+        assert_eq!(
+            value["code_graph_serving"],
+            serde_json::json!({ "state": "ready" })
+        );
+    }
+
+    #[test]
     fn a_serving_worktree_with_a_parked_newer_build_stays_current_but_warns() {
         let freshness =
             tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
