@@ -47,9 +47,16 @@ mod rust;
 mod typescript;
 
 use std::collections::BTreeMap;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use super::*;
+use serde_json::{Value, json};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+
+use crate::ToolResult;
+use crate::handlers::support::{
+    effective_path, rendered_tool_result, require_object_args, unique_file_paths,
+};
+use crate::tools::render;
 
 /// Default and ceiling for reported orphans in one response.
 ///
@@ -267,8 +274,8 @@ pub(super) fn normalized(path: &Path) -> PathBuf {
 }
 
 #[hotpath::measure(future = true, label = "mcp.analysis.unmounted_files.total")]
-pub(crate) async fn handle_unmounted_files(
-    cg: &TraceDecay,
+pub async fn handle_unmounted_files(
+    project_root: &Path,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -285,12 +292,12 @@ pub(crate) async fn handle_unmounted_files(
         .and_then(Value::as_str)
         .map(str::to_ascii_lowercase);
 
-    let project_root = cg.project_root().to_path_buf();
+    let scan_project_root = project_root.to_path_buf();
     // The walk reads every candidate source file, so it runs on a blocking
     // worker rather than holding the async dispatch thread through thousands
     // of synchronous reads.
     let audit = hotpath::future!(
-        tokio::task::spawn_blocking(move || audit_project(&project_root)),
+        tokio::task::spawn_blocking(move || audit_project(&scan_project_root)),
         label = "mcp.analysis.unmounted_files.scan"
     )
     .await
@@ -361,7 +368,7 @@ pub(crate) async fn handle_unmounted_files(
         });
 
     Ok(rendered_tool_result(
-        Some(cg.project_root()),
+        Some(project_root),
         &args,
         &output,
         touched_files,
@@ -459,7 +466,9 @@ fn unmodelled_ecosystems(files: &ProjectFiles) -> Vec<EcosystemAudit> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::{Path, PathBuf};
+
+    use super::{EcosystemAudit, ProjectAudit, ProjectFiles, audit_project, normalized};
 
     /// Writes `contents` to `root/relative`, creating parents.
     pub(super) fn write(root: &Path, relative: &str, contents: &str) {

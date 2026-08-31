@@ -1,6 +1,16 @@
 //! `tracedecay_unsafe_patterns` — risky-construct scan over indexed source.
 
-use super::*;
+use std::collections::HashMap;
+use std::path::Path;
+
+use serde_json::{Value, json};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_graph_query::VerifiedGraphQuery;
+
+use super::{VerifiedAnalysisSymbol, path_is_rust, verified_analysis_symbols};
+use crate::ToolResult;
+use crate::handlers::support::{effective_path, rendered_tool_result};
+use crate::tools::render;
 
 const UNSAFE_KINDS: &[&str] = &[
     "unwrap",
@@ -108,9 +118,9 @@ fn path_looks_like_test(path: &str) -> bool {
 }
 
 #[hotpath::measure(future = true, label = "mcp.analysis.unsafe_patterns.total")]
-pub(crate) async fn handle_unsafe_patterns(
-    cg: &TraceDecay,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+pub async fn handle_unsafe_patterns(
+    project_root: &Path,
+    graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -147,7 +157,7 @@ pub(crate) async fn handle_unsafe_patterns(
     });
     // Graph phase is done. The source walk reads and masks candidate files, so
     // it belongs on a blocking worker like the sibling analysis scans.
-    let project_root = cg.project_root().to_path_buf();
+    let scan_project_root = project_root.to_path_buf();
     let (matches, by_kind, touched) = hotpath::future!(
         tokio::task::spawn_blocking(move || {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
@@ -161,7 +171,7 @@ pub(crate) async fn handle_unsafe_patterns(
                 if exclude_tests && in_test {
                     continue;
                 }
-                let abs_path = project_root.join(file);
+                let abs_path = scan_project_root.join(file);
                 let Ok(source) = tracedecay_runtime_core::sync::read_source_file(&abs_path) else {
                     continue;
                 };
@@ -234,7 +244,9 @@ pub(crate) async fn handle_unsafe_patterns(
     })?;
 
     let payload = hotpath::measure_block!("mcp.analysis.unsafe_patterns.assemble", {
-        let counts = serde_json::to_value(&by_kind).unwrap_or(json!({}));
+        let counts = serde_json::to_value(&by_kind).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to serialize unsafe-pattern counts: {error}"),
+        })?;
         json!({
             "match_count": matches.len(),
             "by_kind": counts,
@@ -242,7 +254,7 @@ pub(crate) async fn handle_unsafe_patterns(
         })
     });
     Ok(rendered_tool_result(
-        Some(cg.project_root()),
+        Some(project_root),
         &args,
         &payload,
         touched,
