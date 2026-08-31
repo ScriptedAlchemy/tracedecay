@@ -82,6 +82,7 @@ pub mod git_intelligence;
 pub mod git_query;
 pub mod git_reads;
 pub mod graph;
+pub mod graph_health_delta;
 mod hotpath_observe;
 pub mod lsp_runtime;
 mod lsp_support;

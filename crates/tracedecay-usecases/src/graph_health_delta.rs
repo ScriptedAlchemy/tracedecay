@@ -23,8 +23,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::observability::RegisteredObservabilityPortV1;
 
-use super::health::{VerifiedHealthSnapshotV1, compute_verified_health_snapshot};
-use super::queries::GraphQueryManager;
+use crate::graph::health::{VerifiedHealthSnapshotV1, compute_verified_health_snapshot};
+use crate::graph::queries::GraphQueryManager;
 
 const HEALTH_DELTA_SCHEMA_VERSION: u32 = 1;
 const HEALTH_DELTA_CURSOR_PREFIX: &str = "health-delta.v1.";

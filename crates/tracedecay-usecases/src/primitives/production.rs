@@ -59,7 +59,7 @@ use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{
     DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
 };
-use crate::graph::health_delta::compute_verified_health_delta;
+use crate::graph_health_delta::compute_verified_health_delta;
 use crate::graph::queries::{GraphQueryManager, is_test_marker};
 use crate::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,

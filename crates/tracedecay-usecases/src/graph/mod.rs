@@ -1,7 +1,6 @@
 //! Code-graph use cases over daemon-resolved verified projections.
 
 pub mod health;
-pub mod health_delta;
 mod projection;
 pub mod queries;
 pub mod scc;
