@@ -133,8 +133,8 @@ impl ProjectRouterCache {
 #[derive(Clone)]
 struct RemoteHttpApplicationMount {
     router: Router,
-    credentials: Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
-    runtime: Option<Arc<super::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>,
+    credentials: Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>,
+    runtime: Option<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>,
 }
 
 #[derive(Deserialize)]
@@ -201,9 +201,9 @@ impl DaemonHttpApplicationRegistry {
     pub(super) fn install_remote(
         &self,
         router: Router,
-        credentials: Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
+        credentials: Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>,
         runtime: Option<
-            Arc<super::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+            Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         >,
     ) -> Result<()> {
         let mut slot = self.remote.write().map_err(|_| TraceDecayError::Config {
@@ -318,7 +318,7 @@ impl DaemonHttpApplicationRegistry {
         admission: LocalHttpAdmission,
     ) -> Result<(
         Router,
-        Option<Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>>,
+        Option<Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>>,
     )> {
         let local = Router::new()
             .route(
@@ -367,7 +367,7 @@ impl DaemonHttpApplicationRegistry {
     ) -> Result<
         Option<(
             Router,
-            Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
+            Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>,
         )>,
     > {
         let remote = self
@@ -692,7 +692,7 @@ pub(super) struct DaemonHttpApplicationService {
     #[cfg(test)]
     origin: String,
     active: Arc<AtomicBool>,
-    remote_credentials: Option<Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>>,
+    remote_credentials: Option<Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<()>>>,
     remote_tls_shutdown: Option<oneshot::Sender<()>>,
@@ -708,7 +708,7 @@ struct RemoteBrainTlsServer {
     endpoint: SocketAddr,
     router: Router,
     admission: Arc<Semaphore>,
-    credentials: Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
+    credentials: Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>,
     #[cfg(test)]
     egress: Arc<RemoteBrainTlsEgressObserver>,
 }

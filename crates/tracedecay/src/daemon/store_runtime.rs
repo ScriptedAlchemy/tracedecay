@@ -1,30 +1,12 @@
-//! Re-export of the kernel store-runtime registry, plus the daemon-owned
-//! session registry that cannot move into the kernel.
+//! Kernel store-runtime re-export kept at the composition root.
 //!
-//! `session_registry` stays here because it stores `RegisteredGlobalDbLeaseV1`
-//! on its public surface, and `tracedecay-global-db` already depends on the
-//! kernel — taking that edge would be a Cargo cycle. It also reaches
-//! `daemon::transport`, `log_daemon_event`, and
-//! `tracedecay_daemon_identity::{authority, profile_identity}`.
-//! See `tracedecay_runtime_core`'s crate-level doc.
+//! The session registry now lives in `tracedecay-store-runtime`. This module
+//! still forwards the kernel `store_runtime` surface (`registry`, `resolver`,
+//! `telemetry`, `profile_paths`) so existing daemon callers of
+//! `crate::daemon::store_runtime::registry` keep a single path. See
+//! `tracedecay_runtime_core`'s crate-level doc.
 
 pub(crate) use tracedecay_runtime_core::store_runtime::*;
-
-pub(crate) mod session_registry;
-
-/// Installs the root-owned registered global/session schema installer into the
-/// kernel's store-runtime registry.
-///
-/// The schema lives in `tracedecay-global-db`, which already depends on the
-/// kernel — so the kernel reaches it through
-/// `tracedecay_runtime_core::ports::registered_schema` instead. The
-/// port fails closed, so every path that can initialise a profile- or
-/// session-scoped shard must call this first. Idempotent.
-pub(crate) fn register_registered_schema_installer() {
-    tracedecay_runtime_core::ports::registered_schema::register(|connection| {
-        Box::pin(tracedecay_global_db::ensure_registered_schema(connection))
-    });
-}
 
 #[cfg(test)]
 mod profile_paths_parity {

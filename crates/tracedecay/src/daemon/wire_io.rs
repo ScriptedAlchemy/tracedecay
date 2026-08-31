@@ -106,8 +106,7 @@ mod wire_bound_tests {
             // Stream hostile bytes without pre-building a MAX+1 String in the
             // product reader path; allocate only a small chunk buffer here.
             let chunk = vec![b'w'; 8192];
-            let mut remaining =
-                tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES + 64 * 1024;
+            let mut remaining = tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES + 64 * 1024;
             while remaining > 0 {
                 let n = remaining.min(chunk.len());
                 client.write_all(&chunk[..n]).await.expect("write");
@@ -139,8 +138,7 @@ mod wire_bound_tests {
             client
                 .write_all(&vec![
                     b'x';
-                    tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES
-                        + 1
+                    tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES + 1
                 ])
                 .await
                 .expect("write oversized frame");
@@ -368,9 +366,8 @@ mod wire_bound_tests {
                 br#"{"jsonrpc":"2.0","id":"daemon-7","method":"tools/call","params":{"payload":""#;
             client.write_all(prefix).await.expect("prefix");
             let chunk = vec![b'q'; 4096];
-            let mut remaining = tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES
-                + 32 * 1024
-                - prefix.len();
+            let mut remaining =
+                tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES + 32 * 1024 - prefix.len();
             while remaining > 0 {
                 let n = remaining.min(chunk.len());
                 client.write_all(&chunk[..n]).await.expect("write");

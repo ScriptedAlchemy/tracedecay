@@ -29,6 +29,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_semantic_contracts::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
 };
+use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 
 use super::{
     CodeGenerationRetentionOutcomeV1, VectorRetentionInventoryV1, apply_code_generation_retention,

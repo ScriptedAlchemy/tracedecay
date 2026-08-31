@@ -123,6 +123,21 @@ impl ExactLaneEvidence {
         &self,
         request: &ExactLaneRequest<'_>,
     ) -> Result<(), RetrievalPortError> {
+        self.validate_shape_against_validated_request(request)?;
+        self.admission_proof
+            .validate_for_request(&request.base)
+            .map_err(contract_error)?;
+        self.validate_proof_names_matched_literal()
+    }
+
+    /// The digest-free evidence checks: generation binding, matched-literal
+    /// presence, and literal shape. Batch enforcement runs these per
+    /// candidate while memoizing the digest-heavy proof validation per
+    /// distinct literal.
+    fn validate_shape_against_validated_request(
+        &self,
+        request: &ExactLaneRequest<'_>,
+    ) -> Result<(), RetrievalPortError> {
         if self.binding.occurrence.generation != request.generation {
             return Err(RetrievalPortError::GenerationMismatch);
         }
@@ -134,9 +149,10 @@ impl ExactLaneEvidence {
         for literal in &self.matched_literals {
             literal.validate()?;
         }
-        self.admission_proof
-            .validate_for_request(&request.base)
-            .map_err(contract_error)?;
+        Ok(())
+    }
+
+    fn validate_proof_names_matched_literal(&self) -> Result<(), RetrievalPortError> {
         if !self.matched_literals.iter().any(|literal| {
             literal.field == self.admission_proof.field
                 && literal.original_bytes == self.admission_proof.original_bytes
@@ -609,6 +625,12 @@ where
         batch.validate().map_err(contract_error)?;
         let mut admitted: Vec<(CompactCandidate, ExactLaneEvidence)> =
             Vec::with_capacity(batch.candidates.len());
+        // A proof is a pure function of its literal and the request, and one
+        // validate-plus-mint costs six canonical-JSON SHA-256 digests. Verify
+        // each distinct literal once per batch instead of once per candidate;
+        // every candidate still compares against the verified minted proof.
+        let mut verified_proofs: BTreeMap<(ExactFieldV1, Vec<u8>, Vec<u8>), ExactAdmissionProof> =
+            BTreeMap::new();
         for candidate in &batch.candidates {
             let evidence = lane_bound_evidence(
                 batch,
@@ -616,7 +638,52 @@ where
                 RetrieverKind::ExactLiteral,
                 &EXACT_REJECTIONS,
             )?;
-            evidence.validate_against_validated_request(request)?;
+            evidence.validate_shape_against_validated_request(request)?;
+            let proof_key = (
+                evidence.admission_proof.field,
+                evidence.admission_proof.original_bytes.clone(),
+                evidence.admission_proof.canonical_bytes.clone(),
+            );
+            match verified_proofs.get(&proof_key) {
+                Some(minted) => {
+                    if *minted != evidence.admission_proof {
+                        return Err(RetrievalPortError::Contract(
+                            "exact admission proof was not minted by the central authority"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                None => {
+                    evidence
+                        .admission_proof
+                        .validate_for_request(&request.base)
+                        .map_err(contract_error)?;
+                    // Only the central authority may mint a proof; re-admission
+                    // binds this lane to proofs it can never construct itself.
+                    let minted = self
+                        .authority
+                        .admit(
+                            evidence.admission_proof.field,
+                            &evidence.admission_proof.original_bytes,
+                            &request.base,
+                        )
+                        .map_err(contract_error)?
+                        .ok_or_else(|| {
+                            RetrievalPortError::Contract(
+                                "the central exact admission authority rejected the proof literal"
+                                    .to_owned(),
+                            )
+                        })?;
+                    if minted != evidence.admission_proof {
+                        return Err(RetrievalPortError::Contract(
+                            "exact admission proof was not minted by the central authority"
+                                .to_owned(),
+                        ));
+                    }
+                    verified_proofs.insert(proof_key, minted);
+                }
+            }
+            evidence.validate_proof_names_matched_literal()?;
             let proof = candidate.exact_admission_proof.clone().ok_or_else(|| {
                 RetrievalPortError::Contract(
                     "exact lane candidate is missing its admission proof".to_owned(),
@@ -634,23 +701,6 @@ where
             {
                 return Err(RetrievalPortError::Contract(
                     "exact lane evidence matches a literal outside the request".to_owned(),
-                ));
-            }
-            // Only the central authority may mint a proof; re-admission binds
-            // this lane to proofs it can never construct itself.
-            let minted = self
-                .authority
-                .admit(proof.field, &proof.original_bytes, &request.base)
-                .map_err(contract_error)?
-                .ok_or_else(|| {
-                    RetrievalPortError::Contract(
-                        "the central exact admission authority rejected the proof literal"
-                            .to_owned(),
-                    )
-                })?;
-            if minted != proof {
-                return Err(RetrievalPortError::Contract(
-                    "exact admission proof was not minted by the central authority".to_owned(),
                 ));
             }
             admitted.push((candidate.clone(), evidence.clone()));

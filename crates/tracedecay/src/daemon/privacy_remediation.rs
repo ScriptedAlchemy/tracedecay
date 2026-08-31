@@ -125,7 +125,7 @@ mod tests {
     };
 
     use super::{remediation_read_control, remediation_write_control};
-    use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+    use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
     use tracedecay_daemon_identity::profile_identity;
     use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 

@@ -3,11 +3,12 @@ use std::sync::{Arc, atomic::Ordering};
 use super::{SessionRuntimeRegistryEntryV1, StoreAdministration};
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_store_runtime::RemoteRecoveryProjectLifecycle;
 
 #[derive(Clone)]
 pub(in crate::daemon) struct SessionRuntimeMemoryGraphReconciliationShutdownV1 {
     registries:
-        Vec<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>,
+        Vec<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>,
 }
 
 impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
@@ -45,8 +46,9 @@ impl StoreAdministration {
     ) -> Result<()> {
         let identity = self.profile_identity()?.clone();
         let profile_root = authority::canonical_identity_path(identity.profile_root())?;
+        crate::register_runtime_ports()?;
         let registry = Arc::new(
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(
                 identity.clone(),
                 true,
             )
@@ -71,7 +73,7 @@ impl StoreAdministration {
 
     pub(in crate::daemon) async fn session_runtime_registry(
         &self,
-    ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
+    ) -> Result<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>
     {
         if self
             .session_runtime_registry_admission_closed
@@ -101,10 +103,11 @@ impl StoreAdministration {
         };
         let registry = registry
             .get_or_try_init(|| async move {
+                crate::register_runtime_ports()?;
                 // Boxed: the registry-open composition is a mega future whose
                 // inline layout overflows 2MB runtime stacks.
                 Box::pin(
-                    crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                    tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                         identity,
                     ),
                 )
@@ -115,14 +118,16 @@ impl StoreAdministration {
             .map(Arc::clone)?;
         registry.install_session_sync_service(&self.session_sync_service)?;
         if let Some(lifecycle) = self.remote_recovery_project_lifecycle()? {
-            registry.install_remote_recovery_project_lifecycle(&lifecycle)?;
+            registry.install_remote_recovery_project_lifecycle(
+                Arc::clone(&lifecycle) as Arc<dyn RemoteRecoveryProjectLifecycle>,
+            )?;
         }
         Ok(registry)
     }
 
     pub(in crate::daemon) async fn registered_runtime_registry(
         &self,
-    ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
+    ) -> Result<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>
     {
         Box::pin(self.ensure_account_active()).await?;
         Box::pin(self.session_runtime_registry()).await
@@ -174,7 +179,8 @@ impl StoreAdministration {
             let initialized = entry
                 .registry
                 .get_or_try_init(|| async move {
-                    crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                    crate::register_runtime_ports()?;
+                    tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                         identity,
                     )
                     .await

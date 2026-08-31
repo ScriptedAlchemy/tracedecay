@@ -26,6 +26,7 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
+use tracedecay_configuration::ConfigurationControlStore;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
@@ -34,7 +35,6 @@ use tracedecay_global_db::configuration::{
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 use tracedecay_semantic_contracts::SemanticConfig;
-use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_usecases::config::retrieval;
@@ -588,7 +588,7 @@ impl Default for TraceDecayConfig {
 
 /// Typed project route for the configuration daemon boundary. The path is
 /// display/routing context only; [`ProjectId`] remains the authority key.
-pub use tracedecay_usecases::config::RuntimeConfigurationTarget;
+pub use tracedecay_configuration::config::RuntimeConfigurationTarget;
 
 /// A complete resolved configuration pinned to one revision before a runtime
 /// component starts. No caller may re-read mutable legacy input after holding
@@ -840,8 +840,8 @@ pub(crate) struct OpenedRuntimeConfiguration {
 
 fn usecase_runtime_configuration(
     configuration: PinnedRuntimeConfiguration,
-) -> Result<tracedecay_usecases::config::PinnedRuntimeConfiguration> {
-    tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
+) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
+    tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
         configuration.target,
         configuration.revision_id,
         configuration.snapshot,
@@ -850,9 +850,9 @@ fn usecase_runtime_configuration(
 
 fn usecase_opened_runtime_configuration(
     opened: OpenedRuntimeConfiguration,
-) -> Result<tracedecay_usecases::config::OpenedRuntimeConfiguration> {
+) -> Result<tracedecay_configuration::config::OpenedRuntimeConfiguration> {
     Ok(
-        tracedecay_usecases::config::OpenedRuntimeConfiguration::new(
+        tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
             usecase_runtime_configuration(opened.configuration)?,
             opened.registered_database,
         ),
@@ -860,7 +860,7 @@ fn usecase_opened_runtime_configuration(
 }
 
 pub(crate) fn root_runtime_configuration(
-    configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+    configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
 ) -> Result<PinnedRuntimeConfiguration> {
     PinnedRuntimeConfiguration::new(
         configuration.target.clone(),
@@ -870,19 +870,19 @@ pub(crate) fn root_runtime_configuration(
 }
 
 pub(crate) fn materialize_root_runtime_configuration(
-    configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+    configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
 ) -> Result<TraceDecayConfig> {
     Ok(root_runtime_configuration(configuration)?.config)
 }
 
 struct RootPinnedRuntimeConfigurationCache;
 
-impl tracedecay_usecases::config::PinnedRuntimeConfigurationCachePort
+impl tracedecay_configuration::config::PinnedRuntimeConfigurationCachePort
     for RootPinnedRuntimeConfigurationCache
 {
     fn publish(
         &self,
-        configuration: tracedecay_usecases::config::PinnedRuntimeConfiguration,
+        configuration: tracedecay_configuration::config::PinnedRuntimeConfiguration,
     ) -> Result<()> {
         install_pinned_runtime_configuration(root_runtime_configuration(&configuration)?)
     }
@@ -890,14 +890,14 @@ impl tracedecay_usecases::config::PinnedRuntimeConfigurationCachePort
     fn cached_for_root(
         &self,
         project_root: &Path,
-    ) -> Result<tracedecay_usecases::config::PinnedRuntimeConfiguration> {
+    ) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
         usecase_runtime_configuration(cached_runtime_configuration(project_root)?)
     }
 }
 
 struct RootRuntimeConfigurationAuthority;
 
-impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
+impl tracedecay_configuration::config::RuntimeConfigurationAuthorityPort
     for RootRuntimeConfigurationAuthority
 {
     fn open<'a>(
@@ -905,9 +905,9 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
         project_root: &'a Path,
         layout: &'a tracedecay_runtime_core::storage::StoreLayout,
         database: RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
+    ) -> tracedecay_configuration::config::RuntimeConfigurationFuture<
         'a,
-        tracedecay_usecases::config::OpenedRuntimeConfiguration,
+        tracedecay_configuration::config::OpenedRuntimeConfiguration,
     > {
         Box::pin(async move {
             usecase_opened_runtime_configuration(
@@ -922,9 +922,9 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
         project_root: &'a Path,
         layout: &'a tracedecay_runtime_core::storage::StoreLayout,
         database: RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
+    ) -> tracedecay_configuration::config::RuntimeConfigurationFuture<
         'a,
-        tracedecay_usecases::config::OpenedRuntimeConfiguration,
+        tracedecay_configuration::config::OpenedRuntimeConfiguration,
     > {
         Box::pin(async move {
             usecase_opened_runtime_configuration(
@@ -943,9 +943,9 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
         project_root: &'a Path,
         layout: &'a tracedecay_runtime_core::storage::StoreLayout,
         database: RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
+    ) -> tracedecay_configuration::config::RuntimeConfigurationFuture<
         'a,
-        tracedecay_usecases::config::PinnedRuntimeConfiguration,
+        tracedecay_configuration::config::PinnedRuntimeConfiguration,
     > {
         Box::pin(async move {
             usecase_runtime_configuration(
@@ -964,9 +964,9 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
         project_root: &'a Path,
         layout: &'a tracedecay_runtime_core::storage::StoreLayout,
         database: RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
+    ) -> tracedecay_configuration::config::RuntimeConfigurationFuture<
         'a,
-        tracedecay_usecases::config::PinnedRuntimeConfiguration,
+        tracedecay_configuration::config::PinnedRuntimeConfiguration,
     > {
         Box::pin(async move {
             usecase_runtime_configuration(
@@ -983,11 +983,11 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
 
 pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
     static INSTALLATION: LazyLock<std::result::Result<(), String>> = LazyLock::new(|| {
-        tracedecay_usecases::config::install_runtime_configuration_authority(Arc::new(
+        tracedecay_configuration::config::install_runtime_configuration_authority(Arc::new(
             RootRuntimeConfigurationAuthority,
         ))
         .map_err(|error| error.to_string())?;
-        tracedecay_usecases::config::install_pinned_runtime_configuration_cache(Arc::new(
+        tracedecay_configuration::config::install_pinned_runtime_configuration_cache(Arc::new(
             RootPinnedRuntimeConfigurationCache,
         ))
         .map_err(|error| error.to_string())?;
@@ -1070,7 +1070,7 @@ async fn open_runtime_configuration_from_store(
                 |error| config_error(format!("invalid initial configuration revision: {error}")),
             )?;
         let daemon_binding =
-            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+            tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
                 &target.project_id,
                 &target.project_root,
             )
@@ -1105,7 +1105,7 @@ async fn open_runtime_configuration_from_store(
             .map_err(map_configuration_error)?;
     }
     let daemon_binding =
-        tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+        tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
             &target.project_id,
             &target.project_root,
         )
@@ -1120,7 +1120,7 @@ async fn open_runtime_configuration_from_store(
         .await
     {
         Ok(state) => state,
-        Err(tracedecay_usecases::configuration::ConfigurationError::RevisionConflict) => {
+        Err(tracedecay_configuration::ConfigurationError::RevisionConflict) => {
             store.current().await.map_err(map_configuration_error)?
         }
         Err(error) => return Err(map_configuration_error(error)),
@@ -1184,9 +1184,9 @@ async fn open_runtime_configuration_from_store(
                     Ok(state) => state,
                     // A concurrent open won the swap; adopt what it
                     // published and re-verify it exactly.
-                    Err(
-                        tracedecay_usecases::configuration::ConfigurationError::RevisionConflict,
-                    ) => store.current().await.map_err(map_configuration_error)?,
+                    Err(tracedecay_configuration::ConfigurationError::RevisionConflict) => {
+                        store.current().await.map_err(map_configuration_error)?
+                    }
                     Err(error) => return Err(map_configuration_error(error)),
                 };
             }
@@ -1323,11 +1323,9 @@ fn registered_configuration_database_required() -> TraceDecayError {
     )
 }
 
-fn map_configuration_error(
-    error: tracedecay_usecases::configuration::ConfigurationError,
-) -> TraceDecayError {
+fn map_configuration_error(error: tracedecay_configuration::ConfigurationError) -> TraceDecayError {
     match error {
-        tracedecay_usecases::configuration::ConfigurationError::ResetRequired { reason } => {
+        tracedecay_configuration::ConfigurationError::ResetRequired { reason } => {
             TraceDecayError::reset_required("configuration", reason)
         }
         error => config_error(format!("configuration authority unavailable: {error}")),

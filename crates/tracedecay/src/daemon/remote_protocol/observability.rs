@@ -21,9 +21,9 @@ use tracedecay_domain::{
 };
 use tracedecay_usecases::observability::BoundedObservabilityProducerV1;
 
-use super::DaemonRemoteCredentialAuthorityV1;
+use tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1;
 use crate::daemon::remote_query::DaemonRemoteExactObservationQueryPortV1;
-use crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
+use tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1;
 use tracedecay_daemon_service::DaemonInvocationService;
 
 pub(super) struct DaemonRemoteQueryProtocolPortV1 {
@@ -86,8 +86,8 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPor
             let producer = self
                 .invocation
                 .observability_producer_for_brain_profile_project(
-                    &self.credentials.brain_id,
-                    &self.credentials.profile_id,
+                    self.credentials.brain_id(),
+                    self.credentials.profile_id(),
                     &envelope.scope.project_id,
                 );
             record_remote_query_response(producer.as_deref(), expected_shards, &response);

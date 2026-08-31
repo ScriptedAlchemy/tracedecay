@@ -59,10 +59,12 @@ use crate::advisory::{
     ConcreteProximityRuntimeOwnerV1, ProximityRuntimeOutcomeV1, ProximityThresholdPinV1,
     SharedCanonicalProximityEvidenceAuthorityV1, open_proximity_runtime,
 };
-use crate::config::analyzer::{configured_language_selection, resolved_analyzer_settings};
-use crate::configuration::ConfigurationCurrentStateV1;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_configuration::ConfigurationCurrentStateV1;
+use tracedecay_configuration::config::analyzer::{
+    configured_language_selection, resolved_analyzer_settings,
+};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_lsp::analyzer::broker::MountedLspProvider;
@@ -1238,8 +1240,9 @@ mod tests {
     #[test]
     fn non_rust_provider_admits_against_the_authoritative_configuration_snapshot() {
         let scope = scope();
-        let snapshot = crate::config::resolver::resolve_configuration(
-            &crate::config::registry::ConfigurationRegistry::core().expect("registry"),
+        let snapshot = tracedecay_configuration::config::resolver::resolve_configuration(
+            &tracedecay_configuration::config::registry::ConfigurationRegistry::core()
+                .expect("registry"),
             &[],
         )
         .expect("configuration resolution")
@@ -1654,8 +1657,9 @@ mod tests {
     #[test]
     fn missing_mounted_provider_contributes_typed_unavailable() {
         let scope = scope();
-        let snapshot = crate::config::resolver::resolve_configuration(
-            &crate::config::registry::ConfigurationRegistry::core().expect("registry"),
+        let snapshot = tracedecay_configuration::config::resolver::resolve_configuration(
+            &tracedecay_configuration::config::registry::ConfigurationRegistry::core()
+                .expect("registry"),
             &[],
         )
         .expect("configuration resolution")

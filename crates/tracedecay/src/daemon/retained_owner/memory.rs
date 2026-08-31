@@ -1,7 +1,5 @@
-use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::Serialize;
 use tracedecay_application::retained_surfaces::{
@@ -13,7 +11,7 @@ use tracedecay_application::retained_surfaces::{
     RetainedSurfaceResultV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, RequestAdmission, RetainedMemoryExecutionPortV1, RetainedMemoryRequestV1,
+    ApplicationOutcome, RetainedMemoryExecutionPortV1, RetainedMemoryRequestV1,
     RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1, now_micros,
 };
@@ -22,19 +20,21 @@ use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryOperationContext, ProjectMemoryFactAddRequestOutcome,
 };
 use tracedecay_store::{
-    FactReadControl, FactWriteControl, ProjectMemoryFactContradictionQueryV1,
+    FactReadControl, ProjectMemoryFactContradictionQueryV1,
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactListQueryV1,
     ProjectMemoryFactSearchKindV1,
 };
 
 use super::map_execution_error;
 use super::memory_mapping;
-use super::memory_mutation::{fresh_one_shot_commit_gate, validate_memory_mutation};
+use super::memory_mutation::{
+    bounded_memory_operation, fact_write_control, validate_memory_mutation,
+};
 use super::memory_tracking::{TrackedExplicitSearch, track_explicit_search};
 use super::receipts::{
     effective_memory_deadline, evidence_outcome, memory_expiry_partial, prepare_retained_effect,
 };
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
@@ -79,7 +79,7 @@ macro_rules! execute_scoped_memory {
                 memory_mapping::ensure_profile_request_scope($memory_scope, $selector)?;
                 let (database, _) = bounded_memory_operation($context, async {
                     hotpath::future!(
-                        crate::daemon::store_runtime::session_registry::open_user_memory_db(
+                        tracedecay_store_runtime::open_user_memory_db(
                             registry
                         ),
                         label = "daemon.retained.memory.open_profile"
@@ -967,105 +967,10 @@ fn fact_read_control(context: &RetainedSurfaceExecutionContextV1<'_>) -> FactRea
     }))
 }
 
-pub(super) fn fact_write_control(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-) -> FactWriteControl {
-    let interrupted_signal = context.cancellation_signal.clone();
-    let commit_signal = context.cancellation_signal.clone();
-    let expires_at = effective_expiry(context);
-    let commit_expires_at = expires_at;
-    FactWriteControl::new(
-        Arc::new(move || interrupted_signal.is_cancelled() || expires_at <= now_micros()),
-        fresh_one_shot_commit_gate(Arc::new(move || {
-            commit_signal.is_cancelled()
-                || commit_expires_at <= now_micros()
-                || !commit_signal.try_begin_commit()
-        })),
-    )
-}
-
 fn effective_expiry(
     context: &RetainedSurfaceExecutionContextV1<'_>,
 ) -> tracedecay_domain::UtcMicros {
     effective_memory_deadline(context).expires_at
-}
-
-#[hotpath::measure(label = "daemon.retained.memory.bounded_operation", future = true)]
-pub(super) async fn bounded_memory_operation<T, F>(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    future: F,
-) -> Result<(T, bool), RetainedSurfaceExecutionErrorV1>
-where
-    F: Future<Output = Result<T, RetainedSurfaceExecutionErrorV1>>,
-{
-    let now = now_micros();
-    match context.request_context.admission_at(now) {
-        RequestAdmission::Admitted if !context.cancellation_signal.is_cancelled() => {}
-        RequestAdmission::Admitted | RequestAdmission::Cancelled => {
-            return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::BeforeEffect,
-            ));
-        }
-        RequestAdmission::TimedOut => {
-            return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::BeforeEffect,
-            ));
-        }
-    }
-    let remaining = effective_expiry(context).0.saturating_sub(now.0);
-    let remaining = u64::try_from(remaining)
-        .ok()
-        .map(Duration::from_micros)
-        .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::BeforeEffect,
-        ))?;
-    tokio::pin!(future);
-    tokio::select! {
-        biased;
-        outcome = &mut future => classify_memory_settlement(context, outcome),
-        () = context.cancellation_signal.cancelled() => {
-            if context.cancellation_signal.commit_started() {
-                classify_memory_settlement(context, future.await)
-            } else {
-                Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::BeforeEffect))
-            }
-        }
-        () = tokio::time::sleep(remaining) => {
-            if context.cancellation_signal.commit_started() {
-                classify_memory_settlement(context, future.await)
-            } else {
-                Err(RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_application::CancellationStage::BeforeEffect))
-            }
-        }
-    }
-}
-
-fn classify_memory_settlement<T>(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    outcome: Result<T, RetainedSurfaceExecutionErrorV1>,
-) -> Result<(T, bool), RetainedSurfaceExecutionErrorV1> {
-    let commit_started = context.cancellation_signal.commit_started();
-    let cancelled = context.cancellation_signal.is_cancelled();
-    let timed_out = effective_expiry(context) <= now_micros();
-    match outcome {
-        Ok(value) if commit_started => Ok((value, timed_out)),
-        Ok(_) if cancelled => Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::BeforeEffect,
-        )),
-        Ok(_) if timed_out => Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::BeforeEffect,
-        )),
-        Ok(value) => Ok((value, false)),
-        Err(_) if cancelled && !commit_started => Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::BeforeEffect,
-        )),
-        Err(RetainedSurfaceExecutionErrorV1::Cancelled(_)) if timed_out => {
-            Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::BeforeEffect,
-            ))
-        }
-        Err(error) => Err(error),
-    }
 }
 
 fn memory_operation_context<T: Serialize>(
