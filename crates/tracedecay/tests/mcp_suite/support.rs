@@ -403,14 +403,13 @@ pub(crate) async fn handle_tool_call(
     // in-process MCP harness and the for-test server constructor live behind
     // it); without the feature these tools take the generic path below.
     //
-    // Always mount the retained project session runtime for these tools. Falling
-    // through when `sessions.db` is not yet a regular file left
-    // `active_project_session_db` unset, so message-search and LCM reads failed
-    // closed even though the test graph still retained a registered session
-    // authority (production mounts that authority before dispatching the same
-    // tools).
+    // Every retained-surface tool (LCM, message search, fact store, session
+    // and workflow reads) executes through the daemon retained owner in
+    // production, so dispatch it through the registered test server — which
+    // mounts that owner in process — rather than the bare registry path whose
+    // missing executor truthfully reports the transport as unavailable.
     #[cfg(feature = "test-transport")]
-    if tool_name == "tracedecay_message_search" || tool_name.starts_with("tracedecay_lcm_") {
+    if tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
         let runtime = open_active_project_scoped_runtime(cg).await;
         // Boxed graph-open and server-construction futures: these are the
         // deep production compositions whose inline layouts overflow the
@@ -446,12 +445,49 @@ pub(crate) async fn handle_tool_call(
             serde_json::from_str(&response).map_err(|error| TraceDecayError::Config {
                 message: format!("{tool_name} returned invalid MCP JSON: {error}"),
             })?;
+        if std::env::var_os("TRACEDECAY_TEST_DEBUG_RETAINED").is_some() {
+            eprintln!("[retained-probe] {tool_name} response: {response}");
+        }
         if let Some(error) = response.get("error") {
             return Err(TraceDecayError::Config {
                 message: format!("{tool_name} failed over MCP: {error}"),
             });
         }
-        return Ok(ToolResult::new(response["result"].clone(), Vec::new()));
+        // The retained MCP contract is the versioned
+        // `schema.application.retained.*` envelope. These handler tests assert
+        // the owner's payload, so unwrap evidence payloads here and surface
+        // refusals as errors; a problem envelope is a refusal, not an answer.
+        let result = response["result"].clone();
+        let envelope = result["content"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    let text = item["text"].as_str()?;
+                    serde_json::from_str::<Value>(text).ok().filter(|value| {
+                        value.get("outcome").is_some() || value.get("problem").is_some()
+                    })
+                })
+            })
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("{tool_name} returned no retained envelope: {result}"),
+            })?;
+        if envelope.pointer("/outcome/outcome").and_then(Value::as_str) != Some("evidence") {
+            return Err(TraceDecayError::Config {
+                message: format!("{tool_name} answered with a retained refusal: {envelope}"),
+            });
+        }
+        let payload =
+            envelope
+                .pointer("/outcome/value/payload")
+                .cloned()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!("{tool_name} omitted its retained payload: {envelope}"),
+                })?;
+        let mut unwrapped = result;
+        unwrapped["content"] = serde_json::json!([
+            { "type": "text", "text": payload.to_string() }
+        ]);
+        return Ok(ToolResult::new(unwrapped, Vec::new()));
     }
     Box::pin(tracedecay::mcp::handle_tool_call(
         cg,
