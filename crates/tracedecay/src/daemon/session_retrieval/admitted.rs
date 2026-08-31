@@ -307,10 +307,11 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             if cancellation.is_cancelled() {
                 return LcmDescribeServiceOutcome::Cancelled;
             }
-            let binding = match admitted_session_binding(&self.root, self.configuration, context) {
-                Ok(binding) => binding,
-                Err(outcome) => return describe_binding_outcome(*outcome),
-            };
+            let binding =
+                match admitted_lcm_session_binding(&self.root, self.configuration, context) {
+                    Ok(binding) => binding,
+                    Err(outcome) => return describe_binding_outcome(*outcome),
+                };
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
@@ -336,10 +337,11 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             if cancellation.is_cancelled() {
                 return LcmExpandServiceOutcome::Cancelled;
             }
-            let binding = match admitted_session_binding(&self.root, self.configuration, context) {
-                Ok(binding) => binding,
-                Err(outcome) => return expand_binding_outcome(*outcome),
-            };
+            let binding =
+                match admitted_lcm_session_binding(&self.root, self.configuration, context) {
+                    Ok(binding) => binding,
+                    Err(outcome) => return expand_binding_outcome(*outcome),
+                };
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
@@ -447,7 +449,40 @@ fn admitted_session_binding(
     retrieval_configuration: SessionRetrievalConfiguration,
     context: &RequestContext,
 ) -> Result<SessionRequestBinding, Box<SessionRetrievalServiceOutcome>> {
-    let binding = build_admitted_session_binding(root, retrieval_configuration, context);
+    let budgets = RequestBudgets::new(
+        APPLICATION_RETRIEVAL_MAX_RESULTS,
+        APPLICATION_RETRIEVAL_MAX_BYTES,
+        APPLICATION_RETRIEVAL_MAX_WORK_UNITS,
+    )
+    .map_err(|_| Box::new(temporal_store_unavailable()))?;
+    counted_admitted_session_binding(root, retrieval_configuration, context, budgets)
+}
+
+/// As [`admitted_session_binding`], but carrying the canonical daemon LCM
+/// budgets. LCM describe and expand verify content hashes over whole payloads
+/// before slicing, so their read budget is the LCM authority's — the response
+/// stays bounded by the query's context budget and the MCP response cap.
+fn admitted_lcm_session_binding(
+    root: &DaemonSessionRetrievalRoot,
+    retrieval_configuration: SessionRetrievalConfiguration,
+    context: &RequestContext,
+) -> Result<SessionRequestBinding, Box<SessionRetrievalServiceOutcome>> {
+    let budgets = RequestBudgets::new(
+        crate::daemon::lcm_authority::LCM_MAX_RESULTS,
+        crate::daemon::lcm_authority::LCM_MAX_BYTES,
+        crate::daemon::lcm_authority::LCM_MAX_WORK_UNITS,
+    )
+    .map_err(|_| Box::new(temporal_store_unavailable()))?;
+    counted_admitted_session_binding(root, retrieval_configuration, context, budgets)
+}
+
+fn counted_admitted_session_binding(
+    root: &DaemonSessionRetrievalRoot,
+    retrieval_configuration: SessionRetrievalConfiguration,
+    context: &RequestContext,
+    budgets: RequestBudgets,
+) -> Result<SessionRequestBinding, Box<SessionRetrievalServiceOutcome>> {
+    let binding = build_admitted_session_binding(root, retrieval_configuration, context, budgets);
     match &binding {
         Ok(_) => {
             hotpath::gauge!("daemon.session_retrieval.admitted").inc(1.0);
@@ -468,6 +503,7 @@ fn build_admitted_session_binding(
     root: &DaemonSessionRetrievalRoot,
     retrieval_configuration: SessionRetrievalConfiguration,
     context: &RequestContext,
+    budgets: RequestBudgets,
 ) -> Result<SessionRequestBinding, Box<SessionRetrievalServiceOutcome>> {
     if matches!(root.store_scope, SessionRetrievalStoreScope::Project)
         != root.identity.project_id().is_some()
@@ -493,12 +529,6 @@ fn build_admitted_session_binding(
     if context.cancellation().is_cancelled() {
         cancellation.cancel();
     }
-    let budgets = RequestBudgets::new(
-        APPLICATION_RETRIEVAL_MAX_RESULTS,
-        APPLICATION_RETRIEVAL_MAX_BYTES,
-        APPLICATION_RETRIEVAL_MAX_WORK_UNITS,
-    )
-    .map_err(|_| Box::new(temporal_store_unavailable()))?;
     let capability = CapabilityDigest::new(application_retrieval_digest(
         b"tracedecay.application.session-retrieval.capability.v1\0",
         &root.identity,

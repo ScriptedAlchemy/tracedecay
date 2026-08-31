@@ -59,10 +59,8 @@ pub(crate) async fn resolve_registered_project_route_for_tool(
     {
         return Ok(None);
     }
-    let semantic_top_level_fields = match tool_name.as_str() {
-        "tracedecay_message_search" => &["project_path"][..],
-        _ => &[][..],
-    };
+    let semantic_top_level_fields =
+        crate::mcp::project_route::semantic_route_argument_fields(&tool_name);
     let context = boxed_send(registered_project_context(
         &args,
         semantic_top_level_fields,

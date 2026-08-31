@@ -29,9 +29,13 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 const LCM_ACTOR_ID: &str = "actor.daemon.lcm";
 const LCM_GRANT_ID: &str = "grant.daemon.lcm";
 const LCM_REQUEST_TIMEOUT: Duration = Duration::from_secs(115);
-const LCM_MAX_RESULTS: u64 = 4_096;
-const LCM_MAX_BYTES: u64 = 64 * 1024 * 1024;
-const LCM_MAX_WORK_UNITS: u64 = 1_000_000;
+// The canonical LCM operation budgets. LCM reads verify content hashes over
+// whole payloads before slicing, so their byte budget covers verified read
+// I/O — not the response, which stays bounded by the context budget and the
+// MCP response cap. The admitted describe/expand bindings share these.
+pub(crate) const LCM_MAX_RESULTS: u64 = 4_096;
+pub(crate) const LCM_MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const LCM_MAX_WORK_UNITS: u64 = 1_000_000;
 
 pub(crate) type MountedLcmFuture<'a> =
     Pin<Box<dyn Future<Output = Option<LcmAuthorityResponse>> + Send + 'a>>;

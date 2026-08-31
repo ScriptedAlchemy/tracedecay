@@ -478,7 +478,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
         }
         if tool_accepts_registered_project_selector(tool_name)
             && !tool_is_selector_bound_effect(tool_name)
-            && crate::mcp::project_route::arguments_have_project_selector(&args)
+            && crate::mcp::project_route::arguments_have_project_selector(tool_name, &args)
             && options.resolved_project_route.is_none()
         {
             return Err(TraceDecayError::project_route(

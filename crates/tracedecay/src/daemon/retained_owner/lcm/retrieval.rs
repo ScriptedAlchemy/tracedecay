@@ -23,7 +23,6 @@ use tracedecay_sessions::runtime::{
     SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
 };
 use tracedecay_temporal_query::context::ContextBudget;
-use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_usecases::session::{SessionRetrievalScope, SessionTemporalQuery};
 
@@ -31,9 +30,8 @@ use super::super::receipts::evidence_outcome;
 use super::super::session_retrieval_unavailable_detail;
 use super::output;
 use super::{
-    bounded_text, cursor, message_type, optional_provider, optional_usize, relationship_scope,
-    required, role_name, session_id, specific_provider, temporal_mode, time_filter, trimmed,
-    unsigned_i64,
+    cursor, message_type, optional_provider, optional_usize, relationship_scope, required,
+    role_name, session_id, specific_provider, temporal_mode, time_filter, trimmed, unsigned_i64,
 };
 use crate::daemon::session_retrieval::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, LcmExpandServiceCommand,
@@ -465,12 +463,19 @@ pub(super) async fn execute_expand_query(
     })?;
     let provider = specific_provider(&request.provider)?;
     let session_id = session_id(&request.session_id)?;
-    let prompt = bounded_text(&request.prompt, MAX_QUERY_PROMPT_CHARS)?;
+    // The synthesis contract clamps oversized prompt and query inputs to the
+    // MCP bound with typed truncation markers instead of refusing, so an
+    // agent's long question still gets a synthesizable answer.
+    let (prompt, prompt_truncated) = clamped_text(&request.prompt, MAX_QUERY_PROMPT_CHARS)?;
     let query = request
         .query
         .as_deref()
-        .map(|value| bounded_text(value, MAX_QUERY_QUERY_CHARS))
+        .map(|value| clamped_text(value, MAX_QUERY_QUERY_CHARS))
         .transpose()?;
+    let (query, query_truncated) = match query {
+        Some((value, truncated)) => (Some(value), truncated),
+        None => (None, false),
+    };
     let node_ids = request
         .node_ids
         .as_deref()
@@ -498,8 +503,8 @@ pub(super) async fn execute_expand_query(
             context,
             provider,
             &session_id,
-            prompt,
-            query,
+            &prompt,
+            query.as_deref(),
             cursor,
             max_results,
             max_tokens,
@@ -512,8 +517,8 @@ pub(super) async fn execute_expand_query(
             context,
             provider,
             &session_id,
-            prompt,
-            query,
+            &prompt,
+            query.as_deref(),
             node_ids,
             cursor,
             max_results,
@@ -522,18 +527,34 @@ pub(super) async fn execute_expand_query(
         )
         .await?
     };
+    let mut result = output::expand_query_result(
+        response,
+        status,
+        omitted,
+        provider,
+        session_id.as_str(),
+        output::temporal_fields(temporal),
+    );
+    output::bound_expand_query_result_for_mcp(&mut result, prompt_truncated, query_truncated);
     evidence_outcome(
         context,
         RetainedSurfaceOperation::LcmExpandQuery,
-        RetainedSurfaceResultV1::LcmExpandQuery(output::expand_query_result(
-            response,
-            status,
-            omitted,
-            provider,
-            session_id.as_str(),
-            output::temporal_fields(temporal),
-        )),
+        RetainedSurfaceResultV1::LcmExpandQuery(result),
     )
+}
+
+/// Requires non-blank text and clamps it to `max` characters, reporting
+/// whether it was truncated — the expand-query synthesis contract clamps
+/// oversized inputs with typed markers instead of refusing them.
+fn clamped_text(
+    value: &str,
+    max: usize,
+) -> Result<(String, bool), RetainedSurfaceExecutionErrorV1> {
+    let value = required(value)?;
+    let mut chars = value.chars();
+    let clamped: String = chars.by_ref().take(max).collect();
+    let truncated = chars.next().is_some();
+    Ok((clamped, truncated))
 }
 
 fn retrieval_query(
@@ -566,7 +587,9 @@ fn retrieval_query(
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
     .with_retrieval_scope(retrieval_scope)
-    .with_execution_limits(admitted_execution_limits(limit));
+    .with_execution_limits(crate::daemon::session_retrieval::admitted_execution_limits(
+        limit,
+    ));
     Ok(SessionRetrievalCommand::new(
         query,
         SessionRetrievalFilters {
@@ -584,23 +607,6 @@ fn retrieval_query(
         false,
     )
     .into_query())
-}
-
-fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
-    ExecutionLimits {
-        candidate_limit: limit,
-        candidate_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        candidate_item_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        candidate_metadata_field_bytes: 16 * 1024,
-        record_limit: limit,
-        record_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        record_item_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        hydration_limit: limit,
-        hydration_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        hydration_payload_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        hydration_chunk_bytes: 16 * 1024,
-        ..ExecutionLimits::default()
-    }
 }
 
 fn retrieval_page(

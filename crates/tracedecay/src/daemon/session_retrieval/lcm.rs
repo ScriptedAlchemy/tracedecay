@@ -142,10 +142,10 @@ impl DaemonSessionRetrievalService {
         )
         .ok()?
         .with_retrieval_scope(retrieval_scope)
-        // The direct query resolves exactly one anchor and the caller then
-        // slices its content, so the multi-MiB defaults buy nothing — and the
-        // admitted binding rejects them outright.
-        .with_execution_limits(super::admitted_execution_limits(1))
+        // The direct query resolves one anchor but must hydrate and
+        // hash-verify its whole payload before the caller slices content, so
+        // it keeps the default execution limits; the LCM binding's budgets
+        // admit them, and the response stays bounded by the context budget.
         .with_compatibility_filter_digest(binding);
         Some(match direct_anchor {
             Some(anchor_id) => query.with_direct_anchor(anchor_id),

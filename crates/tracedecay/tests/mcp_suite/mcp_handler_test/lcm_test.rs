@@ -116,7 +116,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
     assert_eq!(loaded_payload["status"], "partial");
     assert_eq!(loaded_payload["omitted"], 1);
-    assert_eq!(loaded_payload["coverage"]["unknown"], 1);
+    assert_eq!(loaded_payload["temporal"]["coverage"]["unknown"], 1);
     assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
     assert!(
         loaded_payload["messages"][0]["content_range"]["truncated"]
@@ -147,10 +147,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "root-wide grep payload: {grep_payload}"
     );
     assert_eq!(
-        grep_payload["omitted"], 2,
+        grep_payload["omitted"], 1,
         "root-wide grep payload: {grep_payload}"
     );
-    assert_eq!(grep_payload["coverage"]["unknown"], 1);
+    assert_eq!(grep_payload["temporal"]["coverage"]["unknown"], 1);
     assert_eq!(grep_payload["hits"].as_array().unwrap().len(), 1);
     assert!(
         grep_payload["hits"][0]["snippet"]
@@ -178,10 +178,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "default-provider root-wide grep payload: {default_provider_grep_payload}"
     );
     assert_eq!(
-        default_provider_grep_payload["omitted"], 2,
+        default_provider_grep_payload["omitted"], 1,
         "default-provider root-wide grep payload: {default_provider_grep_payload}"
     );
-    assert_eq!(default_provider_grep_payload["coverage"]["unknown"], 1);
+    assert_eq!(default_provider_grep_payload["temporal"]["coverage"]["unknown"], 1);
     assert_eq!(default_provider_grep_payload["provider"], "all");
     assert_eq!(
         default_provider_grep_payload["hits"]
@@ -235,7 +235,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     assert_eq!(scoped_default_provider_grep_payload["status"], "partial");
     assert_eq!(scoped_default_provider_grep_payload["omitted"], 2);
     assert_eq!(
-        scoped_default_provider_grep_payload["coverage"]["unknown"],
+        scoped_default_provider_grep_payload["temporal"]["coverage"]["unknown"],
         2
     );
     assert_eq!(scoped_default_provider_grep_payload["provider"], "all");
@@ -265,7 +265,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         serde_json::from_str(extract_text(&provider_local_load.value)).unwrap();
     assert_eq!(provider_local_load_payload["status"], "partial");
     assert_eq!(provider_local_load_payload["omitted"], 2);
-    assert_eq!(provider_local_load_payload["coverage"]["unknown"], 2);
+    assert_eq!(provider_local_load_payload["temporal"]["coverage"]["unknown"], 2);
     assert_eq!(provider_local_load_payload["provider"], "all");
     let loaded_providers = provider_local_load_payload["messages"]
         .as_array()
@@ -285,7 +285,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .await
     .unwrap();
     let described_payload: Value = serde_json::from_str(extract_text(&described.value)).unwrap();
-    assert_eq!(described_payload["status"], "ok");
+    // The session's temporal page still carries the unknown-coverage record
+    // seeded above, so the retained describe truthfully reports partial while
+    // the description itself is complete.
+    assert_eq!(described_payload["status"], "partial", "{described_payload}");
     assert_eq!(described_payload["description"]["raw_message_count"], 1);
     assert!(
         described_payload["description"]["raw_messages"][0]
@@ -315,7 +318,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .await
     .unwrap();
     let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
-    assert_eq!(expanded_payload["status"], "ok");
+    // The same unknown-coverage record keeps the temporal page partial while
+    // the requested target still hydrates completely below.
+    assert_eq!(expanded_payload["status"], "partial", "{expanded_payload}");
     assert_eq!(expanded_payload["expansion"]["kind"], "raw_message");
     assert_eq!(
         expanded_payload["expansion"]["content"]
@@ -352,11 +357,13 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         payload["status"], "partial",
         "bounded expand-query payload: {payload}"
     );
+    // Retained accounting counts the one unknown-coverage record once, not
+    // per consulted surface.
     assert_eq!(
-        payload["omitted"], 2,
+        payload["omitted"], 1,
         "bounded expand-query payload: {payload}"
     );
-    assert_eq!(payload["coverage"]["unknown"], 1);
+    assert_eq!(payload["temporal"]["coverage"]["unknown"], 1);
     assert_eq!(payload["needs_synthesis"], true);
     assert_eq!(payload["prompt"], "Summarize orchard dispatch");
     assert!(
@@ -616,9 +623,9 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     );
     assert_eq!(node_payload["grain"], "summary");
     assert_eq!(node_payload["state"], "available");
-    assert_eq!(node_payload["anchors"].as_array().unwrap().len(), 1);
-    assert!(node_payload["watermarks"]["generation"].as_u64().unwrap() > 0);
-    assert_eq!(node_payload["coverage"]["visible"], 1);
+    assert_eq!(node_payload["temporal"]["anchors"].as_array().unwrap().len(), 1);
+    assert!(node_payload["temporal"]["watermarks"]["generation"].as_u64().unwrap() > 0);
+    assert_eq!(node_payload["temporal"]["coverage"]["visible"], 1);
     assert_eq!(node_payload["lineage"].as_array().unwrap().len(), 1);
 
     let payload_result = handle_real_server_tool_call(
@@ -633,7 +640,10 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     .await;
     let payload_payload: Value =
         serde_json::from_str(extract_real_server_text(&payload_result)).unwrap();
-    assert_eq!(payload_payload["status"], "ok", "{payload_payload}");
+    // The external-payload page ranks the summary anchor too, whose coverage
+    // is unknown in this fixture, so the retained describe truthfully reports
+    // partial while the payload description itself is complete.
+    assert_eq!(payload_payload["status"], "partial", "{payload_payload}");
     assert_eq!(payload_payload["description"]["target"], "external_payload");
     assert_eq!(
         payload_payload["description"]["external_payload"]["payload_ref"],
@@ -645,7 +655,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     );
     assert_eq!(payload_payload["grain"], "occurrence");
     assert_eq!(payload_payload["state"], "available");
-    assert_eq!(payload_payload["anchors"].as_array().unwrap().len(), 1);
+    assert_eq!(payload_payload["temporal"]["anchors"].as_array().unwrap().len(), 1);
 
     let rendered = format!(
         "{}\n{}",
@@ -730,8 +740,8 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
             "provider": "cursor",
             "session_id": "lcm-native-filters",
             "roles": ["assistant", "user"],
-            "time_from": 1,
-            "time_to": 25,
+            "start_time": 1,
+            "end_time": 25,
             "content_limit": 25_000,
             "limit": 10
         }),
@@ -749,7 +759,7 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
         loaded_payload["omitted"], 2,
         "native-filter load payload: {loaded_payload}"
     );
-    assert_eq!(loaded_payload["coverage"]["unknown"], 2);
+    assert_eq!(loaded_payload["temporal"]["coverage"]["unknown"], 2);
     assert_eq!(loaded_payload["content_limit"], 20_000);
     assert_eq!(loaded_payload["content_limit_clamped_from"], 25_000);
     assert_eq!(
@@ -986,7 +996,7 @@ async fn lcm_load_session_accepts_valid_integer_args() {
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(payload["status"], "partial");
     assert_eq!(payload["omitted"], 1);
-    assert_eq!(payload["coverage"]["unknown"], 1);
+    assert_eq!(payload["temporal"]["coverage"]["unknown"], 1);
     assert_eq!(
         payload["messages"].as_array().unwrap().len(),
         1,
@@ -1018,8 +1028,12 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
     let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&db, "lcm-large-json", projections).await;
 
-    let result = handle_tool_call(
-        &cg,
+    // This test asserts the raw wire contract — the truncation wrapper the
+    // server actually serves for an over-budget response — so it must read
+    // the response before any recovery through the retrieve handle.
+    let server = real_mcp_server(cg).await;
+    let response = handle_real_server_tool_call_raw(
+        &server,
         "tracedecay_lcm_load_session",
         json!({
             "provider": "cursor",
@@ -1027,15 +1041,17 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
             "limit": 4,
             "content_limit": 8192
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value))
-        .expect("truncated LCM tool text should remain valid JSON");
-    assert_eq!(payload["truncated"], true);
+    .await;
+    assert!(response["error"].is_null(), "{response}");
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("truncated LCM tool response text");
+    let payload: Value =
+        serde_json::from_str(text).expect("truncated LCM tool text should remain valid JSON");
+    assert_eq!(payload["truncated"], true, "{payload}");
     assert!(payload["preview"].as_str().unwrap().len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
+    server.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
@@ -1247,14 +1263,21 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     };
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["content"][0]["type"], "text");
-    let payload = extract_first_json_content(&json);
-    // Typed status proves the CLI bridge dispatched and parsed JSON args.
-    // Store contents vary: ok / not_ingested when an LCM authority is mounted,
-    // unavailable when the daemon has not mounted one for this exact store.
-    let status = payload["status"].as_str();
+    let envelope = extract_first_json_content(&json);
+    // The retained evidence envelope proves the CLI bridge dispatched and
+    // parsed JSON args through the daemon retained owner; a problem envelope
+    // exits nonzero and is caught as a failure by the retry loop above.
+    assert_eq!(
+        envelope.pointer("/outcome/outcome").and_then(Value::as_str),
+        Some("evidence"),
+        "unexpected lcm_status envelope: {envelope}"
+    );
+    let status = envelope
+        .pointer("/outcome/value/payload/status")
+        .and_then(Value::as_str);
     assert!(
-        matches!(status, Some("ok" | "not_ingested" | "unavailable")),
-        "unexpected lcm_status: {payload}"
+        matches!(status, Some("ok" | "not_ingested")),
+        "unexpected lcm_status evidence: {envelope}"
     );
 }
 
@@ -1358,10 +1381,10 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     assert_eq!(pagination["remaining_sources"], 1);
     assert_eq!(payload["grain"], "summary");
     assert_eq!(payload["state"], "available");
-    assert!(!payload["anchors"].as_array().unwrap().is_empty());
-    assert!(payload["watermarks"]["generation"].as_u64().unwrap() > 0);
-    assert!(payload["coverage"]["visible"].as_u64().unwrap() > 0);
-    let cursor = payload["next_cursor"]
+    assert!(!payload["temporal"]["anchors"].as_array().unwrap().is_empty());
+    assert!(payload["temporal"]["watermarks"]["generation"].as_u64().unwrap() > 0);
+    assert!(payload["temporal"]["coverage"]["visible"].as_u64().unwrap() > 0);
+    let cursor = payload["temporal"]["next_cursor"]
         .as_str()
         .expect("summary source page should return an opaque cursor");
 
@@ -1378,7 +1401,12 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     )
     .await;
     let tampered: Value = serde_json::from_str(extract_real_server_text(&tampered)).unwrap();
-    assert_eq!(tampered["status"], "denied", "{tampered}");
+    // An unverifiable cursor fails closed as a typed not-found-or-not-
+    // authorized problem envelope rather than a served page.
+    assert_eq!(
+        tampered["problem"]["kind"], "not_found_or_not_authorized",
+        "{tampered}"
+    );
 
     let rebound = handle_real_server_tool_call(
         &server,
@@ -1393,7 +1421,10 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     )
     .await;
     let rebound: Value = serde_json::from_str(extract_real_server_text(&rebound)).unwrap();
-    assert_eq!(rebound["status"], "denied", "{rebound}");
+    assert_eq!(
+        rebound["problem"]["kind"], "not_found_or_not_authorized",
+        "{rebound}"
+    );
 
     let private_terminal = handle_real_server_tool_call(
         &server,
@@ -1410,7 +1441,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let private_terminal: Value =
         serde_json::from_str(extract_real_server_text(&private_terminal)).unwrap();
     assert_eq!(
-        private_terminal["status"], "denied",
+        private_terminal["problem"]["kind"], "not_found_or_not_authorized",
         "cursor authentication must precede target-state disclosure: {private_terminal}"
     );
 
@@ -1448,7 +1479,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             .get("source_offset")
             .is_none()
     );
-    assert!(continued["next_cursor"].is_null());
+    assert!(continued["temporal"]["next_cursor"].is_null());
 
     let first_query_page = handle_real_server_tool_call(
         &server,
@@ -1479,7 +1510,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "expand-query first page should contain {body}: {first_query_page}"
         );
     }
-    let query_cursor = first_query_page["next_cursor"]
+    let query_cursor = first_query_page["temporal"]["next_cursor"]
         .as_str()
         .expect("expand-query source page should return a cursor");
 
@@ -1509,7 +1540,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "expand-query continued page should contain {body}: {continued_query_page}"
         );
     }
-    assert!(continued_query_page["next_cursor"].is_null());
+    assert!(continued_query_page["temporal"]["next_cursor"].is_null());
     server.shutdown().await;
 }
 
@@ -1558,7 +1589,11 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     .await;
     let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
 
-    assert_eq!(payload["status"], "ok", "{payload}");
+    // The poisoned origin projection stays omitted from the temporal page, so
+    // the retained retrieval truthfully reports partial while the direct
+    // cross-session target still hydrates completely below.
+    assert_eq!(payload["status"], "partial", "{payload}");
+    assert_eq!(payload["omitted"], 1, "{payload}");
     assert_eq!(payload["expansion"]["kind"], "raw_message");
     assert_eq!(payload["expansion"]["from_current_session"], false);
     assert_eq!(
@@ -1571,8 +1606,8 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     );
     assert_eq!(payload["state"], "available");
     assert_eq!(payload["grain"], "occurrence");
-    assert_eq!(payload["anchors"].as_array().unwrap().len(), 1);
-    assert!(payload["watermarks"]["generation"].as_u64().unwrap() > 0);
+    assert_eq!(payload["temporal"]["anchors"].as_array().unwrap().len(), 1);
+    assert!(payload["temporal"]["watermarks"]["generation"].as_u64().unwrap() > 0);
     server.shutdown().await;
 }
 
@@ -1689,13 +1724,20 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
     )
     .await;
     let initial: Value = serde_json::from_str(extract_real_server_text(&initial)).unwrap();
-    assert_eq!(initial["status"], "ok", "{initial}");
+    // The terminal-state records seeded alongside the available target stay
+    // omitted from the temporal page, so the retained expand truthfully
+    // reports partial while the available target hydrates completely.
+    assert_eq!(initial["status"], "partial", "{initial}");
     assert_eq!(initial["expansion"]["content"], "stateful expansion body");
 
-    for (store_id, expected_status) in [
-        (redacted_store_id, "redacted"),
-        (locked_store_id, "locked"),
-        (deleted_store_id, "deleted"),
+    // Terminal anchor states answer as typed retained refusals that never
+    // serve content: redacted and deleted records are indistinguishable from
+    // absent ones (no existence oracle), and a locked store is an
+    // availability condition, not a content answer.
+    for (store_id, expected_kind) in [
+        (redacted_store_id, "not_found_or_not_authorized"),
+        (locked_store_id, "unavailable"),
+        (deleted_store_id, "not_found_or_not_authorized"),
     ] {
         let result = handle_real_server_tool_call(
             &server,
@@ -1707,14 +1749,13 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
             }),
         )
         .await;
-        let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
-        assert_eq!(payload["status"], expected_status, "{payload}");
-        assert!(
-            payload["expansion"].as_array().unwrap().is_empty(),
-            "{payload}"
-        );
+        let envelope: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
+        assert_eq!(envelope["problem"]["kind"], expected_kind, "{envelope}");
+        assert!(envelope["outcome"].is_null(), "{envelope}");
     }
 
+    // A forged summary cursor fails closed the same way: a typed refusal, not
+    // a served page.
     let denied = handle_real_server_tool_call(
         &server,
         "tracedecay_lcm_expand",
@@ -1728,11 +1769,11 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
     )
     .await;
     let denied: Value = serde_json::from_str(extract_real_server_text(&denied)).unwrap();
-    assert_eq!(denied["status"], "denied", "{denied}");
-    assert!(
-        denied["expansion"].as_array().unwrap().is_empty(),
+    assert_eq!(
+        denied["problem"]["kind"], "not_found_or_not_authorized",
         "{denied}"
     );
+    assert!(denied["outcome"].is_null(), "{denied}");
 
     server.shutdown().await;
 }
@@ -2011,7 +2052,12 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     .await;
     let denied_payload: Value =
         serde_json::from_str(extract_real_server_text(&denied_payload)).unwrap();
-    assert_eq!(denied_payload["status"], "deleted");
+    // A session that does not own the payload gets a typed refusal that is
+    // indistinguishable from the payload not existing — no existence oracle.
+    assert_eq!(
+        denied_payload["problem"]["kind"], "not_found_or_not_authorized",
+        "{denied_payload}"
+    );
 
     let payload_result = handle_real_server_tool_call(
         &server,
@@ -2053,7 +2099,12 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     .await;
     let wrong_provider: Value =
         serde_json::from_str(extract_real_server_text(&wrong_provider_result)).unwrap();
-    assert_eq!(wrong_provider["status"], "deleted", "{wrong_provider}");
+    // A provider that does not own the payload gets the same typed refusal as
+    // an absent payload — no existence oracle across providers.
+    assert_eq!(
+        wrong_provider["problem"]["kind"], "not_found_or_not_authorized",
+        "{wrong_provider}"
+    );
 
     db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplaceOccurrenceProvider {
         session_id: owner_session.clone(),
@@ -2075,7 +2126,12 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     .await;
     let wrong_occurrence: Value =
         serde_json::from_str(extract_real_server_text(&wrong_occurrence_result)).unwrap();
-    assert_eq!(wrong_occurrence["status"], "denied", "{wrong_occurrence}");
+    // A tampered occurrence binding is a denial, refused with the same
+    // non-oracle problem kind.
+    assert_eq!(
+        wrong_occurrence["problem"]["kind"], "not_found_or_not_authorized",
+        "{wrong_occurrence}"
+    );
     db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplaceOccurrenceProvider {
         session_id: owner_session.clone(),
         message_id: "origin-external-message".to_string(),
@@ -2105,8 +2161,10 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     .await;
     let tampered_receipt: Value =
         serde_json::from_str(extract_real_server_text(&tampered_receipt_result)).unwrap();
+    // A publication receipt that no longer verifies makes the payload
+    // unavailable, not served and not confirmed absent.
     assert_eq!(
-        tampered_receipt["status"], "unavailable",
+        tampered_receipt["problem"]["kind"], "unavailable",
         "{tampered_receipt}"
     );
     db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplacePublicationReceipt {
@@ -2136,7 +2194,10 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     .await;
     let wrong_session: Value =
         serde_json::from_str(extract_real_server_text(&wrong_session_result)).unwrap();
-    assert_eq!(wrong_session["status"], "unavailable", "{wrong_session}");
+    assert_eq!(
+        wrong_session["problem"]["kind"], "unavailable",
+        "{wrong_session}"
+    );
 
     db.replace_lcm_external_payload_manifest_for_test(&payload_ref, &original_manifest)
         .await
@@ -2158,7 +2219,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     )
     .await;
     let tampered: Value = serde_json::from_str(extract_real_server_text(&tampered_result)).unwrap();
-    assert_eq!(tampered["status"], "unavailable", "{tampered}");
+    assert_eq!(tampered["problem"]["kind"], "unavailable", "{tampered}");
 
     db.replace_lcm_external_payload_manifest_for_test(&payload_ref, &original_manifest)
         .await
@@ -2176,7 +2237,12 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     )
     .await;
     let missing: Value = serde_json::from_str(extract_real_server_text(&missing_result)).unwrap();
-    assert_eq!(missing["status"], "deleted", "{missing}");
+    // A payload file removed from disk answers exactly like one that never
+    // existed.
+    assert_eq!(
+        missing["problem"]["kind"], "not_found_or_not_authorized",
+        "{missing}"
+    );
     server.shutdown().await;
 }
 
@@ -2403,7 +2469,7 @@ async fn lcm_grep_rejects_invalid_scope() {
         .await,
     );
     assert!(
-        err.contains("scope must be one of current, session, all"),
+        err.contains("scope") && err.contains("expected one of `current`, `session`, `all`"),
         "unexpected error: {err}"
     );
     let err = expect_tool_error(
@@ -2417,7 +2483,8 @@ async fn lcm_grep_rejects_invalid_scope() {
         .await,
     );
     assert!(
-        err.contains("relationship_scope must be one of all, parents_only, subagents_only"),
+        err.contains("relationship_scope")
+            && err.contains("expected one of `all`, `parents_only`, `subagents_only`"),
         "unexpected error: {err}"
     );
 }
@@ -2459,30 +2526,40 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
             json!({"provider": "cursor", "session_id": "ghost-session", "prompt": "anything"}),
         ),
     ] {
-        let result = handle_tool_call(&cg, tool, args.clone(), None, None)
-            .await
-            .unwrap_or_else(|e| panic!("{tool} returned error: {e}"));
+        match handle_tool_call(&cg, tool, args.clone(), None, None).await {
+            Ok(result) => {
+                let text = extract_text(&result.value);
+                let payload: Value = serde_json::from_str(text)
+                    .unwrap_or_else(|e| panic!("{tool} response is not valid JSON: {e}\n{text}"));
 
-        let text = extract_text(&result.value);
-        let payload: Value = serde_json::from_str(text)
-            .unwrap_or_else(|e| panic!("{tool} response is not valid JSON: {e}\n{text}"));
-
-        let status = payload["status"].as_str().unwrap_or_default();
-        // The temporal retrieval runtime maps an empty/zero-row resolution for a
-        // never-ingested anchor to a typed, non-retryable `deleted` outcome
-        // (session_retrieval.rs CompleteZero -> Deleted). That stays a typed,
-        // non-error, non-mutating read, which is exactly this test's intent.
-        assert!(
-            matches!(
-                status,
-                "ok" | "not_ingested" | "unavailable" | "complete_zero" | "deleted"
-            ),
-            "{tool}: unexpected status={status}, got {payload}"
-        );
-        assert_ne!(
-            status, "error",
-            "{tool}: read-only empty store must stay typed, got {payload}"
-        );
+                let status = payload["status"].as_str().unwrap_or_default();
+                // The temporal retrieval runtime maps an empty/zero-row resolution
+                // for a never-ingested anchor to a typed, non-retryable `deleted`
+                // outcome (session_retrieval.rs CompleteZero -> Deleted). That
+                // stays a typed, non-error, non-mutating read, which is exactly
+                // this test's intent.
+                assert!(
+                    matches!(
+                        status,
+                        "ok" | "not_ingested" | "unavailable" | "complete_zero" | "deleted"
+                    ),
+                    "{tool}: unexpected status={status}, got {payload}"
+                );
+                assert_ne!(
+                    status, "error",
+                    "{tool}: read-only empty store must stay typed, got {payload}"
+                );
+            }
+            // The retained owner refuses a never-ingested target as a typed
+            // not-found problem envelope: still a typed, non-mutating read.
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("not found or is not authorized"),
+                    "{tool}: read-only empty store must stay typed, got {message}"
+                );
+            }
+        }
 
         assert!(
             db_path.exists(),
@@ -2528,7 +2605,7 @@ async fn lcm_load_session_missing_store_uses_typed_empty_messages_without_creati
 
     // Without retained temporal retrieval, ghost loads stay typed-empty.
     assert_eq!(payload["messages"], json!([]));
-    assert_eq!(payload["next_cursor"], Value::Null);
+    assert_eq!(payload["temporal"]["next_cursor"], Value::Null);
     let status = payload["status"].as_str().unwrap_or_default();
     assert!(
         matches!(

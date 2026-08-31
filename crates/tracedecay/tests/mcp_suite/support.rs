@@ -110,7 +110,67 @@ pub(crate) async fn handle_real_server_tool_call(
 ) -> Value {
     let response = handle_real_server_tool_call_raw(server, tool_name, arguments).await;
     assert!(response["error"].is_null(), "{response}");
-    response["result"].clone()
+    let mut result = response["result"].clone();
+    // The retained envelope wraps the owner's payload in authority and receipt
+    // metadata, which can push a modest payload over the response budget. The
+    // truncation wrapper carries a typed retrieve handle; recover the full
+    // original the same way a real agent does before unwrapping.
+    if let Some(text) = result["content"][0]["text"].as_str()
+        && let Some(handle) = truncated_response_handle(text)
+    {
+        let retrieved = handle_real_server_tool_call_raw(
+            server,
+            "tracedecay_retrieve",
+            json!({ "handle": handle }),
+        )
+        .await;
+        assert!(retrieved["error"].is_null(), "{retrieved}");
+        let record: Value = serde_json::from_str(
+            retrieved["result"]["content"][0]["text"]
+                .as_str()
+                .expect("retrieved response text"),
+        )
+        .expect("retrieved response JSON");
+        result["content"][0]["text"] = record["content"].clone();
+    }
+    // Retained tools answer with the versioned `schema.application.retained.*`
+    // envelope; these tests assert the owner's payload, so unwrap evidence and
+    // effect payloads in place. Problem envelopes stay intact for tests that
+    // assert typed refusals.
+    if let Some(text) = result["content"][0]["text"].as_str()
+        && let Some(payload) = retained_envelope_payload(text)
+    {
+        result["content"][0]["text"] = Value::String(payload.to_string());
+    }
+    result
+}
+
+/// The retrieve handle from a response-budget truncation wrapper, if `text`
+/// is one.
+#[cfg(feature = "test-transport")]
+pub(crate) fn truncated_response_handle(text: &str) -> Option<String> {
+    let wrapper: Value = serde_json::from_str(text).ok()?;
+    if wrapper["truncated"] != Value::Bool(true) {
+        return None;
+    }
+    wrapper["handle"].as_str().map(str::to_owned)
+}
+
+/// The owner payload from a retained evidence or effect envelope, if `text`
+/// is one. Problem envelopes and non-retained responses return `None`.
+#[cfg(feature = "test-transport")]
+pub(crate) fn retained_envelope_payload(text: &str) -> Option<Value> {
+    let envelope: Value = serde_json::from_str(text).ok()?;
+    envelope
+        .pointer("/contract/schema_id")
+        .and_then(Value::as_str)
+        .filter(|schema| schema.starts_with("schema.application.retained."))?;
+    matches!(
+        envelope.pointer("/outcome/outcome").and_then(Value::as_str),
+        Some("evidence" | "effect")
+    )
+    .then(|| envelope.pointer("/outcome/value/payload").cloned())
+    .flatten()
 }
 
 /// The whole JSON-RPC response, including a protocol-level `error`.
@@ -403,15 +463,23 @@ pub(crate) async fn handle_tool_call(
     // in-process MCP harness and the for-test server constructor live behind
     // it); without the feature these tools take the generic path below.
     //
-    // Always mount the retained project session runtime for these tools. Falling
-    // through when `sessions.db` is not yet a regular file left
-    // `active_project_session_db` unset, so message-search and LCM reads failed
-    // closed even though the test graph still retained a registered session
-    // authority (production mounts that authority before dispatching the same
-    // tools).
+    // Every retained-surface tool (LCM, message search, fact store, session
+    // and workflow reads) executes through the daemon retained owner in
+    // production, so dispatch it through the registered test server — which
+    // mounts that owner in process — rather than the bare registry path whose
+    // missing executor truthfully reports the transport as unavailable.
     #[cfg(feature = "test-transport")]
-    if tool_name == "tracedecay_message_search" || tool_name.starts_with("tracedecay_lcm_") {
+    if tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
         let runtime = open_active_project_scoped_runtime(cg).await;
+        // The daemon serves retained tools only for registered projects, so
+        // mirror `real_mcp_server` and register this graph's identity in the
+        // runtime registry; without it route resolution truthfully reports
+        // the retained operation authority as unavailable.
+        if let Some(project_id) = cg.store_layout().identity.project_id.clone() {
+            runtime
+                .upsert_code_project(&project_id, cg.project_root(), None, None, None)
+                .await?;
+        }
         // Boxed graph-open and server-construction futures: these are the
         // deep production compositions whose inline layouts overflow the
         // perf-profile test stack.
@@ -425,33 +493,48 @@ pub(crate) async fn handle_tool_call(
                 message: format!("{tool_name} project retrieval authority was not constructed"),
             });
         }
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": args,
-            },
-        })
-        .to_string();
-        let response = crate::mcp_server_test::run_server_with_messages(server, vec![request])
-            .await
-            .into_iter()
-            .next()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("{tool_name} returned no MCP response"),
-            })?;
-        let response: Value =
-            serde_json::from_str(&response).map_err(|error| TraceDecayError::Config {
-                message: format!("{tool_name} returned invalid MCP JSON: {error}"),
-            })?;
-        if let Some(error) = response.get("error") {
-            return Err(TraceDecayError::Config {
-                message: format!("{tool_name} failed over MCP: {error}"),
-            });
-        }
-        return Ok(ToolResult::new(response["result"].clone(), Vec::new()));
+        // Each dispatch is one client connection against the shared live
+        // server (the daemon's per-socket entry point); the server must stay
+        // up across dispatches because a truncated response is recovered by a
+        // follow-up `tracedecay_retrieve` on the same server.
+        let dispatch = |name: String, arguments: Value| {
+            let server = std::sync::Arc::clone(&server);
+            async move {
+                let request = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": name,
+                        "arguments": arguments,
+                    },
+                })
+                .to_string();
+                let response = crate::mcp_server_test::run_client_connection_with_messages(
+                    server,
+                    vec![request],
+                )
+                .await
+                .into_iter()
+                .next()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!("{name} returned no MCP response"),
+                })?;
+                let response: Value =
+                    serde_json::from_str(&response).map_err(|error| TraceDecayError::Config {
+                        message: format!("{name} returned invalid MCP JSON: {error}"),
+                    })?;
+                if let Some(error) = response.get("error") {
+                    return Err(TraceDecayError::Config {
+                        message: format!("{name} failed over MCP: {error}"),
+                    });
+                }
+                Ok(response["result"].clone())
+            }
+        };
+        let outcome = handle_retained_dispatch(tool_name, args, dispatch).await;
+        server.shutdown().await;
+        return outcome;
     }
     Box::pin(tracedecay::mcp::handle_tool_call(
         cg,
@@ -461,6 +544,73 @@ pub(crate) async fn handle_tool_call(
         scope_prefix,
     ))
     .await
+}
+
+/// Dispatches `tool_name` through `dispatch`, recovers truncated responses
+/// through the typed retrieve handle, and unwraps the retained evidence or
+/// effect payload. A problem envelope is surfaced as an error carrying the
+/// full envelope, not an answer.
+#[cfg(feature = "test-transport")]
+async fn handle_retained_dispatch<D, F>(
+    tool_name: &str,
+    args: Value,
+    dispatch: D,
+) -> tracedecay_domain::errors::Result<ToolResult>
+where
+    D: Fn(String, Value) -> F,
+    F: std::future::Future<Output = tracedecay_domain::errors::Result<Value>>,
+{
+    let mut result = dispatch(tool_name.to_owned(), args).await?;
+    // The retained envelope wraps the owner's payload in authority and
+    // receipt metadata, which can push a modest payload over the response
+    // budget. Recover the full original through the typed retrieve handle
+    // the same way a real agent does.
+    if let Some(text) = result["content"][0]["text"].as_str()
+        && let Some(handle) = truncated_response_handle(text)
+    {
+        let retrieved = dispatch(
+            "tracedecay_retrieve".to_owned(),
+            json!({ "handle": handle, "format": "json" }),
+        )
+        .await?;
+        let record: Value =
+            serde_json::from_str(retrieved["content"][0]["text"].as_str().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: format!("{tool_name} retrieve returned no text: {retrieved}"),
+                }
+            })?)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("{tool_name} retrieve returned invalid JSON: {error}"),
+            })?;
+        result["content"][0]["text"] = record["content"].clone();
+    }
+    // The retained MCP contract is the versioned
+    // `schema.application.retained.*` envelope. These handler tests assert
+    // the owner's payload, so unwrap evidence and effect payloads here and
+    // surface refusals as errors; a problem envelope is a refusal, not an
+    // answer.
+    let text = result["content"][0]["text"]
+        .as_str()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("{tool_name} returned no text content: {result}"),
+        })?;
+    let payload = match retained_envelope_payload(text) {
+        Some(payload) => payload,
+        None => {
+            let envelope: Value =
+                serde_json::from_str(text).map_err(|error| TraceDecayError::Config {
+                    message: format!("{tool_name} returned no retained envelope: {error}"),
+                })?;
+            return Err(TraceDecayError::Config {
+                message: format!("{tool_name} answered with a retained refusal: {envelope}"),
+            });
+        }
+    };
+    let mut unwrapped = result;
+    unwrapped["content"] = serde_json::json!([
+        { "type": "text", "text": payload.to_string() }
+    ]);
+    Ok(ToolResult::new(unwrapped, Vec::new()))
 }
 
 #[cfg(feature = "test-transport")]

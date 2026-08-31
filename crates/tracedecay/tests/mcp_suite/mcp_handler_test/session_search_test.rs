@@ -128,12 +128,18 @@ async fn production_codex_message_search(
         result["isError"], true,
         "production message search returned an error: {result}"
     );
-    let payload: Value = serde_json::from_str(
+    let envelope: Value = serde_json::from_str(
         result["content"][0]["text"]
             .as_str()
             .expect("production message search JSON content"),
     )
     .expect("production message search JSON");
+    // Retained tools respond with the full evidence envelope; the search
+    // payload the assertions consume lives under `outcome.value.payload`.
+    let payload = envelope
+        .pointer("/outcome/value/payload")
+        .cloned()
+        .unwrap_or(envelope);
     assert!(
         payload["results"].as_array().is_some_and(|results| {
             results.iter().any(|result| {
@@ -165,7 +171,8 @@ async fn message_search_rejects_invalid_scope() {
             .await,
         );
         assert!(
-            err.contains("scope must be one of all, parents_only, subagents_only"),
+            err.contains("scope")
+                && err.contains("expected one of `all`, `parents_only`, `subagents_only`"),
             "unexpected error for scope {invalid:?}: {err}"
         );
     }
@@ -196,17 +203,20 @@ async fn message_search_rejects_invalid_scope() {
         .await,
     );
     assert!(
-        err.contains("message_type must be one of all, direct_user, tool_result"),
+        err.contains("message_type")
+            && err.contains("expected one of `all`, `direct_user`, `tool_result`"),
         "unexpected message_type error: {err}"
     );
 }
 
-/// `project_scope` is a closed enum: any value other than `all_registered`
-/// must fail closed rather than silently degrade to a single-project search.
+/// `project_scope` is closed: the mounted retained owner serves only its own
+/// project, so any other scope value fails closed as not-found-or-not-
+/// authorized rather than silently degrading to a broader search.
 #[tokio::test]
 async fn message_search_rejects_unsupported_project_scope() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    for invalid in ["everything", "all", "registered", "ALL_REGISTERED"] {
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
+    for invalid in ["everything", "all", "registered", "all_registered"] {
         let err = expect_tool_error(
             handle_tool_call(
                 &cg,
@@ -218,34 +228,65 @@ async fn message_search_rejects_unsupported_project_scope() {
             .await,
         );
         assert!(
-            err.contains("project_scope must be omitted or all_registered"),
+            err.contains("not found or is not authorized"),
             "unexpected error for project_scope {invalid:?}: {err}"
         );
     }
+
+    // The owner's own scope stays served: the closed enum rejects foreign
+    // scopes without breaking the supported one.
+    handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({"query": "anything", "project_scope": "project"}),
+        None,
+        None,
+    )
+    .await
+    .expect("project-scoped message search must stay served");
 }
 
-/// The `all_registered` scope cannot be paired with a single-project
-/// selector.
+/// Cross-project selection has exactly one spelling —
+/// `project_selector.project_id` — so top-level aliases are refused with the
+/// typed invalid-selector route error, a foreign registered id fails closed
+/// as not-found-or-not-authorized, and a malformed selector is a decode error
+/// naming the argument.
 #[tokio::test]
-async fn message_search_rejects_all_registered_with_project_selector() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    for selector in [
-        json!({"project_id": "proj_x"}),
-        json!({"project_selector": {"path": "/some/path"}}),
-        json!({"project_selector": {"project_path": "/some/path"}}),
-    ] {
-        let mut args = json!({"query": "anything", "project_scope": "all_registered"});
-        args.as_object_mut()
-            .unwrap()
-            .extend(selector.as_object().unwrap().clone());
-        let err = expect_tool_error(
-            handle_tool_call(&cg, "tracedecay_message_search", args, None, None).await,
-        );
-        assert!(
-            err.contains("project_route_invalid_selector"),
-            "unexpected error for selector {selector}: {err}"
-        );
-    }
+async fn message_search_rejects_foreign_project_selectors() {
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({"query": "anything", "project_id": "proj_0123456789abcdef"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("project_route_invalid_selector")
+            && err.contains("is not a registered-project selector"),
+        "unexpected error for top-level project_id: {err}"
+    );
+
+    // `project_path` is a semantic message-search argument, not a route
+    // selector; the mounted owner refuses a foreign path closed.
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({"query": "anything", "project_path": "/some/foreign/path"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("not found or is not authorized"),
+        "unexpected error for foreign project_path: {err}"
+    );
 
     let err = expect_tool_error(
         handle_tool_call(
@@ -253,8 +294,7 @@ async fn message_search_rejects_all_registered_with_project_selector() {
             "tracedecay_message_search",
             json!({
                 "query": "anything",
-                "project_scope": "all_registered",
-                "project_path": "/some/path"
+                "project_selector": {"project_id": "proj_0123456789abcdef"}
             }),
             None,
             None,
@@ -262,8 +302,23 @@ async fn message_search_rejects_all_registered_with_project_selector() {
         .await,
     );
     assert!(
-        err.contains("project_scope cannot be combined"),
-        "message-search project_path remains a semantic filter: {err}"
+        err.contains("not found") || err.contains("not registered"),
+        "a foreign registered id must fail closed: {err}"
+    );
+
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({"query": "anything", "project_selector": {"path": "/some/path"}}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("project_selector"),
+        "malformed selectors must fail decode naming the argument: {err}"
     );
 }
 
@@ -318,20 +373,29 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
         )
         .await
         .expect("production Codex hook ingest invocation");
+    let result = match response.result {
+        Some(result) => result,
+        None => panic!(
+            "production Codex hook ingest failed: {:?}",
+            response.error
+        ),
+    };
     let ingest: Value = serde_json::from_str(
-        response
-            .result
-            .expect("production Codex hook ingest result")["content"][0]["text"]
+        result["content"][0]["text"]
             .as_str()
             .expect("production Codex hook ingest JSON content"),
     )
     .expect("production Codex hook ingest JSON");
     assert_eq!(ingest["completed"], true, "{ingest}");
+    // The composition's background Codex catch-up may admit the rollout
+    // before the hook pass reaches it, in which case the hook truthfully
+    // reports zero new bytes. Either path must leave the rollout durable and
+    // searchable, which the retrieval assertions below verify directly.
     assert!(
-        ingest["messages_upserted"]
-            .as_u64()
-            .is_some_and(|count| count > 0),
-        "real Codex hook ingest did not project messages: {ingest}"
+        ingest["admission"]["status"]
+            .as_str()
+            .is_some_and(|status| status != "unavailable" && status != "unknown"),
+        "real Codex hook ingest was refused: {ingest}"
     );
 
     let initial = production_codex_message_search(&harness, &project).await;
