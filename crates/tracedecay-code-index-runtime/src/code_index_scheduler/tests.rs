@@ -12711,7 +12711,44 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         .scheduler_handle(fixture.path())
         .await
         .expect("mounted scheduler");
+    // One budget covers both pre-edit observations: they are two stages of
+    // the same retained-mount journey. Text owners deliberately install only
+    // when the artifact build finishes and the Ready snapshot publishes in
+    // the same step, so live build progress and ready text are sequential
+    // states, never a simultaneous one.
     let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let progress_mid_build = loop {
+        let observed = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let progress = scheduler.build_progress_slot();
+            let progress = progress
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            progress.snapshot()
+        };
+        if let Some(progress) = observed
+            && progress.committed_pages > 0
+            && progress.phase
+                != tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        {
+            break progress;
+        }
+        assert!(
+            std::time::Instant::now() <= progress_deadline,
+            "graph-on text projection never exposed bounded live progress"
+        );
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(
+        progress_mid_build.generation_id,
+        sealed_generation_id.as_str(),
+        "the live build progress must belong to the retained generation"
+    );
+    // Exact and lexical owners must finish and serve while native graph
+    // activation keeps failing; this ready owner is the pre-edit baseline
+    // the changed generation must replace.
     let (text_owner_before_retry, owner_epoch_before_retry, progress_before_retry) = loop {
         let text = registry.latest_text_serving_for_scope(&scope).await;
         let observed = {
@@ -12724,16 +12761,12 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             (progress.owner_epoch, progress.snapshot())
         };
-        if let (Some(text), (owner_epoch, Some(progress))) = (text, observed)
-            && progress.committed_pages > 0
-            && progress.phase
-                != tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
-        {
+        if let (Some(text), (owner_epoch, Some(progress))) = (text, observed) {
             break (text, owner_epoch, progress);
         }
         assert!(
             std::time::Instant::now() <= progress_deadline,
-            "graph-on text projection never exposed bounded live progress"
+            "graph retries withheld retained exact and lexical readiness"
         );
         tokio::task::yield_now().await;
     };
