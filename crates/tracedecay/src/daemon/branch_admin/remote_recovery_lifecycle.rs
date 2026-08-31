@@ -99,9 +99,8 @@ fn ensure_profile_lifecycle(
     administration: &StoreAdministration,
     lifecycles: &mut RemoteRecoveryProjectLifecyclesV1,
 ) -> Result<Arc<RemoteRecoveryProjectLifecycleV1>> {
-    let profile_root = authority::canonical_identity_path(
-        administration.profile_identity()?.profile_root(),
-    )?;
+    let profile_root =
+        authority::canonical_identity_path(administration.profile_identity()?.profile_root())?;
     if let Some(lifecycle) = lifecycles.profiles.get(&profile_root) {
         return Ok(Arc::clone(lifecycle));
     }

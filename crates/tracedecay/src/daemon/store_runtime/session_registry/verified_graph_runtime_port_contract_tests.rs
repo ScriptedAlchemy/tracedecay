@@ -4,12 +4,12 @@ use std::sync::atomic::AtomicBool;
 
 use tempfile::TempDir;
 use tracedecay_domain::UtcMicros;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
     VerifiedGraphSnapshot,
 };
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_store::{
     FactReadControl, GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1,
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationKeyV1,
@@ -429,7 +429,7 @@ async fn exact_publication_replay_returns_the_same_verified_head() {
     assert_eq!(replay.verified_head(), first.verified_head());
     assert!(matches!(
         reconcile_through_database(&database, &changed, key("exact-replay")),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
     let retained = snapshot_through_database(&database, &projection)
         .expect("verified snapshot after changed-input conflict")
@@ -452,7 +452,7 @@ async fn stale_republication_conflicts_after_a_new_head_wins() {
 
     assert!(matches!(
         publish_through_database(&database, &first, key("stale-first"), false),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
 }
 
@@ -594,7 +594,8 @@ async fn exact_shard_retirement_closes_retained_graph_after_root_is_absent() {
 #[tokio::test]
 async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_graph() {
     let fixture = ContractFixture::new("session-relation-close-retry").await;
-    let session_sync = Arc::new(tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default());
+    let session_sync =
+        Arc::new(tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default());
     fixture
         .registry
         .install_session_sync_service(&session_sync)
@@ -866,7 +867,7 @@ async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
     let changed = manifest(&projection, "resume-journaled", "changed");
     assert!(matches!(
         publish_through_database(&project_database, &changed, key("resume-journaled"), false),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
     let published = publish_through_database(
         &project_database,

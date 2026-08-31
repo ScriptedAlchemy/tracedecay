@@ -27,7 +27,7 @@ use crate::runtime::snapshot_observation::{
 use crate::runtime::source::{
     FileDiscoveryLimit, HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
     TranscriptIngestResult, bound_path_list, canonical_framed_sha256, jsonl_file_identity,
-    persist_host_provider_coverage,
+    persist_host_provider_coverage, run_blocking_transcript_section,
 };
 
 mod discovery;
@@ -60,6 +60,7 @@ pub struct KimiCaptureOutcome {
     pub discovery_failures: u64,
 }
 
+#[hotpath::measure_all]
 impl KimiSource {
     pub fn new() -> Option<Self> {
         let home = crate::runtime::home_dir()?;
@@ -512,7 +513,10 @@ pub async fn capture_kimi_observations(
                 };
                 let provider = ProviderId::new(PROVIDER).map_err(|_| invalid_frame())?;
                 let session = SessionId::new(&session_id).map_err(|_| invalid_frame())?;
-                let file_identity = match jsonl_file_identity(&path) {
+                let file_identity = match hotpath::measure_block!(
+                    "sessions.hosts.kimi.identity_blocking",
+                    run_blocking_transcript_section(|| jsonl_file_identity(&path))
+                ) {
                     Ok(file_identity) => file_identity,
                     Err(error) => {
                         warn_isolated_source(&path, "source_identity_unavailable");

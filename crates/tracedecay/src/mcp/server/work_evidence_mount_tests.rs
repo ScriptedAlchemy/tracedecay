@@ -18,8 +18,11 @@ impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalP
         &'a self,
         _context: &'a RequestContext,
         _query: SessionTemporalQuery,
-    ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
-        Box::pin(async { tracedecay_session_runtime::session_retrieval::SessionRetrievalServiceOutcome::Denied })
+    ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
+    {
+        Box::pin(async {
+            tracedecay_session_runtime::session_retrieval::SessionRetrievalServiceOutcome::Denied
+        })
     }
 }
 

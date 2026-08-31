@@ -1506,16 +1506,20 @@ fn content_hash_stays_inside_the_persisted_cursor_domain() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn blocking_transcript_section_yields_the_worker_queue() {
     let handle = tokio::runtime::Handle::current();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let value = run_blocking_transcript_section(move || {
-        handle.spawn(async move {
-            let _ = sender.send(());
-        });
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .map(|()| 7)
-            .expect("a task spawned during the blocking section must run")
-    });
+    let value = tokio::spawn(async move {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        run_blocking_transcript_section(move || {
+            handle.spawn(async move {
+                let _ = sender.send(());
+            });
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map(|()| 7)
+                .expect("a task spawned during the blocking section must run")
+        })
+    })
+    .await
+    .expect("join blocking section");
     assert_eq!(value, 7);
 }
 

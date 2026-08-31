@@ -11,10 +11,10 @@ use tracedecay_application::{
     OperationBudgetUsage, PageCursor, PageState, RetrievalEvidence, TemporalState, now_micros,
 };
 use tracedecay_domain::{RetrievalGrainV1, UtcMicros};
+use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::SortContractId;
-use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
 
 use super::{
     SessionApplicationRetrievalPortV1, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
@@ -464,7 +464,8 @@ mod tests {
 
     #[test]
     fn budget_refusal_preserves_stage() {
-        let stage = tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ContextTokens;
+        let stage =
+            tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ContextTokens;
 
         assert_eq!(
             map_outcome(

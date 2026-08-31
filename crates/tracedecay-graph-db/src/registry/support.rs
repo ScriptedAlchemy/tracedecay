@@ -48,7 +48,7 @@ pub(super) fn reject_path_alias(
                 (requested_binding, requested_locator, path, expected_format),
             )?;
         } else if registered_path == path {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("support.reject_path_alias"));
         }
     }
     Ok(())
@@ -246,7 +246,7 @@ pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             GraphDbError::DurabilityUncertain { .. } => GraphDbRegistryStatus::DurabilityUncertain,
             GraphDbError::Cancelled
             | GraphDbError::InvalidRequest { .. }
-            | GraphDbError::Conflict
+            | GraphDbError::Conflict { .. }
             | GraphDbError::BudgetExhausted { .. }
             | GraphDbError::DeadlineExceeded
             | GraphDbError::ProjectionMismatch { .. }

@@ -13,7 +13,6 @@ use std::sync::{
 use tracedecay_application::RequestContext;
 use tracedecay_domain::CodeGenerationId;
 
-use tracedecay_session_memory::context::{CancellationToken, RequestInterruption, application_request_interruption};
 use tracedecay_code_index::{
     chunks::CodeIndexImportEvidenceV1,
     production::{
@@ -21,6 +20,9 @@ use tracedecay_code_index::{
         CodeIndexProductionOpenErrorV1, CodeIndexProductionOwnerV1,
     },
     projection::CodeChunkProjectionSink,
+};
+use tracedecay_session_memory::context::{
+    CancellationToken, RequestInterruption, application_request_interruption,
 };
 
 /// Production owner type exposed to daemon, CLI, MCP, and hook composition.
