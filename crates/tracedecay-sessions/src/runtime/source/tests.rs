@@ -1497,3 +1497,31 @@ fn content_hash_stays_inside_the_persisted_cursor_domain() {
         "probe set must include a digest with the top bit set"
     );
 }
+
+/// The offload helper must hand the worker's run queue to another thread:
+/// with a single-worker multi-thread runtime, a task spawned *from inside*
+/// the blocking section can only run if `block_in_place` released the
+/// worker. Running the section inline would deadlock this test until the
+/// receive timeout fails it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn blocking_transcript_section_yields_the_worker_queue() {
+    let handle = tokio::runtime::Handle::current();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let value = run_blocking_transcript_section(move || {
+        handle.spawn(async move {
+            let _ = sender.send(());
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map(|()| 7)
+            .expect("a task spawned during the blocking section must run")
+    });
+    assert_eq!(value, 7);
+}
+
+/// On a current-thread runtime `block_in_place` would panic, so the helper
+/// must run the section inline and still return its value.
+#[tokio::test]
+async fn blocking_transcript_section_runs_inline_on_current_thread() {
+    assert_eq!(run_blocking_transcript_section(|| 11), 11);
+}

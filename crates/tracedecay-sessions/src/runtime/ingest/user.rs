@@ -191,10 +191,12 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 });
             }
         },
-        None => std::sync::Arc::new(source.discover_transcript_paths_with_frontier(
-            TranscriptDiscoveryBounds::default_walk(),
-            frontier,
-        )?),
+        None => std::sync::Arc::new(source::run_blocking_transcript_section(|| {
+            source.discover_transcript_paths_with_frontier(
+                TranscriptDiscoveryBounds::default_walk(),
+                frontier,
+            )
+        })?),
     };
     let next_frontier = pass.next_frontier;
     let discovery = &pass.report;
