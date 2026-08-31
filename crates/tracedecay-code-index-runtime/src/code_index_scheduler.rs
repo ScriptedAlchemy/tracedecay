@@ -24,6 +24,8 @@ use tracedecay_application::now_micros;
 use tracedecay_domain::canonical_text::{
     encode_lowercase_hex, encode_tagged_lowercase_hex, sha256_hex,
 };
+use tracedecay_graph_db::GraphConflictContextV1;
+
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
@@ -4281,6 +4283,19 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::WorkerPlan(_) => false,
             #[cfg(not(any(test, feature = "test-helpers")))]
             Self::WorkerPlanNotInstalled => false,
+        }
+    }
+
+    /// The structured conflict verdict carried by a graph-projection
+    /// activation failure, when this error is one. The seat retry loop uses
+    /// it to recognize a deterministic conflict — the same guard site
+    /// refusing with identical compared evidence on consecutive attempts
+    /// over the same sealed generation — which no amount of backoff can
+    /// outwait (issue #765).
+    pub fn activation_conflict_context(&self) -> Option<&GraphConflictContextV1> {
+        match self {
+            Self::GraphProjection(CodeGraphProjectionError::Conflict { context }) => Some(context),
+            _ => None,
         }
     }
 

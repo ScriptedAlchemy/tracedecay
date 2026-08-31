@@ -6158,6 +6158,85 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
     );
 }
 
+/// A conflict verdict identical to the previous seat attempt's — same guard
+/// site, same compared evidence, same sealed generation — is deterministic:
+/// the sealed inputs are immutable, so replaying activation reproduces the
+/// exact refusal forever. The seat loop must recognize the repeat and take
+/// the terminal typed-refusal arm instead of looping at the backoff ceiling
+/// (issue #765). Anything short of an exact repeat stays a retry: a first
+/// conflict, a different guard site, different compared evidence, another
+/// generation, or a non-conflict failure in between.
+#[test]
+fn repeated_identical_conflict_verdict_is_terminal_not_retryable() {
+    use tracedecay_graph_db::GraphDbError;
+
+    let generation = CodeGenerationId::new("gen.sealed-1").expect("generation id");
+    let other_generation = CodeGenerationId::new("gen.sealed-2").expect("generation id");
+    let conflict_error = |site: &'static str| {
+        super::CodeIndexSchedulerErrorV1::GraphProjection(GraphDbError::conflict(site).into())
+    };
+    let context_of = |site: &'static str| {
+        let error = conflict_error(site);
+        error
+            .activation_conflict_context()
+            .expect("conflict error carries its context")
+            .clone()
+    };
+
+    let error = conflict_error("publication.prepare.expected_prior_head");
+    let prior = (
+        generation.clone(),
+        context_of("publication.prepare.expected_prior_head"),
+    );
+
+    assert!(
+        super::registry::is_repeated_conflict_verdict(&error, &generation, Some(&prior)),
+        "an identical verdict for the same generation is deterministic and terminal"
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(&error, &generation, None),
+        "the first conflict retries; it may be a concurrent-publisher race"
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(&error, &other_generation, Some(&prior)),
+        "a different sealed generation is a fresh attempt, not a repeat"
+    );
+    let different_site = (
+        generation.clone(),
+        context_of("publication.complete.cas_prior_head"),
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(&error, &generation, Some(&different_site)),
+        "a different guard site is a different verdict"
+    );
+    let different_evidence = (
+        generation.clone(),
+        match GraphDbError::conflict_observed(
+            "publication.prepare.expected_prior_head",
+            "head seq 1",
+            "head seq 2",
+        ) {
+            GraphDbError::Conflict { context } => context,
+            _ => unreachable!("conflict constructor produces the conflict variant"),
+        },
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(
+            &error,
+            &generation,
+            Some(&different_evidence)
+        ),
+        "different compared evidence is a different verdict"
+    );
+    let non_conflict = super::CodeIndexSchedulerErrorV1::GraphProjection(
+        crate::code_index::graph_projection::CodeGraphProjectionError::DeadlineExceeded,
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(&non_conflict, &generation, Some(&prior)),
+        "only a conflict verdict can repeat a conflict verdict"
+    );
+}
+
 /// The serving gates are relaxed on `reference` only. A different repository
 /// or a different worktree is a different checkout identity and must stay
 /// unservable, or an answer would be mis-attributed rather than merely old.
