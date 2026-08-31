@@ -279,7 +279,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for FactStoreCurateSuc
         _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
-        tracedecay_runtime_core::errors::Result<()>,
+        tracedecay_domain::errors::Result<()>,
     > {
         Box::pin(async { Ok(()) })
     }
@@ -354,7 +354,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExe
         _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
-        tracedecay_runtime_core::errors::Result<()>,
+        tracedecay_domain::errors::Result<()>,
     > {
         Box::pin(async { Ok(()) })
     }
@@ -551,7 +551,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PostCommitPartialE
         _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
-        tracedecay_runtime_core::errors::Result<()>,
+        tracedecay_domain::errors::Result<()>,
     > {
         Box::pin(async { Ok(()) })
     }
@@ -625,7 +625,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PreCommitInterrupt
         _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
-        tracedecay_runtime_core::errors::Result<()>,
+        tracedecay_domain::errors::Result<()>,
     > {
         Box::pin(async { Ok(()) })
     }

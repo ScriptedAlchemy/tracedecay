@@ -1,18 +1,17 @@
 //! Unified engine adapter for memory and diagnostics stores.
 
 use crate::db::engine::{self, IntoParams, Rows, TransactionBehavior};
-
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
-pub struct SqliteDriverError {
-    message: String,
-}
+use tracedecay_domain::errors::{SqliteDriverError, TraceDecayError};
 
 impl From<engine::Error> for SqliteDriverError {
     fn from(error: engine::Error) -> Self {
-        Self {
-            message: error.to_string(),
-        }
+        Self::new(error.to_string())
+    }
+}
+
+impl From<engine::Error> for TraceDecayError {
+    fn from(error: engine::Error) -> Self {
+        Self::Sqlite(error.into())
     }
 }
 
@@ -146,5 +145,18 @@ impl MemoryTransaction {
         match self {
             Self::Runtime(transaction) => transaction.rollback().await.map_err(Into::into),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_error_converts_without_exposing_the_private_engine_type() {
+        let err: TraceDecayError = engine::Error::Runtime("writer unavailable".to_string()).into();
+
+        assert!(matches!(err, TraceDecayError::Sqlite(_)));
+        assert!(err.to_string().contains("writer unavailable"));
     }
 }

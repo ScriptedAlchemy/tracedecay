@@ -31,9 +31,16 @@ pub(crate) async fn execute_retained_memory_curator(
         .client()
         .current()
         .await
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    let mut config = from_configuration_snapshot(&pinned.snapshot)
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the automation configuration could not be loaded: {error}"
+            ))
+        })?;
+    let mut config = from_configuration_snapshot(&pinned.snapshot).map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the automation configuration snapshot is invalid: {error}"
+        ))
+    })?;
     let min_confidence = f64::from(request.min_confidence_millionths) / 1_000_000.0;
     config.timeout_secs = config.timeout_secs.min(MEMORY_CURATOR_REQUEST_TIMEOUT_SECS);
     let backend = CodexAppServerBackend::from_automation_config(&config);
@@ -43,7 +50,11 @@ pub(crate) async fn execute_retained_memory_curator(
             &pinned.snapshot.effective_behavior_digest,
             &pinned.snapshot.resolution_provenance_digest,
         )
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the pinned automation configuration digest could not be assembled: {error}"
+            ))
+        })?;
     let automation_request = request
         .automation_request(context.request_context.request_id())
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
@@ -61,7 +72,11 @@ pub(crate) async fn execute_retained_memory_curator(
         automation_request,
     )
     .await
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the automation effect authority could not be prepared: {error}"
+        ))
+    })?;
     let effect = match admission {
         crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => effect,
         crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
@@ -109,10 +124,11 @@ pub(crate) async fn execute_retained_memory_curator(
     let waiter = effect.start_retained_automation_settlement(retained_run, observer, |run| {
         (run.ledger_record, run.committed_receipt)
     });
-    let settlement = waiter
-        .wait()
-        .await
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let settlement = waiter.wait().await.map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the automation run settlement could not be observed: {error}"
+        ))
+    })?;
     match settlement {
         crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Run {
             terminal,
@@ -127,7 +143,9 @@ pub(crate) async fn execute_retained_memory_curator(
         }
         | crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::AbandonedObserved {
             record: _record,
-        } => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+        } => Err(RetainedSurfaceExecutionErrorV1::unavailable(
+            "the automation run settled without a retained terminal (reused or abandoned)",
+        )),
     }
 }
 

@@ -37,21 +37,21 @@ async fn invoke_exact_tool(
     server: &tracedecay::mcp::McpServer,
     tool_name: &str,
     mut arguments: Value,
-) -> tracedecay_runtime_core::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
     arguments
         .as_object_mut()
         .expect("exact MCP request object")
         .insert("format".to_owned(), json!("json"));
     let response = handle_real_server_tool_call_raw(server, tool_name, arguments).await;
     if !response["error"].is_null() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: response["error"].to_string(),
         });
     }
     let mcp_result = response["result"].clone();
     let text = extract_real_server_text(&mcp_result);
     let response_value: Value = serde_json::from_str(text).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("{tool_name} returned invalid application JSON: {error}"),
         }
     })?;
@@ -61,13 +61,13 @@ async fn invoke_exact_tool(
             .and_then(Value::as_str)
             .unwrap_or(text)
             .to_owned();
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config { message });
+        return Err(tracedecay_domain::errors::TraceDecayError::Config { message });
     }
     let payload = response_value
         .pointer("/outcome/value/payload")
         .cloned()
         .ok_or_else(
-            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+            || tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("{tool_name} omitted its canonical application payload"),
             },
         )?;
@@ -78,7 +78,7 @@ pub(super) async fn invoke_production_tool(
     fixture: &FactStoreMcpFixture,
     tool_name: &str,
     arguments: Value,
-) -> tracedecay_runtime_core::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
     invoke_exact_tool(&fixture.server, tool_name, arguments).await
 }
 

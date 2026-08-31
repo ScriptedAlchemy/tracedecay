@@ -396,7 +396,7 @@ const DELIVERY_SETTLEMENT_SCHEMA: &str = "
 /// stepped forward from an older shape.
 pub async fn ensure_registered_schema(
     installation: &RegisteredSchemaInstallationV1,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let convergence = ensure_registered_schema_for_admission(installation).await?;
     converge_registered_schema_on(installation, convergence).await
 }
@@ -424,7 +424,7 @@ struct RegisteredSchemaAdmissionClassification {
 async fn classify_registered_schema_admission(
     connection: &impl QueryExecutor,
     binding: &tracedecay_store::StoreRuntimeBindingV1,
-) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaAdmissionClassification> {
+) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmissionClassification> {
     crate::registered_legacy_relations::reject_legacy_session_relation_shape(connection, binding)
         .await?;
     // The LCM authority classifies profile content first: a legacy or
@@ -438,7 +438,7 @@ async fn classify_registered_schema_admission(
             tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
                 found_version,
                 required_version,
-            } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+            } => tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
                 component: "LCM",
                 found_version,
                 required_version,
@@ -449,7 +449,7 @@ async fn classify_registered_schema_admission(
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                tracedecay_domain::errors::TraceDecayError::reset_required(
                     "configuration",
                     reason,
                 )
@@ -468,7 +468,7 @@ async fn classify_registered_schema_admission(
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                tracedecay_domain::errors::TraceDecayError::reset_required(
                     "configuration",
                     reason,
                 )
@@ -485,7 +485,7 @@ async fn classify_registered_schema_admission(
         && let Err(error) = validate_remote_deletion_schema_contract(connection).await
     {
         return Err(
-            tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+            tracedecay_domain::errors::TraceDecayError::reset_required(
                 "remote deletion tombstones",
                 error.to_string(),
             ),
@@ -504,7 +504,7 @@ async fn classify_registered_schema_admission(
 #[hotpath::measure(future = true, label = "global_db.schema.persist.admission")]
 pub async fn ensure_registered_schema_for_admission(
     installation: &RegisteredSchemaInstallationV1,
-) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
+) -> tracedecay_domain::errors::Result<RegisteredSchemaConvergence> {
     const OPERATION: &str = "initialize registered global database schema";
     let RegisteredSchemaAdmissionClassification {
         configuration_fresh,
@@ -565,14 +565,14 @@ async fn install_registered_schema_stages(
     temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     crate::hotpath_observe::record_transaction_rows(1);
     let is_fresh = configuration_fresh.is_some();
     configuration::ensure_configuration_schema(transaction, configuration_fresh)
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                tracedecay_domain::errors::TraceDecayError::reset_required(
                     "configuration",
                     reason,
                 )
@@ -620,7 +620,7 @@ async fn install_registered_schema_stages(
             return Err(error);
         }
         return Err(
-            tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+            tracedecay_domain::errors::TraceDecayError::reset_required(
                 project_registry::PROJECT_REGISTRY_AUTHORITY,
                 error.to_string(),
             ),
@@ -726,7 +726,7 @@ async fn install_registered_schema_stages(
             tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
                 found_version,
                 required_version,
-            } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+            } => tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
                 component: "LCM",
                 found_version,
                 required_version,
@@ -758,7 +758,7 @@ async fn install_registered_schema_stages(
 pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     // The invariant pass pages historical authority rows and can legitimately
     // outlive an ordinary open on a large store. The admission phase has
     // already installed and validated its guard triggers, so daemon reads and
@@ -776,7 +776,7 @@ pub async fn converge_registered_schema(
 async fn converge_registered_schema_on(
     connection: &impl Executor,
     convergence: RegisteredSchemaConvergence,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     ensure_authority_invariants(
         connection,
         convergence.force_exhaustive,
@@ -797,7 +797,7 @@ async fn converge_registered_schema_on(
 #[hotpath::measure(future = true, label = "global_db.schema.persist.converge_attached")]
 pub async fn converge_attached_registered_schema(
     database: &Database,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let transaction = database
         .begin_bulk_write_transaction("converge attached global database authority schema")
         .await?;
@@ -827,7 +827,7 @@ pub async fn converge_attached_registered_schema(
 #[hotpath::measure(future = true, label = "global_db.schema.persist.attach")]
 pub async fn ensure_attached_registered_schema(
     database: &Database,
-) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
+) -> tracedecay_domain::errors::Result<RegisteredSchemaConvergence> {
     let read_connection = database.read_connection();
     let RegisteredSchemaAdmissionClassification {
         configuration_fresh,
@@ -886,7 +886,7 @@ enum WorkflowSchemaAdmission {
 
 async fn inspect_workflow_schema_for_admission(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<WorkflowSchemaAdmission> {
+) -> tracedecay_domain::errors::Result<WorkflowSchemaAdmission> {
     let mut rows = conn
         .query(
             "SELECT type, name, sql FROM sqlite_master
@@ -1027,26 +1027,26 @@ async fn inspect_workflow_schema_for_admission(
 
 fn workflow_schema_reset_required(
     reason: &str,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::reset_required("workflow", reason)
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::reset_required("workflow", reason)
 }
 
 pub async fn validate_observation_authority_connection(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     validate_authority_schema_contract(conn).await?;
     validate_authority_rows_exhaustive(conn).await
 }
 
 pub async fn begin_observation_authority_canonical_repair(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     suspend_immutability_for_canonical_repair(conn).await
 }
 
 pub async fn finish_observation_authority_canonical_repair(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     restore_immutability_after_canonical_repair(conn).await
 }
 
@@ -1071,7 +1071,7 @@ mod tests {
 
     async fn registered_admission_error(
         database_path: &std::path::Path,
-    ) -> tracedecay_runtime_core::errors::TraceDecayError {
+    ) -> tracedecay_domain::errors::TraceDecayError {
         match open_registered_test_database_fixture(
             database_path,
             TestDatabaseRuntimeScope::ProfileSessions,
@@ -1202,7 +1202,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { .. }
+                tracedecay_domain::errors::TraceDecayError::ResetRequired { .. }
             ),
             "incompatible final V2 catalog returned the wrong typed problem: {error}"
         );

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::ast_grep_search::{AstGrepSearchMatch, search_tree_scoped_with_cancel};
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::support::{run_bounded_search, unique_file_paths};
 use tracedecay_mcp::ToolResult;

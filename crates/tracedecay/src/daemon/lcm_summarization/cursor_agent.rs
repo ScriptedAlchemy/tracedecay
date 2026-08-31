@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_sessions::runtime::codex_app_server::strip_reasoning_tags;
 use tracedecay_sessions::runtime::lcm::LcmSummaryRequest;
 

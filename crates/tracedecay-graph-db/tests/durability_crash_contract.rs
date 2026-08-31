@@ -373,8 +373,39 @@ fn write_non_final_shape(path: &std::path::Path) {
     raw.close().unwrap();
 }
 
+/// Locates the timestamped quarantine directory the corrupt-mount recovery
+/// created beside the container, or `None` before any quarantine ran.
+fn quarantine_directory(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut directories: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| {
+            entry.file_type().unwrap().is_dir()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("graph.grafeo.corrupt-"))
+        })
+        .map(|entry| entry.path())
+        .collect();
+    directories.sort();
+    directories.pop()
+}
+
+fn quarantine_receipt(quarantine: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(quarantine.join("store-quarantined.json")).unwrap())
+        .unwrap()
+}
+
+/// GitHub issue #763: a deterministic corruption verdict on the durable
+/// container was retried identically forever — every mount refaulted, every
+/// activation refused, and only manual surgery (move the store and WAL aside,
+/// restart) recovered the project. This pins the automatic form of exactly
+/// that recovery: the second identical verdict quarantines the container for
+/// forensics, the mount reopens fresh, and the relational replay journal
+/// re-projects the verified generation without ever advancing the head.
 #[test]
-fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
+fn torn_durable_store_is_quarantined_and_rebuilt_from_the_replay_journal() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
@@ -416,7 +447,7 @@ fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
 
     // A foreign or corrupt WAL sidecar left beside a checkpointed store is not
     // durable evidence: the reopen serves the last verified generation from the
-    // single file and the relational head is untouched.
+    // single file, the relational head is untouched, and nothing quarantines.
     std::fs::create_dir_all(&sidecar).unwrap();
     std::fs::write(sidecar.join("000001.wal"), vec![0xAB_u8; 4096]).unwrap();
     registered.mount().unwrap();
@@ -436,6 +467,7 @@ fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
     assert_eq!(marker_of(&after_foreign_sidecar, &identity), "g1");
     drop(after_foreign_sidecar);
     assert_eq!(authority.head(&projection_key), Some(&verified_head));
+    assert!(quarantine_directory(temp.path()).is_none());
     assert!(registered.close().unwrap());
 
     // A torn write in the single durable file is the real crash surface.
@@ -444,20 +476,41 @@ fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
         bytes.len() > 64,
         "a published store must have a non-trivial durable body"
     );
-    std::fs::write(&path, &bytes[..bytes.len() / 3]).unwrap();
+    let torn = bytes[..bytes.len() / 3].to_vec();
+    std::fs::write(&path, &torn).unwrap();
 
-    let cas_attempts_before = authority.cas_attempts;
-    let error = registered.mount().unwrap_err();
-    // `map_open_error` types malformed IO on a preexisting store as `Corrupt`
-    // (crates/tracedecay-graph-db/src/recovery.rs), never as a silent reopen.
+    // The mount re-proves the fault itself and quarantines instead of
+    // faulting: retry #2 with the identical verdict is the terminal state
+    // for these bytes, never retry #25.
+    registered.mount().unwrap();
+    let quarantine = quarantine_directory(temp.path())
+        .expect("a deterministically corrupt container must be quarantined");
+    assert_eq!(
+        std::fs::read(quarantine.join("graph.grafeo")).unwrap(),
+        torn,
+        "the forensic bytes must move into quarantine unmodified"
+    );
+    let receipt = quarantine_receipt(&quarantine);
+    assert_eq!(
+        receipt["version"].as_str().unwrap(),
+        "tracedecay.graph-store-quarantine.v1"
+    );
+    assert_eq!(receipt["verification_attempts"].as_u64().unwrap(), 2);
     assert!(
-        matches!(error, GraphDbError::Corrupt { .. }),
-        "a torn durable store must surface a typed Corrupt fault, got {error:?}"
+        receipt["fault"].as_str().unwrap().contains("corrupt")
+            || !receipt["fault"].as_str().unwrap().is_empty(),
+        "the receipt journals the exact fault"
+    );
+    assert!(
+        receipt["fault_fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
     );
 
-    // The fault is retained by the registry: the shard stays faulted rather
-    // than silently reopening onto a truncated store.
-    let repeated = registered
+    // The fresh store refuses the recovered head with a typed mismatch until
+    // the replay journal re-projects it — never a silent empty success.
+    let pending = registered
         .registry
         .recover_verified_snapshot(
             registration(registered.binding.clone(), temp.path()),
@@ -466,35 +519,263 @@ fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
             &projection_key,
         )
         .unwrap_err();
-    assert_eq!(repeated, error);
-
-    // A publication staged after the tear must not advance the relational head.
-    let g2 = manifest(identity.clone(), "g2", "g2");
-    let g2_record = stage_manifest(
-        &mut authority,
-        &registered.binding,
-        &g2,
-        "publish:g2",
-        Some(verified_head.clone()),
-        'b',
+    assert!(
+        matches!(
+            pending,
+            GraphDbError::GenerationMismatch { .. } | GraphDbError::ProjectionMismatch { .. }
+        ),
+        "a fresh store pending rebuild must refuse typed, got {pending:?}"
     );
-    let publish_error = registered
+
+    // The durable replay record rebuilds the identical generation: this is
+    // the manual mv-and-restart recovery, automated.
+    let rebuilt = registered
         .registry
         .publish_verified(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
             &context,
-            &g2_record.publication.key,
+            &g1_record.publication.key,
             None,
         )
-        .unwrap_err();
-    assert_eq!(publish_error, error);
-    assert_eq!(authority.cas_attempts, cas_attempts_before);
+        .unwrap();
+    assert_eq!(
+        rebuilt.snapshot.generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+    assert_eq!(marker_of(&rebuilt.snapshot, &identity), "g1");
+    assert_eq!(rebuilt.head, verified_head);
+    drop(rebuilt);
     assert_eq!(
         authority.head(&projection_key),
         Some(&verified_head),
         "the relational verified head must never advance past the last verified generation"
     );
+    assert_eq!(
+        authority.cas_advances, 1,
+        "rebuilding from the journal replays the linearized outcome, never a new advance"
+    );
+
+    // The rebuilt store serves through the ordinary verified surface.
+    let served = registered
+        .registry
+        .verified_snapshot(registration(registered.binding.clone(), temp.path()), &identity)
+        .unwrap();
+    assert_eq!(served.generation(), &GraphGenerationId::new("g1").unwrap());
+    assert_eq!(marker_of(&served, &identity), "g1");
+}
+
+/// The operator-profile fault shape: a SIGKILL mid-WAL-write leaves a
+/// current-version container whose serialized block no longer matches its
+/// CRC, plus a live WAL sidecar. The corrupted-but-current store reports the
+/// CRC fault deterministically; quarantine must adopt the container *and*
+/// the WAL sidecar so the forensic pair stays together, and the fresh store
+/// must rebuild from the replay journal.
+#[test]
+fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("crash", "crc");
+
+    let g1 = manifest(identity.clone(), "g1", "g1");
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    let first = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let verified_head = first.head.clone();
+    drop(first);
+    let projection_key = g1_record.publication.key.projection.clone();
+
+    // Snapshot the crash image while the store is open: the WAL sidecar is
+    // live because nothing has checkpointed, exactly the SIGKILL surface.
+    let source = graph_path(temp.path());
+    let crash = TempDir::new().unwrap();
+    copy_crash_image(temp.path(), crash.path());
+    let crashed_container = graph_path(crash.path());
+    let crashed_sidecar = sidecar_wal_path(&crashed_container);
+    assert!(
+        crashed_sidecar.is_dir(),
+        "the crash image must carry the live WAL sidecar"
+    );
+    let wal_segments: Vec<(String, Vec<u8>)> = std::fs::read_dir(&crashed_sidecar)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                std::fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        !wal_segments.is_empty(),
+        "the crash image must carry WAL segments"
+    );
+    assert!(registered.close().unwrap());
+    let _ = source;
+
+    // Flip authoritative leading bytes while keeping the length: the store
+    // is still current-sized but its serialized sections no longer match
+    // their checksums. The physical midpoint is not a valid target — the
+    // format may leave aligned padding there, outside every section
+    // checksum (see verified_generation_contract/verify_once.rs).
+    let mut bytes = std::fs::read(&crashed_container).unwrap();
+    assert!(bytes.len() > 512);
+    for offset in 0..64 {
+        bytes[offset] ^= 0xFF;
+    }
+    let corrupted = bytes.clone();
+    std::fs::write(&crashed_container, &bytes).unwrap();
+
+    let crashed = RegisteredGraph::new(crash.path()).unwrap();
+    crashed.mount().unwrap();
+
+    let quarantine = quarantine_directory(crash.path())
+        .expect("a CRC-faulted container must be quarantined");
+    assert_eq!(
+        std::fs::read(quarantine.join("graph.grafeo")).unwrap(),
+        corrupted,
+        "the corrupted container bytes are forensic evidence and move unmodified"
+    );
+    let quarantined_sidecar = quarantine.join("graph.grafeo.wal");
+    assert!(
+        quarantined_sidecar.is_dir(),
+        "the WAL sidecar must move with its container"
+    );
+    // The quarantined segments are the exact pre-mount forensic bytes. The
+    // fresh WalSync store legitimately creates its own new sidecar at the
+    // live path; the old journal is provably not beside it because every
+    // old segment now lives in quarantine with unmodified content.
+    for (segment, expected_bytes) in &wal_segments {
+        assert_eq!(
+            &std::fs::read(quarantined_sidecar.join(segment)).unwrap(),
+            expected_bytes,
+            "WAL segment {segment} must be retained in quarantine unmodified"
+        );
+    }
+    let receipt = quarantine_receipt(&quarantine);
+    let members: Vec<&str> = receipt["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|member| member.as_str().unwrap())
+        .collect();
+    assert!(members.contains(&"graph.grafeo"));
+    assert!(members.contains(&"graph.grafeo.wal"));
+
+    // The journal rebuild serves the exact verified generation again.
+    let rebuilt = crashed
+        .registry
+        .publish_verified(
+            registration(crashed.binding.clone(), crash.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        rebuilt.snapshot.generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+    assert_eq!(marker_of(&rebuilt.snapshot, &identity), "g1");
+    assert_eq!(rebuilt.head, verified_head);
+    drop(rebuilt);
+    assert_eq!(authority.head(&projection_key), Some(&verified_head));
+}
+
+/// The compare-and-swap discipline for the quarantine decision itself: an
+/// authority that does not hold the decision lock must neither re-verify nor
+/// sweep the store — another incarnation may be mid-recovery. The refusal is
+/// a retryable typed unavailable, not a retained terminal fault, so the next
+/// mount attempt (after the holder releases) completes the recovery.
+#[test]
+fn held_quarantine_decision_defers_the_mount_and_the_next_attempt_recovers() {
+    use fs2::FileExt;
+
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("crash", "held");
+
+    let g1 = manifest(identity.clone(), "g1", "g1");
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    drop(
+        registered
+            .registry
+            .publish_verified(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &g1_record.publication.key,
+                None,
+            )
+            .unwrap(),
+    );
+    assert!(registered.close().unwrap());
+
+    let path = graph_path(temp.path());
+    let bytes = std::fs::read(&path).unwrap();
+    let torn = bytes[..bytes.len() / 3].to_vec();
+    std::fs::write(&path, &torn).unwrap();
+
+    // A foreign incarnation holds the quarantine decision.
+    let lock_path = temp.path().join("graph.grafeo.quarantine-lock");
+    let foreign_holder = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    foreign_holder.try_lock_exclusive().unwrap();
+
+    let deferred = registered.mount().unwrap_err();
+    assert!(
+        matches!(&deferred, GraphDbError::Unavailable { message }
+            if message.contains("another authority holds")),
+        "a held decision must defer retryably, got {deferred:?}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        torn,
+        "a non-holder must not move or modify the store"
+    );
+    assert!(quarantine_directory(temp.path()).is_none());
+
+    // Once the holder releases, the same mount request completes the
+    // quarantine and rebuild instead of remaining faulted.
+    FileExt::unlock(&foreign_holder).unwrap();
+    registered.mount().unwrap();
+    let quarantine = quarantine_directory(temp.path())
+        .expect("the released decision lock lets the next mount quarantine");
+    assert_eq!(std::fs::read(quarantine.join("graph.grafeo")).unwrap(), torn);
 }
 
 #[test]

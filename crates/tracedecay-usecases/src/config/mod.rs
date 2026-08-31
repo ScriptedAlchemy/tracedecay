@@ -33,7 +33,7 @@ use tracedecay_domain::configuration::{
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::StoreLayout;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +203,44 @@ pub async fn open_runtime_configuration_for_registered_database_read_only(
     runtime_configuration_authority()?
         .open_read_only(project_root, layout, database)
         .await
+}
+
+/// Process-wide pin cache used by daemon invocation after project-open
+/// publishes a snapshot. Distinct from [`RuntimeConfigurationAuthorityPort`],
+/// which opens durable configuration from a registered store.
+pub trait PinnedRuntimeConfigurationCachePort: Send + Sync {
+    fn publish(&self, configuration: PinnedRuntimeConfiguration) -> Result<()>;
+
+    fn cached_for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration>;
+}
+
+static PINNED_RUNTIME_CONFIGURATION_CACHE: OnceLock<Arc<dyn PinnedRuntimeConfigurationCachePort>> =
+    OnceLock::new();
+
+pub fn install_pinned_runtime_configuration_cache(
+    cache: Arc<dyn PinnedRuntimeConfigurationCachePort>,
+) -> Result<()> {
+    PINNED_RUNTIME_CONFIGURATION_CACHE
+        .set(cache)
+        .map_err(|_| config_error("pinned runtime configuration cache is already installed"))
+}
+
+fn pinned_runtime_configuration_cache() -> Result<&'static dyn PinnedRuntimeConfigurationCachePort> {
+    PINNED_RUNTIME_CONFIGURATION_CACHE.get().map(Arc::as_ref).ok_or_else(|| {
+        config_error("pinned runtime configuration cache is not installed")
+    })
+}
+
+pub fn publish_pinned_runtime_configuration(
+    configuration: PinnedRuntimeConfiguration,
+) -> Result<()> {
+    pinned_runtime_configuration_cache()?.publish(configuration)
+}
+
+pub fn cached_pinned_runtime_configuration(
+    project_root: &Path,
+) -> Result<PinnedRuntimeConfiguration> {
+    pinned_runtime_configuration_cache()?.cached_for_root(project_root)
 }
 
 fn runtime_configuration_authority() -> Result<&'static dyn RuntimeConfigurationAuthorityPort> {

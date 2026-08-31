@@ -80,7 +80,7 @@ impl ProjectSessionTestRuntime {
 
     pub(super) async fn session_message_count(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<i64> {
+    ) -> tracedecay_domain::errors::Result<i64> {
         self.runtime.project_session_message_count_for_test().await
     }
 

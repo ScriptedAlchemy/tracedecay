@@ -10,7 +10,7 @@ pub(crate) fn project_automation_reconcile_args() -> serde_json::Value {
 
 pub(crate) async fn notify_project_automation_scheduler(
     project_path: &std::path::Path,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     crate::commands::daemon_tool_json(
         Some(project_path),
         "tracedecay_admin_project",
@@ -22,7 +22,7 @@ pub(crate) async fn notify_project_automation_scheduler(
 
 pub(super) async fn handle_automation_config_command(
     action: AutomationConfigAction,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     use tracedecay_automation_runtime::automation::config::{
         AutomationBackend, AutomationConfigPatch,
     };
@@ -147,7 +147,7 @@ pub(super) async fn handle_automation_config_command(
 
 pub(crate) async fn load_canonical_automation_config(
     project_path: &std::path::Path,
-) -> tracedecay_runtime_core::errors::Result<
+) -> tracedecay_domain::errors::Result<
     tracedecay_automation_runtime::automation::config::AutomationConfig,
 > {
     match crate::commands::current_project_setting(
@@ -169,7 +169,7 @@ pub(crate) async fn load_canonical_automation_config(
 pub(crate) async fn apply_project_automation_patch(
     project_path: &std::path::Path,
     patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
-) -> tracedecay_runtime_core::errors::Result<
+) -> tracedecay_domain::errors::Result<
     tracedecay_automation_runtime::automation::config::AutomationConfig,
 > {
     let resolved = crate::commands::resolve_project_scope(project_path.to_path_buf()).await?;
@@ -209,7 +209,7 @@ fn automation_task_patch(
     min_idle_secs: Option<String>,
     stale_lock_secs: Option<String>,
     task: &str,
-) -> tracedecay_runtime_core::errors::Result<
+) -> tracedecay_domain::errors::Result<
     tracedecay_automation_runtime::automation::config::AutomationTaskPatch,
 > {
     Ok(
@@ -242,7 +242,7 @@ fn string_clears_optional(value: &str) -> bool {
 fn parse_optional_u64(
     value: Option<String>,
     field: &str,
-) -> tracedecay_runtime_core::errors::Result<Option<Option<u64>>> {
+) -> tracedecay_domain::errors::Result<Option<Option<u64>>> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -263,7 +263,7 @@ fn print_automation_config(
     effective: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     json: bool,
     explain: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let availability =
         tracedecay_automation_runtime::automation::backend::backend_availability(effective);
     let trace_decay_backend_calls = effective.enabled
@@ -315,7 +315,7 @@ fn print_automation_config(
 
 fn parse_automation_backend(
     value: &str,
-) -> tracedecay_runtime_core::errors::Result<
+) -> tracedecay_domain::errors::Result<
     tracedecay_automation_runtime::automation::config::AutomationBackend,
 > {
     use tracedecay_automation_runtime::automation::config::AutomationBackend;
@@ -330,7 +330,7 @@ fn parse_automation_backend(
 
 fn parse_automation_host_mode(
     value: &str,
-) -> tracedecay_runtime_core::errors::Result<
+) -> tracedecay_domain::errors::Result<
     tracedecay_automation_runtime::automation::config::AutomationHostMode,
 > {
     use tracedecay_automation_runtime::automation::config::AutomationHostMode;
@@ -343,8 +343,8 @@ fn parse_automation_host_mode(
     }
 }
 
-fn config_error(message: impl Into<String>) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),
     }
 }

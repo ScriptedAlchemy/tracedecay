@@ -52,6 +52,7 @@ pub mod multi_root;
 pub mod observability;
 pub mod observatory_surface;
 pub mod policy;
+pub mod project_registry;
 pub mod remote;
 pub mod request_identity;
 pub mod result;
@@ -251,6 +252,14 @@ pub use policy::{
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1,
     RegisteredPolicyCapabilityV1,
 };
+pub use project_registry::{
+    ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
+    ProjectRegistryContextView, ProjectRegistryEntry, ProjectRegistryListingCommand,
+    ProjectRegistryListingFuture, ProjectRegistryListingOutcome, ProjectRegistryListingScope,
+    ProjectRegistryListingView, ProjectRegistryReadPort, ProjectRegistrySelector,
+    ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup, PublicCodeProject,
+    list_registered_projects, read_registered_project_context,
+};
 pub use remote::status::RemoteOperationalStatusReadPort;
 pub use result::{
     APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationExecutionFailureClassV1,
@@ -341,7 +350,7 @@ pub use surface_contracts::{
     CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
     CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
     CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
-    NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
+    NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest, primitive_code_into_primitive,
 };
 pub use work::*;
 pub use work_artifact_hydration::*;
@@ -355,7 +364,8 @@ pub use work_evidence::{
     WorkAttemptReceiptReadErrorV1, WorkAttemptReceiptReadPortV1, WorkAttemptReceiptV1,
     WorkEvidenceContinuationV1, WorkEvidenceCoverageStateV1, WorkEvidenceCoverageV1,
     WorkEvidenceExpansionSelectorV1, WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1,
-    WorkEvidenceOmissionReasonV1, WorkEvidenceOmissionV1, WorkEvidenceRetrievalServiceV1,
+    WorkEvidenceOmissionReasonV1, WorkEvidenceOmissionV1, WorkEvidenceRetrievalPortV1,
+    WorkEvidenceRetrievalServiceV1,
     WorkEvidenceRetrievalV1, WorkEvidenceRetrieveRequestV1, WorkEvidenceRootReadErrorV1,
     WorkEvidenceRootReadPortV1, WorkEvidenceSourceV1, WorkTaskSessionContinuationV1,
     WorkTaskSessionCoverageV1, WorkTaskSessionEvidenceV1, WorkTaskSessionFuture,

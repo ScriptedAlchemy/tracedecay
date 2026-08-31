@@ -1,14 +1,12 @@
 use serde_json::Value;
-use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, ResultContractRef, SafeDiagnostic,
-};
+use tracedecay_application::{ApplicationProblem, ResultContractRef};
 use tracedecay_tool_catalog::BindingSurface;
 
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::tracedecay::TraceDecay;
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use tracedecay_mcp::ToolResult;
 
@@ -21,8 +19,10 @@ use super::{
 };
 
 mod health_dispatch;
-mod retained_response;
 pub(super) use health_dispatch::dispatch_health_tools;
+use tracedecay_mcp::{
+    retained_problem_envelope, retained_safe_diagnostic, validated_retained_response,
+};
 
 fn graph_read_unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::ProjectRoute {
@@ -30,30 +30,6 @@ fn graph_read_unavailable(detail: &str) -> TraceDecayError {
         retryable: false,
         detail: detail.to_owned(),
     }
-}
-
-fn retained_contract_error(
-    context: &'static str,
-    error: tracedecay_application::ApplicationContractError,
-) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("{context}: {error}"),
-    }
-}
-
-fn retained_safe_diagnostic(code: &'static str, message: &'static str) -> Result<SafeDiagnostic> {
-    SafeDiagnostic::new(code, message)
-        .map_err(|error| retained_contract_error("invalid retained application diagnostic", error))
-}
-
-fn retained_problem_envelope(
-    contract: ResultContractRef,
-    request_id: tracedecay_application::RequestId,
-    problem: ApplicationProblem,
-) -> Result<ApplicationProblemEnvelope> {
-    ApplicationProblemEnvelope::new(contract, request_id, problem).map_err(|error| {
-        retained_contract_error("invalid retained application problem envelope", error)
-    })
 }
 
 async fn admitted_graph_query(
@@ -759,8 +735,12 @@ fn dispatch_git_tools_inner<'a>(
                     git::handle_diff_context(cg, &graph, args).await
                 }
                 "tracedecay_changelog" => {
-                    let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
-                    git::handle_changelog(cg, &graph, args).await
+                    git::handle_changelog(
+                        cg,
+                        admitted_graph_query(cg, &options, "file_dependents"),
+                        args,
+                    )
+                    .await
                 }
                 "tracedecay_commit_context" => {
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
@@ -1012,7 +992,7 @@ fn dispatch_retained_application_tools_inner<'a>(
                                 == tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION
                             && response.request_id == request_id.as_str() =>
                     {
-                        retained_response::validated_retained_response(
+                        validated_retained_response(
                             response.outcome,
                             retained_operation,
                             &request_id,
@@ -1131,10 +1111,9 @@ fn dispatch_session_workflow_tools_inner<'a>(
                 .await
             }
             "tracedecay_run_affected_tests" => {
-                let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
                 workflow::handle_run_affected_tests(
                     cg,
-                    &graph,
+                    admitted_graph_query(cg, &options, "file_dependents"),
                     args,
                     options.application_cancellation.clone(),
                     options.code_index_publication_identity.as_deref(),

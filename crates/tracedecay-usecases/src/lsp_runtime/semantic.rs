@@ -18,7 +18,7 @@ use tracedecay_lsp::{
     LspRuntimeFuture, SemanticProviderPort, UnavailableSemanticProvider, UpstreamCapabilities,
 };
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{DaemonSemanticProviderAdapter, UpstreamCapabilityInitializationAuthority};
 use crate::lsp_support::analyzer_runtime_config_error;

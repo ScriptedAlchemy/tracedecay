@@ -1039,7 +1039,7 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
         QueryNormalizationRevision::new("normalization.daemon-owned-test.v1")
             .expect("normalization revision");
     let PrimitiveRequest::SymbolSearch(symbol_search) =
-        crate::application_surface::primitive_code_into_primitive(
+        tracedecay_application::primitive_code_into_primitive(
             symbol_search,
             sanitizer_revision.clone(),
             normalization_revision.clone(),
@@ -1714,7 +1714,7 @@ async fn dead_daemon_surface_dispatch_fails_fast_with_typed_unreachable() {
             _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
         ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
-            tracedecay_runtime_core::errors::Result<()>,
+            tracedecay_domain::errors::Result<()>,
         > {
             Box::pin(async { Ok(()) })
         }

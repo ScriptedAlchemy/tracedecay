@@ -22,7 +22,7 @@ use tracedecay_usecases::context::ResolvedSessionIdentity;
 use super::lcm::DirectRetainedLcmPortV1;
 use super::memory::DirectRetainedMemoryPortV1;
 use super::session::DirectProfileRetainedSessionPortV1;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 /// Exact mounted authorities for a profile-retained request.
 #[derive(Clone)]

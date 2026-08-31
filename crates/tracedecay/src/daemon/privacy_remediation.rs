@@ -17,7 +17,7 @@ use tracedecay_usecases::memory::{
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Spawns the bounded background rescan for one adopted project store.
 pub(crate) fn spawn_at_rest_privacy_remediation(

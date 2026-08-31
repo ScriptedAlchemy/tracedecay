@@ -1,5 +1,5 @@
 use super::connection::Database;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 impl Database {
     /// Owner-bound metadata-only semantic-vector staging authority.

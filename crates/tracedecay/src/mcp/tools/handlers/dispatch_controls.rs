@@ -5,7 +5,7 @@ use tracedecay_application::{CancellationSignal, Deadline};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{ToolCallRegistryOptions, analytics};
 use tracedecay_mcp::ToolResult;

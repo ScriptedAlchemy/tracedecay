@@ -51,7 +51,7 @@ pub(super) struct AuditProgress {
 
 pub(super) async fn ensure_audit_checkpoint_schema(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     validate_existing_audit_checkpoint_baseline(conn).await?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS authority_audit_checkpoints (
@@ -151,7 +151,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
 
 async fn validate_existing_audit_checkpoint_baseline(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM sqlite_schema
@@ -205,7 +205,7 @@ async fn validate_existing_audit_checkpoint_baseline(
 
 pub(super) async fn read_audit_checkpoint(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<Option<AuditCheckpoint>> {
+) -> tracedecay_domain::errors::Result<Option<AuditCheckpoint>> {
     let mut rows = conn
         .query(
             "SELECT receipt_rowid, observation_sequence,
@@ -259,7 +259,7 @@ pub(super) async fn read_audit_checkpoint(
 pub(super) async fn audit_checkpoint_is_plausible(
     conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     if checkpoint.receipt_rowid < 0
         || checkpoint.observation_sequence < 0
         || checkpoint.source_cursor_rowid < 0
@@ -345,7 +345,7 @@ impl ProjectionAuthorityState {
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let mut rows = conn
             .query(
                 "SELECT
@@ -428,7 +428,7 @@ impl ProjectionAliasRow {
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let mut rows = conn
             .query(
                 "SELECT output_provider, output_message_id
@@ -480,7 +480,7 @@ impl ProjectionProvenanceRow {
     async fn load_batch(
         conn: &impl QueryExecutor,
         observation_ids: &BTreeSet<String>,
-    ) -> tracedecay_runtime_core::errors::Result<HashMap<(String, i64), Self>> {
+    ) -> tracedecay_domain::errors::Result<HashMap<(String, i64), Self>> {
         let mut rows_by_key = HashMap::new();
         if observation_ids.is_empty() {
             return Ok(rows_by_key);
@@ -552,7 +552,7 @@ impl ProjectionDispositionRow {
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let mut rows = conn
             .query(
                 "SELECT receipt_id, reason FROM observation_projection_dispositions
@@ -600,7 +600,7 @@ impl ProjectionOutputOwnership {
     async fn load_batch(
         conn: &impl QueryExecutor,
         outputs: &BTreeSet<(String, String)>,
-    ) -> tracedecay_runtime_core::errors::Result<HashMap<(String, String), i64>> {
+    ) -> tracedecay_domain::errors::Result<HashMap<(String, String), i64>> {
         let mut counts = HashMap::with_capacity(outputs.len());
         if outputs.is_empty() {
             return Ok(counts);
@@ -659,7 +659,7 @@ impl ProjectionOutputOwnership {
         Self { creator_count }
     }
 
-    fn validate(self) -> tracedecay_runtime_core::errors::Result<()> {
+    fn validate(self) -> tracedecay_domain::errors::Result<()> {
         if self.creator_count > 1 {
             return Err(authority_violation(
                 "projection output has multiple creation owners",
@@ -708,7 +708,7 @@ impl ResolvedOutputAuthority {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<&ProjectionOutputAuthority> {
+    ) -> tracedecay_domain::errors::Result<&ProjectionOutputAuthority> {
         self.authorities
             .get(&(provider.to_owned(), message_id.to_owned()))
             .ok_or_else(|| {
@@ -728,7 +728,7 @@ fn validate_alias_binding(
     alias: &ProjectionAliasRow,
     unaliased: &ObservationProjection,
     projection: &SessionMessageProjection,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let unaliased_projection = unaliased.message().ok_or_else(|| {
         authority_violation("projection alias is ineligible without a message output")
     })?;
@@ -752,7 +752,7 @@ fn validate_alias_binding(
 fn validate_provenance_row(
     actual: &ProjectionProvenanceRow,
     projection: &SessionMessageProjection,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let provenance = projection.provenance();
     let message = projection.message();
     let output_digest = projection.output_digest().map_err(|_| {
@@ -778,7 +778,7 @@ async fn validate_message_projection_row(
     effect: &ObservationProjection,
     resolved: &ResolvedOutputAuthority,
     projection: &SessionMessageProjection,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     let message = projection.message();
     let Some(provenance) =
         resolved.provenance_row(observation_id, i64::from(projection.output_ordinal()))
@@ -844,7 +844,7 @@ async fn validate_message_projection(
     effect: &ObservationProjection,
     resolved: &ResolvedOutputAuthority,
     projection: &SessionMessageProjection,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if state.alias_rows > 1 {
         return Err(authority_violation(
             "projection authority must contain exactly one message outcome",
@@ -873,7 +873,7 @@ async fn validate_skipped_projection(
     observation: &DurableObservationV1,
     state: ProjectionAuthorityState,
     reason: ProjectionSkipReason,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let observation_id = observation.observation_id().as_str();
     if state.is_pending_skip() {
         return Ok(());
@@ -891,7 +891,7 @@ fn validate_skipped_projection_row(
     observation: &DurableObservationV1,
     disposition: &ProjectionDispositionRow,
     reason: ProjectionSkipReason,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if disposition.receipt_id != observation.receipt().receipt().receipt_id().as_str()
         || disposition.reason != reason.as_str()
     {
@@ -913,7 +913,7 @@ async fn validate_composite_projection(
     message: Option<&SessionMessageProjection>,
     derived_messages: &[SessionMessageProjection],
     workflow_facts: &[WorkflowFactProjection],
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if workflow_facts.is_empty() && derived_messages.is_empty() {
         return Err(authority_violation(
             "composite projection has no additional output",
@@ -1005,7 +1005,7 @@ async fn validate_composite_projection(
 async fn derive_projection_effect(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
-) -> tracedecay_runtime_core::errors::Result<ObservationProjection> {
+) -> tracedecay_domain::errors::Result<ObservationProjection> {
     crate::observation_projection::derive_projection_with_alias(conn, observation)
         .await
         .map_err(|error| authority_violation(format!("invalid projection authority: {error}")))
@@ -1038,7 +1038,7 @@ fn requested_outputs(effects: &[ObservationProjection]) -> BTreeSet<(String, Str
 async fn derive_page_effects(
     conn: &impl QueryExecutor,
     observations: &[&DurableObservationV1],
-) -> tracedecay_runtime_core::errors::Result<Vec<ObservationProjection>> {
+) -> tracedecay_domain::errors::Result<Vec<ObservationProjection>> {
     let mut effects = Vec::with_capacity(observations.len());
     for group in observations.chunks(DETAILED_AUDIT_CONCURRENCY) {
         effects.extend(
@@ -1063,7 +1063,7 @@ async fn resolve_output_authority(
     conn: &impl QueryExecutor,
     observations: &[&DurableObservationV1],
     effects: &[ObservationProjection],
-) -> tracedecay_runtime_core::errors::Result<ResolvedOutputAuthority> {
+) -> tracedecay_domain::errors::Result<ResolvedOutputAuthority> {
     let outputs = requested_outputs(effects);
     let authorities = crate::observation_projection::read_output_authorities(conn, &outputs)
         .await
@@ -1102,7 +1102,7 @@ async fn resolve_output_authority(
 async fn validate_projection_effects(
     conn: &impl QueryExecutor,
     observations: &[&DurableObservationV1],
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let effects = derive_page_effects(conn, observations).await?;
     let resolved = resolve_output_authority(conn, observations, &effects).await?;
     for group in observations
@@ -1123,7 +1123,7 @@ async fn validate_projection_effect(
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
     resolved: &ResolvedOutputAuthority,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     // The unaliased projection is only needed to validate alias bindings, so it
     // is derived lazily inside the arms that consume it.
     let observation_id = observation.observation_id().as_str();
@@ -1174,7 +1174,7 @@ async fn validate_projection_effect(
 
 fn derive_unaliased_projection(
     observation: &DurableObservationV1,
-) -> tracedecay_runtime_core::errors::Result<ObservationProjection> {
+) -> tracedecay_domain::errors::Result<ObservationProjection> {
     crate::observation_projection::derive_projection(observation)
         .map_err(|error| authority_violation(format!("invalid projection authority: {error}")))
 }
@@ -1182,7 +1182,7 @@ fn derive_unaliased_projection(
 async fn observation_by_id(
     conn: &impl QueryExecutor,
     observation_id: &str,
-) -> tracedecay_runtime_core::errors::Result<DurableObservationV1> {
+) -> tracedecay_domain::errors::Result<DurableObservationV1> {
     let mut rows = conn
         .query(
             "SELECT observation_json FROM observations WHERE observation_id = ?1",
@@ -1206,7 +1206,7 @@ async fn count_suffix_rows(
     conn: &impl QueryExecutor,
     table: &str,
     after_rowid: i64,
-) -> tracedecay_runtime_core::errors::Result<(i64, i64)> {
+) -> tracedecay_domain::errors::Result<(i64, i64)> {
     let query = format!(
         "SELECT COALESCE(MAX(rowid), ?1), COUNT(*) FROM {table}
          WHERE rowid > ?1 AND projector_version = ?2"
@@ -1239,7 +1239,7 @@ async fn collect_projection_suffix_ids(
     after_rowid: i64,
     through_observation_sequence: i64,
     observation_ids: &mut BTreeSet<String>,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let query = format!(
         "SELECT projection.rowid, projection.observation_id
          FROM {table} AS projection
@@ -1290,7 +1290,7 @@ async fn projection_rowid_through_sequence(
     conn: &impl QueryExecutor,
     table: &str,
     through_observation_sequence: i64,
-) -> tracedecay_runtime_core::errors::Result<i64> {
+) -> tracedecay_domain::errors::Result<i64> {
     let query = format!(
         "SELECT COALESCE(MAX(projection.rowid), 0)
          FROM {table} AS projection
@@ -1321,7 +1321,7 @@ async fn projection_audit_checkpoint_through_sequence(
     conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
     observation_sequence: i64,
-) -> tracedecay_runtime_core::errors::Result<AuditCheckpoint> {
+) -> tracedecay_domain::errors::Result<AuditCheckpoint> {
     if checkpoint.bounded_passes_since_exhaustive == INCOMPLETE_EXHAUSTIVE_PASS {
         return Ok(AuditCheckpoint {
             projection_checkpoint: observation_sequence,
@@ -1360,7 +1360,7 @@ async fn validate_projection_authority_suffix_pages(
     conn: &impl QueryExecutor,
     mut checkpoint: AuditCheckpoint,
     page_limit: Option<i64>,
-) -> tracedecay_runtime_core::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
+) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
     let (provenance_rowid, provenance_audited) = count_suffix_rows(
         conn,
         "observation_projection_provenance",
@@ -1645,7 +1645,7 @@ async fn validate_projection_authority_suffix_pages(
 pub(super) async fn validate_projection_authority_suffix(
     conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
-) -> tracedecay_runtime_core::errors::Result<(AuditCheckpoint, i64, i64, i64)> {
+) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64)> {
     let (checkpoint, provenance, dispositions, aliases, _) =
         validate_projection_authority_suffix_pages(conn, checkpoint, None).await?;
     Ok((checkpoint, provenance, dispositions, aliases))
@@ -1654,7 +1654,7 @@ pub(super) async fn validate_projection_authority_suffix(
 pub(super) async fn validate_projection_authority_chunk(
     conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
-) -> tracedecay_runtime_core::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
+) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
     validate_projection_authority_suffix_pages(
         conn,
         checkpoint,
@@ -1666,7 +1666,7 @@ pub(super) async fn validate_projection_authority_chunk(
 pub(super) async fn write_audit_checkpoint(
     conn: &impl Executor,
     progress: AuditProgress,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let checkpoint = progress.checkpoint;
     conn.execute(
         "INSERT INTO authority_audit_checkpoints (

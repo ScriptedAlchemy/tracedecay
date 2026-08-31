@@ -38,8 +38,11 @@ pub(super) fn validate_memory_mutation<T: Debug>(
     match memory_mutation_settlement(settlement)? {
         MemoryMutationSettlement::Validated(outcome) => Ok(outcome),
         MemoryMutationSettlement::InvalidAuthority(outcome) => {
-            let committed_state =
-                committed_state(&outcome).ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+            let committed_state = committed_state(&outcome).ok_or_else(|| {
+                RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the invalid authority result carried no committed state",
+                )
+            })?;
             Err(prepared.partial_error_with_digest(
                 committed_state,
                 "application.retained.memory-authority-result-invalid",

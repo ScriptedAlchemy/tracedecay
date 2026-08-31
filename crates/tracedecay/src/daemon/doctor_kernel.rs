@@ -1100,7 +1100,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             };
             let inputs = DoctorKernelInputsV1 {
                 configuration: configuration_read_from_pin::<
-                    tracedecay_runtime_core::errors::TraceDecayError,
+                    tracedecay_domain::errors::TraceDecayError,
                 >(&pinned),
                 runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {
                     serving: true,

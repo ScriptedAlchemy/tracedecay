@@ -7,7 +7,8 @@ use tracedecay_code_extraction::{
     ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
 };
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, SourceSpan, SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1, SourceSpan,
+    SymbolOccurrenceId,
 };
 
 use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key};
@@ -118,6 +119,41 @@ impl CodeIndexImportEvidenceV1 {
     }
 }
 
+/// One parser-observed reference the file's own symbol table could not bind.
+/// Retained as typed evidence so generation sealing can resolve it against
+/// the whole generation's symbol set, where a cross-file target may live.
+/// Names are already narrowed at retention: ubiquitous method names and
+/// receiver-dotted paths never reach this lane.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexUnresolvedReferenceV1 {
+    pub from_occurrence: SymbolOccurrenceId,
+    pub reference_name: String,
+    pub kind: RelationEdgeKindV1,
+    /// The referencing symbol's extraction-attested span — the same evidence
+    /// span its same-file edges carry.
+    pub evidence_span: SourceSpan,
+}
+
+impl CodeIndexUnresolvedReferenceV1 {
+    pub(crate) fn validate(&self) -> Result<(), ChunkingFailureV1> {
+        self.from_occurrence
+            .validate()
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
+        if self.reference_name.is_empty() {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "unresolved reference has an empty name".to_owned(),
+            ));
+        }
+        if self.evidence_span.is_empty() {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "unresolved reference has an empty evidence span".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Parser-backed evidence for one indexed file. The canonical relation rows
 /// contain only relation kinds the graph contract can represent; everything
 /// else remains a typed abstention rather than a synthetic edge.
@@ -131,6 +167,10 @@ pub struct CodeFileIndexArtifactsV1 {
     pub edges: Vec<CanonicalRelationEdgeV1>,
     pub edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     pub imports: Vec<CodeIndexImportEvidenceV1>,
+    /// References this file could not bind locally, canonically ordered.
+    /// Generation sealing derives cross-file edges from these against the
+    /// whole staged file set; they never bind within one file alone.
+    pub unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 /// Why one parser relation was not promoted into the canonical graph lane.
@@ -154,11 +194,13 @@ pub struct CodeIndexEdgeAbstentionV1 {
 }
 
 impl CodeFileIndexArtifactsV1 {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parser_artifact(
         chunks: CodeFileChunksV1,
         symbols: Vec<LineageSymbolRecordV1>,
         edges: Vec<CanonicalRelationEdgeV1>,
         edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
+        unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
         artifact: &ExtractionArtifactV1,
         extraction: &ExtractionBatchV1,
     ) -> Result<Self, ChunkingFailureV1> {
@@ -175,6 +217,7 @@ impl CodeFileIndexArtifactsV1 {
             edges,
             edge_abstentions,
             imports,
+            unresolved_references,
         )?;
         artifacts.validate_generation_import_authority(extraction)?;
         Ok(artifacts)
@@ -184,7 +227,14 @@ impl CodeFileIndexArtifactsV1 {
         chunks: CodeFileChunksV1,
         extraction: &ExtractionBatchV1,
     ) -> Result<Self, ChunkingFailureV1> {
-        let artifacts = Self::from_parts(chunks, Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
+        let artifacts = Self::from_parts(
+            chunks,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
         artifacts.validate_generation_import_authority(extraction)?;
         Ok(artifacts)
     }
@@ -195,14 +245,18 @@ impl CodeFileIndexArtifactsV1 {
         edges: Vec<CanonicalRelationEdgeV1>,
         edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
         mut imports: Vec<CodeIndexImportEvidenceV1>,
+        mut unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
     ) -> Result<Self, ChunkingFailureV1> {
         imports.sort_by(canonical_import_order);
+        unresolved_references.sort();
+        unresolved_references.dedup();
         let artifacts = Self {
             chunks,
             symbols,
             edges,
             edge_abstentions,
             imports,
+            unresolved_references,
         };
         artifacts.validate()?;
         Ok(artifacts)
@@ -254,6 +308,23 @@ impl CodeFileIndexArtifactsV1 {
         {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
                 "file graph evidence is not canonical".to_owned(),
+            ));
+        }
+        for reference in &self.unresolved_references {
+            reference.validate()?;
+            if !occurrences.contains(&reference.from_occurrence) {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "unresolved reference is not anchored to a file symbol".to_owned(),
+                ));
+            }
+        }
+        if self
+            .unresolved_references
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "unresolved references are not in strict canonical order".to_owned(),
             ));
         }
         Ok(())
@@ -377,12 +448,19 @@ impl CodeFileIndexArtifactsV1 {
         for row in &mut imports {
             row.file_occurrence_id = file_occurrence_id.clone();
         }
+        let mut unresolved_references = self.unresolved_references.clone();
+        for reference in &mut unresolved_references {
+            reference.from_occurrence =
+                rematerialized_occurrence(&occurrences, &reference.from_occurrence)?;
+        }
+        unresolved_references.sort();
         let result = Self {
             chunks,
             symbols,
             edges,
             edge_abstentions: self.edge_abstentions.clone(),
             imports,
+            unresolved_references,
         };
         result.validate()?;
         Ok(result)

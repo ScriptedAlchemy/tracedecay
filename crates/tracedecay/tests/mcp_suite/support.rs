@@ -28,6 +28,8 @@ use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRu
 use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
+use tracedecay_domain::errors::TraceDecayError;
+#[cfg(feature = "test-transport")]
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
@@ -43,8 +45,6 @@ use tracedecay_domain::{
 #[cfg(feature = "test-transport")]
 use tracedecay_mcp::McpTransport;
 use tracedecay_mcp::ToolResult;
-#[cfg(feature = "test-transport")]
-use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -389,7 +389,7 @@ pub(crate) async fn handle_tool_call(
     mut args: serde_json::Value,
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
@@ -403,14 +403,13 @@ pub(crate) async fn handle_tool_call(
     // in-process MCP harness and the for-test server constructor live behind
     // it); without the feature these tools take the generic path below.
     //
-    // Always mount the retained project session runtime for these tools. Falling
-    // through when `sessions.db` is not yet a regular file left
-    // `active_project_session_db` unset, so message-search and LCM reads failed
-    // closed even though the test graph still retained a registered session
-    // authority (production mounts that authority before dispatching the same
-    // tools).
+    // Every retained-surface tool (LCM, message search, fact store, session
+    // and workflow reads) executes through the daemon retained owner in
+    // production, so dispatch it through the registered test server — which
+    // mounts that owner in process — rather than the bare registry path whose
+    // missing executor truthfully reports the transport as unavailable.
     #[cfg(feature = "test-transport")]
-    if tool_name == "tracedecay_message_search" || tool_name.starts_with("tracedecay_lcm_") {
+    if tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
         let runtime = open_active_project_scoped_runtime(cg).await;
         // Boxed graph-open and server-construction futures: these are the
         // deep production compositions whose inline layouts overflow the
@@ -451,7 +450,40 @@ pub(crate) async fn handle_tool_call(
                 message: format!("{tool_name} failed over MCP: {error}"),
             });
         }
-        return Ok(ToolResult::new(response["result"].clone(), Vec::new()));
+        // The retained MCP contract is the versioned
+        // `schema.application.retained.*` envelope. These handler tests assert
+        // the owner's payload, so unwrap evidence payloads here and surface
+        // refusals as errors; a problem envelope is a refusal, not an answer.
+        let result = response["result"].clone();
+        let envelope = result["content"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    let text = item["text"].as_str()?;
+                    serde_json::from_str::<Value>(text).ok().filter(|value| {
+                        value.get("outcome").is_some() || value.get("problem").is_some()
+                    })
+                })
+            })
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("{tool_name} returned no retained envelope: {result}"),
+            })?;
+        if envelope.pointer("/outcome/outcome").and_then(Value::as_str) != Some("evidence") {
+            return Err(TraceDecayError::Config {
+                message: format!("{tool_name} answered with a retained refusal: {envelope}"),
+            });
+        }
+        let payload = envelope
+            .pointer("/outcome/value/payload")
+            .cloned()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("{tool_name} omitted its retained payload: {envelope}"),
+            })?;
+        let mut unwrapped = result;
+        unwrapped["content"] = serde_json::json!([
+            { "type": "text", "text": payload.to_string() }
+        ]);
+        return Ok(ToolResult::new(unwrapped, Vec::new()));
     }
     Box::pin(tracedecay::mcp::handle_tool_call(
         cg,
@@ -471,7 +503,7 @@ pub(crate) async fn handle_tool_call_with_runtime(
     mut args: serde_json::Value,
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
@@ -485,10 +517,14 @@ async fn handle_project_open_source_edit_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
     mut args: Value,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let graph = Box::pin(TraceDecay::open(cg.project_root())).await?;
     let server = Box::pin(McpServer::new(graph, None)).await;
-    server
+    // `false` means this direct server has no production code-graph
+    // projection port, so the source-edit authority cannot mount; the
+    // dispatch boundary below is still the production path, and an actual
+    // edit reports its typed executor-unavailable refusal.
+    let _authority_mounted = server
         .install_project_open_source_edit_authority_for_test()
         .await?;
 
@@ -545,7 +581,7 @@ pub(crate) async fn handle_production_source_edit_tool_call(
     mut args: Value,
     _server_stats: Option<Value>,
     _scope_prefix: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(object) = args.as_object_mut() {
         object
@@ -643,7 +679,7 @@ async fn call_project_open_source_edit_server(
     server: &McpServer,
     tool_name: &str,
     arguments: Value,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -977,7 +1013,7 @@ pub(crate) fn extract_first_json_content(value: &Value) -> Value {
         .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
 }
 
-pub(crate) fn expect_tool_error<T>(result: tracedecay_runtime_core::errors::Result<T>) -> String {
+pub(crate) fn expect_tool_error<T>(result: tracedecay_domain::errors::Result<T>) -> String {
     match result {
         Ok(_) => panic!("expected tool call to fail"),
         Err(err) => format!("{err}"),

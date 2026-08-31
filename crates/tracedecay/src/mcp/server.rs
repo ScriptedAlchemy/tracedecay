@@ -18,21 +18,21 @@ use crate::mcp::tool_analytics::{
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_daemon_protocol::wire::is_wire_oversized_io_error;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
 use tracedecay_mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
 
-use super::tools::{
-    ProjectRegistryReadPort, SessionRefreshServicePort, default_catalog_discovery_authority,
-};
+use super::tools::default_catalog_discovery_authority;
+use tracedecay_application::ProjectRegistryReadPort;
+use tracedecay_mcp::SessionRefreshServicePort;
 use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
@@ -166,7 +166,7 @@ pub(crate) struct SourceEditInvocationV1 {
 pub(crate) type SourceEditFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = tracedecay_runtime_core::errors::Result<
+                Output = tracedecay_domain::errors::Result<
                     tracedecay_application::source_edit::SourceEditSurfaceResultV1,
                 >,
             > + Send
@@ -568,7 +568,7 @@ impl McpServer {
         cg: TraceDecay,
         scope_prefix: Option<String>,
         runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
-    ) -> tracedecay_runtime_core::errors::Result<Arc<Self>> {
+    ) -> tracedecay_domain::errors::Result<Arc<Self>> {
         Self::new_with_retained_test_servers_for_test(cg, scope_prefix, runtime, Vec::new()).await
     }
 
@@ -586,7 +586,7 @@ impl McpServer {
         scope_prefix: Option<String>,
         runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
         retained_servers: Vec<Arc<McpServer>>,
-    ) -> tracedecay_runtime_core::errors::Result<Arc<Self>> {
+    ) -> tracedecay_domain::errors::Result<Arc<Self>> {
         let runtime = runtime.into_runtime();
         let mut context = runtime.mcp_server_context_for_test(cg, scope_prefix)?;
         // Hook notifications require a durable admission spool before their
@@ -601,10 +601,8 @@ impl McpServer {
                 tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
             })
             .await
-            .map_err(|error| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: format!("test server host-admission task failed: {error}"),
-                }
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("test server host-admission task failed: {error}"),
             })?;
             let (admission_runtime, _) = admission_runtime?;
             context.host_admission_broker = Some(Arc::new(
@@ -630,17 +628,33 @@ impl McpServer {
     pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
         retained_servers: Vec<Arc<McpServer>>,
-    ) -> tracedecay_runtime_core::errors::Result<Arc<Self>> {
+    ) -> tracedecay_domain::errors::Result<Arc<Self>> {
         context
             .host_admission_test_runtime
             .as_ref()
-            .ok_or_else(
-                || tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: "registered test context is missing its host-admission runtime"
-                        .to_owned(),
-                },
-            )?;
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "registered test context is missing its host-admission runtime".to_owned(),
+            })?;
         let retained_root = context.cg.project_root().to_path_buf();
+        // The daemon mounts the project retained owner at project open, so
+        // retained application tools (`tracedecay_lcm_*`, fact-store, session
+        // and workflow reads) execute against the real in-process owner
+        // instead of reporting the daemon transport as unavailable. Mirror
+        // that mount for registered test servers. A graph without a
+        // registered project identity has no owner to mount — production
+        // refuses to open such a project — so those direct fixtures keep the
+        // typed unavailable envelope.
+        let retained_owner_transport = if context.application_invocation_executor.is_none()
+            && context.cg.store_layout().identity.project_id.is_some()
+        {
+            let transport = crate::daemon::retained_test_support::project_retained_owner_transport(
+                context.cg.project_root(),
+            )?;
+            context = context.with_application_invocation_executor(Arc::clone(&transport.executor));
+            Some(transport)
+        } else {
+            None
+        };
         // The daemon always has the active project mounted, so its resolver can
         // serve it like any other registered project. Mirror that here through
         // a late-bound weak slot: the server is only available after
@@ -687,13 +701,11 @@ impl McpServer {
                         return Ok(matches.pop());
                     }
                     if !matches.is_empty() {
-                        return Err(
-                            tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                                "project_route_ambiguous",
-                                false,
-                                "multiple retained test servers match one registered project route",
-                            ),
-                        );
+                        return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                            "project_route_ambiguous",
+                            false,
+                            "multiple retained test servers match one registered project route",
+                        ));
                     }
                     let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
                     let Some(active) = active else {
@@ -710,6 +722,13 @@ impl McpServer {
             });
         context = context.with_retained_project_server_resolver(resolver);
         let server = Self::new_with_context(context).await;
+        if let Some(transport) = retained_owner_transport {
+            crate::daemon::retained_test_support::register_project_retained_owner_for_test(
+                &transport.service,
+                server.as_ref(),
+            )
+            .await?;
+        }
         // Registered test servers exercise real completion without consulting
         // the operator's network. A fresh cache entry for this exact build
         // keeps version-notice behavior deterministic while preserving the
@@ -1195,9 +1214,15 @@ impl McpServer {
 
     #[cfg(feature = "test-transport")]
     #[doc(hidden)]
+    /// Mounts the daemon-owned source-edit authority on a test server.
+    ///
+    /// Returns `Ok(false)` when this server was constructed without the
+    /// production code-graph projection port (a direct test server), so the
+    /// authority cannot mount; dispatch-boundary behavior is unaffected and
+    /// actual edits then report their typed executor-unavailable refusal.
     pub async fn install_project_open_source_edit_authority_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<bool> {
         crate::daemon::project_open_owners::install_project_open_source_edit_owners_for_test(self)
             .await
     }

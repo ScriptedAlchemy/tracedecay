@@ -7,8 +7,8 @@ use tracedecay_domain::FactOwnerV1;
 
 use crate::db::engine::Executor;
 #[cfg(test)]
-use crate::errors::Result;
-use crate::errors::TraceDecayError;
+use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::TraceDecayError;
 
 mod schema;
 #[cfg(test)]

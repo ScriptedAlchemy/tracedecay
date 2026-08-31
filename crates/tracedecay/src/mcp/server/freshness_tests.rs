@@ -247,7 +247,7 @@ async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db
 
 #[test]
 fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
-    let error = tracedecay_runtime_core::errors::TraceDecayError::hook_runtime_with_status(
+    let error = tracedecay_domain::errors::TraceDecayError::hook_runtime_with_status(
         "observation_cursor_conflict",
         true,
         "Claude observation store operation failed",
@@ -267,7 +267,7 @@ fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
 
 #[test]
 fn project_route_error_messages_keep_retry_authority_when_clients_hide_error_data() {
-    let error = tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
+    let error = tracedecay_domain::errors::TraceDecayError::ProjectRoute {
         reason_code: "code-graph-unavailable".to_owned(),
         retryable: true,
         detail: "the verified code graph is not ready for the exact project root".to_owned(),

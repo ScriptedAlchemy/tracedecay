@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 pub use cache::DiagnosticsCache;
 
@@ -156,7 +156,7 @@ pub fn spawn_rust_diagnostics_prewarm(project_root: &Path) -> Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_child| ())
-        .map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
+        .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("failed to spawn cargo prewarm: {e}"),
         })
 }

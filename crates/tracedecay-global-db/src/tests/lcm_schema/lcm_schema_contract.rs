@@ -1,5 +1,5 @@
 use super::*;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 #[tokio::test]
 async fn legacy_profile_requires_reset_without_carrying_session_content_forward() {

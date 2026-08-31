@@ -12,7 +12,7 @@ use crate::automation::run_ledger::AutomationRunLedgerRecord;
 
 use super::contract::contract_error;
 use super::terminal::AutomationSettledProblem;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub fn reset_required_problem(
     operation: &tracedecay_application::ApplicationOperation,
@@ -357,7 +357,7 @@ mod tests {
         let problem = runtime_problem(
             &context,
             &cancellation,
-            &tracedecay_runtime_core::errors::TraceDecayError::Config {
+            &tracedecay_domain::errors::TraceDecayError::Config {
                 message: "backend disconnected after admission".to_owned(),
             },
         )

@@ -13,9 +13,11 @@ use super::read_model::{
     scope_from_state,
 };
 use super::{DashboardState, build_selected_project_state, config_error};
-use crate::project_registry::{PublicCodeProject, build_project_registry_view};
+use crate::project_registry::{
+    PublicCodeProject, build_project_registry_view, public_code_project_from_record,
+};
 use tracedecay_global_db::ProjectRegistryContext;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Clone)]
 pub struct DashboardRuntime {
@@ -223,7 +225,7 @@ pub async fn list(
     let view = build_project_registry_view(&contexts, runtime.active_project_id(), truncated);
     let rows = projects
         .iter()
-        .map(|project| PublicCodeProject::from_record(project, runtime.active_project_id()))
+        .map(|project| public_code_project_from_record(project, runtime.active_project_id()))
         .collect::<Vec<_>>();
     let row_count = rows.len() as u64;
 
@@ -339,7 +341,7 @@ pub async fn context(
             status: "ok".to_owned(),
             error: None,
             is_active: Some(is_active),
-            project: Some(PublicCodeProject::from_record(
+            project: Some(public_code_project_from_record(
                 &context.project,
                 runtime.active_project_id(),
             )),

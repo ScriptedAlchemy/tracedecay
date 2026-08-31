@@ -6,7 +6,7 @@ use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
 use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(super) const INFO_SYMBOL_CENSUS_LIMIT: usize = 500_000;
 pub(super) const INFO_RELATION_LIMIT: usize = 2_000_000;

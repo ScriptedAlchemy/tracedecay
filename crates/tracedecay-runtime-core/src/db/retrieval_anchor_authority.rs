@@ -9,15 +9,9 @@ use tracedecay_store::{
 };
 
 use crate::db::engine::{QueryExecutor, params};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const OPERATION: &str = "retrieval anchor authority";
-
-impl From<RetrievalAnchorStoreError> for TraceDecayError {
-    fn from(error: RetrievalAnchorStoreError) -> Self {
-        authority_error(error.to_string())
-    }
-}
 
 #[cfg(test)]
 fn validate_label(value: &str, field: &str) -> Result<()> {

@@ -73,7 +73,8 @@ pub(crate) use tracedecay_usecases::user_config;
 // crate's root keeps every historical `crate::<module>::…` path in the moved
 // code resolving verbatim, exactly as the root crate's `src/<module>.rs` shims
 // do on the other side of the split.
-pub(crate) use tracedecay_runtime_core::{branch, config, db, errors, storage, worktree};
+pub(crate) use tracedecay_domain::errors;
+pub(crate) use tracedecay_runtime_core::{branch, config, db, storage, worktree};
 
 /// Kernel-owned slice of the former root `tracedecay` façade module.
 pub(crate) mod tracedecay {

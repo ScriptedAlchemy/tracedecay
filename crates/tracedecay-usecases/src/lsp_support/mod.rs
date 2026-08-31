@@ -1,7 +1,7 @@
 //! Store-free LSP runtime composition.
 
 use tracedecay_lsp::analyzer::AnalyzerRuntimeError;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 mod factory;
 mod runtime_adapters;

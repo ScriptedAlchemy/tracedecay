@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::config::TraceDecayConfig;
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 fn parse_counter(key: &'static str, value: Option<String>) -> Result<u64> {
     let Some(value) = value else {

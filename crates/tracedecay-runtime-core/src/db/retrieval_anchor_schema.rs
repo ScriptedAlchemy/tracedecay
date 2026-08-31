@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use crate::db::engine::{Executor, params};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const ALIASES_TABLE: &str = "retrieval_anchor_aliases";
 const LEGACY_ALIASES_TABLE: &str = "retrieval_anchor_aliases_owner_unbound_v1";

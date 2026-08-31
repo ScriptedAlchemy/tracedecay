@@ -9,7 +9,7 @@ use std::hash::BuildHasher;
 
 use super::queries::GraphQueryManager;
 use super::scc::tarjan_scc;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 #[derive(Clone, Debug)]
 pub struct VerifiedHealthSnapshotV1 {

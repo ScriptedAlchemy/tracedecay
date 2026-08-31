@@ -1,17 +1,37 @@
 //! Validation for the bounded `tracedecay_run_affected_tests` request.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use super::{MAX_TESTS_HARD_CAP, error_result};
-use tracedecay_mcp::ToolResult;
+use crate::tools::render;
+use crate::ToolResult;
 
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 300;
+/// Maximum exact test identities admitted to one managed foreground request.
+pub const MAX_TESTS_HARD_CAP: usize = 500;
 /// Managed test runs are foreground tool effects. A caller cannot turn one
 /// into an unbounded daemon job by selecting an arbitrarily distant deadline.
-pub(super) const MAX_TEST_TIMEOUT_SECS: u64 = DEFAULT_TEST_TIMEOUT_SECS;
+pub const MAX_TEST_TIMEOUT_SECS: u64 = DEFAULT_TEST_TIMEOUT_SECS;
+
+fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> ToolResult {
+    let value = json!({
+        "passed": 0,
+        "failed": 0,
+        "results": [],
+        "error": {
+            "kind": kind,
+            "operation": operation,
+            "message": message,
+        }
+    });
+    let text = render::finalize(None, args, &value, || render::generic_md(&value));
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        Vec::new(),
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum TestProfile {
+pub enum TestProfile {
     Debug,
     Release,
 }
@@ -33,16 +53,16 @@ impl TestProfile {
 }
 
 #[derive(Debug)]
-pub(super) struct RunAffectedArgs {
-    pub(super) explicit_paths: Option<Vec<String>>,
-    pub(super) profile: TestProfile,
-    pub(super) timeout_secs: u64,
-    pub(super) max_tests: usize,
+pub struct RunAffectedArgs {
+    pub explicit_paths: Option<Vec<String>>,
+    pub profile: TestProfile,
+    pub timeout_secs: u64,
+    pub max_tests: usize,
 }
 
 impl RunAffectedArgs {
     #[hotpath::measure(label = "mcp.workflow.affected_tests.request_build")]
-    pub(super) fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
+    pub fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
         let explicit_paths = match args.get("changed_paths") {
             Some(Value::Array(paths)) => {
                 let mut parsed = Vec::with_capacity(paths.len());

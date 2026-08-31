@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::client_identity::DaemonClientIdentity;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// How first-touch resolution treats a moved non-git store whose registry row
 /// no longer resolves at its recorded root.

@@ -222,7 +222,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             .begin_write_transaction("cancel queued linked-worktree writer")
             .await?;
         drop(transaction);
-        Ok::<(), tracedecay_runtime_core::errors::TraceDecayError>(())
+        Ok::<(), tracedecay_domain::errors::TraceDecayError>(())
     });
     tokio::task::yield_now().await;
     assert!(

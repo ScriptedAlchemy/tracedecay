@@ -179,16 +179,16 @@ fn denied<T>() -> Result<T, RetainedSurfaceExecutionErrorV1> {
 }
 
 fn map_target_infrastructure_error(
-    error: tracedecay_runtime_core::errors::TraceDecayError,
+    error: tracedecay_domain::errors::TraceDecayError,
 ) -> RetainedSurfaceExecutionErrorV1 {
     match error {
-        tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired { .. } => {
+        tracedecay_domain::errors::TraceDecayError::ProfileResetRequired { .. } => {
             RetainedSurfaceExecutionErrorV1::ProfileResetRequired
         }
-        tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { .. } => {
+        tracedecay_domain::errors::TraceDecayError::ResetRequired { .. } => {
             RetainedSurfaceExecutionErrorV1::ProjectResetRequired
         }
-        _ => RetainedSurfaceExecutionErrorV1::Unavailable,
+        error => RetainedSurfaceExecutionErrorV1::unavailable(error.to_string()),
     }
 }
 
@@ -262,17 +262,22 @@ mod tests {
 
     #[test]
     fn selected_target_infrastructure_failures_remain_typed() {
-        assert!(matches!(
+        let RetainedSurfaceExecutionErrorV1::Unavailable { detail } =
             map_target_infrastructure_error(
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: "corrupt registry".to_owned(),
-                }
-            ),
-            RetainedSurfaceExecutionErrorV1::Unavailable
-        ));
+                },
+            )
+        else {
+            panic!("infrastructure failures must map to the unavailable terminal");
+        };
+        assert!(
+            detail.contains("corrupt registry"),
+            "the detail must carry the underlying cause, got: {detail}"
+        );
         assert!(matches!(
             map_target_infrastructure_error(
-                tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+                tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
                     component: "profile-memory",
                     found_version: Some(1),
                     required_version: 2,
@@ -282,7 +287,7 @@ mod tests {
         ));
         assert!(matches!(
             map_target_infrastructure_error(
-                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                tracedecay_domain::errors::TraceDecayError::reset_required(
                     "project-memory",
                     "schema mismatch",
                 )

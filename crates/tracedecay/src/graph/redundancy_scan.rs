@@ -32,7 +32,7 @@ use tracedecay_code_extraction::redundancy::{
     redundancy_match_score, round4,
 };
 use tracedecay_domain::SourceSpan;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_usecases::semantic_runtime::{
     SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,

@@ -2,7 +2,7 @@ use tempfile::TempDir;
 
 use crate::tests::harness::open_registered_test_database_fixture;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 use super::reset_refused_observation_authority;
 

@@ -8,8 +8,9 @@ use crate::result::OpaqueCursor;
 use crate::retrieval::{
     CodeFacetDimension, CodeFacetRequest, CodeLexicalFieldFilter, CodeNavigationRequest,
     CodeQueryScope, CodeRelationRequest, CodeTimelineRequest, ExactOccurrenceRequest,
-    ImplementationSelector, PageRequest, PhraseSearchRequest, ResultProjection, RetrievalOrder,
-    RetrievalRequestMeta, SymbolGraphScope,
+    GraphRelationRequest, ImplementationSelector, ImplementationsRequest, PageRequest,
+    PhraseSearchRequest, PrimitiveRequest, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
+    SignatureSearchRequest, SymbolGraphScope, TypeHierarchyRequest,
 };
 
 /// Surface-owned query semantics. Page size remains an invocation control, but
@@ -159,6 +160,52 @@ pub enum PrimitiveCodeSurfaceRequest {
     Implementations(CodeImplementationsSurfaceRequest),
     TypeHierarchy(CodeTypeHierarchySurfaceRequest),
     Callers(CodeCallersSurfaceRequest),
+}
+
+pub fn primitive_code_into_primitive(
+    request: PrimitiveCodeSurfaceRequest,
+    sanitizer_revision: SanitizerRevision,
+    normalization_revision: QueryNormalizationRevision,
+    page: PageRequest,
+) -> Result<PrimitiveRequest, ApplicationContractError> {
+    Ok(match request {
+        PrimitiveCodeSurfaceRequest::SymbolSearch(request) => PrimitiveRequest::SymbolSearch(
+            request.into_primitive_request(sanitizer_revision, normalization_revision, page)?,
+        ),
+        PrimitiveCodeSurfaceRequest::SignatureSearch(request) => {
+            PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
+                returns: request.returns,
+                params: request.params,
+                is_async: request.is_async,
+                scope: request.scope,
+                meta: request.meta.into_application(page),
+            })
+        }
+        PrimitiveCodeSurfaceRequest::Implementations(request) => {
+            PrimitiveRequest::Implementations(ImplementationsRequest {
+                selector: request.selector,
+                scope: request.scope,
+                meta: request.meta.into_application(page),
+            })
+        }
+        PrimitiveCodeSurfaceRequest::TypeHierarchy(request) => {
+            PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
+                node_id: request.node_id,
+                maximum_depth: request.maximum_depth,
+                scope: request.scope,
+                meta: request.meta.into_application(page),
+            })
+        }
+        PrimitiveCodeSurfaceRequest::Callers(request) => {
+            PrimitiveRequest::Callers(GraphRelationRequest {
+                node_id: request.node_id,
+                maximum_depth: request.maximum_depth,
+                resolve_trait_dispatch: request.resolve_trait_dispatch,
+                scope: request.scope,
+                meta: request.meta.into_application(page),
+            })
+        }
+    })
 }
 
 impl CodeSymbolSearchSurfaceRequest {

@@ -11,6 +11,11 @@ mod workspace_diagnostics;
 use workspace_admission::CurrentLspWorkspaceAuthorityV1;
 pub(super) use workspace_diagnostics::PublishedCodeIndexWorkspaceDocuments;
 
+pub(in crate::daemon) const LSP_WORKSPACE_CAPABILITY_ID_V1: &str =
+    "capability.application.lsp.workspace-folders";
+pub(in crate::daemon) const LSP_WORKSPACE_USE_CASE_ID_V1: &str =
+    "use-case.application.lsp.workspace-folders";
+
 pub(super) fn admit_lsp_control(
     request_id: String,
     deadline: &Deadline,
@@ -187,12 +192,8 @@ impl DaemonInvocationService {
                 ));
             }
         };
-        let capability =
-            CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
-                .ok()?;
-        let use_case =
-            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
-                .ok()?;
+        let capability = CapabilityId::new(LSP_WORKSPACE_CAPABILITY_ID_V1).ok()?;
+        let use_case = UseCaseId::new(LSP_WORKSPACE_USE_CASE_ID_V1).ok()?;
         let mut admissions = Vec::with_capacity(roots.len());
         let mut storages = vec![active_storage.clone()];
         for (ordinal, (project_root, scope, locator)) in roots.iter().enumerate() {

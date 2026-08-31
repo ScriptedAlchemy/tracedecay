@@ -20,7 +20,7 @@ pub use tracedecay_automation::config::{
 };
 
 use tracedecay_runtime_core::db::engine::Executor;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Free-page compaction for tracked branch databases, off the hot path
 /// (plan 38, §6).

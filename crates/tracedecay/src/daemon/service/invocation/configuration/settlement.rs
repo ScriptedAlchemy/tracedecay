@@ -26,12 +26,8 @@ pub(super) async fn reconcile_configuration_runtime(
         }
     };
     let installation = hotpath::measure_block!("daemon.service.configuration.activate", {
-        crate::config::root_runtime_configuration(&current)
+        tracedecay_usecases::config::publish_pinned_runtime_configuration(current.clone())
             .map_err(|error| error.to_string())
-            .and_then(|root| {
-                crate::config::install_pinned_runtime_configuration(root)
-                    .map_err(|error| error.to_string())
-            })
     });
     let (observed_revision_id, activation_error_code) = match installation {
         Ok(()) => (Some(current.revision_id), None),

@@ -1,9 +1,14 @@
 //! Minimal project-source access composition over existing authorities.
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use tracedecay_application::{
-    ApplicationOperation, AuthorizationRequest, RequestAdmission, RequestContext, ResolvedScope,
+    ApplicationContractError, ApplicationOperation, ApplicationProblem, AuthorizationRequest,
+    CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope,
 };
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationRevisionId,
@@ -173,4 +178,32 @@ pub async fn project_source_access_snapshot_for_request(
 
 fn denied() -> ProjectSourceAccessOutcome {
     ProjectSourceAccessOutcome::Denied(ProjectSourceAccessDenial::NotFoundOrNotAuthorized)
+}
+
+/// Computes one project-source snapshot from the pinned configuration and
+/// admitted scope. Root composition implements this over the daemon-owned
+/// project-open binding authority.
+pub trait ProjectSourceAccessSnapshotPort: Send + Sync {
+    fn source_access_at(
+        &self,
+        scope: &ResolvedScope,
+        project_root: &Path,
+        configuration: &crate::config::PinnedRuntimeConfiguration,
+        observed_at: UtcMicros,
+    ) -> Result<ProjectSourceAccessSnapshot, ApplicationContractError>;
+}
+
+pub type CurrentCallableCodeAccessFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<ProjectSourceAccessSnapshot, ApplicationProblem>> + Send + 'a>,
+>;
+
+/// Source that refreshes current project-source access and then yields a
+/// callable-code authorization port for that exact snapshot.
+pub trait CallableCodeAuthorizationSourcePort: Send + Sync {
+    fn current(&self, observed_at: UtcMicros) -> CurrentCallableCodeAccessFuture<'_>;
+
+    fn authorize(
+        &self,
+        admitted_access: ProjectSourceAccessSnapshot,
+    ) -> Arc<dyn CallableCodeAuthorizationPort>;
 }

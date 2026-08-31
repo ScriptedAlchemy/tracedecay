@@ -12,7 +12,7 @@ use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
 };
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod bootstrap;
 mod lease;
