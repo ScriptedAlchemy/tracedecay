@@ -21,8 +21,7 @@ CREATE TABLE IF NOT EXISTS semantic_vector_stages (
     privacy_domain_digest TEXT NOT NULL,
     privacy_key_epoch INTEGER NOT NULL CHECK (privacy_key_epoch > 0),
     expected_chunk_manifest_digest TEXT NOT NULL,
-    expected_chunk_count INTEGER NOT NULL
-        CHECK (expected_chunk_count >= 0 AND expected_chunk_count <= 100000),
+    expected_chunk_count INTEGER NOT NULL CHECK (expected_chunk_count >= 0),
     expected_prior_verified_head TEXT,
     writer_binding TEXT NOT NULL CHECK (json_valid(writer_binding)),
     code_scope_hash TEXT NOT NULL
