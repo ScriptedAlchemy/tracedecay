@@ -29,10 +29,10 @@ const SESSION_SYNC_SHUTDOWN_ABORT_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct DaemonSessionSyncService {
-    pub contexts: Arc<RwLock<BTreeMap<String, Arc<SessionSyncProjectContext>>>>,
+    contexts: Arc<RwLock<BTreeMap<String, Arc<SessionSyncProjectContext>>>>,
     active: Arc<Mutex<BTreeMap<String, CancellationSignal>>>,
-    pub tasks: Arc<Mutex<Vec<SessionSyncTaskV1>>>,
-    pub scan_slots: Arc<tokio::sync::Semaphore>,
+    tasks: Arc<Mutex<Vec<SessionSyncTaskV1>>>,
+    scan_slots: Arc<tokio::sync::Semaphore>,
     project_gates: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
     completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
@@ -889,6 +889,154 @@ pub mod work;
 
 pub use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
 
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_harness {
+    use std::sync::{Arc, PoisonError};
+    use std::time::Duration;
+
+    use tokio::sync::Semaphore;
+    use tracedecay_application::session_sync::{
+        SessionSyncJournalV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncStatsV1,
+    };
+    use tracedecay_application::{
+        CancellationSignal, Deadline, IdempotencyKey, OperationTermination,
+    };
+    use tracedecay_domain::UtcMicros;
+
+    use super::{DaemonSessionSyncService, SessionSyncTaskV1};
+    use crate::session_temporal_refresh_scheduler::projector::{
+        SessionTemporalRefreshPolicy, SessionTemporalRefreshProjector,
+    };
+    use crate::session_temporal_refresh_scheduler::registry::{
+        SessionTemporalRefreshSchedulerRegistry, session_refresh_retry_delay as retry_delay,
+    };
+    use crate::session_temporal_refresh_scheduler::wake::{
+        RecoverySelectionGuard, SessionTemporalRefreshRetryClass,
+    };
+
+    pub use crate::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshPassReport;
+    pub use crate::session_temporal_refresh_scheduler::wake::SessionTemporalRefreshWakeState;
+    pub use crate::session_temporal_refresh_scheduler::{
+        apply_refresh_effect, begin_admitted_session_refreshes, process_refresh_begin_requests,
+        run_session_temporal_refresh_pass,
+    };
+
+    pub async fn wait_for_interruption(
+        service: &DaemonSessionSyncService,
+        cancellation: &CancellationSignal,
+        deadline: &Deadline,
+    ) -> super::work::SessionSyncInterruption {
+        service
+            .wait_for_interruption_parts(cancellation, deadline)
+            .await
+    }
+
+    pub fn context_count(service: &DaemonSessionSyncService) -> usize {
+        service
+            .contexts
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    pub fn task_count(service: &DaemonSessionSyncService) -> usize {
+        service
+            .tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    pub fn push_task(service: &DaemonSessionSyncService, task: SessionSyncTaskV1) {
+        service
+            .tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(task);
+    }
+
+    pub fn extend_tasks(
+        service: &DaemonSessionSyncService,
+        tasks: impl IntoIterator<Item = SessionSyncTaskV1>,
+    ) {
+        service
+            .tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(tasks);
+    }
+
+    pub fn scan_slots(service: &DaemonSessionSyncService) -> Arc<Semaphore> {
+        Arc::clone(&service.scan_slots)
+    }
+
+    pub fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
+        super::journal_prefix(scope)
+    }
+
+    pub fn completed_profile_sweep_covers(
+        sweep_started_at: Option<&UtcMicros>,
+        admitted_at: UtcMicros,
+    ) -> bool {
+        super::completed_profile_sweep_covers(sweep_started_at, admitted_at)
+    }
+
+    pub fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
+        super::journal_key(scope, key)
+    }
+
+    pub fn decode_matching_journal(
+        encoded: &str,
+        request: &SessionSyncRequestV1,
+    ) -> Result<SessionSyncJournalV1, &'static str> {
+        super::decode_matching_journal(encoded, request)
+    }
+
+    pub fn completion_termination(
+        requested: Option<OperationTermination>,
+        committed: bool,
+        stats: &SessionSyncStatsV1,
+        coverage_complete: bool,
+        failures_empty: bool,
+    ) -> OperationTermination {
+        super::completion_termination(
+            requested,
+            committed,
+            stats,
+            coverage_complete,
+            failures_empty,
+        )
+    }
+
+    pub fn configure_scheduler(
+        registry: &mut SessionTemporalRefreshSchedulerRegistry,
+        projector: Arc<dyn SessionTemporalRefreshProjector>,
+        policy: SessionTemporalRefreshPolicy,
+    ) {
+        registry.configure_for_test(projector, policy);
+    }
+
+    pub fn session_refresh_retry_delay(
+        class: SessionTemporalRefreshRetryClass,
+        attempt: u32,
+    ) -> Duration {
+        retry_delay(class, attempt)
+    }
+
+    pub fn complete_recovery_selection(
+        state: &SessionTemporalRefreshWakeState,
+        pending: Vec<String>,
+        completed: &[&str],
+    ) -> Vec<String> {
+        let mut selection = RecoverySelectionGuard::new(state, pending);
+        for operation in completed {
+            selection.complete(operation);
+        }
+        drop(selection);
+        state.pending_recovery_operations()
+    }
+}
+
 impl DaemonSessionSyncService {
     fn observed_interruption(
         &self,
@@ -914,7 +1062,7 @@ impl DaemonSessionSyncService {
             .await
     }
 
-    pub async fn wait_for_interruption_parts(
+    async fn wait_for_interruption_parts(
         &self,
         cancellation: &CancellationSignal,
         deadline: &Deadline,
@@ -940,7 +1088,7 @@ fn sleep_until_deadline(deadline: &tracedecay_application::Deadline) -> impl Fut
     tokio::time::sleep(Duration::from_micros(remaining))
 }
 
-pub fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
+fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
     let profile_id = scope.profile_id().as_str();
     let project_id = scope.project_id().as_str();
     format!(
@@ -960,7 +1108,7 @@ fn import_scope_key(scope: &SessionSyncScopeV1) -> String {
     )
 }
 
-pub fn completed_profile_sweep_covers(
+fn completed_profile_sweep_covers(
     sweep_started_at: Option<&UtcMicros>,
     admitted_at: UtcMicros,
 ) -> bool {
@@ -992,11 +1140,11 @@ fn source_coverage(
     }
 }
 
-pub fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
+fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
     format!("{}{}", journal_prefix(scope), key.as_str())
 }
 
-pub fn decode_matching_journal(
+fn decode_matching_journal(
     encoded: &str,
     request: &SessionSyncRequestV1,
 ) -> Result<SessionSyncJournalV1, &'static str> {
@@ -1011,7 +1159,7 @@ pub fn decode_matching_journal(
     Ok(journal)
 }
 
-pub fn completion_termination(
+fn completion_termination(
     requested: Option<OperationTermination>,
     committed: bool,
     stats: &SessionSyncStatsV1,

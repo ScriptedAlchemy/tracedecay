@@ -1,9 +1,14 @@
 use tracedecay_session_runtime::StoreOwnerKey;
+use tracedecay_session_runtime::session_sync::test_harness::{
+    SessionTemporalRefreshPassReport, SessionTemporalRefreshWakeState,
+    begin_admitted_session_refreshes, complete_recovery_selection, configure_scheduler,
+    process_refresh_begin_requests, session_refresh_retry_delay,
+};
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::projector::*;
-use tracedecay_session_runtime::session_temporal_refresh_scheduler::registry::*;
-use tracedecay_session_runtime::session_temporal_refresh_scheduler::wake::*;
-use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
-    begin_admitted_session_refreshes, process_refresh_begin_requests,
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::wake::{
+    SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
+    SessionTemporalRefreshUnavailableReason,
 };
 
 use std::collections::HashSet;
@@ -473,11 +478,7 @@ async fn retained_begin_retry_prevents_discovery_queue_growth_and_cursor_advance
             "retained storage retry keeps the pass live"
         );
         assert_eq!(
-            state
-                .requests
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .len(),
+            state.queued_request_count(),
             1,
             "discovery must not append another page behind a retained begin retry"
         );
@@ -1068,11 +1069,14 @@ async fn saturated_recovery_passes_visit_every_operation_before_idling() {
     let db = authority.database();
     let projector = Arc::new(RecordingDeferredProjector::new());
     let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
-    registry.projector = projector.clone();
-    registry.policy = SessionTemporalRefreshPolicy {
-        max_operations_per_pass: 2,
-        ..SessionTemporalRefreshPolicy::default()
-    };
+    configure_scheduler(
+        &mut registry,
+        projector.clone(),
+        SessionTemporalRefreshPolicy {
+            max_operations_per_pass: 2,
+            ..SessionTemporalRefreshPolicy::default()
+        },
+    );
     let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
     for index in 0..3 {
         store
@@ -1106,10 +1110,14 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
     };
     let started = Arc::new(tokio::sync::Notify::new());
     let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
-    registry.projector = Arc::new(BlockingProjector {
-        started: Arc::clone(&started),
-        release: Arc::new(tokio::sync::Notify::new()),
-    });
+    configure_scheduler(
+        &mut registry,
+        Arc::new(BlockingProjector {
+            started: Arc::clone(&started),
+            release: Arc::new(tokio::sync::Notify::new()),
+        }),
+        SessionTemporalRefreshPolicy::default(),
+    );
     let wake = authority.ensure_project(&registry, owner.clone()).await;
     tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(authority.database())
         .begin_or_join_session_refresh(request("session.retire.inflight", 0))
@@ -1189,9 +1197,13 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         registered_test_database(&temp, "worker-recovery", HostAdmissionScope::Profile).await;
     let db = authority.database();
     let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
-    registry.projector = Arc::new(PanicOnceProjector {
-        panicked: AtomicBool::new(false),
-    });
+    configure_scheduler(
+        &mut registry,
+        Arc::new(PanicOnceProjector {
+            panicked: AtomicBool::new(false),
+        }),
+        SessionTemporalRefreshPolicy::default(),
+    );
     let wake = authority.ensure_profile(&registry).await;
     tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db)
         .begin_or_join_session_refresh(request("session.worker.restart", 0))
@@ -1390,26 +1402,17 @@ async fn canonical_noop_materialize_terminalizes_with_complete_receipt() {
 #[test]
 fn recovery_selection_completes_by_identity_when_keys_are_skipped() {
     let state = Arc::new(SessionTemporalRefreshWakeState::default());
-    let mut selection = RecoverySelectionGuard::new(
+    let pending = complete_recovery_selection(
         &state,
         vec![
             "session.a\0op.a".to_string(),
             "session.b\0op.b".to_string(),
             "session.c\0op.c".to_string(),
         ],
+        &["session.a\0op.a", "session.c\0op.c"],
     );
-    selection.complete("session.a\0op.a");
-    selection.complete("session.c\0op.c");
-    drop(selection);
 
-    let pending = state
-        .recovery_cycle_pending
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    assert_eq!(
-        pending.iter().cloned().collect::<Vec<_>>(),
-        vec!["session.b\0op.b".to_string()]
-    );
+    assert_eq!(pending, vec!["session.b\0op.b".to_string()]);
 }
 
 #[tokio::test]
@@ -1505,7 +1508,7 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
         .await;
     wake.wake();
 
-    assert!(old_state.cancelled.load(Ordering::Acquire));
+    assert!(old_state.is_cancelled());
     assert!(registry.project_state(&old_owner).await.is_none());
     let new_state = registry.project_state(&new_owner).await.unwrap();
     assert!(!Arc::ptr_eq(&old_state, &new_state));
