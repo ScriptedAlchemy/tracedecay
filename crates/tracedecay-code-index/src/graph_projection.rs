@@ -206,6 +206,7 @@ impl fmt::Debug for CodeGraphProjectionStore {
     }
 }
 
+#[hotpath::measure_all]
 impl CodeGraphProjectionStore {
     pub fn from_verified_snapshot(
         snapshot: VerifiedGraphSnapshot,
@@ -591,6 +592,7 @@ impl fmt::Debug for CodeGraphEvidenceReader {
     }
 }
 
+#[hotpath::measure]
 pub fn code_graph_generation_id(
     generation: &CodeGenerationId,
     projector_revision: &GraphProjectorRevision,
@@ -607,6 +609,7 @@ pub fn code_graph_generation_id(
     GraphGenerationId::new(format!("code-graph:{}", digest.as_str())).map_err(Into::into)
 }
 
+#[hotpath::measure]
 pub fn code_graph_idempotency_key(
     generation: &CodeGenerationId,
     projector_revision: &GraphProjectorRevision,
@@ -615,6 +618,7 @@ pub fn code_graph_idempotency_key(
     GraphIdempotencyKey::new(format!("publish:{}", graph_generation.as_str())).map_err(Into::into)
 }
 
+#[hotpath::measure]
 pub fn code_graph_projection_identity(
     namespace: GraphNamespace,
 ) -> Result<GraphProjectionIdentity, CodeGraphProjectionError> {
@@ -626,6 +630,7 @@ pub fn code_graph_projection_identity(
 /// any bulk row. Every field is a pure function of the namespace, the sealed
 /// code generation, and the projector revision, exactly as
 /// [`build_code_graph_manifest_checked`] would set them.
+#[hotpath::measure]
 pub fn code_graph_manifest_identity(
     namespace: GraphNamespace,
     generation: &CodeGenerationId,
@@ -643,6 +648,7 @@ pub fn code_graph_manifest_identity(
     ))
 }
 
+#[hotpath::measure]
 pub fn build_code_graph_manifest(
     projection: GraphProjectionIdentity,
     generation: &CodeGenerationId,
@@ -668,6 +674,7 @@ pub fn build_code_graph_manifest(
     )
 }
 
+#[hotpath::measure]
 pub fn build_code_graph_manifest_checked(
     projection: GraphProjectionIdentity,
     generation: &CodeGenerationId,
@@ -687,6 +694,7 @@ pub fn build_code_graph_manifest_checked(
     )
 }
 
+#[hotpath::measure]
 fn build_code_graph_manifest_inputs_checked(
     projection: GraphProjectionIdentity,
     generation: &CodeGenerationId,
@@ -763,6 +771,7 @@ fn read_current_generation(
     })
 }
 
+#[hotpath::measure]
 fn current_generation_entity(
     generation: &CodeGenerationId,
     projection_node_count: usize,
@@ -787,6 +796,7 @@ fn current_generation_entity(
 /// `identity` must be the [`symbol_entity_id`] of `record.occurrence`; the
 /// builder derives each occurrence's identity once and reuses it here and in
 /// every relation that names the symbol.
+#[hotpath::measure]
 fn symbol_entity(
     identity: GraphEntityId,
     record: SymbolRecordV1,
@@ -803,12 +813,14 @@ fn symbol_entity(
     .map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn symbol_entity_id(
     occurrence: &SymbolOccurrenceId,
 ) -> Result<GraphEntityId, CodeGraphProjectionError> {
     GraphEntityId::new(stable_identity("symbol", occurrence.as_str())).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn edge_entity_id(
     edge: &CanonicalRelationEdgeV1,
 ) -> Result<GraphEntityId, CodeGraphProjectionError> {
@@ -824,12 +836,14 @@ fn projection() -> Result<GraphProjectionId, CodeGraphProjectionError> {
     GraphProjectionId::new(CODE_PROJECTION).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn source_generation(
     generation: &CodeGenerationId,
 ) -> Result<SourceGeneration, CodeGraphProjectionError> {
     SourceGeneration::new(stable_identity("generation", generation.as_str())).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn property_string(entity: &GraphEntity, name: &str) -> Result<String, CodeGraphProjectionError> {
     let property = entity
         .properties
@@ -845,6 +859,7 @@ fn property_string(entity: &GraphEntity, name: &str) -> Result<String, CodeGraph
     Ok(value.clone())
 }
 
+#[hotpath::measure]
 fn validate_reader_metadata(
     repository_id: Option<&RepositoryId>,
     freshness: &SourceFreshness,
@@ -868,6 +883,7 @@ fn validate_reader_metadata(
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
 }
 
+#[hotpath::measure]
 fn validate_symbol_record(record: &SymbolRecordV1) -> Result<(), CodeGraphProjectionError> {
     record
         .occurrence
@@ -894,6 +910,7 @@ fn validate_symbol_record(record: &SymbolRecordV1) -> Result<(), CodeGraphProjec
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_edge(edge: &CanonicalRelationEdgeV1) -> Result<(), CodeGraphProjectionError> {
     edge.from_occurrence
         .validate()
@@ -906,6 +923,7 @@ fn validate_edge(edge: &CanonicalRelationEdgeV1) -> Result<(), CodeGraphProjecti
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
 }
 
+#[hotpath::measure]
 fn compare_edges(left: &CanonicalRelationEdgeV1, right: &CanonicalRelationEdgeV1) -> Ordering {
     (
         &left.from_occurrence,
@@ -928,6 +946,7 @@ fn compare_edges(left: &CanonicalRelationEdgeV1, right: &CanonicalRelationEdgeV1
 /// Loads and revalidates one symbol record by occurrence. `Ok(None)` means the
 /// occurrence has no entity in this generation; every payload mismatch is a
 /// typed corruption, never a silent miss.
+#[hotpath::measure]
 fn load_symbol_record(
     snapshot: &VerifiedGraphSnapshot,
     projection: &GraphProjectionIdentity,
@@ -976,6 +995,7 @@ impl GraphCancellation for ApplicationCancellation {
     }
 }
 
+#[hotpath::measure]
 fn application_cancellation(cancellation: &CancellationSignal) -> Arc<dyn GraphCancellation> {
     Arc::new(ApplicationCancellation(cancellation.clone()))
 }

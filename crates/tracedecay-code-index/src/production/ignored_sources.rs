@@ -63,6 +63,7 @@ pub(super) struct IgnoredSourceRosterV1 {
     digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl IgnoredSourceRosterV1 {
     pub(super) fn admit(
         snapshot: &SanitizedCodeSnapshotV1,
@@ -163,6 +164,7 @@ impl IgnoredSourceRosterV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl CodeIndexPublishedGenerationV1 {
     pub fn repository_parse_identity(&self) -> &CodeIndexRepositoryParseIdentityV1 {
         &self.repository_parse_identity

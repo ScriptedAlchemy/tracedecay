@@ -49,6 +49,7 @@ struct InteractiveCatalogArtifactV1 {
 /// and streams the catalog artifact into `out`. This is the seal-time half of
 /// catalog-at-seal: one linear pass over rows already in RAM, instead of the
 /// paged projection re-scan the open-time warm performs.
+#[hotpath::measure]
 pub fn write_interactive_catalog_artifact(
     manifest: &GraphGenerationManifest,
     out: &mut dyn Write,
@@ -98,6 +99,7 @@ pub fn write_interactive_catalog_artifact(
 
 /// Decodes a digest-verified catalog artifact back into the in-memory
 /// catalog, revalidating structural invariants row by row.
+#[hotpath::measure]
 pub(super) fn decode_interactive_catalog_artifact(
     bytes: &[u8],
     expected_graph_generation: &str,

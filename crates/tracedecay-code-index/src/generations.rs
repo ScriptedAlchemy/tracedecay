@@ -148,6 +148,7 @@ pub struct GenerationIncrementPlanV1 {
     pub deleted: u64,
 }
 
+#[hotpath::measure_all]
 impl GenerationIncrementPlanV1 {
     /// Whether this plan is a declared full rebuild.
     pub fn is_full_rebuild(&self) -> bool {
@@ -187,6 +188,7 @@ pub struct GenerationPlanner<R: LanguageRegistry> {
     planner: ComponentVersion,
 }
 
+#[hotpath::measure_all]
 impl<R: LanguageRegistry> GenerationPlanner<R> {
     /// Create a planner for one repository with pinned chunker and privacy
     /// inputs.
@@ -631,6 +633,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
 }
 
 /// The per-repository discriminator segment of minted generation identity.
+#[hotpath::measure]
 fn repository_discriminator(
     repository: &RepositoryId,
 ) -> Result<String, GenerationPlanningErrorV1> {
@@ -647,6 +650,7 @@ fn repository_discriminator(
 /// Parse an identity minted by this planner. Legacy
 /// `generation.v1.<repo>.<seq>` parents remain accepted; current identities
 /// include a SHA-256 invalidation fingerprint suffix.
+#[hotpath::measure]
 fn parse_minted_generation_id(generation_id: &CodeGenerationId) -> Option<(String, u64)> {
     let mut parts = generation_id.as_str().split('.');
     let scheme = parts.next()?;
@@ -668,6 +672,7 @@ fn parse_minted_generation_id(generation_id: &CodeGenerationId) -> Option<(Strin
 /// A well-formed placeholder digest, replaced by the computed seal before the
 /// manifest is returned. The seal payload excludes the seal itself, so the
 /// placeholder never influences the computed digest.
+#[hotpath::measure]
 fn placeholder_digest() -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
         .expect("a zeroed sha256 digest is canonical")

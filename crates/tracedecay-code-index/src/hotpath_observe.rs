@@ -32,12 +32,14 @@ static HOT_LOOP_SAMPLE: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "hotpath")]
 #[must_use]
 #[inline(always)]
+#[hotpath::measure]
 fn is_hot_loop_sample(sequence: u64) -> bool {
     sequence.is_multiple_of(HOT_LOOP_SAMPLE_PERIOD)
 }
 
 #[must_use]
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn sample_hot_loop() -> bool {
     #[cfg(feature = "hotpath")]
     {
@@ -232,11 +234,13 @@ fn refresh_worker_gauges() {
 
 #[cfg(feature = "hotpath")]
 #[inline(always)]
+#[hotpath::measure]
 fn refresh_queue_gauge() {
     hotpath::gauge!("code_index_queue_depth").set(PENDING_WORK.load(Ordering::Relaxed));
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_files(count: usize) {
     #[cfg(feature = "hotpath")]
     {
@@ -252,11 +256,13 @@ pub(crate) fn record_files(count: usize) {
 /// this carries the same gate instead of a body that can never run.
 #[cfg(feature = "hotpath")]
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_source_bytes(bytes: u64) {
     hotpath::gauge!("code_index_source_bytes").set(bytes);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn add_parse_bytes(bytes: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -269,6 +275,7 @@ pub(crate) fn add_parse_bytes(bytes: u64) {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn add_reused_parses(count: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -284,6 +291,7 @@ pub(crate) fn add_reused_parses(count: u64) {
 /// profiling is on.
 #[cfg(feature = "hotpath")]
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_symbols(count: u64) {
     hotpath::gauge!("code_index_symbols").set(count);
 }
@@ -292,11 +300,13 @@ pub(crate) fn record_symbols(count: u64) {
 /// profiling is on.
 #[cfg(feature = "hotpath")]
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_relations(count: u64) {
     hotpath::gauge!("code_index_relations").set(count);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_pages(count: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -309,6 +319,7 @@ pub(crate) fn record_pages(count: u64) {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_seal_bytes(bytes: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -327,6 +338,7 @@ pub(crate) fn record_seal_bytes(bytes: u64) {
 pub(crate) struct BuildToQueryableStart(#[cfg(feature = "hotpath")] Instant);
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn start_build_to_queryable() -> BuildToQueryableStart {
     BuildToQueryableStart(
         #[cfg(feature = "hotpath")]
@@ -335,6 +347,7 @@ pub(crate) fn start_build_to_queryable() -> BuildToQueryableStart {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_build_to_queryable(started: BuildToQueryableStart) {
     #[cfg(feature = "hotpath")]
     {
@@ -348,6 +361,7 @@ pub(crate) fn record_build_to_queryable(started: BuildToQueryableStart) {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_generation_state(state: &'static str) {
     #[cfg(feature = "hotpath")]
     {
@@ -360,6 +374,7 @@ pub(crate) fn record_generation_state(state: &'static str) {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_rebuild_state(state: &'static str) {
     #[cfg(feature = "hotpath")]
     {

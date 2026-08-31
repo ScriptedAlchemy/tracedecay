@@ -52,6 +52,7 @@ pub struct GrepScanOmissionsV1 {
     pub unavailable_sources: usize,
 }
 
+#[hotpath::measure_all]
 impl GrepScanOmissionsV1 {
     #[must_use]
     pub fn any(self) -> bool {
@@ -183,6 +184,7 @@ pub fn search_tree_with_cancel(
     Ok(result)
 }
 
+#[hotpath::measure]
 fn examine_grep_file<C: Fn() -> bool>(
     matcher: &Regex,
     query: &GrepSearchQuery,
@@ -241,6 +243,7 @@ fn examine_grep_file<C: Fn() -> bool>(
     false
 }
 
+#[hotpath::measure]
 fn next_grep_line<'a>(
     source: &mut impl Iterator<Item = (usize, &'a str)>,
     pending: &mut VecDeque<(usize, &'a str)>,
@@ -254,6 +257,7 @@ fn next_grep_line<'a>(
     Some(line)
 }
 
+#[hotpath::measure]
 fn fill_after_context<'a>(
     source: &mut impl Iterator<Item = (usize, &'a str)>,
     pending: &mut VecDeque<(usize, &'a str)>,
@@ -269,6 +273,7 @@ fn fill_after_context<'a>(
     }
 }
 
+#[hotpath::measure]
 fn remember_before<'a>(before: &mut VecDeque<&'a str>, line: &'a str, context_lines: usize) {
     if context_lines == 0 {
         return;
@@ -279,6 +284,7 @@ fn remember_before<'a>(before: &mut VecDeque<&'a str>, line: &'a str, context_li
     before.push_back(line);
 }
 
+#[hotpath::measure]
 fn build_matcher(query: &GrepSearchQuery) -> Result<Regex, GrepSearchError> {
     let source = if query.fixed_strings {
         regex::escape(&query.pattern)
@@ -294,6 +300,7 @@ fn build_matcher(query: &GrepSearchQuery) -> Result<Regex, GrepSearchError> {
         })
 }
 
+#[hotpath::measure]
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0)
 }

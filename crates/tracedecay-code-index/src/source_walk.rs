@@ -24,6 +24,7 @@ struct GeneratedDirScope {
     may_match_descendants: bool,
 }
 
+#[hotpath::measure_all]
 impl GeneratedDirScope {
     fn from_path_glob(path_glob: &str) -> Option<Self> {
         let path_glob = path_glob.trim();
@@ -124,6 +125,7 @@ pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk,
     Ok(builder.build())
 }
 
+#[hotpath::measure]
 fn build_overrides(
     project_root: &Path,
     path_glob: Option<&str>,

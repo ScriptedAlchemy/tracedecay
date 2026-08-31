@@ -41,6 +41,7 @@ pub struct GenerationGitEvidenceScopeV1 {
     pub options_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl GenerationGitEvidenceScopeV1 {
     fn validate(&self) -> Result<(), GenerationGitJoinErrorV1> {
         if let Some(worktree) = &self.worktree {
@@ -109,6 +110,7 @@ pub struct GenerationGitWatermarkV1 {
     pub captured_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl GenerationGitWatermarkV1 {
     pub fn recompute_evidence_digest(
         &self,
@@ -140,6 +142,7 @@ pub struct GenerationGitReadWatermarkV1 {
     pub captured_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl GenerationGitReadWatermarkV1 {
     pub fn recompute_history_digest(
         &self,
@@ -411,6 +414,7 @@ pub enum GenerationGitJoinErrorV1 {
     Contract(String),
 }
 
+#[hotpath::measure_all]
 impl GenerationGitHistoryJoinV1 {
     #[hotpath::measure(label = "code_index.git.join_history")]
     pub fn join(
@@ -450,6 +454,7 @@ impl GenerationGitHistoryJoinV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl GenerationGitBlameJoinV1 {
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "code_index.git.join_blame")]
@@ -551,6 +556,7 @@ impl GenerationGitBlameJoinV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl GenerationGitJoinV1 {
     /// Bind one typed Plan-36 diff to one immutable code generation.
     ///
@@ -734,6 +740,7 @@ struct GenerationGitContextIndexV1<'a> {
     test_attribution: Option<&'a GenerationTestJoinV1>,
 }
 
+#[hotpath::measure]
 fn validate_context<'a>(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
@@ -847,6 +854,7 @@ fn validate_context<'a>(
     })
 }
 
+#[hotpath::measure]
 fn hunk_context(
     generation: &CodeGenerationManifestV1,
     git_file: &tracedecay_domain::GitFileDiffV1,
@@ -941,6 +949,7 @@ fn hunk_context(
     })
 }
 
+#[hotpath::measure]
 fn bind_blame_lines(
     lines: &[GitBlameLineV1],
     symbol_bindings: &[GitSymbolLineBindingV1],
@@ -985,6 +994,7 @@ fn bind_blame_lines(
         .collect()
 }
 
+#[hotpath::measure]
 fn validate_generation_snapshot(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
@@ -1007,6 +1017,7 @@ fn validate_generation_snapshot(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_git_watermark(
     snapshot: &ValidatedCodeSnapshotV1,
     diff: &GitDiffV1,
@@ -1049,6 +1060,7 @@ fn validate_git_watermark(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_git_read_watermark(
     snapshot: &ValidatedCodeSnapshotV1,
     watermark: &GenerationGitReadWatermarkV1,
@@ -1084,6 +1096,7 @@ fn validate_git_read_watermark(
     Ok(())
 }
 
+#[hotpath::measure]
 fn index_content_identity(
     identities: &[GitFileContentIdentityV1],
 ) -> Result<BTreeMap<&str, &ContentDigest>, GenerationGitJoinErrorV1> {
@@ -1110,6 +1123,7 @@ fn index_content_identity(
     Ok(by_path)
 }
 
+#[hotpath::measure]
 fn disposition_matches(
     change: GitChangeKindV1,
     disposition: SnapshotFileDispositionV1,

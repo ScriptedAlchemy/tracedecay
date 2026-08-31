@@ -66,6 +66,7 @@ pub struct VerifiedSealedLexicalCursorV1 {
     cumulative_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl VerifiedSealedLexicalCursorV1 {
     fn initial(
         source_state_digest: ManifestDigest,
@@ -249,6 +250,7 @@ pub struct VerifiedSealedLexicalSymbolDisplayV1 {
     kind: String,
 }
 
+#[hotpath::measure_all]
 impl VerifiedSealedLexicalSymbolDisplayV1 {
     pub fn occurrence(&self) -> &SymbolOccurrenceId {
         &self.occurrence
@@ -293,6 +295,7 @@ pub struct VerifiedSealedLexicalPageV1 {
     previous_cursor: VerifiedSealedLexicalCursorV1,
 }
 
+#[hotpath::measure_all]
 impl VerifiedSealedLexicalPageV1 {
     pub fn page_ordinal(&self) -> u64 {
         self.page_ordinal
@@ -662,6 +665,7 @@ pub struct VerifiedSealedLexicalSourceReceiptV1 {
     cumulative_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl VerifiedSealedLexicalSourceReceiptV1 {
     pub fn source_state_digest(&self) -> &ManifestDigest {
         &self.source_state_digest
@@ -756,6 +760,7 @@ pub struct VerifiedSealedLexicalPageBatchBoundsV1 {
     page_slot_bytes: usize,
 }
 
+#[hotpath::measure_all]
 impl VerifiedSealedLexicalPageBatchBoundsV1 {
     pub fn new(
         maximum_pages: usize,
@@ -882,6 +887,7 @@ pub struct VerifiedSealedTextGenerationMetadataV1 {
     snapshot: SanitizedCodeSnapshotV1,
 }
 
+#[hotpath::measure_all]
 impl VerifiedSealedTextGenerationMetadataV1 {
     pub fn from_published_generation(generation: &CodeIndexPublishedGenerationV1) -> Self {
         Self {
@@ -899,6 +905,7 @@ impl VerifiedSealedTextGenerationMetadataV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     #[hotpath::measure(label = "code_index.restore.open")]
     pub fn open(
@@ -1890,6 +1897,7 @@ pub(super) fn scan_layout<R: Read + Seek>(
     )
 }
 
+#[hotpath::measure]
 fn scan_layout_with_progress<R: Read + Seek>(
     reader: &mut R,
     admitted_len: u64,
@@ -1990,6 +1998,7 @@ enum LayoutKey {
     Snapshot,
 }
 
+#[hotpath::measure_all]
 impl LayoutKey {
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         match bytes {
@@ -2080,6 +2089,7 @@ enum GenerationSpanEvent {
     Closed,
 }
 
+#[hotpath::measure_all]
 impl LayoutScanner {
     /// Observe one contiguous run of admitted bytes starting at `base_offset`.
     ///
@@ -2430,6 +2440,7 @@ impl LayoutScanner {
 /// Locate the next quote or escape marker with eight-byte candidate probes.
 /// Every input byte is still authenticated by the outer SHA-256 stream; this
 /// helper only avoids interpreting ordinary string payload bytes one by one.
+#[hotpath::measure]
 fn first_json_string_control(bytes: &[u8]) -> Option<usize> {
     const LOW_BITS: u64 = 0x0101_0101_0101_0101;
     const HIGH_BITS: u64 = 0x8080_8080_8080_8080;
@@ -2559,6 +2570,7 @@ fn read_verified_text_metadata<R: Read + Seek>(
     Ok(VerifiedSealedTextGenerationMetadataV1 { manifest, snapshot })
 }
 
+#[hotpath::measure]
 fn read_file_bytes_at_range<R: Read + Seek>(
     reader: &mut R,
     start: u64,
@@ -2594,6 +2606,7 @@ fn read_file_bytes_at_range<R: Read + Seek>(
     Ok(bytes)
 }
 
+#[hotpath::measure]
 fn admit_persisted_file_bytes(
     bytes: &[u8],
     next_file_offset: u64,
@@ -2620,6 +2633,7 @@ fn admit_persisted_file_bytes(
     )
 }
 
+#[hotpath::measure]
 fn admit_file_generation_artifacts(
     file: &FileGenerationArtifactsV1,
     next_file_offset: u64,
@@ -2636,6 +2650,7 @@ fn admit_file_generation_artifacts(
     )
 }
 
+#[hotpath::measure]
 fn admit_validated_file_parts(
     authority: &ReceiptBoundCodeFileAuthorityV1,
     extraction: &ExtractionBatchV1,
@@ -2735,6 +2750,7 @@ fn admit_validated_file_parts(
     })
 }
 
+#[hotpath::measure]
 fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeIndexProductionErrorV1> {
     if control.is_cancelled() {
         Err(CodeIndexProductionErrorV1::Interrupted(
@@ -2749,12 +2765,14 @@ fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeIndex
     }
 }
 
+#[hotpath::measure]
 fn initial_digest(domain: &[u8]) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
     let mut hasher = Sha256::new();
     hasher.update(domain);
     digest_hasher(hasher)
 }
 
+#[hotpath::measure]
 fn advance_digest(
     previous: &ManifestDigest,
     record_domain: &[u8],
@@ -2767,6 +2785,7 @@ fn advance_digest(
     digest_hasher(hasher)
 }
 
+#[hotpath::measure]
 fn page_hasher(page_ordinal: u64) -> Sha256 {
     let mut hasher = Sha256::new();
     hasher.update(PAGE_DIGEST_DOMAIN);
@@ -2774,6 +2793,7 @@ fn page_hasher(page_ordinal: u64) -> Sha256 {
     hasher
 }
 
+#[hotpath::measure]
 fn hash_cursor(
     hasher: &mut Sha256,
     cursor: &VerifiedSealedLexicalCursorV1,
@@ -2791,11 +2811,13 @@ fn hash_cursor(
     hash_record(hasher, cursor.cumulative_digest.as_str().as_bytes())
 }
 
+#[hotpath::measure]
 fn hash_import_record(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeIndexProductionErrorV1> {
     hasher.update(IMPORT_RECORD_DOMAIN);
     hash_record(hasher, bytes)
 }
 
+#[hotpath::measure]
 fn hash_symbol_display_record(
     hasher: &mut Sha256,
     bytes: &[u8],
@@ -2804,6 +2826,7 @@ fn hash_symbol_display_record(
     hash_record(hasher, bytes)
 }
 
+#[hotpath::measure]
 fn hash_record(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeIndexProductionErrorV1> {
     let byte_len = u64::try_from(bytes.len()).map_err(|_| {
         CodeIndexProductionErrorV1::Contract("sealed lexical digest record exceeds u64".to_owned())
@@ -2813,6 +2836,7 @@ fn hash_record(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeIndexProduct
     Ok(())
 }
 
+#[hotpath::measure]
 fn digest_hasher(hasher: Sha256) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
     ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))

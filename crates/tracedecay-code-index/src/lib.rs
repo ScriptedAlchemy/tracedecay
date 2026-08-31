@@ -42,6 +42,7 @@ pub mod test_attribution;
 pub use self::intake::CodeIndexIntake;
 
 /// Returns `true` if the file path looks like a test file.
+#[hotpath::measure]
 pub fn is_test_file(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     [

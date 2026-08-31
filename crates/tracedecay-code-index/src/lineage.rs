@@ -147,6 +147,7 @@ pub struct LineageSymbolRecordV1 {
     pub content_digest: ContentDigest,
 }
 
+#[hotpath::measure_all]
 impl LineageSymbolRecordV1 {
     /// The qualified-structure group key: identity minus the same-name
     /// occurrence index.
@@ -171,6 +172,7 @@ pub struct GenerationSymbolIndexV1 {
     pub symbols: Vec<Arc<LineageSymbolRecordV1>>,
 }
 
+#[hotpath::measure_all]
 impl GenerationSymbolIndexV1 {
     /// Build the index, sorting records into canonical occurrence order and
     /// rejecting duplicate occurrences.
@@ -219,6 +221,7 @@ pub enum LineageResolutionErrorV1 {
 /// current indexes always produce identical candidates.
 pub struct SymbolLineageResolver;
 
+#[hotpath::measure_all]
 impl SymbolLineageResolver {
     pub fn new() -> Self {
         Self
@@ -550,6 +553,7 @@ impl Default for SymbolLineageResolver {
 
 /// The canonical evidence record for one candidate. An abstention carries no
 /// prior digest: no ancestor was chosen.
+#[hotpath::measure]
 fn evidence(
     prior_generation: &CodeGenerationId,
     current_generation: &CodeGenerationId,

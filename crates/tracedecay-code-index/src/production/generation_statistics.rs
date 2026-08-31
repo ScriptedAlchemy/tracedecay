@@ -17,6 +17,7 @@ pub struct CodeIndexGenerationStatisticsV1 {
     pub edge_count: u64,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexPublishedGenerationV1 {
     /// Return checked aggregate facts for this immutable generation.
     ///
@@ -44,6 +45,7 @@ impl CodeIndexPublishedGenerationV1 {
     }
 }
 
+#[hotpath::measure]
 fn checked_source_total<'a>(
     mut coverages: impl Iterator<Item = &'a ExtractionCoverageV1>,
 ) -> Result<u64, CodeIndexProductionErrorV1> {

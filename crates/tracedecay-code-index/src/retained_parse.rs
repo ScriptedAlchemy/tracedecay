@@ -84,6 +84,7 @@ enum ParseDocumentKey {
     },
 }
 
+#[hotpath::measure_all]
 impl ParseDocumentKey {
     fn for_identity(identity: &ParseDocumentIdentity) -> Self {
         match identity {
@@ -146,6 +147,7 @@ impl Default for SharedRetainedParsePool {
     }
 }
 
+#[hotpath::measure_all]
 impl SharedRetainedParsePool {
     pub fn new(limits: RetainedParsePoolLimits) -> Result<Self, RetainedParsePoolOpenError> {
         if limits.max_documents == 0
@@ -503,11 +505,13 @@ impl SharedRetainedParsePool {
     }
 }
 
+#[hotpath::measure]
 fn touch(lru: &mut VecDeque<ParseDocumentKey>, key: &ParseDocumentKey) {
     lru.retain(|candidate| candidate != key);
     lru.push_back(key.clone());
 }
 
+#[hotpath::measure]
 fn evict_to_limits(
     state: &mut RetainedParsePoolState,
     protected: &ParseDocumentKey,
@@ -537,6 +541,7 @@ fn evict_to_limits(
     }
 }
 
+#[hotpath::measure]
 fn record_success(
     stats: &mut RetainedParsePoolStats,
     report: &ParseReport,

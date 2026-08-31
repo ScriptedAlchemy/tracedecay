@@ -35,6 +35,7 @@ pub struct CodeIndexImportEvidenceV1 {
     pub start_column: u32,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexImportEvidenceV1 {
     fn from_extracted(
         row: &ExtractedImportEvidenceV1,
@@ -135,6 +136,7 @@ pub struct CodeIndexUnresolvedReferenceV1 {
     pub evidence_span: SourceSpan,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexUnresolvedReferenceV1 {
     pub(crate) fn validate(&self) -> Result<(), ChunkingFailureV1> {
         self.from_occurrence
@@ -194,6 +196,7 @@ pub struct CodeIndexEdgeAbstentionV1 {
     pub reason: CodeIndexEdgeAbstentionReasonV1,
 }
 
+#[hotpath::measure_all]
 impl CodeFileIndexArtifactsV1 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parser_artifact(
@@ -468,6 +471,7 @@ impl CodeFileIndexArtifactsV1 {
     }
 }
 
+#[hotpath::measure]
 fn rematerialized_occurrence(
     occurrences: &BTreeMap<SymbolOccurrenceId, SymbolOccurrenceId>,
     occurrence: &SymbolOccurrenceId,
@@ -479,6 +483,7 @@ fn rematerialized_occurrence(
     })
 }
 
+#[hotpath::measure]
 fn canonical_import_order(
     left: &CodeIndexImportEvidenceV1,
     right: &CodeIndexImportEvidenceV1,

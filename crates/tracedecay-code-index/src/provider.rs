@@ -60,6 +60,7 @@ pub enum GenerationProviderCoverageV1 {
     Unavailable,
 }
 
+#[hotpath::measure_all]
 impl GenerationProviderCoverageV1 {
     pub fn is_complete(&self) -> bool {
         matches!(self, Self::Complete { .. })
@@ -103,6 +104,7 @@ pub struct GenerationProviderReadV1<T> {
     pub evidence: Option<T>,
 }
 
+#[hotpath::measure_all]
 impl<T> GenerationProviderReadV1<T> {
     pub fn new(
         provider_state: ProviderEvaluationStateV1,

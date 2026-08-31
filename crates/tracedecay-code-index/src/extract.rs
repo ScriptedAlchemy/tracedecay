@@ -118,6 +118,7 @@ pub struct ExtractedCodeFileV1 {
     parse_artifact: ExtractionArtifactV1,
 }
 
+#[hotpath::measure_all]
 impl ExtractedCodeFileV1 {
     pub fn batch(&self) -> &ExtractionBatchV1 {
         &self.batch
@@ -161,6 +162,7 @@ impl ExtractedCodeFileV1 {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn rebind_extraction_batch(
     authority: &ReceiptBoundCodeFileAuthorityV1,
     batch: &ExtractionBatchV1,
@@ -222,6 +224,7 @@ pub struct TreeSitterExtractor {
     parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,
 }
 
+#[hotpath::measure_all]
 impl TreeSitterExtractor {
     /// Create the adapter over a freshly built extraction registry.
     pub fn new() -> Self {
@@ -431,6 +434,7 @@ impl<'a> From<&'a Node> for CanonicalNodeRow<'a> {
 
 /// Rows are canonically ordered by their serialized canonical form, matching
 /// the legacy `sort_canonical_json` byte ordering exactly.
+#[hotpath::measure]
 fn sort_canonical_rows<T: Serialize>(rows: &mut [T]) {
     rows.sort_by_cached_key(|row| serde_json::to_string(row).expect("canonical row serializes"));
 }
@@ -482,6 +486,7 @@ impl<'a> From<&'a UnresolvedRef> for CanonicalUnresolvedRefRow<'a> {
 /// serialized canonical form before one payload serialization. The borrowed
 /// form stays byte-identical to the legacy `serde_json::Value` canonicalization
 /// the pinned digest identity was minted from.
+#[hotpath::measure]
 fn rows_digest(
     file: &ValidatedCodeFileV1,
     descriptor: &LanguageDescriptorV1,
@@ -545,6 +550,7 @@ fn rows_digest(
     })
 }
 
+#[hotpath::measure]
 pub(crate) fn parser_import_rows_digest(
     imports: &[ExtractedImportEvidenceV1],
 ) -> Result<ManifestDigest, ExtractionFailureV1> {
@@ -613,6 +619,7 @@ impl LanguageExtractor for TreeSitterExtractor {
     }
 }
 
+#[hotpath::measure]
 fn validate_descriptor(
     file: &ValidatedCodeFileV1,
     descriptor: &LanguageDescriptorV1,
@@ -630,6 +637,7 @@ fn validate_descriptor(
     Ok(())
 }
 
+#[hotpath::measure]
 fn finish_extraction(
     authority: ReceiptBoundCodeFileAuthorityV1,
     file: &ValidatedCodeFileV1,

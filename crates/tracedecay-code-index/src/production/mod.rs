@@ -257,6 +257,7 @@ pub struct CodeIndexGenerationScopeV1 {
     pub worktree: Option<WorktreeId>,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexGenerationScopeV1 {
     pub fn for_snapshot(snapshot: &SanitizedCodeSnapshotV1) -> Self {
         Self {
@@ -304,6 +305,7 @@ impl CodeIndexGenerationScopeV1 {
 /// Renders one scope for slot-dispatch refusals. An absent reference or
 /// worktree is a truthful non-git/unbound component, spelled out so operators
 /// can tell a misclassified checkout from a mispartitioned store.
+#[hotpath::measure]
 fn describe_scope(scope: &CodeIndexGenerationScopeV1) -> String {
     format!(
         "repository {}, reference {}, worktree {}",
@@ -387,6 +389,7 @@ const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
 /// it unwind out of the pool instead aborted the whole fan-out and surfaced in
 /// the daemon only as an opaque `JoinError`, so a single malformed file took
 /// down every other file's work in the same generation.
+#[hotpath::measure]
 fn collect_bounded_ordered<T, R, E, F>(items: &[T], operation: F) -> Result<Vec<R>, E>
 where
     T: Sync,
@@ -454,6 +457,7 @@ pub struct SharedPhysicalCodeArtifactPoolV1 {
     state: Arc<Mutex<PhysicalCodeArtifactPoolStateV1>>,
 }
 
+#[hotpath::measure]
 fn upgrade_weak_under_lock<S, T>(
     state: &Mutex<S>,
     select: impl FnOnce(&S) -> Option<Weak<T>>,
@@ -464,6 +468,7 @@ fn upgrade_weak_under_lock<S, T>(
     select(&state).and_then(|value| value.upgrade())
 }
 
+#[hotpath::measure_all]
 impl SharedPhysicalCodeArtifactPoolV1 {
     fn reuse(
         &self,
@@ -534,6 +539,7 @@ impl SharedPhysicalCodeArtifactPoolV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl FileGenerationArtifactsV1 {
     fn rematerialize_for_file(
         &self,

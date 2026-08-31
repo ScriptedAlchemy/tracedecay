@@ -27,6 +27,7 @@ pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 6;
 /// bounded.
 pub const MAX_SEALED_CODE_GENERATION_BYTES_V1: u64 = 2 * 1024 * 1024 * 1024;
 
+#[hotpath::measure]
 fn admit_sealed_generation_len(len: u64) -> Result<(), CodeIndexProductionErrorV1> {
     if len > MAX_SEALED_CODE_GENERATION_BYTES_V1 {
         return Err(CodeIndexProductionErrorV1::Contract(
@@ -43,6 +44,7 @@ pub const fn sealed_generation_format_revision_is_compatible(revision: u32) -> b
     )
 }
 
+#[hotpath::measure]
 pub fn sealed_generation_payload_digest<T: Serialize>(
     format_revision: u32,
     generation: &T,
@@ -195,6 +197,7 @@ enum CompatibleSealedMaterializationV1 {
 /// The digest remints are by-ref and independent per file, so the fan-out
 /// keeps the sequential failure semantics (lowest-index error) while the
 /// pages themselves move — the persist corpus is never copied.
+#[hotpath::measure]
 fn restore_file_pages(
     pages: Vec<PersistedFileGenerationArtifactsV1>,
 ) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
@@ -219,6 +222,7 @@ fn restore_file_pages(
         .collect())
 }
 
+#[hotpath::measure]
 fn assemble_published_generation(
     generation: StreamingPersistedPublishedGenerationV1,
 ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
@@ -361,6 +365,7 @@ struct PersistedPublishedGenerationFormatProbeV1 {
 /// probe-first outcomes exactly. The digest is computed and compared before
 /// the payload is materialized, so a corrupt V1 envelope is still rejected
 /// without building corpus-scale structures from unverified bytes.
+#[hotpath::measure]
 fn materialize_compatible_envelope(
     bytes: &[u8],
 ) -> Result<Option<CompatibleSealedMaterializationV1>, CodeIndexProductionErrorV1> {
@@ -427,6 +432,7 @@ fn materialize_compatible_envelope(
 /// did not accept: a legacy revision restores through the strict legacy
 /// envelope parse, an incompatible revision is `Ok(None)`, and a V1 revision
 /// keeps the exact typed rejection that interrupted the decode.
+#[hotpath::measure]
 fn classify_unaccepted_envelope(
     bytes: &[u8],
     v1_rejection: CodeIndexProductionErrorV1,
@@ -448,6 +454,7 @@ fn classify_unaccepted_envelope(
     }
 }
 
+#[hotpath::measure]
 fn decode_legacy_envelope(
     bytes: &[u8],
 ) -> Result<SealedPublishedGenerationEnvelopeV1, CodeIndexProductionErrorV1> {
@@ -472,6 +479,7 @@ fn decode_admitted_json<T: DeserializeOwned, R: std::io::Read>(
     })
 }
 
+#[hotpath::measure]
 fn read_admitted_bytes<R: std::io::Read>(
     reader: R,
     admitted_len: u64,
@@ -493,6 +501,7 @@ fn read_admitted_bytes<R: std::io::Read>(
     Ok(bytes)
 }
 
+#[hotpath::measure]
 fn admit_sealed_generation_bytes(
     bytes: &[u8],
     admitted_len: u64,
@@ -564,12 +573,14 @@ impl<W: Write> Write for GenerationDigestWriterV1<'_, '_, W> {
     }
 }
 
+#[hotpath::measure]
 fn byte_limit_error() -> CodeIndexProductionErrorV1 {
     CodeIndexProductionErrorV1::Contract(
         "sealed generation exceeds the canonical byte limit".to_owned(),
     )
 }
 
+#[hotpath::measure]
 fn write_chunked<W: Write>(
     writer: &mut W,
     mut bytes: &[u8],
@@ -585,6 +596,7 @@ fn write_chunked<W: Write>(
     Ok(())
 }
 
+#[hotpath::measure]
 fn write_generation_envelope_with_limits<T: Serialize, W: Write + Seek>(
     generation: &T,
     writer: &mut W,
@@ -739,6 +751,7 @@ fn write_generation_envelope_with_limits<T: Serialize, W: Write + Seek>(
     Ok(written)
 }
 
+#[hotpath::measure]
 fn encode_persisted_files_parallel(
     files: &[Arc<FileGenerationArtifactsV1>],
 ) -> Result<Vec<Box<RawValue>>, CodeIndexProductionErrorV1> {
@@ -758,6 +771,7 @@ fn encode_persisted_files_parallel(
     })
 }
 
+#[hotpath::measure]
 fn json_generation_digest(
     generation_bytes: &[u8],
 ) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
@@ -765,6 +779,7 @@ fn json_generation_digest(
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
 }
 
+#[hotpath::measure]
 fn json_generation_bytes_and_digest<T: Serialize>(
     generation: &T,
 ) -> Result<(Vec<u8>, ManifestDigest), CodeIndexProductionErrorV1> {
@@ -777,6 +792,7 @@ fn json_generation_bytes_and_digest<T: Serialize>(
     Ok((generation_bytes, state_digest))
 }
 
+#[hotpath::measure_all]
 impl CodeIndexPublishedGenerationV1 {
     /// Stream the complete sealed generation into one seekable immutable-store
     /// sink. Writes and the total envelope are bounded independently, and the

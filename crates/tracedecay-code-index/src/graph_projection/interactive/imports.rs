@@ -11,6 +11,7 @@ use super::catalog::check_cancelled;
 use super::{CodeGraphInteractiveReader, require_positive};
 use crate::chunks::CodeIndexImportEvidenceV1;
 
+#[hotpath::measure_all]
 impl CodeGraphInteractiveReader {
     /// Returns parser-backed bare-module type imports whose module specifier or
     /// imported name contains `query` under ASCII case folding.
@@ -52,6 +53,7 @@ impl CodeGraphInteractiveReader {
     }
 }
 
+#[hotpath::measure]
 fn matches_query(import: &CodeIndexImportEvidenceV1, query: &str) -> bool {
     import.module_specifier.to_ascii_lowercase().contains(query)
         || import

@@ -69,6 +69,7 @@ pub trait CodeIndexIntake {
 pub const INTAKE_DIGEST_SEPARATOR: &str = "tracedecay.code-index-intake.v1";
 
 /// Content digest over byte-exact sanitized source.
+#[hotpath::measure]
 pub fn content_digest(bytes: &[u8]) -> ContentDigest {
     ContentDigest::of_bytes(bytes)
 }
@@ -82,6 +83,7 @@ pub struct SanitizedSnapshotCapabilityV1 {
     files_by_occurrence: BTreeMap<FileOccurrenceId, usize>,
 }
 
+#[hotpath::measure_all]
 impl SanitizedSnapshotCapabilityV1 {
     fn new(snapshot: ValidatedCodeSnapshotV1) -> Self {
         let files_by_occurrence = snapshot
@@ -122,6 +124,7 @@ pub struct ReceiptBoundCodeFileV1 {
     authority: ReceiptBoundCodeFileAuthorityV1,
 }
 
+#[hotpath::measure_all]
 impl ReceiptBoundCodeFileV1 {
     /// The byte-exact sanitized source authorized for extraction and chunking.
     pub fn sanitized_bytes(&self) -> &[u8] {
@@ -175,6 +178,7 @@ pub struct SanitizedCodeIntake<R: LanguageRegistry> {
     max_snapshot_age_micros: Option<i64>,
 }
 
+#[hotpath::measure_all]
 impl<R: LanguageRegistry> SanitizedCodeIntake<R> {
     /// Create an intake validator with no staleness bound.
     pub fn new(
@@ -249,6 +253,7 @@ impl<R: LanguageRegistry> SanitizedCodeIntake<R> {
 }
 
 /// Map a domain snapshot-validation error to the typed intake rejection.
+#[hotpath::measure]
 fn rejection_for(error: &DomainError) -> IntakeRejectionV1 {
     match error {
         // Duplicate or non-canonically-ordered receipts, occurrences, or

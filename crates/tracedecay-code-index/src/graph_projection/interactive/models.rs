@@ -117,6 +117,7 @@ pub(in crate::graph_projection) struct InteractiveCatalog {
     pub(super) imports: Vec<CodeIndexImportEvidenceV1>,
 }
 
+#[hotpath::measure_all]
 impl InteractiveCatalog {
     pub(in crate::graph_projection) fn empty() -> Self {
         Self {
@@ -165,6 +166,7 @@ impl InteractiveCatalog {
 }
 
 /// Lowercased trailing path segment of a qualified name.
+#[hotpath::measure]
 fn derived_simple_name(qualified_name: &str) -> String {
     let tail = qualified_name.rsplit("::").next().unwrap_or(qualified_name);
     let tail = tail.rsplit('.').next().unwrap_or(tail);

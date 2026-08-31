@@ -11,6 +11,7 @@ pub(super) struct FrontierPath {
     pub(super) score: u64,
 }
 
+#[hotpath::measure_all]
 impl FrontierPath {
     pub(super) fn seed() -> Self {
         Self {
@@ -34,6 +35,7 @@ impl FrontierPath {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn admit_frontier_path(frontier: &mut Vec<FrontierPath>, candidate: FrontierPath) {
     if let Some(depth) = frontier.first().map(|path| path.segments.len()) {
         if depth < candidate.segments.len() {
@@ -63,6 +65,7 @@ pub(super) fn admit_frontier_path(frontier: &mut Vec<FrontierPath>, candidate: F
     *frontier = retained;
 }
 
+#[hotpath::measure]
 pub(super) fn best_frontier_path(
     paths: Vec<FrontierPath>,
 ) -> Result<FrontierPath, CodeGraphProjectionError> {
@@ -82,6 +85,7 @@ pub(super) fn best_frontier_path(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn compare_paths(
     left: &[CanonicalRelationEdgeV1],
     right: &[CanonicalRelationEdgeV1],
@@ -107,6 +111,7 @@ pub(super) fn compare_paths(
         }))
 }
 
+#[hotpath::measure]
 fn graph_score_micros(path_len: usize, authority: EdgeAuthorityV1) -> u64 {
     let depth_bonus = 1_000_000u64.saturating_sub((path_len as u64).saturating_mul(50_000));
     let authority_bonus = match authority {

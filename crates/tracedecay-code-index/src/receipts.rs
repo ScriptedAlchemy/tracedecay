@@ -85,6 +85,7 @@ enum Partition {
 
 /// The canonical request digest: every request field except the digest
 /// itself, under the request domain separator.
+#[hotpath::measure]
 pub fn expected_request_digest(
     request: &ProjectionBatchRequestV1,
 ) -> Result<ManifestDigest, DomainError> {
@@ -99,6 +100,7 @@ pub fn expected_request_digest(
 
 /// The canonical publication digest of one batch receipt: every batch field
 /// except the digest itself, under the publication domain separator.
+#[hotpath::measure]
 pub fn expected_publication_digest(
     batch: &ProjectionBatchReceiptV1,
 ) -> Result<ManifestDigest, DomainError> {
@@ -108,6 +110,7 @@ pub fn expected_publication_digest(
 /// Whether the changed-chunk set requests no projection work: empty
 /// added/changed and deleted partitions (Plan 25: a no-op generation emits
 /// empty `added_or_changed` and `deleted` sets plus explicit `reused`).
+#[hotpath::measure]
 pub fn changeset_is_noop(changes: &ChangedCodeChunkSetV1) -> bool {
     changes.added_or_changed.is_empty() && changes.deleted.is_empty()
 }
@@ -116,6 +119,7 @@ pub fn changeset_is_noop(changes: &ChangedCodeChunkSetV1) -> bool {
 /// `Reused` operation with a `Reused` outcome and the reused count covers
 /// the whole set. An identical replay of an already-projected batch always
 /// satisfies this.
+#[hotpath::measure]
 pub fn batch_proves_zero_work(batch: &ProjectionBatchReceiptV1) -> bool {
     batch.reused_count == batch.receipts.len() as u64
         && batch.receipts.iter().all(|receipt| {
@@ -126,6 +130,7 @@ pub fn batch_proves_zero_work(batch: &ProjectionBatchReceiptV1) -> bool {
 
 /// Whether a batch receipt can activate a projection generation (Plan 25:
 /// failed or partial receipt sets remain inspectable but cannot activate).
+#[hotpath::measure]
 pub fn batch_can_activate(batch: &ProjectionBatchReceiptV1) -> bool {
     batch.receipts.iter().all(|receipt| {
         matches!(
@@ -137,6 +142,7 @@ pub fn batch_can_activate(batch: &ProjectionBatchReceiptV1) -> bool {
 
 /// The decisions for a no-op replay: every reused chunk maps to a `Reused`
 /// operation with a `Reused` outcome and no output digest.
+#[hotpath::measure]
 pub fn decisions_for_noop(changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectionDecisionV1> {
     changes
         .reused
@@ -168,6 +174,7 @@ pub(crate) struct ProjectionRequestEvidenceV1 {
     partitions: BTreeMap<CodeSearchChunkId, (Partition, DigestPair)>,
 }
 
+#[hotpath::measure_all]
 impl ProjectionRequestEvidenceV1 {
     /// Record evidence for a request whose digest was just recomputed and
     /// whose changed-chunk set was just validated by the caller.
@@ -201,6 +208,7 @@ pub(crate) enum PublicationDigestTrustV1 {
 /// request partitions; the receipts are canonically ordered and the
 /// publication digest seals the batch. Construction is deterministic, so
 /// identical requests and decisions yield identical receipts.
+#[hotpath::measure]
 pub fn build_batch_receipt(
     request: &ProjectionBatchRequestV1,
     decisions: &[ChunkProjectionDecisionV1],
@@ -209,6 +217,7 @@ pub fn build_batch_receipt(
 }
 
 /// [`build_batch_receipt`] for a request this chain already verified.
+#[hotpath::measure]
 pub(crate) fn build_batch_receipt_verified(
     request: &ProjectionBatchRequestV1,
     evidence: &ProjectionRequestEvidenceV1,
@@ -217,6 +226,7 @@ pub(crate) fn build_batch_receipt_verified(
     build_batch_receipt_with(request, Some(evidence), decisions)
 }
 
+#[hotpath::measure]
 fn build_batch_receipt_with(
     request: &ProjectionBatchRequestV1,
     evidence: Option<&ProjectionRequestEvidenceV1>,
@@ -300,6 +310,7 @@ fn build_batch_receipt_with(
 /// missing, extra, or duplicate receipts), every receipt carries the
 /// request's projection key and generation watermarks, and every operation,
 /// outcome, and digest is consistent with the request partitions.
+#[hotpath::measure]
 pub fn verify_batch_receipt(
     request: &ProjectionBatchRequestV1,
     batch: &ProjectionBatchReceiptV1,
@@ -309,6 +320,7 @@ pub fn verify_batch_receipt(
 
 /// [`verify_batch_receipt`] for a request this chain already verified, and a
 /// receipt whose publication digest may already be known good.
+#[hotpath::measure]
 pub(crate) fn verify_batch_receipt_verified(
     request: &ProjectionBatchRequestV1,
     evidence: &ProjectionRequestEvidenceV1,
@@ -318,6 +330,7 @@ pub(crate) fn verify_batch_receipt_verified(
     verify_batch_receipt_with(request, Some(evidence), batch, publication)
 }
 
+#[hotpath::measure]
 fn verify_batch_receipt_with(
     request: &ProjectionBatchRequestV1,
     evidence: Option<&ProjectionRequestEvidenceV1>,
@@ -427,6 +440,7 @@ fn verify_batch_receipt_with(
     Ok(())
 }
 
+#[hotpath::measure]
 fn reembeds_reused_chunks(
     request: &ProjectionBatchRequestV1,
 ) -> Result<bool, ProjectionReceiptErrorV1> {
@@ -446,6 +460,7 @@ fn reembeds_reused_chunks(
 /// Index the changed-chunk set's partitions by chunk identity, validating
 /// the set first (canonical order, partition shape, and manifest digest are
 /// owned by the domain contract).
+#[hotpath::measure]
 fn partitions_of(
     changes: &ChangedCodeChunkSetV1,
 ) -> Result<BTreeMap<CodeSearchChunkId, (Partition, DigestPair)>, ProjectionReceiptErrorV1> {
@@ -459,6 +474,7 @@ fn partitions_of(
 ///
 /// `ChangedCodeChunkSetV1::validate` recomputes the whole set's manifest
 /// digest, so it runs once per call chain and the index is threaded onward.
+#[hotpath::measure]
 fn index_partitions(
     changes: &ChangedCodeChunkSetV1,
 ) -> BTreeMap<CodeSearchChunkId, (Partition, DigestPair)> {
@@ -511,6 +527,7 @@ struct DigestPair {
 
 /// Enforce operation, outcome, and digest consistency between one decision
 /// (or receipt) and the request partition its chunk belongs to.
+#[hotpath::measure]
 fn check_decision(
     partition: Partition,
     expected: &DigestPair,
@@ -568,6 +585,7 @@ fn check_decision(
 
 /// A well-formed placeholder digest, replaced by the computed publication
 /// digest before the batch is returned.
+#[hotpath::measure]
 fn placeholder_digest() -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
         .expect("a zeroed sha256 digest is canonical")

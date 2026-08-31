@@ -81,6 +81,7 @@ pub enum GenerationImpactJoinErrorV1 {
     Contract(String),
 }
 
+#[hotpath::measure_all]
 impl GenerationImpactJoinV1 {
     pub fn join(
         generation: &CodeGenerationManifestV1,
@@ -173,6 +174,7 @@ impl GenerationImpactJoinV1 {
     }
 }
 
+#[hotpath::measure]
 fn index_occurrences(
     occurrences: &[GenerationOccurrenceBindingV1],
 ) -> Result<
@@ -209,6 +211,7 @@ fn index_occurrences(
     Ok(by_id)
 }
 
+#[hotpath::measure]
 fn resolve_occurrence(
     generation: &CodeGenerationManifestV1,
     content_by_file: &BTreeMap<&FileOccurrenceId, &ContentDigest>,
@@ -237,6 +240,7 @@ fn resolve_occurrence(
     Ok(occurrence.clone())
 }
 
+#[hotpath::measure]
 fn validate_unique<T: Ord + Clone>(values: &[T]) -> Result<(), GenerationImpactJoinErrorV1> {
     let mut seen = BTreeSet::new();
     for value in values {
@@ -249,6 +253,7 @@ fn validate_unique<T: Ord + Clone>(values: &[T]) -> Result<(), GenerationImpactJ
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_generation_snapshot(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
