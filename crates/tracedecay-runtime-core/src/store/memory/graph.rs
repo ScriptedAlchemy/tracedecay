@@ -230,7 +230,11 @@ pub(super) async fn project_memory_graph(
                     GraphRelationRef::new(projection_identity_for_read.clone(), relation_id);
                 let relation = snapshot_for_read
                     .relation(&reference, Arc::clone(&cancellation))?
-                    .ok_or(tracedecay_graph_db::GraphDbError::Conflict)?;
+                    .ok_or_else(|| {
+                        tracedecay_graph_db::GraphDbError::conflict(
+                            "memory_graph.project_relations.missing_relation",
+                        )
+                    })?;
                 relations.push(ProjectedRelation {
                     source: relation.from.identity,
                     target: relation.to.identity,
@@ -515,7 +519,9 @@ pub(super) fn validate_rooted_relations(
         !accepted_entities.contains(&relation.source)
             || !accepted_entities.contains(&relation.target)
     }) {
-        return Err(tracedecay_graph_db::GraphDbError::Conflict);
+        return Err(tracedecay_graph_db::GraphDbError::conflict(
+            "memory_graph.accept_relations.unaccepted_endpoint",
+        ));
     }
     if relations.len() > max_relations {
         return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
@@ -1165,7 +1171,7 @@ pub(super) fn graph_error(
     error: tracedecay_graph_db::GraphDbError,
 ) -> FactStoreError {
     match error {
-        tracedecay_graph_db::GraphDbError::Conflict => FactStoreError::GraphConflict,
+        tracedecay_graph_db::GraphDbError::Conflict { .. } => FactStoreError::GraphConflict,
         tracedecay_graph_db::GraphDbError::Cancelled => FactStoreError::GraphCancelled,
         tracedecay_graph_db::GraphDbError::BudgetExhausted { .. } => {
             FactStoreError::GraphBudgetExhausted

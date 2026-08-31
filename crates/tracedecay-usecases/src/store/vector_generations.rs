@@ -962,7 +962,6 @@ pub struct PublishedVectorGenerationV1 {
     manifest_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl PublishedVectorGenerationV1 {
     pub fn generation_id(&self) -> &VectorGenerationIdV1 {
         &self.generation_id
@@ -1236,7 +1235,6 @@ struct PublishedStateV1 {
         BTreeMap<VectorGenerationIdV1, ExternalV1<BTreeMap<CodeSearchChunkId, ManifestDigest>>>,
 }
 
-#[hotpath::measure_all]
 impl PublishedStateV1 {
     fn immutable_graph_generation(
         generations: BTreeMap<VectorGenerationIdV1, PublishedVectorGenerationV1>,
@@ -1262,7 +1260,6 @@ pub struct VectorGenerationStateMachineV1 {
     staged_values: StagedVectorValueRetentionV1,
 }
 
-#[hotpath::measure_all]
 impl VectorGenerationStateMachineV1 {
     pub fn new() -> Self {
         Self::default()
@@ -1852,7 +1849,6 @@ impl VectorGenerationStateMachineV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl VectorGenerationStateMachineV1 {
     /// Rebuild the derived physical-byte index for every published generation.
     ///
@@ -1957,7 +1953,6 @@ fn seal_test_state(
 type ExternalSlotVisitV1<'visit> =
     dyn FnMut(&mut dyn ExternalSlotV1) -> Result<(), VectorGenerationStoreErrorV1> + 'visit;
 
-#[hotpath::measure_all]
 impl PublishedVectorGenerationV1 {
     fn visit_external_slots(
         &mut self,
@@ -2116,7 +2111,6 @@ fn validate_receipt_parts(
     Ok(())
 }
 
-#[hotpath::measure_all]
 impl VectorGenerationStateMachineV1 {
     /// Every externalized collection in the state document, in a stable order.
     fn visit_external_slots(

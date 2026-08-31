@@ -77,6 +77,29 @@ const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(any(test, feature = "
     Duration::from_mins(10)
 };
 
+/// Whether this activation failure repeats the previous attempt's conflict
+/// verdict for the same sealed generation. A first Conflict can be a race
+/// with a concurrent publisher and retries like any transient failure, but
+/// the same guard site refusing with identical compared evidence on the very
+/// next attempt over the same immutable sealed inputs is deterministic:
+/// retrying re-runs minutes of replay to reach the identical refusal, so the
+/// seat loop converts it into the terminal typed refusal instead of backing
+/// off forever (issue #765).
+pub(crate) fn is_repeated_conflict_verdict(
+    error: &CodeIndexSchedulerErrorV1,
+    seat_generation_id: &tracedecay_domain::CodeGenerationId,
+    last_seat_conflict: Option<&(
+        tracedecay_domain::CodeGenerationId,
+        tracedecay_graph_db::GraphConflictContextV1,
+    )>,
+) -> bool {
+    error.activation_conflict_context().is_some_and(|context| {
+        last_seat_conflict.is_some_and(|(prior_generation, prior_context)| {
+            prior_generation == seat_generation_id && prior_context == context
+        })
+    })
+}
+
 /// How many bounded text-projection slices one pass may run to completion
 /// before the optional graph decode. The projection is finite in the sealed
 /// generation's document count, so this only bounds a non-progressing builder:
@@ -2816,6 +2839,19 @@ impl CodeIndexSchedulerRegistryV1 {
             // generation that serves text without a native graph to one per
             // generation, so a permanently unactivatable seal cannot spin.
             let mut graph_seat_attempted: Option<tracedecay_domain::CodeGenerationId> = None;
+            // The conflict verdict of the previous failed seat attempt. A
+            // Conflict can be a race (a concurrent publisher advanced the
+            // head) and is retried once like any transient failure, but the
+            // same guard site refusing with identical compared evidence for
+            // the same sealed generation on the very next attempt is a
+            // deterministic verdict that no backoff can outwait. One repeat
+            // converts the retry into the terminal typed refusal below, so
+            // the backoff ceiling can never become an infinite conflict loop
+            // (issue #765).
+            let mut last_seat_conflict: Option<(
+                tracedecay_domain::CodeGenerationId,
+                tracedecay_graph_db::GraphConflictContextV1,
+            )> = None;
             // Bounded retry state for a reconcile whose blocking task unwound.
             // Arbitrary user source runs through the indexing pool, so a panic
             // there is an input fault, not a programmer-contract break: it
@@ -3513,10 +3549,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         Ok(()) => {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                            last_seat_conflict = None;
                         }
                         Err(error) if error.is_graph_activation_refusal() => {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                            last_seat_conflict = None;
                             tracing::warn!(
                                 event = "code_index_graph_activation_refused",
                                 error = %error,
@@ -3524,10 +3562,23 @@ impl CodeIndexSchedulerRegistryV1 {
                             );
                         }
                         Err(error) => {
+                            let seat_generation_id =
+                                latest.generation().manifest().generation_id.clone();
+                            let repeated_conflict = is_repeated_conflict_verdict(
+                                &error,
+                                &seat_generation_id,
+                                last_seat_conflict.as_ref(),
+                            );
                             // The generation just sealed is complete; a retryable
                             // activation failure arms the same seat backoff so the
                             // next passes retry this artifact instead of resealing.
-                            if error.is_retryable_activation() {
+                            // A conflict verdict identical to the previous
+                            // attempt's for this same generation is deterministic
+                            // and falls through to the terminal arm instead.
+                            if error.is_retryable_activation() && !repeated_conflict {
+                                last_seat_conflict = error
+                                    .activation_conflict_context()
+                                    .map(|context| (seat_generation_id, context.clone()));
                                 next_seat_attempt_at = Some(Instant::now() + seat_retry_backoff);
                                 let retry_wake = Arc::clone(&worker_wake);
                                 let retry_delay = seat_retry_backoff;
@@ -3558,13 +3609,25 @@ impl CodeIndexSchedulerRegistryV1 {
                             } else {
                                 next_seat_attempt_at = None;
                                 seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                                last_seat_conflict = None;
                                 latest.mark_graph_activation_unavailable(error.to_string());
-                                tracing::warn!(
-                                    event = "code_index_graph_activation_failed",
-                                    error = %error,
-                                    "graph activation failed terminally; exact and lexical \
-                                     serving remain available with typed graph unavailability"
-                                );
+                                if repeated_conflict {
+                                    tracing::warn!(
+                                        event = "code_index_graph_activation_conflict_terminal",
+                                        error = %error,
+                                        "graph activation repeated an identical conflict \
+                                         verdict for the same sealed generation; retrying \
+                                         cannot succeed, so the generation serves exact and \
+                                         lexical with typed graph unavailability"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        event = "code_index_graph_activation_failed",
+                                        error = %error,
+                                        "graph activation failed terminally; exact and lexical \
+                                         serving remain available with typed graph unavailability"
+                                    );
+                                }
                             }
                         }
                     }

@@ -69,7 +69,6 @@ struct LoadInterruptionSignalV1 {
     state: AtomicU8,
 }
 
-#[hotpath::measure_all]
 impl LoadInterruptionSignalV1 {
     /// Record the first interruption; later signals keep the original cause.
     fn fire(&self, interruption: SemanticExecutionInterruptionV1) {
@@ -212,7 +211,6 @@ pub enum SessionAcquireError {
     /// artifact's declared resident-byte ceiling. The load was signalled to
     /// abort; its slot and byte reservation release when the runtime returns.
     ResidentCeilingExceeded {
-        tracked_resident_bytes: u64,
         observed_growth_bytes: u64,
         ceiling_bytes: u64,
     },
@@ -249,12 +247,11 @@ impl fmt::Display for SessionAcquireError {
                 "cold session load deadline exceeded: elapsed {elapsed:?} exceeds {deadline:?}"
             ),
             Self::ResidentCeilingExceeded {
-                tracked_resident_bytes,
                 observed_growth_bytes,
                 ceiling_bytes,
             } => write!(
                 f,
-                "cold session load resident ceiling exceeded: {tracked_resident_bytes} tracked bytes + {observed_growth_bytes} observed growth > {ceiling_bytes} byte ceiling"
+                "cold session load resident ceiling exceeded: observed {observed_growth_bytes} bytes of growth over the {ceiling_bytes} byte ceiling"
             ),
             Self::Open(err) => write!(f, "failed to open session: {err}"),
             Self::Closed => write!(f, "session pool is closed"),
@@ -319,7 +316,6 @@ impl<S> Default for PoolState<S> {
     }
 }
 
-#[hotpath::measure_all]
 impl<S> PoolState<S> {
     fn idle_sessions(&self) -> usize {
         self.idle.values().map(Vec::len).sum()
@@ -356,7 +352,6 @@ struct PoolInner<R: EmbeddingRuntime, C: MonotonicClock> {
     wakeups: Condvar,
 }
 
-#[hotpath::measure_all]
 impl<R: EmbeddingRuntime, C: MonotonicClock> PoolInner<R, C> {
     fn lock_state(&self) -> MutexGuard<'_, PoolState<R::Session>> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -378,7 +373,6 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Clone for SessionPool<R, C> {
     }
 }
 
-#[hotpath::measure_all]
 impl<R, C> SessionPool<R, C>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
@@ -503,7 +497,6 @@ where
                 max: self.inner.config.max_sessions,
             });
         }
-        let tracked_resident_before_open = state.resident_bytes;
         // Reserve both the slot and a conservative resident-byte bound before
         // opening. FastEmbed model loading is itself memory-intensive, so a
         // post-open check would allow concurrent opens to transiently exceed
@@ -538,12 +531,7 @@ where
 
         let load_started = self.inner.clock.now();
         let load_deadline = Duration::from_millis(authority.load_deadline_ms());
-        let session = self.open_session_bounded(
-            authority,
-            load_deadline,
-            reserved_bytes,
-            tracked_resident_before_open,
-        )?;
+        let session = self.open_session_bounded(authority, load_deadline, reserved_bytes)?;
         // Injected-clock recheck after a bounded open: a manual test clock can
         // report a longer load than the wall-time bound observed, and the
         // deadline verdict must follow the injected clock in that case too.
@@ -808,7 +796,6 @@ where
         authority: &AdmittedProjectionArtifactV1,
         load_deadline: Duration,
         reserved_bytes: u64,
-        tracked_resident_before_open: u64,
     ) -> Result<R::Session, SessionAcquireError> {
         let (result_tx, result_rx) = channel::<Result<R::Session, EmbedError>>();
         let inner = Arc::clone(&self.inner);
@@ -866,7 +853,7 @@ where
             if remaining.is_zero() {
                 let elapsed = self.inner.clock.now().saturating_sub(wait_started);
                 interruption.fire(SemanticExecutionInterruptionV1::DeadlineExceeded);
-                self.settle_abandoned_open(result_rx, reserved_bytes, elapsed);
+                self.settle_abandoned_open(&result_rx, reserved_bytes, elapsed);
                 return Err(SessionAcquireError::LoadDeadlineExceeded {
                     elapsed,
                     deadline: load_deadline,
@@ -896,25 +883,15 @@ where
                     };
                     hotpath::gauge!("semantic_cold_load_resident_growth_bytes")
                         .set(observed_growth_bytes);
-                    let effective_resident_bytes =
-                        tracked_resident_before_open.checked_add(observed_growth_bytes);
-                    let violated_ceiling = if observed_growth_bytes > resident_ceiling_bytes {
-                        Some(resident_ceiling_bytes)
-                    } else {
-                        effective_resident_bytes
-                            .is_none_or(|bytes| bytes > self.inner.config.memory_ceiling_bytes)
-                            .then_some(self.inner.config.memory_ceiling_bytes)
-                    };
-                    let Some(ceiling_bytes) = violated_ceiling else {
+                    if observed_growth_bytes <= resident_ceiling_bytes {
                         continue;
-                    };
+                    }
                     let elapsed = self.inner.clock.now().saturating_sub(wait_started);
                     interruption.fire(SemanticExecutionInterruptionV1::Cancelled);
-                    self.settle_abandoned_open(result_rx, reserved_bytes, elapsed);
+                    self.settle_abandoned_open(&result_rx, reserved_bytes, elapsed);
                     return Err(SessionAcquireError::ResidentCeilingExceeded {
-                        tracked_resident_bytes: tracked_resident_before_open,
                         observed_growth_bytes,
-                        ceiling_bytes,
+                        ceiling_bytes: resident_ceiling_bytes,
                     });
                 }
                 Err(RecvTimeoutError::Disconnected) => {
@@ -938,7 +915,7 @@ where
     /// when the runtime returns.
     fn settle_abandoned_open(
         &self,
-        result_rx: Receiver<Result<R::Session, EmbedError>>,
+        result_rx: &Receiver<Result<R::Session, EmbedError>>,
         reserved_bytes: u64,
         elapsed: Duration,
     ) {
@@ -960,11 +937,7 @@ where
             Err(TryRecvError::Disconnected) => {
                 self.release_reserved_slot(reserved_bytes);
             }
-            // Taking the receiver by value closes the race where the loader
-            // sends after this empty observation but before abandonment
-            // returns. Dropping it here makes that send fail, so the loader
-            // owns reservation settlement in every future-send case.
-            Err(TryRecvError::Empty) => drop(result_rx),
+            Err(TryRecvError::Empty) => {}
         }
     }
 
@@ -1030,7 +1003,6 @@ pub struct PooledSession<R: EmbeddingRuntime, C: MonotonicClock> {
     resident_bytes: u64,
 }
 
-#[hotpath::measure_all]
 impl<R: EmbeddingRuntime, C: MonotonicClock> PooledSession<R, C> {
     pub fn identity(&self) -> &SessionIdentityV1 {
         &self.identity
