@@ -529,6 +529,35 @@ fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
         .join(crate::PRODUCT_VERSION)
 }
 
+/// Attribute Codex CLI cache mutations to the active host-config write-intent
+/// scope so registration rollback can restore the pre-command surface.
+///
+/// `host_registration_paths` inventories every managed file under the versioned
+/// cache. `codex plugin add`/`remove` create or delete those files outside
+/// [`super::safe_write_text_file`], and without a recorded intent
+/// `restore_registration` treats the live cache as foreign drift (`StalePreview`)
+/// and aborts before restoring any other registration path — including the
+/// managed-agent ownership manifest that byte-for-byte rollback demands.
+fn record_codex_cached_plugin_registration_intents(home: &Path) -> Result<()> {
+    let cache_dir = codex_plugin_current_cached_install_dir(home);
+    for path in codex_plugin_managed_paths(&cache_dir) {
+        let contents = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to read Codex plugin cache registration path {}: {error}",
+                        path.display()
+                    ),
+                });
+            }
+        };
+        super::record_host_config_observation_bytes(&path, contents.as_deref())?;
+    }
+    Ok(())
+}
+
 fn codex_exact_cache_manifest_path(home: &Path) -> Result<Option<PathBuf>> {
     let marketplace_name =
         codex_exact_personal_marketplace_name(home).map_err(|()| TraceDecayError::Config {
