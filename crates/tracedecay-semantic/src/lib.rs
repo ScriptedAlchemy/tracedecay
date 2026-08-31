@@ -439,6 +439,7 @@ fn warm_failure(error: SessionAcquireError) -> SemanticRuntimeScheduleFailureV1 
         SessionAcquireError::Exhausted { .. }
         | SessionAcquireError::QueueFull { .. }
         | SessionAcquireError::MemoryCeilingExceeded { .. }
+        | SessionAcquireError::ResidentCeilingExceeded { .. }
         | SessionAcquireError::Open(_)
         | SessionAcquireError::Closed => SemanticRuntimeScheduleFailureV1::Runtime,
     }
