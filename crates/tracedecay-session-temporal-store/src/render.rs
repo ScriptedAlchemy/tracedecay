@@ -59,6 +59,7 @@ pub fn apply_canonical_content(
     Ok(expansion)
 }
 
+#[hotpath::measure]
 pub fn apply_canonical_summary_source_content(
     expansion: &mut LcmExpandResponse,
     slice: LcmContentSlice,

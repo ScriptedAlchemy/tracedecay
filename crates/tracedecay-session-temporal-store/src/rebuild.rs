@@ -25,6 +25,7 @@ use crate::handle::{
 
 const MAX_REBUILD_RELATION_PROJECTION_ITEMS: usize = 100_000;
 
+#[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::measure(future = true, label = "session_temporal.txn.begin_rebuild")]
     pub async fn begin_session_generation_rebuild_result(
@@ -308,6 +309,7 @@ pub(super) async fn rebuild_candidate_session_relations(
     Ok(loaded)
 }
 
+#[hotpath::measure]
 pub(super) fn checkpoint_relation_rebuild_control(
     control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
@@ -316,6 +318,7 @@ pub(super) fn checkpoint_relation_rebuild_control(
         .map_err(map_relation_rebuild_control_error)
 }
 
+#[hotpath::measure]
 fn map_relation_rebuild_control_error(error: TemporalPortError) -> SessionStoreError {
     match error {
         TemporalPortError::Cancelled => SessionStoreError::Cancelled,
@@ -329,6 +332,7 @@ fn map_relation_rebuild_control_error(error: TemporalPortError) -> SessionStoreE
     }
 }
 
+#[hotpath::measure]
 fn map_relation_rebuild_error(
     operation: &'static str,
     error: SessionRelationError,

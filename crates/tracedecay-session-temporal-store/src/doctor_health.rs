@@ -60,6 +60,7 @@ static SESSION_TEMPORAL_HEALTH_CACHE: OnceLock<
     SessionDoctorCacheLock<HashMap<PathBuf, SessionTemporalHealthCacheCell>>,
 > = OnceLock::new();
 
+#[hotpath::measure]
 fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCacheCell {
     let cache = SESSION_TEMPORAL_HEALTH_CACHE.get_or_init(|| {
         hotpath::mutex!(
@@ -87,6 +88,7 @@ fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCache
     }))
 }
 
+#[hotpath::measure]
 fn store_file_fingerprint(
     path: &Path,
 ) -> std::io::Result<Option<SessionTemporalStoreFileFingerprint>> {
@@ -104,6 +106,7 @@ fn store_file_fingerprint(
     }
 }
 
+#[hotpath::measure]
 fn session_temporal_store_fingerprint(
     database_path: &Path,
 ) -> std::io::Result<SessionTemporalStoreFingerprint> {
@@ -123,6 +126,7 @@ fn session_temporal_store_fingerprint(
     })
 }
 
+#[hotpath::measure]
 fn session_temporal_store_family_bytes(database_path: &Path) -> std::io::Result<u64> {
     hotpath::measure_block!("session_temporal.doctor.stat", {
         let database = std::fs::metadata(database_path)?.len();
@@ -141,6 +145,7 @@ fn session_temporal_store_family_bytes(database_path: &Path) -> std::io::Result<
     })
 }
 
+#[hotpath::measure]
 fn permits_synchronous_session_temporal_health(database_path: &Path) -> bool {
     session_temporal_store_family_bytes(database_path)
         .is_ok_and(|bytes| bytes <= MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES)
@@ -207,6 +212,7 @@ const REQUIRED_FTS_SHADOW_TABLES: &[&str] = &[
     "session_summary_nodes_fts_docsize",
 ];
 
+#[hotpath::measure]
 fn required_table_names() -> impl Iterator<Item = &'static str> {
     REQUIRED_BASE_TABLES
         .iter()
@@ -628,11 +634,14 @@ pub struct SessionTemporalHealthFinding {
     count: u64,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalHealthFinding {
+    #[hotpath::skip]
     pub const fn kind(&self) -> SessionTemporalHealthFindingKind {
         self.kind
     }
 
+    #[hotpath::skip]
     pub const fn count(&self) -> u64 {
         self.count
     }
@@ -649,7 +658,9 @@ pub struct SessionTemporalHealthReport {
     reason: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalHealthReport {
+    #[hotpath::skip]
     pub const fn status(&self) -> SessionTemporalHealthStatus {
         self.status
     }
@@ -669,6 +680,7 @@ struct HealthCheck {
     sql: &'static str,
 }
 
+#[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// Produces a redacted, non-mutating temporal health snapshot through the
     /// retained registered reader pool. Identical requests coalesce behind one
@@ -911,6 +923,7 @@ async fn snapshot_column_shape_drift(
     Ok(drift)
 }
 
+#[hotpath::measure]
 fn normalize_sql(sql: &str) -> String {
     sql.chars()
         .filter(|character| !character.is_whitespace() && *character != ';')
@@ -949,6 +962,7 @@ async fn snapshot_count(
         .min(MAX_FINDING_COUNT))
 }
 
+#[hotpath::measure]
 fn finding(kind: SessionTemporalHealthFindingKind, count: u64) -> SessionTemporalHealthFinding {
     SessionTemporalHealthFinding {
         kind,
@@ -956,6 +970,7 @@ fn finding(kind: SessionTemporalHealthFindingKind, count: u64) -> SessionTempora
     }
 }
 
+#[hotpath::measure]
 fn merge_finding(
     findings: &mut Vec<SessionTemporalHealthFinding>,
     kind: SessionTemporalHealthFindingKind,
@@ -968,6 +983,7 @@ fn merge_finding(
     }
 }
 
+#[hotpath::measure]
 fn is_fts_finding(kind: SessionTemporalHealthFindingKind) -> bool {
     matches!(
         kind,
@@ -976,11 +992,13 @@ fn is_fts_finding(kind: SessionTemporalHealthFindingKind) -> bool {
     )
 }
 
+#[hotpath::measure]
 fn is_fts_virtual_table_corruption(error: &EngineError) -> bool {
     error.sqlite_extended_code() == Some(SQLITE_CORRUPT_VTAB)
         || error.sqlite_code() == Some(SQLITE_CORRUPT_VTAB)
 }
 
+#[hotpath::measure]
 fn classify_engine_error(error: &EngineError) -> SessionTemporalHealthStatus {
     if is_engine_locked(error) {
         SessionTemporalHealthStatus::Locked
@@ -989,6 +1007,7 @@ fn classify_engine_error(error: &EngineError) -> SessionTemporalHealthStatus {
     }
 }
 
+#[hotpath::measure]
 fn classify_database_error(error: &TraceDecayError) -> SessionTemporalHealthStatus {
     let message = error.to_string().to_ascii_lowercase();
     if message.contains("locked") || message.contains("busy") {
@@ -998,15 +1017,18 @@ fn classify_database_error(error: &TraceDecayError) -> SessionTemporalHealthStat
     }
 }
 
+#[hotpath::measure]
 fn is_engine_locked(error: &EngineError) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("locked") || message.contains("busy")
 }
 
+#[hotpath::measure]
 fn unavailable_report(status: SessionTemporalHealthStatus) -> SessionTemporalHealthReport {
     unavailable_report_with_reason(status, None)
 }
 
+#[hotpath::measure]
 fn unavailable_report_with_reason(
     status: SessionTemporalHealthStatus,
     reason: Option<&'static str>,
@@ -1019,18 +1041,21 @@ fn unavailable_report_with_reason(
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_session_doctor_cache_hit() {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.doctor.cache_hits").inc(1_u64);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_session_doctor_cache_miss() {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.doctor.cache_misses").inc(1_u64);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_session_doctor_check() {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.doctor.checks").inc(1_u64);

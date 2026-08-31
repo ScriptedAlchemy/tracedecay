@@ -41,6 +41,7 @@ pub(super) async fn describe_relation_summary_ids(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn expand_relation_summary_ids(request: &LcmExpandRequest) -> Vec<String> {
     match &request.target {
         LcmExpandTarget::SummaryNode { node_id } => vec![node_id.clone()],
@@ -682,6 +683,7 @@ async fn retention_dropped_store_id(
     Ok(store_id)
 }
 
+#[hotpath::measure]
 fn relation<'a>(
     relations: &'a [SummaryRelationRead],
     summary_id: &str,
@@ -940,6 +942,7 @@ async fn load_payload(
     })
 }
 
+#[hotpath::measure]
 fn source_pagination(
     total_sources: usize,
     source_offset: usize,
@@ -965,6 +968,7 @@ fn source_pagination(
     }
 }
 
+#[hotpath::measure]
 fn empty_content_range(slice: LcmContentSlice) -> LcmContentRange {
     LcmContentRange {
         offset: slice.offset as u64,
@@ -975,6 +979,7 @@ fn empty_content_range(slice: LcmContentSlice) -> LcmContentRange {
     }
 }
 
+#[hotpath::measure]
 fn storage_kind(value: &str) -> Result<LcmStorageKind, LcmError> {
     LcmStorageKind::from_db(value)
         .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {value}")))

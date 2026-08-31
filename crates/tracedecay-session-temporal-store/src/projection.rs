@@ -46,6 +46,7 @@ pub struct SessionTemporalRefreshDiscoveryPage {
     pending_has_more: bool,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalRefreshDiscoveryPage {
     pub fn active_rows_scanned(&self) -> usize {
         self.active_rows_scanned
@@ -71,6 +72,7 @@ impl SessionTemporalRefreshDiscoveryPage {
     }
 }
 
+#[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// Discovers sessions that need temporal projection.
     ///

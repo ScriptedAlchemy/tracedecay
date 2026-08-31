@@ -39,6 +39,7 @@ pub struct AuthorizedTemporalExecutionRequest {
     configuration_digest: String,
 }
 
+#[hotpath::measure_all]
 impl AuthorizedTemporalExecutionRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -88,10 +89,12 @@ impl AuthorizedTemporalExecutionRequest {
         self.cursor.as_deref()
     }
 
+    #[hotpath::skip]
     pub const fn limit(&self) -> usize {
         self.limit
     }
 
+    #[hotpath::skip]
     pub const fn diversity(&self) -> DiversityLimits {
         self.diversity
     }
@@ -100,14 +103,17 @@ impl AuthorizedTemporalExecutionRequest {
         &self.context_budget
     }
 
+    #[hotpath::skip]
     pub const fn execution_limits(&self) -> ExecutionLimits {
         self.snapshot_request.limits()
     }
 
+    #[hotpath::skip]
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
 
+    #[hotpath::skip]
     pub const fn ranking_version(&self) -> u32 {
         self.ranking_version
     }
@@ -158,6 +164,7 @@ pub struct SessionTemporalExecutionReport {
     source_coverage: Option<SessionSourceCoverageReceiptV1>,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalExecutionReport {
     pub fn new(result: TemporalKernelResult, freshness: SessionDataFreshness) -> Self {
         let source_coverage = result.snapshot.source_coverage().ok();
@@ -184,6 +191,7 @@ impl SessionTemporalExecutionReport {
         &self.result
     }
 
+    #[hotpath::skip]
     pub const fn freshness(&self) -> SessionDataFreshness {
         self.freshness
     }
@@ -317,6 +325,7 @@ pub struct AuthorizedTaskSessionExecutionRequestV1 {
     control: EvidenceLaneExecutionControlV1,
 }
 
+#[hotpath::measure_all]
 impl AuthorizedTaskSessionExecutionRequestV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -519,6 +528,7 @@ pub enum SessionDataFreshness {
     Partial { generation_lag: u64 },
 }
 
+#[hotpath::measure_all]
 impl SessionDataFreshness {
     #[must_use]
     pub fn from_source_coverage(receipt: &SessionSourceCoverageReceiptV1) -> Self {

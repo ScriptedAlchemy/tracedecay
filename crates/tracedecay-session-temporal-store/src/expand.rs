@@ -39,6 +39,7 @@ struct SummarySeed {
     publication: Option<SummaryPublicationMetadataV1>,
 }
 
+#[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::measure(future = true, label = "session_temporal.snapshot.freeze")]
     pub async fn freeze_session_temporal_snapshot_result(
@@ -297,6 +298,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 }
 
+#[hotpath::measure]
 fn relation_logical_copies(
     db: &impl SessionTemporalRegisteredDb,
     request: &SessionTemporalRetrievalRequestV1,
@@ -341,10 +343,12 @@ fn relation_logical_copies(
     })
 }
 
+#[hotpath::measure]
 fn checkpoint_execution_control(control: &ExecutionControl) -> SessionStoreResult<()> {
     control.checkpoint().map_err(map_execution_control_error)
 }
 
+#[hotpath::measure]
 fn map_execution_control_error(error: TemporalPortError) -> SessionStoreError {
     match error {
         TemporalPortError::Cancelled => SessionStoreError::Cancelled,
@@ -358,6 +362,7 @@ fn map_execution_control_error(error: TemporalPortError) -> SessionStoreError {
     }
 }
 
+#[hotpath::measure]
 fn map_session_relation_error(error: SessionRelationError) -> SessionStoreError {
     match error {
         SessionRelationError::Cancelled => SessionStoreError::Cancelled,
@@ -368,6 +373,7 @@ fn map_session_relation_error(error: SessionRelationError) -> SessionStoreError 
     }
 }
 
+#[hotpath::measure]
 fn relation_summary_relations(
     db: &impl SessionTemporalRegisteredDb,
     request: &SessionTemporalRetrievalRequestV1,
@@ -709,6 +715,7 @@ async fn validate_frozen_snapshot(
     Ok(())
 }
 
+#[hotpath::measure]
 fn occurrence_from_row(
     row: &Row,
     session_id: &SessionId,
@@ -736,6 +743,7 @@ fn occurrence_from_row(
     Ok(record)
 }
 
+#[hotpath::measure]
 fn assertion_from_row(
     row: &Row,
     assertion_id: String,
@@ -753,17 +761,20 @@ fn assertion_from_row(
     Ok(record)
 }
 
+#[hotpath::measure]
 fn row_get<T: FromValue>(row: &Row, column: i32) -> SessionStoreResult<T> {
     row.get(column)
         .map_err(|error| storage(EXPAND_OPERATION, error))
 }
 
+#[hotpath::measure]
 fn decode_optional_text<T: DeserializeOwned>(
     value: Option<String>,
 ) -> SessionStoreResult<Option<T>> {
     value.map(decode_text).transpose()
 }
 
+#[hotpath::measure]
 fn decode_optional_json<T: DeserializeOwned>(
     encoded: Option<String>,
 ) -> SessionStoreResult<Option<T>> {
@@ -780,22 +791,27 @@ fn decode_optional_json<T: DeserializeOwned>(
     }
 }
 
+#[hotpath::measure]
 fn parse_json_value(encoded: String) -> SessionStoreResult<serde_json::Value> {
     serde_json::from_str(&encoded).map_err(|error| storage(EXPAND_OPERATION, error))
 }
 
+#[hotpath::measure]
 fn decode_json_str<T: DeserializeOwned>(encoded: String) -> SessionStoreResult<T> {
     serde_json::from_str(&encoded).map_err(|error| storage(EXPAND_OPERATION, error))
 }
 
+#[hotpath::measure]
 fn decode_json_value<T: DeserializeOwned>(value: serde_json::Value) -> SessionStoreResult<T> {
     serde_json::from_value(value).map_err(|error| storage(EXPAND_OPERATION, error))
 }
 
+#[hotpath::measure]
 fn decode_text<T: DeserializeOwned>(value: String) -> SessionStoreResult<T> {
     decode_json_value(serde_json::Value::String(value))
 }
 
+#[hotpath::measure]
 fn decode_summary_publication(encoded: &str) -> SessionStoreResult<SummaryPublicationMetadataV1> {
     let value = parse_json_value(encoded.to_string())?;
     let value = if value.get("version").is_some() {
@@ -828,6 +844,7 @@ fn decode_summary_publication(encoded: &str) -> SessionStoreResult<SummaryPublic
     decode_json_value(value)
 }
 
+#[hotpath::measure]
 fn decode_generation_i64(
     value: i64,
     operation: &'static str,
@@ -836,6 +853,7 @@ fn decode_generation_i64(
     SessionProjectionGenerationV1::new(generation).map_err(SessionStoreError::from)
 }
 
+#[hotpath::measure]
 fn decode_frozen_watermarks(
     encoded: &str,
     active_generation: SessionProjectionGenerationV1,

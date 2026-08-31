@@ -71,6 +71,7 @@ pub(super) struct CanonicalPublicationManifest {
     pub route: Value,
 }
 
+#[hotpath::measure_all]
 impl CanonicalPublicationManifest {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn from_publication(
@@ -171,6 +172,7 @@ pub struct FrozenPublicationReceipt {
     pub publication_manifest_digest: String,
 }
 
+#[hotpath::measure]
 pub fn receipt_id(summary_id: &str, summary_hash: &str) -> String {
     format!(
         "receipt_summary_{}",
@@ -178,6 +180,7 @@ pub fn receipt_id(summary_id: &str, summary_hash: &str) -> String {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn logical_identity_digest(draft: &LcmSummaryNodeDraft) -> Result<String, LcmError> {
     let identity = serde_json::to_string(&(
         draft.provider.as_str(),
@@ -190,6 +193,7 @@ pub(super) fn logical_identity_digest(draft: &LcmSummaryNodeDraft) -> Result<Str
     Ok(projected_content_hash(&identity))
 }
 
+#[hotpath::measure]
 pub(super) fn normalize_timestamp(value: i64) -> i64 {
     if value.abs() < UNIX_TIMESTAMP_MILLIS_THRESHOLD {
         value.saturating_mul(1_000_000)

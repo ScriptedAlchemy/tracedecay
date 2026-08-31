@@ -19,6 +19,7 @@ use super::{
     projection, relation_ordinal,
 };
 
+#[hotpath::measure_all]
 impl SessionRelationGraphStore {
     /// Loads one immutable projection for direct publication of its successor.
     /// The caller owns both bounds; no partial projection is returned.
@@ -72,6 +73,7 @@ impl SessionRelationGraphStore {
     }
 }
 
+#[hotpath::measure]
 fn decode_projection(
     scope: &super::SessionRelationScope,
     session_id: &SessionId,
@@ -389,6 +391,7 @@ fn decode_projection(
     Ok(projection)
 }
 
+#[hotpath::measure]
 fn ordinal(
     relation: &tracedecay_graph_db::GraphRelation,
     property: &GraphPropertyName,
@@ -398,6 +401,7 @@ fn ordinal(
         .ok_or(SessionRelationError::Corrupt)
 }
 
+#[hotpath::measure]
 fn string_property<'a>(
     relation: &'a tracedecay_graph_db::GraphRelation,
     property: &GraphPropertyName,

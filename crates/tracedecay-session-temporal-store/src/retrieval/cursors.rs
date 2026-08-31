@@ -9,6 +9,7 @@ use super::super::sql::TemporalSqlRow;
 use super::rows::*;
 use super::{CANDIDATE_OPERATION, MIN_CURSOR_CAPACITY, RECORD_OPERATION};
 
+#[hotpath::measure]
 pub(super) fn decode_cursor<T: DeserializeOwned>(
     key: &PageKey,
     operation: &'static str,
@@ -25,6 +26,7 @@ pub(super) struct FrozenWatermarksWire {
     pub(super) summary_frontier: u64,
 }
 
+#[hotpath::measure]
 pub(super) fn encode_cursor(
     cursor: &impl Serialize,
     cap: usize,
@@ -39,6 +41,7 @@ pub(super) fn encode_cursor(
     Ok(PageKey::new(encoded))
 }
 
+#[hotpath::measure_all]
 impl PageBounds {
     pub(super) fn from_request(request: &PageRequest) -> Result<Self, TemporalPortError> {
         if request
@@ -64,6 +67,7 @@ impl PageBounds {
     }
 }
 
+#[hotpath::measure_all]
 impl CandidateCursor {
     pub(super) fn decode(key: Option<&PageKey>) -> Result<Self, TemporalPortError> {
         key.map_or(
@@ -82,6 +86,7 @@ impl CandidateCursor {
     }
 }
 
+#[hotpath::measure_all]
 impl RecordCursor {
     pub(super) fn decode(key: Option<&PageKey>) -> Result<Self, TemporalPortError> {
         key.map_or(

@@ -21,6 +21,7 @@ pub(super) struct GenerationRow {
     pub frozen_watermarks_json: String,
 }
 
+#[hotpath::measure]
 pub(super) fn storage(
     operation: &'static str,
     source: impl Error + Send + Sync + 'static,
@@ -31,6 +32,7 @@ pub(super) fn storage(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn storage_message(
     operation: &'static str,
     message: impl Into<String>,
@@ -38,6 +40,7 @@ pub(super) fn storage_message(
     storage(operation, io::Error::other(message.into()))
 }
 
+#[hotpath::measure]
 pub(super) fn now_micros(operation: &'static str) -> SessionStoreResult<UtcMicros> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -46,6 +49,7 @@ pub(super) fn now_micros(operation: &'static str) -> SessionStoreResult<UtcMicro
     Ok(UtcMicros(micros))
 }
 
+#[hotpath::measure]
 pub(super) fn generation_i64(
     generation: SessionProjectionGenerationV1,
     operation: &'static str,
@@ -53,10 +57,12 @@ pub(super) fn generation_i64(
     i64::try_from(generation.value()).map_err(|error| storage(operation, error))
 }
 
+#[hotpath::measure]
 pub(super) fn frontier_i64(frontier: u64, operation: &'static str) -> SessionStoreResult<i64> {
     i64::try_from(frontier).map_err(|error| storage(operation, error))
 }
 
+#[hotpath::measure]
 pub(super) fn encode_watermarks(
     watermarks: &SessionFrozenWatermarksV1,
     operation: &'static str,
@@ -99,6 +105,7 @@ pub(super) async fn read_generation(
         .transpose()
 }
 
+#[hotpath::measure]
 fn decode_generation(row: &Row, operation: &'static str) -> SessionStoreResult<GenerationRow> {
     Ok(GenerationRow {
         state: row.get(0).map_err(|error| storage(operation, error))?,
@@ -251,6 +258,7 @@ pub(super) async fn read_observations(
 
 /// The error `read_observation` raises for an id the store does not hold, reused
 /// by callers that resolve prefetched observations out of a batch map.
+#[hotpath::measure]
 pub(super) fn missing_observation(observation_id: &CanonicalObservationIdV1) -> SessionStoreError {
     storage_message(
         PERSIST_OPERATION,

@@ -104,6 +104,7 @@ pub use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 pub use store::GlobalDbSessionTemporalStore;
 
+#[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// Resolves a Git filter through the verified Git-evidence graph.
     ///
@@ -162,6 +163,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(key)
     }
 
+    #[hotpath::skip]
     pub async fn load_session_cursor_key_provider_result(
         &self,
     ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
@@ -178,6 +180,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
     }
 
+    #[hotpath::skip]
     pub async fn load_preprovisioned_session_cursor_key_provider_result(
         &self,
     ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
@@ -213,7 +216,9 @@ pub enum SessionPageReconstructionRequest<'a> {
     },
 }
 
+#[hotpath::measure_all]
 impl<'a> SessionPageReconstructionRequest<'a> {
+    #[hotpath::skip]
     pub const fn occurrence(
         snapshot: &'a TemporalExecutionSnapshot,
         anchor_id: &'a RetrievalAnchorId,
@@ -230,6 +235,7 @@ impl<'a> SessionPageReconstructionRequest<'a> {
         }
     }
 
+    #[hotpath::skip]
     pub const fn summary(
         snapshot: &'a TemporalExecutionSnapshot,
         provider: &'a str,
@@ -268,6 +274,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         SessionTemporalAccess::new(self.db)
     }
 
+    #[hotpath::skip]
     pub const fn new(db: &'db D) -> Self {
         Self { db }
     }
@@ -276,6 +283,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
     /// Every request must carry the exact same authorized root; accepting a
     /// mixed-root batch would make a registered shard an implicit cross-project
     /// cache.
+    #[hotpath::skip]
     pub async fn reconstruct_session_page<'a>(
         &self,
         requests: impl IntoIterator<Item = SessionPageReconstructionRequest<'a>>,
@@ -395,6 +403,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         Ok(reconstructed)
     }
 
+    #[hotpath::skip]
     pub async fn resolve_lcm_describe_target(
         &self,
         provider: &str,
@@ -415,6 +424,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         .await
     }
 
+    #[hotpath::skip]
     pub async fn resolve_lcm_expand_target(
         &self,
         provider: &str,
@@ -435,6 +445,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         .await
     }
 
+    #[hotpath::skip]
     pub async fn render_lcm_describe(
         &self,
         request: LcmDescribeRequest,
@@ -456,6 +467,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .map_err(map_lcm_error)
     }
 
+    #[hotpath::skip]
     pub async fn render_lcm_expand(
         &self,
         request: LcmExpandRequest,
@@ -476,6 +488,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .map_err(map_lcm_error)
     }
 
+    #[hotpath::skip]
     async fn lcm_summary_relations(
         &self,
         session_id: &str,
@@ -537,6 +550,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         Ok(relations)
     }
 
+    #[hotpath::skip]
     pub async fn hydrate_lcm_external_payload(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -628,6 +642,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         .map_err(map_lcm_error)
     }
 
+    #[hotpath::skip]
     pub async fn hydrate_lcm_summary_sources(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -758,6 +773,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .map_err(|_| SessionTemporalExecutionError::Unavailable)
     }
 
+    #[hotpath::skip]
     pub async fn encode_lcm_source_cursor(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -780,6 +796,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         .map_err(map_lcm_cursor_error)
     }
 
+    #[hotpath::skip]
     pub async fn decode_lcm_source_cursor(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -1101,6 +1118,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
     }
 }
 
+#[hotpath::measure]
 fn task_session_reauthorize(
     selector: &dyn TaskSessionRankSelectorV1,
     binding: &tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1,
@@ -1112,6 +1130,7 @@ fn task_session_reauthorize(
     }
 }
 
+#[hotpath::measure]
 fn task_session_callback_omission(
     stage: TaskSessionReauthorizationStageV1,
     error: TaskSessionSelectionCallbackErrorV1,
@@ -1129,12 +1148,14 @@ fn task_session_callback_omission(
     Ok(Some(TaskSessionExecutionOmissionV1 { stage, reason }))
 }
 
+#[hotpath::measure]
 fn task_session_callback_contract(detail: String) -> SessionTemporalExecutionError {
     SessionTemporalExecutionError::Kernel(
         tracedecay_temporal_query::TemporalKernelError::CandidateExportContract(detail),
     )
 }
 
+#[hotpath::measure]
 fn map_kernel_execution_error(
     error: tracedecay_temporal_query::TemporalKernelError,
 ) -> SessionTemporalExecutionError {
@@ -1160,6 +1181,7 @@ fn map_kernel_execution_error(
     }
 }
 
+#[hotpath::measure]
 fn map_hydration_error(
     error: tracedecay_temporal_query::hydration::HydrationError,
 ) -> SessionTemporalExecutionError {
@@ -1229,6 +1251,7 @@ async fn session_record_from_frozen_read(
     }))
 }
 
+#[hotpath::measure]
 fn map_control_error(
     error: tracedecay_temporal_query::ports::TemporalPortError,
 ) -> SessionTemporalExecutionError {
@@ -1259,6 +1282,7 @@ fn map_control_error(
     }
 }
 
+#[hotpath::measure]
 fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
     match error {
         LcmError::SummaryNodeNotFound
@@ -1277,6 +1301,7 @@ fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
     }
 }
 
+#[hotpath::measure]
 fn lcm_source_cursor_sort_key(binding: &str, next_source_offset: usize) -> StableSortKey {
     StableSortKey {
         normalized_score_micros: 0,
@@ -1285,6 +1310,7 @@ fn lcm_source_cursor_sort_key(binding: &str, next_source_offset: usize) -> Stabl
     }
 }
 
+#[hotpath::measure]
 fn parse_lcm_source_cursor_offset(
     binding: &str,
     sort_key: &StableSortKey,
@@ -1302,6 +1328,7 @@ fn parse_lcm_source_cursor_offset(
         .map_err(|_| SessionTemporalExecutionError::Denied)
 }
 
+#[hotpath::measure]
 fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
     match error {
         CursorError::RootMismatch

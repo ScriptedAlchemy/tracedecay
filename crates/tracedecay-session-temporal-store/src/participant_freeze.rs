@@ -23,6 +23,7 @@ use super::sql::TemporalSqlRows;
 /// The session-scoped query does not filter on `project_key`, so a session
 /// belonging to another project reaches this point and must be denied here.
 /// An absent authorized root is missing authority, not a permissive one.
+#[hotpath::measure]
 fn participant_authorization(
     authorized_root: Option<&TemporalAuthorizedRoot>,
     participant_project_key: &str,
@@ -35,6 +36,7 @@ fn participant_authorization(
     }
 }
 
+#[hotpath::measure]
 fn participant_source_access(
     metadata_json: Option<&str>,
     now: i64,

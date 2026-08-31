@@ -17,6 +17,7 @@ use super::queries::*;
 use super::rows::*;
 use super::{CANDIDATE_OPERATION, RECORD_OPERATION, SNAPSHOT_OPERATION};
 
+#[hotpath::measure]
 pub(super) fn validate_clause(
     clause: &CandidateClause,
     request: &PageRequest,
@@ -33,6 +34,7 @@ pub(super) fn validate_clause(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn fits_bytes(
     page_bytes: usize,
     item_bytes: usize,
@@ -45,10 +47,12 @@ pub(super) fn fits_bytes(
             .is_some_and(|total| total <= bounds.bytes)
 }
 
+#[hotpath::measure]
 pub(super) fn bounded_window_end(total: usize, start: usize, capacity: usize) -> usize {
     cmp::min(total, start.saturating_add(capacity))
 }
 
+#[hotpath::measure]
 pub(super) fn exact_match_ranges(text: &str, literal: &str) -> Vec<tracedecay_domain::ByteRangeV1> {
     if literal.is_empty() {
         return Vec::new();
@@ -64,6 +68,7 @@ pub(super) fn exact_match_ranges(text: &str, literal: &str) -> Vec<tracedecay_do
         .collect()
 }
 
+#[hotpath::measure]
 pub(super) fn authorized_root_project_key<'a>(
     scope: &TemporalRetrievalScope,
     request: &'a TemporalSnapshotRequest,
@@ -85,7 +90,9 @@ enum RootAuthorityChannel {
     Occurrence,
 }
 
+#[hotpath::measure_all]
 impl RootAuthorityChannel {
+    #[hotpath::skip]
     const fn from_candidate(channel: CandidateChannel) -> Self {
         match channel {
             CandidateChannel::Summary => Self::Summary,
@@ -100,6 +107,7 @@ impl RootAuthorityChannel {
         }
     }
 
+    #[hotpath::skip]
     const fn tag(self) -> &'static str {
         match self {
             Self::Summary => "summary",
@@ -202,6 +210,7 @@ pub(super) struct RootAuthorityDecisions {
     decisions: Vec<RootAuthorityDecision>,
 }
 
+#[hotpath::measure_all]
 impl RootAuthorityDecisions {
     pub(super) fn require(&self, candidate: usize) -> Result<(), TemporalPortError> {
         match self.decisions.get(candidate) {
@@ -683,6 +692,7 @@ pub(super) async fn query_candidate_clause(
         .map_err(|error| read_error(CANDIDATE_OPERATION, error))
 }
 
+#[hotpath::measure]
 pub(super) fn candidate_from_row(
     row: &TemporalSqlRow,
     channel: CandidateChannel,
@@ -769,10 +779,12 @@ pub(super) const fn candidate_score(channel: CandidateChannel) -> i64 {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn fts_phrase(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+#[hotpath::measure]
 pub(super) fn iso_day_bounds(value: &str) -> Result<(i64, i64), TemporalPortError> {
     let start_seconds = parse_rfc3339_timestamp(&format!("{value}T00:00:00Z"))
         .ok_or_else(|| read_message(CANDIDATE_OPERATION, "invalid ISO date candidate"))?;
@@ -789,6 +801,7 @@ pub(super) fn iso_day_bounds(value: &str) -> Result<(i64, i64), TemporalPortErro
     Ok((start, end))
 }
 
+#[hotpath::measure]
 pub(super) fn require_snapshot_scope(
     scope: &TemporalRetrievalScope,
     snapshot: &TemporalExecutionSnapshot,
@@ -802,6 +815,7 @@ pub(super) fn require_snapshot_scope(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn require_candidate_scope(
     scope: &TemporalRetrievalScope,
     candidate: &RankingCandidate,

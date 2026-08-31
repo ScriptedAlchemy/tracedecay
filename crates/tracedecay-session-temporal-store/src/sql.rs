@@ -94,10 +94,12 @@ pub(super) enum TemporalSqlRead<'a> {
 
 impl<'a> TemporalSqlRead<'a> {
     #[cfg(test)]
+    #[hotpath::skip]
     pub(super) const fn engine_connection(read: &'a engine::Connection) -> Self {
         Self::EngineConnection(read)
     }
 
+    #[hotpath::skip]
     pub(super) const fn registered(read: &'a DatabaseEngineReadSnapshot) -> Self {
         Self::Registered(read)
     }
@@ -115,6 +117,7 @@ impl<'a> TemporalSqlRead<'a> {
 }
 
 impl engine::QueryExecutor for TemporalSqlRead<'_> {
+    #[hotpath::skip]
     async fn query<P>(&self, sql: &str, params: P) -> engine::Result<engine::Rows>
     where
         P: engine::IntoParams,

@@ -62,6 +62,7 @@ const MAX_SESSION_CONTEXT_RELATIONS: usize = 256;
 const FILTER_SCAN_PAGE_ITEMS: usize = 64;
 const MAX_RECORD_QUERY_CANDIDATES: usize = 8;
 
+#[hotpath::measure]
 fn temporal_relation_error(
     error: SessionRelationError,
     control: &tracedecay_temporal_query::ports::ExecutionControl,
@@ -99,6 +100,7 @@ fn temporal_relation_error(
     }
 }
 
+#[hotpath::measure]
 fn observation_matches_filter(
     encoded: &str,
     occurrence_role: &str,
@@ -187,7 +189,9 @@ pub(super) struct GlobalDbPreparedCandidatePort<'port, 'db, 'request> {
     plan: &'request CandidatePlan,
 }
 
+#[hotpath::measure_all]
 impl<'port, 'db, 'request> GlobalDbPreparedCandidatePort<'port, 'db, 'request> {
+    #[hotpath::skip]
     pub(super) const fn new(
         read_port: &'port GlobalDbTemporalReadPort<'db>,
         request: &'request TemporalSnapshotRequest,
@@ -227,8 +231,10 @@ struct SessionReadRelationAuthority<'a> {
     store: SessionRelationGraphStore,
 }
 
+#[hotpath::measure_all]
 impl<'a> GlobalDbTemporalReadPort<'a> {
     #[cfg(test)]
+    #[hotpath::skip]
     pub const fn new(read: &'a engine::Connection) -> Self {
         Self {
             read: TemporalSqlRead::engine_connection(read),
@@ -237,6 +243,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
     }
 
+    #[hotpath::skip]
     pub const fn new_registered(read: &'a DatabaseEngineReadSnapshot) -> Self {
         Self {
             read: TemporalSqlRead::registered(read),
@@ -246,6 +253,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub const fn new_with_relations(
         read: &'a engine::Connection,
         scope: &'a SessionRelationScope,
@@ -258,6 +266,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
     }
 
+    #[hotpath::skip]
     pub const fn new_registered_with_relations(
         read: &'a DatabaseEngineReadSnapshot,
         scope: &'a SessionRelationScope,
@@ -270,6 +279,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
     }
 
+    #[hotpath::skip]
     async fn candidate_matches_filter(
         &self,
         request: &TemporalSnapshotRequest,
@@ -324,6 +334,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .await
     }
 
+    #[hotpath::skip]
     async fn session_matches_filter(
         &self,
         request: &TemporalSnapshotRequest,
@@ -448,6 +459,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(true)
     }
 
+    #[hotpath::skip]
     async fn candidate_observations_match(
         &self,
         candidate: &RankingCandidate,
@@ -546,6 +558,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(matched)
     }
 
+    #[hotpath::skip]
     async fn summary_observations_match(
         &self,
         candidate: &RankingCandidate,
@@ -637,6 +650,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::skip]
     async fn query_root_scope_candidates(
         &self,
         snapshot_request: &TemporalSnapshotRequest,
@@ -738,6 +752,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))
     }
 
+    #[hotpath::skip]
     async fn validate_snapshot(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -878,6 +893,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     /// per-participant `LIMIT 2` probe would have returned. Rows are still kept in
     /// a vector per key so a schema that ever admitted a duplicate raises the same
     /// "not unique" error the probe did.
+    #[hotpath::skip]
     async fn read_frozen_participant_generations(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -989,6 +1005,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         .await
     }
 
+    #[hotpath::skip]
     async fn produce_candidates_from_request(
         &self,
         scope: &TemporalRetrievalScope,

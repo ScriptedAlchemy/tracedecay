@@ -4,6 +4,7 @@ use super::{
     SessionRelationError, SessionRelationProjection, SummaryRelationNode, SummarySourceRef,
 };
 
+#[hotpath::measure]
 pub(crate) fn validate_projection(
     projection: &SessionRelationProjection,
 ) -> Result<(), SessionRelationError> {
@@ -88,6 +89,7 @@ pub(crate) fn validate_projection(
     Ok(())
 }
 
+#[hotpath::measure]
 fn ensure_acyclic<'a>(
     edges: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<(), SessionRelationError> {
@@ -133,6 +135,7 @@ fn ensure_acyclic<'a>(
     Ok(())
 }
 
+#[hotpath::measure]
 fn visit_summary<'a>(
     summary_id: &'a str,
     summaries: &BTreeMap<&'a str, &'a SummaryRelationNode>,

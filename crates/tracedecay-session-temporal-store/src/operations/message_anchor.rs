@@ -210,6 +210,7 @@ async fn resolve_canonical_observation(
     Ok(resolved)
 }
 
+#[hotpath::measure]
 fn projects_message(
     observation: &DurableObservationV1,
     message_id: &str,
@@ -221,6 +222,7 @@ fn projects_message(
     Ok(projects_message)
 }
 
+#[hotpath::measure]
 fn require_session_owned_observation(
     observation: &DurableObservationV1,
     anchor: &RetrievalAnchorRecord,
@@ -244,6 +246,7 @@ fn require_session_owned_observation(
 
 /// The observation route finds the anchor by derivation, so the retained row has
 /// to be exactly the canonical exact-observation anchor for that observation.
+#[hotpath::measure]
 fn require_exact_observation_anchor(
     observation: &DurableObservationV1,
     anchor: &RetrievalAnchorRecord,
@@ -261,6 +264,7 @@ fn require_exact_observation_anchor(
     Ok(())
 }
 
+#[hotpath::measure]
 fn require_readable_anchor(
     anchor: &RetrievalAnchorRecord,
     anchor_id: &str,

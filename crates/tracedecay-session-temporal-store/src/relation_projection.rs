@@ -44,6 +44,7 @@ struct CanonicalOccurrence {
     valid_time: TemporalValidityV1,
 }
 
+#[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     pub async fn active_session_summary_relations(
         &self,
@@ -249,6 +250,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(pending.len())
     }
 
+    #[hotpath::skip]
     async fn active_relation_generation(
         &self,
         session_id: &SessionId,
@@ -579,6 +581,7 @@ async fn reconstruct_occurrences(
 }
 
 #[allow(clippy::type_complexity)]
+#[hotpath::measure]
 fn occurrence_relations(
     occurrences: &[CanonicalOccurrence],
 ) -> SessionStoreResult<(
@@ -850,6 +853,7 @@ async fn reconstruct_session_metadata(
     Ok((parent, memberships))
 }
 
+#[hotpath::measure]
 fn enforce_projection_bounds(
     projection: &SessionRelationProjection,
     max_entities: usize,
@@ -947,6 +951,7 @@ async fn active_generation(
         })
 }
 
+#[hotpath::measure]
 fn bounded_query_limit(limit: usize) -> SessionStoreResult<i64> {
     let bounded = limit
         .checked_add(1)
@@ -954,6 +959,7 @@ fn bounded_query_limit(limit: usize) -> SessionStoreResult<i64> {
     i64::try_from(bounded).map_err(|error| storage(RECONSTRUCT_OPERATION, error))
 }
 
+#[hotpath::measure]
 fn require_not_cancelled(cancellation: &Arc<dyn GraphCancellation>) -> SessionStoreResult<()> {
     if cancellation.is_cancelled() {
         Err(storage(

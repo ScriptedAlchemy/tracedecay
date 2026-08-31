@@ -194,6 +194,7 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
     Ok(key)
 }
 
+#[hotpath::measure_all]
 impl GlobalDbCursorKeyProvider {
     pub async fn from_registered_active(
         read: &DatabaseEngineReadSnapshot,
@@ -234,6 +235,7 @@ impl GlobalDbCursorKeyProvider {
         &self.active_key
     }
 
+    #[hotpath::skip]
     pub async fn from_registered_key_ref(
         read: &DatabaseEngineReadSnapshot,
         expected: SignedCursorKeyRefV1,
@@ -241,6 +243,7 @@ impl GlobalDbCursorKeyProvider {
         Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
+    #[hotpath::skip]
     pub async fn from_registered_snapshot(
         read: &DatabaseEngineReadSnapshot,
         snapshot: &TemporalExecutionSnapshot,
@@ -252,6 +255,7 @@ impl GlobalDbCursorKeyProvider {
         Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
+    #[hotpath::skip]
     async fn from_registered_key_ref_at(
         read: &DatabaseEngineReadSnapshot,
         expected: SignedCursorKeyRefV1,
@@ -354,6 +358,7 @@ impl GlobalDbCursorKeyProvider {
     }
 }
 
+#[hotpath::measure]
 fn retrieval_key_id(
     key: &SignedCursorKeyRefV1,
 ) -> Result<RetrievalCursorKeyId, GlobalDbCursorKeyProviderError> {
@@ -404,6 +409,7 @@ impl SessionCursorAuthenticator for GlobalDbCursorKeyProvider {
     }
 }
 
+#[hotpath::measure]
 fn storage(source: tracedecay_runtime_core::db::engine::Error) -> GlobalDbCursorKeyProviderError {
     GlobalDbCursorKeyProviderError::Storage {
         operation: LOAD_OPERATION,

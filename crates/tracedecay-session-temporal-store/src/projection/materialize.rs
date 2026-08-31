@@ -350,6 +350,7 @@ pub(super) struct OccurrenceMaterializationWork {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_occurrence_materialization_work(work: OccurrenceMaterializationWork) {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.occurrence_materialization.envelope_parses")
@@ -358,6 +359,7 @@ fn record_occurrence_materialization_work(work: OccurrenceMaterializationWork) {
     let _ = work;
 }
 
+#[hotpath::measure]
 pub(super) fn derived_temporal_assertion_id(
     subject_anchor_id: &tracedecay_domain::RetrievalAnchorId,
     kind: TemporalAssertionKindV1,
@@ -624,6 +626,7 @@ pub(super) struct RelationDerivationWork {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_relation_derivation_work(work: RelationDerivationWork) {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.relation_derivation.envelope_parses")
@@ -819,12 +822,14 @@ pub async fn canonical_parent_message_resolver(
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_parent_resolver_probe() {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.parent_resolver.query_probes").inc(1_u64);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_parent_resolver_row(bytes: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -835,6 +840,7 @@ fn record_parent_resolver_row(bytes: u64) {
     let _ = bytes;
 }
 
+#[hotpath::measure_all]
 impl ParentMessageResolver {
     pub(crate) fn register(&mut self, message_id: &str, occurrence_id: &str) {
         self.occurrences

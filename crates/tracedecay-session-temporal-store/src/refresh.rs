@@ -73,6 +73,7 @@ pub struct SessionRefreshRecoveryV1 {
     restart_state: SessionRefreshRestartStateV1,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshRecoveryV1 {
     pub fn operation_id(&self) -> &SessionRefreshOperationIdV1 {
         &self.operation_id
@@ -94,14 +95,17 @@ impl SessionRefreshRecoveryV1 {
         &self.coverage_request
     }
 
+    #[hotpath::skip]
     pub const fn target_frontier(&self) -> SessionRefreshFrontierV1 {
         self.target_frontier
     }
 
+    #[hotpath::skip]
     pub const fn source_frontier(&self) -> u64 {
         self.source_frontier
     }
 
+    #[hotpath::skip]
     pub const fn candidate_generation(&self) -> SessionProjectionGenerationV1 {
         self.candidate_generation
     }
@@ -126,6 +130,7 @@ impl SessionRefreshRecoveryV1 {
         self.progress.as_ref()
     }
 
+    #[hotpath::skip]
     pub const fn restart_state(&self) -> SessionRefreshRestartStateV1 {
         self.restart_state
     }
@@ -155,6 +160,7 @@ impl SessionRefreshRecoveryV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::measure(future = true, label = "session_temporal.txn.begin_refresh")]
     pub async fn begin_or_join_session_refresh_result(
@@ -315,6 +321,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         ))
     }
 
+    #[hotpath::skip]
     pub async fn persist_session_refresh_projection_batch_result(
         &self,
         progress: SessionRefreshProgressV1,
@@ -917,6 +924,7 @@ struct RefreshBinding {
     binding_digest: String,
 }
 
+#[hotpath::measure]
 fn refresh_binding_digest(
     request: &SessionRefreshBeginOrJoinRequestV1,
 ) -> SessionStoreResult<String> {
@@ -933,10 +941,12 @@ fn refresh_binding_digest(
     Ok(digest_bytes(&encoded))
 }
 
+#[hotpath::measure]
 fn config_digest() -> String {
     digest_bytes(CONFIG_VERSION.as_bytes())
 }
 
+#[hotpath::measure]
 fn operation_id_for_digest(
     digest: &str,
     attempt: u64,
@@ -950,6 +960,7 @@ fn operation_id_for_digest(
     SessionRefreshOperationIdV1::new(value).map_err(SessionStoreError::from)
 }
 
+#[hotpath::measure]
 fn encode_frontier(frontier: SessionRefreshFrontierV1) -> String {
     json!({
         "committed_through": frontier.committed_through(),
@@ -958,6 +969,7 @@ fn encode_frontier(frontier: SessionRefreshFrontierV1) -> String {
     .to_string()
 }
 
+#[hotpath::measure]
 fn encode_refresh_target(
     request: &SessionRefreshBeginOrJoinRequestV1,
 ) -> SessionStoreResult<String> {
@@ -970,6 +982,7 @@ fn encode_refresh_target(
     .map_err(|error| storage(BEGIN_REFRESH, error))
 }
 
+#[hotpath::measure]
 fn decode_frontier(encoded: &str) -> SessionStoreResult<SessionRefreshFrontierV1> {
     let value: Value =
         serde_json::from_str(encoded).map_err(|error| storage(READ_REFRESH, error))?;
@@ -982,6 +995,7 @@ fn decode_frontier(encoded: &str) -> SessionStoreResult<SessionRefreshFrontierV1
     SessionRefreshFrontierV1::new(observed, committed)
 }
 
+#[hotpath::measure]
 fn decode_refresh_target(
     encoded: &str,
 ) -> SessionStoreResult<(
@@ -1009,6 +1023,7 @@ fn decode_refresh_target(
     Ok((frontier, coverage_request, refresh_key))
 }
 
+#[hotpath::measure]
 fn decode_watermarks(encoded: &str) -> SessionStoreResult<SessionFrozenWatermarksV1> {
     let value: Value =
         serde_json::from_str(encoded).map_err(|error| storage(READ_REFRESH, error))?;
@@ -1033,6 +1048,7 @@ fn decode_watermarks(encoded: &str) -> SessionStoreResult<SessionFrozenWatermark
     Ok(watermarks)
 }
 
+#[hotpath::measure]
 fn decode_generation_value(
     value: &Value,
     field: &'static str,
@@ -1040,12 +1056,14 @@ fn decode_generation_value(
     SessionProjectionGenerationV1::new(decode_u64(value, field)?).map_err(SessionStoreError::from)
 }
 
+#[hotpath::measure]
 fn decode_u64(value: &Value, field: &'static str) -> SessionStoreResult<u64> {
     value[field]
         .as_u64()
         .ok_or_else(|| storage_message(READ_REFRESH, format!("{field} is invalid")))
 }
 
+#[hotpath::measure]
 fn encode_coverage(
     coverage: &TemporalCoverageCountsV1,
     source_coverage: Option<&SessionSourceCoverageReceiptV1>,
@@ -1060,6 +1078,7 @@ fn encode_coverage(
     .to_string()
 }
 
+#[hotpath::measure]
 fn decode_coverage(
     encoded: &str,
 ) -> SessionStoreResult<(
@@ -1248,6 +1267,7 @@ async fn next_generation(
     decode_generation_i64(value, BEGIN_REFRESH)
 }
 
+#[hotpath::measure]
 fn decode_generation_i64(
     value: i64,
     operation: &'static str,
@@ -1260,6 +1280,7 @@ const SQLITE_CONSTRAINT: i32 = 19;
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
 const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
 
+#[hotpath::measure]
 fn is_refresh_busy_constraint(error: &EngineError) -> bool {
     let refresh_related = match error {
         EngineError::Sqlite { message, .. } => {
@@ -1282,6 +1303,7 @@ fn is_refresh_busy_constraint(error: &EngineError) -> bool {
         || message.contains("PRIMARY KEY constraint failed: session_refresh_operations")
 }
 
+#[hotpath::measure]
 fn map_begin_conflict(error: EngineError) -> SessionStoreError {
     if is_refresh_busy_constraint(&error) {
         SessionStoreError::IdempotencyConflict {
@@ -1292,6 +1314,7 @@ fn map_begin_conflict(error: EngineError) -> SessionStoreError {
     }
 }
 
+#[hotpath::measure]
 fn progress_logically_equal(
     left: &SessionRefreshProgressV1,
     right: &SessionRefreshProgressV1,
@@ -1305,6 +1328,7 @@ fn progress_logically_equal(
         && left.committed_records() == right.committed_records()
 }
 
+#[hotpath::measure]
 fn require_progress_batch_ordinal(
     progress: &SessionRefreshProgressV1,
     batch_ordinal: u64,
@@ -1317,6 +1341,7 @@ fn require_progress_batch_ordinal(
     Ok(())
 }
 
+#[hotpath::measure]
 fn require_progress_timestamp(progress: &SessionRefreshProgressV1) -> SessionStoreResult<()> {
     let now = now_micros(PERSIST_REFRESH)?;
     if progress.updated_at() > now {
@@ -1327,6 +1352,7 @@ fn require_progress_timestamp(progress: &SessionRefreshProgressV1) -> SessionSto
     Ok(())
 }
 
+#[hotpath::measure]
 fn terminal_timestamp(
     progress: &SessionRefreshProgressV1,
     operation: &'static str,
@@ -1339,6 +1365,7 @@ fn terminal_timestamp(
     }
 }
 
+#[hotpath::measure]
 fn validate_progress_batch_identity(
     progress: &SessionRefreshProgressV1,
     batch: &SessionTemporalProjectionBatchV1,
@@ -1386,6 +1413,7 @@ async fn require_running_binding(
     decode_binding(&row, operation)
 }
 
+#[hotpath::measure]
 fn decode_binding(row: &Row, operation: &'static str) -> SessionStoreResult<RefreshBinding> {
     let generation = decode_generation_i64(
         row.get(0).map_err(|error| storage(operation, error))?,
@@ -1411,10 +1439,12 @@ fn decode_binding(row: &Row, operation: &'static str) -> SessionStoreResult<Refr
     })
 }
 
+#[hotpath::measure]
 fn decode_nonnegative_i64(value: i64, operation: &'static str) -> SessionStoreResult<u64> {
     u64::try_from(value).map_err(|error| storage(operation, error))
 }
 
+#[hotpath::measure]
 fn validate_batch_binding(
     binding: &RefreshBinding,
     batch: &SessionTemporalProjectionBatchV1,
@@ -1434,6 +1464,7 @@ fn validate_batch_binding(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_progress_binding(
     binding: &RefreshBinding,
     progress: &SessionRefreshProgressV1,
@@ -1690,6 +1721,7 @@ async fn read_progress(
         .transpose()
 }
 
+#[hotpath::measure]
 fn decode_progress(
     row: &Row,
     operation_id: SessionRefreshOperationIdV1,
@@ -1982,6 +2014,7 @@ async fn read_receipt(
         .transpose()
 }
 
+#[hotpath::measure]
 fn decode_receipt(
     row: &Row,
     operation_id: SessionRefreshOperationIdV1,
@@ -2044,6 +2077,7 @@ fn decode_receipt(
     }
 }
 
+#[hotpath::measure]
 fn require_exact_completion(
     receipt: &SessionRefreshReceiptV1,
     request: &SessionRefreshCompletionRequestV1,
@@ -2060,6 +2094,7 @@ fn require_exact_completion(
     )
 }
 
+#[hotpath::measure]
 fn require_exact_failure(
     receipt: &SessionRefreshReceiptV1,
     request: &SessionRefreshFailureRequestV1,
@@ -2076,6 +2111,7 @@ fn require_exact_failure(
     )
 }
 
+#[hotpath::measure]
 fn require_exact_cancellation(
     receipt: &SessionRefreshReceiptV1,
     request: &SessionRefreshCancellationRequestV1,
@@ -2093,6 +2129,7 @@ fn require_exact_cancellation(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn require_exact_terminal(
     receipt: &SessionRefreshReceiptV1,
     operation_id: &SessionRefreshOperationIdV1,
@@ -2286,6 +2323,7 @@ async fn projection_receipt_exists(
         .is_some())
 }
 
+#[hotpath::measure]
 fn decode_refresh_state(
     state: &str,
     operation: &'static str,

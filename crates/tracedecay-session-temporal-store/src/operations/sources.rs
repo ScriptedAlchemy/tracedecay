@@ -249,6 +249,7 @@ async fn prepare_summary_source(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn unavailable(source_id: &str, reason: &str) -> LcmError {
     LcmError::SummarySourceUnavailable {
         source_id: source_id.to_string(),
@@ -256,6 +257,7 @@ pub(super) fn unavailable(source_id: &str, reason: &str) -> LcmError {
     }
 }
 
+#[hotpath::measure]
 fn validate_source_eligibility(
     source_id: &str,
     metadata_json: Option<&str>,
@@ -362,6 +364,7 @@ pub(super) async fn session_owner_json(
     .to_string())
 }
 
+#[hotpath::measure]
 fn compatibility_anchor_id(
     provider: &str,
     session_id: &str,
@@ -376,6 +379,7 @@ fn compatibility_anchor_id(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn source_horizon_json(
     sources: &[PreparedSource],
     declared_source_time_end: Option<i64>,
@@ -715,6 +719,7 @@ async fn verify_payload_bindings(
     Ok(())
 }
 
+#[hotpath::measure]
 fn encoded_payload_refs(payloads: &[PreparedPayload]) -> Result<String, LcmError> {
     serde_json::to_string(
         &payloads

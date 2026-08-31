@@ -28,12 +28,14 @@ use super::MATERIALIZE_REFRESH;
 use super::materialize::*;
 use super::receipts::*;
 
+#[hotpath::measure]
 pub(crate) fn observation_envelope_from_payload(
     payload: &Value,
 ) -> Result<CanonicalObservationEnvelopeV1, serde_json::Error> {
     CanonicalObservationEnvelopeV1::deserialize(payload)
 }
 
+#[hotpath::measure]
 fn observation_envelope(
     observation: &tracedecay_domain::DurableObservationV1,
 ) -> SessionStoreResult<CanonicalObservationEnvelopeV1> {
@@ -605,6 +607,7 @@ pub(super) async fn canonical_occurrence(
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
     #[cfg(feature = "hotpath")]
     {

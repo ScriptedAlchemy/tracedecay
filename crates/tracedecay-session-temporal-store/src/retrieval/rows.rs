@@ -14,6 +14,7 @@ use tracedecay_temporal_query::resolution::{
 use super::super::sql::TemporalSqlRow;
 use super::RECORD_OPERATION;
 
+#[hotpath::measure]
 pub(super) fn temporal_record_from_row(
     row: &TemporalSqlRow,
 ) -> Result<TemporalRecord, TemporalPortError> {
@@ -78,6 +79,7 @@ pub(super) fn temporal_record_from_row(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn summary_from_row(
     row: &TemporalSqlRow,
 ) -> Result<SessionSummaryRecordV1, TemporalPortError> {
@@ -142,6 +144,7 @@ pub(super) fn summary_from_row(
     Ok(summary)
 }
 
+#[hotpath::measure]
 pub(super) fn summary_source_from_row(
     row: &TemporalSqlRow,
 ) -> Result<SummarySourceRecord, TemporalPortError> {
@@ -164,11 +167,13 @@ pub(super) fn summary_source_from_row(
     Ok(SummarySourceRecord { anchor_id, state })
 }
 
+#[hotpath::measure]
 pub(super) fn authorized_evidence(evidence: SessionEvidenceMetadataV1) -> ResolutionEvidence {
     ResolutionEvidence::new(evidence.authority, ValidatedAuthorization::Authorized)
         .with_supporting_anchor(evidence.source_anchor_id)
 }
 
+#[hotpath::measure]
 pub(super) fn required_string(
     row: &TemporalSqlRow,
     column: i32,
@@ -177,6 +182,7 @@ pub(super) fn required_string(
         .map_err(|error| read_error(RECORD_OPERATION, error))
 }
 
+#[hotpath::measure]
 pub(super) fn optional_string(
     row: &TemporalSqlRow,
     column: i32,
@@ -185,11 +191,13 @@ pub(super) fn optional_string(
         .map_err(|error| read_error(RECORD_OPERATION, error))
 }
 
+#[hotpath::measure]
 pub(super) fn required_i64(row: &TemporalSqlRow, column: i32) -> Result<i64, TemporalPortError> {
     row.get(column)
         .map_err(|error| read_error(RECORD_OPERATION, error))
 }
 
+#[hotpath::measure]
 pub(super) fn parse_json<T: DeserializeOwned>(
     value: &str,
     operation: &'static str,
@@ -197,6 +205,7 @@ pub(super) fn parse_json<T: DeserializeOwned>(
     serde_json::from_str(value).map_err(|error| read_error(operation, error))
 }
 
+#[hotpath::measure]
 pub(super) fn parse_text<T: DeserializeOwned>(
     value: String,
     operation: &'static str,
@@ -205,6 +214,7 @@ pub(super) fn parse_text<T: DeserializeOwned>(
         .map_err(|error| read_error(operation, error))
 }
 
+#[hotpath::measure]
 pub(super) fn read_error(
     operation: &'static str,
     error: impl std::fmt::Display,
@@ -215,6 +225,7 @@ pub(super) fn read_error(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn read_message(
     operation: &'static str,
     message: impl Into<String>,

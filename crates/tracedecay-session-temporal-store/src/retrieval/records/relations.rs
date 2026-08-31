@@ -84,6 +84,7 @@ impl GraphCancellation for TemporalGraphCancellation {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(in crate::retrieval) fn load_record_relations(
     store: &SessionRelationGraphStore,
     relation_scope: &SessionRelationScope,
@@ -295,6 +296,7 @@ const SUMMARY_EVIDENCE_ROLE: &str = "summary";
 /// on the anchor channel. Both carry the summary identity in
 /// `retriever_record_id` and the summary evidence role, and neither has an
 /// occurrence identity whose logical copies could be loaded.
+#[hotpath::measure]
 fn names_summary_record(candidate: &RankingCandidate) -> bool {
     match candidate.channel {
         CandidateChannel::Summary => true,
@@ -312,6 +314,7 @@ fn names_summary_record(candidate: &RankingCandidate) -> bool {
     }
 }
 
+#[hotpath::measure]
 fn candidate_session_id(
     scope: &TemporalRetrievalScope,
     candidate: &RankingCandidate,
@@ -333,6 +336,7 @@ fn candidate_session_id(
 /// participant's `(generation, graph_watermark)`.
 type ParticipantGenerations<'a> = HashMap<(&'a str, &'a str), (u64, u64)>;
 
+#[hotpath::measure]
 fn candidate_generation(
     snapshot: &TemporalExecutionSnapshot,
     participants: Option<&ParticipantGenerations<'_>>,
@@ -377,6 +381,7 @@ fn candidate_generation(
     Ok(candidate.participant_generation)
 }
 
+#[hotpath::measure]
 fn map_relation_error(
     error: SessionRelationError,
     control: &ExecutionControl,

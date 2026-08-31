@@ -53,13 +53,16 @@ impl GraphCancellation for ExecutionControlGraphCancellation {
 /// after its graph operation to restore the original typed reason. This
 /// adapter preserves all three interruption paths during traversal without
 /// manufacturing a default control.
+#[hotpath::measure]
 pub fn execution_control_graph_cancellation(
     control: &ExecutionControl,
 ) -> Arc<dyn GraphCancellation> {
     Arc::new(ExecutionControlGraphCancellation(control.clone()))
 }
 
+#[hotpath::measure_all]
 impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a, D> {
+    #[hotpath::skip]
     pub const fn new(db: &'a D) -> Self {
         Self { db }
     }
@@ -68,6 +71,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
         SessionTemporalAccess::new(self.db)
     }
 
+    #[hotpath::skip]
     pub async fn persist_session_refresh_projection_batch(
         &self,
         progress: SessionRefreshProgressV1,
@@ -81,6 +85,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
             .await
     }
 
+    #[hotpath::skip]
     pub async fn persist_session_refresh_projection_batch_controlled(
         &self,
         progress: SessionRefreshProgressV1,
@@ -99,6 +104,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
             .await
     }
 
+    #[hotpath::skip]
     pub async fn session_refresh_recovery(
         &self,
         session_id: &tracedecay_domain::SessionId,
@@ -108,6 +114,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
             .await
     }
 
+    #[hotpath::skip]
     pub async fn running_session_refreshes(
         &self,
     ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {
@@ -115,6 +122,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn materialize_session_temporal_refresh_batch_for_test(
         &self,
         recovery: &SessionRefreshRecoveryV1,
@@ -126,6 +134,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn materialize_pending_session_refresh_for_test(
         &self,
         session_id: &tracedecay_domain::SessionId,
