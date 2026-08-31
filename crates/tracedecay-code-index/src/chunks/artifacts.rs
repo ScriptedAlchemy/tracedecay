@@ -196,6 +196,7 @@ pub struct CodeIndexEdgeAbstentionV1 {
 
 impl CodeFileIndexArtifactsV1 {
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "code_index.artifact.assemble")]
     pub(crate) fn from_parser_artifact(
         chunks: CodeFileChunksV1,
         symbols: Vec<LineageSymbolRecordV1>,
@@ -331,6 +332,7 @@ impl CodeFileIndexArtifactsV1 {
         Ok(())
     }
 
+    #[hotpath::measure(label = "code_index.artifact.verify_imports")]
     pub(crate) fn validate_generation_import_authority(
         &self,
         extraction: &ExtractionBatchV1,
