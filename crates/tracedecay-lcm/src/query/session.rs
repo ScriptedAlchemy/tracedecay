@@ -277,6 +277,7 @@ async fn replay_slice_summary_nodes(
     Ok(nodes)
 }
 
+#[hotpath::measure]
 fn bounded_replay_snippet(text: &str, max_chars: usize) -> (String, bool) {
     let text = text.trim();
     match text.char_indices().nth(max_chars) {
@@ -285,6 +286,7 @@ fn bounded_replay_snippet(text: &str, max_chars: usize) -> (String, bool) {
     }
 }
 
+#[hotpath::measure]
 fn load_message_from_raw(
     raw: LcmRawMessage,
     slice: Option<LcmContentSlice>,

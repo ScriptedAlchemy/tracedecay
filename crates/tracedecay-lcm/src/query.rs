@@ -60,6 +60,7 @@ const RAW_ROLE_PENALTY_CASE: &str =
 const PER_SESSION_HIT_CAP: usize = 3;
 
 /// Fetch budget before the re-rank stage, bounded by [`MAX_PAGE_LIMIT`].
+#[hotpath::measure]
 fn rerank_fetch_limit(limit: usize) -> usize {
     crate::retrieval_content::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
 }
@@ -378,6 +379,7 @@ async fn lcm_table_exists(
     Ok(row.get::<i64>(0)? > 0)
 }
 
+#[hotpath::measure]
 fn slice_content_owned(
     content: String,
     slice: Option<LcmContentSlice>,
@@ -412,10 +414,12 @@ fn slice_content_owned(
     )
 }
 
+#[hotpath::measure]
 fn slice_content(content: &str, slice: Option<LcmContentSlice>) -> (String, LcmContentRange) {
     slice_content_owned(content.to_string(), slice)
 }
 
+#[hotpath::measure]
 fn raw_message_with_sliced_content(
     mut raw: LcmRawMessage,
     slice: Option<LcmContentSlice>,
@@ -425,6 +429,7 @@ fn raw_message_with_sliced_content(
     (raw, range)
 }
 
+#[hotpath::measure]
 fn summary_node_with_sliced_text(
     mut summary: LcmSummaryNode,
     slice: Option<LcmContentSlice>,
@@ -435,6 +440,7 @@ fn summary_node_with_sliced_text(
     (summary, range)
 }
 
+#[hotpath::measure]
 fn slice_summary_sources(
     sources: Vec<LcmExpandedSummarySource>,
     slice: Option<LcmContentSlice>,
@@ -461,6 +467,7 @@ fn slice_summary_sources(
 /// the source count and an omitted limit returns all remaining sources; the
 /// temporal service authenticates the internal next boundary before exposing
 /// an opaque cursor.
+#[hotpath::measure]
 fn paginate_summary_sources(
     sources: Vec<LcmExpandedSummarySource>,
     source_offset: usize,
@@ -499,6 +506,7 @@ struct ExpandQueryAssembler {
     context: OrderedTextContextAssembler,
 }
 
+#[hotpath::measure_all]
 impl ExpandQueryAssembler {
     fn new(max_chars: usize) -> Self {
         Self {
@@ -681,6 +689,7 @@ async fn count_external_payloads(
     util::count_by_provider_session(conn, "lcm_external_payloads", provider, session_id).await
 }
 
+#[hotpath::measure]
 fn scoped_session_filter(scope: LcmScope, session_id: Option<&str>) -> Option<&str> {
     match scope {
         LcmScope::All => None,
@@ -695,6 +704,7 @@ struct GrepQueryPlan {
     requires_like_fallback: bool,
 }
 
+#[hotpath::measure_all]
 impl GrepQueryPlan {
     fn is_empty(&self) -> bool {
         self.fts_query.is_empty() && self.like_terms.is_empty()
@@ -724,6 +734,7 @@ fn grep_query_plan(query: &str) -> GrepQueryPlan {
     }
 }
 
+#[hotpath::measure]
 fn sanitize_fts5_query(query: &str) -> String {
     if query.is_empty() {
         return String::new();
@@ -767,6 +778,7 @@ fn sanitize_fts5_query(query: &str) -> String {
     result.trim().to_string()
 }
 
+#[hotpath::measure]
 fn is_fts5_special_char(ch: char) -> bool {
     matches!(
         ch,
@@ -774,10 +786,12 @@ fn is_fts5_special_char(ch: char) -> bool {
     )
 }
 
+#[hotpath::measure]
 fn requires_like_fallback(query: &str) -> bool {
     contains_cjk(query) || contains_emoji(query) || contains_risky_fts_ascii(query)
 }
 
+#[hotpath::measure]
 fn contains_emoji(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
@@ -787,6 +801,7 @@ fn contains_emoji(value: &str) -> bool {
     })
 }
 
+#[hotpath::measure]
 fn contains_risky_fts_ascii(value: &str) -> bool {
     let raw = value.trim();
     if raw.is_empty() {
@@ -809,6 +824,7 @@ fn contains_risky_fts_ascii(value: &str) -> bool {
     false
 }
 
+#[hotpath::measure]
 fn extract_search_terms(query: &str) -> Vec<String> {
     let text = query.trim();
     if text.is_empty() {
@@ -832,6 +848,7 @@ fn extract_search_terms(query: &str) -> Vec<String> {
     terms
 }
 
+#[hotpath::measure]
 fn split_quoted(text: &str) -> (Vec<String>, String) {
     let mut phrases = Vec::new();
     let mut remainder = String::with_capacity(text.len());
@@ -863,6 +880,7 @@ fn split_quoted(text: &str) -> (Vec<String>, String) {
     (phrases, remainder)
 }
 
+#[hotpath::measure]
 fn token_variants(token: &str) -> Vec<String> {
     let cleaned = token
         .trim()
@@ -887,6 +905,7 @@ fn token_variants(token: &str) -> Vec<String> {
     variants
 }
 
+#[hotpath::measure]
 fn escape_like(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -894,6 +913,7 @@ fn escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+#[hotpath::measure]
 fn like_predicate_sql(term_count: usize, columns: &[&str]) -> String {
     let mut parts = Vec::new();
     for _ in 0..term_count {
@@ -907,6 +927,7 @@ fn like_predicate_sql(term_count: usize, columns: &[&str]) -> String {
     format!("({})", parts.join(" OR "))
 }
 
+#[hotpath::measure]
 fn match_centered_snippet(text: &str, terms: &[String]) -> String {
     let lower_text = text.to_ascii_lowercase();
     let mut best_match = None;
@@ -941,6 +962,7 @@ fn match_centered_snippet(text: &str, terms: &[String]) -> String {
     raw::derived_text_for_snippet(&snippet)
 }
 
+#[hotpath::measure]
 fn find_term(text: &str, lower_text: &str, term: &str) -> Option<usize> {
     if term.is_ascii() {
         let lower_term = term.to_ascii_lowercase();
@@ -949,6 +971,7 @@ fn find_term(text: &str, lower_text: &str, term: &str) -> Option<usize> {
     text.find(term)
 }
 
+#[hotpath::measure]
 fn byte_offset_for_char_index(text: &str, char_index: usize) -> usize {
     if char_index == 0 {
         return 0;
@@ -958,10 +981,12 @@ fn byte_offset_for_char_index(text: &str, char_index: usize) -> usize {
         .map_or(text.len(), |(idx, _)| idx)
 }
 
+#[hotpath::measure]
 fn clamp_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_PAGE_LIMIT)
 }
 
+#[hotpath::measure]
 fn normalized_strings(values: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for value in values {
@@ -975,6 +1000,7 @@ fn normalized_strings(values: &[String]) -> Vec<String> {
 
 const AGE_DECAY_RATE: f64 = 0.001;
 
+#[hotpath::measure]
 fn grep_order_by(
     sort: LcmGrepSort,
     recency_column: &str,
@@ -1007,6 +1033,7 @@ fn grep_order_by(
     }
 }
 
+#[hotpath::measure]
 fn sort_hits(hits: &mut [LcmGrepHit], sort: LcmGrepSort) {
     if matches!(sort, LcmGrepSort::Recency) {
         hits.sort_by(|left, right| {

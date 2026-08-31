@@ -267,6 +267,7 @@ async fn status_counts(
     })
 }
 
+#[hotpath::measure]
 fn status_from_parts(
     schema_version: i64,
     counts: StatusCounts,
@@ -441,6 +442,7 @@ fn sum_option_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmStatus {
     let gc_config = gc_config.clone().normalized();
     let grace_seconds = i64::try_from(gc_config.grace_seconds).unwrap_or(i64::MAX);
@@ -772,6 +774,7 @@ async fn dag_status(
     })
 }
 
+#[hotpath::measure]
 fn python_round_ratio_to_tenths(total_source_tokens: i64, total_tokens: i64) -> String {
     if total_tokens <= 0 {
         return "0:1".to_string();

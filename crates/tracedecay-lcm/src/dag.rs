@@ -24,6 +24,7 @@ enum RawMessageRow {
     Metadata(LcmRawMessageMetadata),
 }
 
+#[hotpath::measure_all]
 impl RawMessageRow {
     fn provider(&self) -> &str {
         match self {
@@ -71,6 +72,7 @@ pub async fn insert_summary_node(
         .map(|receipt| receipt.summary)
 }
 
+#[hotpath::measure]
 pub fn sanitize_summary_draft(
     mut draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNodeDraft, LcmError> {
@@ -233,6 +235,7 @@ async fn expand_summary_nodes_with_content(
 /// Assembles one expansion from an already-hydrated source closure. Pure: it
 /// issues no queries, so the round-trip cost of a page lives entirely in
 /// [`expand_summary_nodes_with_content`].
+#[hotpath::measure]
 fn assemble_summary_expansion(
     summary: LcmSummaryNode,
     provider: &str,
@@ -439,6 +442,7 @@ pub async fn load_uncondensed_summary_nodes(
     Ok(nodes)
 }
 
+#[hotpath::measure]
 pub fn summary_node_id(
     provider: &str,
     session_id: &str,
@@ -607,6 +611,7 @@ async fn load_summary_nodes_by_ids(
     Ok(nodes)
 }
 
+#[hotpath::measure]
 pub(crate) fn verify_summary_content(
     summary_text: &str,
     summary_hash: &str,
@@ -617,6 +622,7 @@ pub(crate) fn verify_summary_content(
     Ok(())
 }
 
+#[hotpath::measure]
 fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef, LcmError> {
     match source_kind {
         "raw_message" => source_id

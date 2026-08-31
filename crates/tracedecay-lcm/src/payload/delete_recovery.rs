@@ -70,6 +70,7 @@ pub struct ReferencedClosureCache {
     by_provider: BTreeMap<String, BTreeSet<String>>,
 }
 
+#[hotpath::measure_all]
 impl ReferencedClosureCache {
     async fn is_referenced(
         &mut self,
@@ -299,6 +300,7 @@ pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
 /// Removes a payload only after its database deletion tombstone committed.
 /// A replacement file with different content is retained for recovery rather
 /// than unlinked under a stale tombstone.
+#[hotpath::measure]
 pub fn remove_committed_payload_file(
     storage_root: &Path,
     payload_ref: &str,
@@ -316,6 +318,7 @@ pub fn remove_committed_payload_file(
     )
 }
 
+#[hotpath::measure]
 pub fn remove_committed_payload_file_with<F>(
     storage_root: &Path,
     payload_ref: &str,
@@ -397,6 +400,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn restore_quarantined_payload(
     path: &Path,
     quarantine: &Path,
@@ -425,6 +429,7 @@ fn restore_quarantined_payload(
     fs::rename(quarantine, path).map_err(|error| LcmError::Io(error.to_string()))
 }
 
+#[hotpath::measure]
 pub fn payload_file_fingerprint(
     dir: &Path,
     payload_ref: &str,

@@ -117,6 +117,7 @@ struct FileIdInfo {
     file_id: FileId128,
 }
 
+#[hotpath::measure]
 pub(super) fn remove_verified_payload_file(
     authority: &VerifiedPayloadAuthority,
 ) -> Result<bool, LcmError> {
@@ -165,6 +166,7 @@ where
     }
 }
 
+#[hotpath::measure]
 pub(super) fn inspect_payload_file_for_delete(path: &Path) -> Result<(bool, u64), LcmError> {
     Ok(match open_verified_payload_file(path)? {
         Some((_file, opened, _lstat, _identity)) => (true, opened.len()),
@@ -172,12 +174,14 @@ pub(super) fn inspect_payload_file_for_delete(path: &Path) -> Result<(bool, u64)
     })
 }
 
+#[hotpath::measure]
 pub(super) fn read_payload_file_for_verify(
     path: &Path,
 ) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
     read_payload_file_for_verify_bounded(path, MAX_VERIFIED_PAYLOAD_FILE_BYTES)
 }
 
+#[hotpath::measure]
 fn read_payload_file_for_verify_bounded(
     path: &Path,
     max_bytes: u64,
@@ -207,6 +211,7 @@ fn read_payload_file_for_verify_bounded_with_checkpoint(
     Ok(Some((content, authority)))
 }
 
+#[hotpath::measure]
 pub(super) fn verify_payload_file_authority(
     path: &Path,
     expected_hash: &str,
@@ -219,6 +224,7 @@ pub(super) fn verify_payload_file_authority(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn read_verified_payload_file(
     path: &Path,
     expected_hash: &str,
@@ -234,6 +240,7 @@ pub(super) fn read_verified_payload_file(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn read_verified_payload_file_with_checkpoint(
     path: &Path,
     expected_hash: &str,
@@ -261,6 +268,7 @@ pub(super) fn read_verified_payload_file_with_checkpoint(
     Ok(Some((content, authority)))
 }
 
+#[hotpath::measure]
 pub(super) fn open_verified_payload_file(
     path: &Path,
 ) -> Result<Option<(fs::File, fs::Metadata, fs::Metadata, PayloadFileIdentity)>, LcmError> {
@@ -270,6 +278,7 @@ pub(super) fn open_verified_payload_file(
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn open_verified_payload_file_for_delete(
     path: &Path,
 ) -> Result<Option<(fs::File, fs::Metadata, fs::Metadata, PayloadFileIdentity)>, LcmError> {
@@ -300,6 +309,7 @@ fn open_verified_payload_file_with(
     Ok(Some((file, opened, lstat, identity)))
 }
 
+#[hotpath::measure]
 fn verify_authority_content(
     authority: &VerifiedPayloadAuthority,
     path: &Path,
@@ -320,6 +330,7 @@ fn verify_authority_content(
     Ok(())
 }
 
+#[hotpath::measure]
 fn verify_opened_payload_file(
     file: &fs::File,
     path: &Path,
@@ -336,6 +347,7 @@ fn verify_opened_payload_file(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn same_file_identity(
     _file: &fs::File,
     opened: &fs::Metadata,
@@ -352,6 +364,7 @@ fn same_file_identity(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn payload_file_identity(
     _file: &fs::File,
     metadata: &fs::Metadata,
@@ -365,6 +378,7 @@ fn payload_file_identity(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 pub(super) fn same_payload_file_identity(
     actual: &PayloadFileIdentity,
     expected: &PayloadFileIdentity,
@@ -377,6 +391,7 @@ pub(super) fn same_payload_file_identity(
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn same_file_identity(
     file: &fs::File,
     _opened: &fs::Metadata,
@@ -395,6 +410,7 @@ fn same_file_identity(
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn payload_file_identity(
     file: &fs::File,
     _metadata: &fs::Metadata,
@@ -403,6 +419,7 @@ fn payload_file_identity(
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 pub(super) fn same_payload_file_identity(
     actual: &PayloadFileIdentity,
     expected: &PayloadFileIdentity,
@@ -416,6 +433,7 @@ pub(super) fn same_payload_file_identity(
 
 #[cfg(all(not(unix), not(windows)))]
 #[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
+#[hotpath::measure]
 fn same_file_identity(
     _file: &fs::File,
     _opened: &fs::Metadata,
@@ -426,6 +444,7 @@ fn same_file_identity(
 }
 
 #[cfg(all(not(unix), not(windows)))]
+#[hotpath::measure]
 fn payload_file_identity(
     _file: &fs::File,
     _metadata: &fs::Metadata,
@@ -435,6 +454,7 @@ fn payload_file_identity(
 
 #[cfg(all(not(unix), not(windows)))]
 #[allow(clippy::trivially_copy_pass_by_ref, clippy::unnecessary_wraps)] // Keep the identity API uniform even where the platform identity is opaque.
+#[hotpath::measure]
 pub(super) fn same_payload_file_identity(
     _actual: &PayloadFileIdentity,
     _expected: &PayloadFileIdentity,
@@ -442,6 +462,7 @@ pub(super) fn same_payload_file_identity(
     Ok(())
 }
 
+#[hotpath::measure]
 fn ensure_regular_non_reparse_file(metadata: &fs::Metadata) -> Result<(), LcmError> {
     if metadata.file_type().is_symlink()
         || metadata_is_reparse_point(metadata)
@@ -454,15 +475,18 @@ fn ensure_regular_non_reparse_file(metadata: &fs::Metadata) -> Result<(), LcmErr
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
     metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
+#[hotpath::measure]
 fn classify_payload_path_error(path: &Path, error: std::io::Error) -> LcmError {
     if fs::symlink_metadata(path).is_ok_and(|metadata| {
         metadata.file_type().is_symlink()
@@ -476,6 +500,7 @@ fn classify_payload_path_error(path: &Path, error: std::io::Error) -> LcmError {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn classify_payload_open_error(path: &Path, error: std::io::Error) -> LcmError {
     if is_windows_sharing_violation(&error) {
         LcmError::Io(error.to_string())
@@ -485,11 +510,13 @@ fn classify_payload_open_error(path: &Path, error: std::io::Error) -> LcmError {
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn classify_payload_open_error(path: &Path, error: std::io::Error) -> LcmError {
     classify_payload_path_error(path, error)
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn is_windows_sharing_violation(error: &std::io::Error) -> bool {
     matches!(
         error.raw_os_error(),
@@ -498,6 +525,7 @@ fn is_windows_sharing_violation(error: &std::io::Error) -> bool {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn same_windows_handle_identity(left: &fs::File, right: &fs::File) -> Result<(), LcmError> {
     let left = windows_file_identity(left)?;
     let right = windows_file_identity(right)?;
@@ -505,6 +533,7 @@ fn same_windows_handle_identity(left: &fs::File, right: &fs::File) -> Result<(),
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn windows_file_identity(file: &fs::File) -> Result<PayloadFileIdentity, LcmError> {
     query_windows_file_identity_with(
         file.as_raw_handle(),
@@ -524,6 +553,7 @@ fn windows_file_identity(file: &fs::File) -> Result<PayloadFileIdentity, LcmErro
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn query_windows_file_identity_with(
     handle: *mut std::ffi::c_void,
     query: impl FnOnce(*mut std::ffi::c_void, i32, *mut std::ffi::c_void, u32) -> i32,
@@ -547,6 +577,7 @@ fn query_windows_file_identity_with(
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn validate_file_id_info(information: FileIdInfo) -> Result<PayloadFileIdentity, LcmError> {
     let file_id = information.file_id.identifier;
     let invalid_volume =
@@ -563,12 +594,14 @@ fn validate_file_id_info(information: FileIdInfo) -> Result<PayloadFileIdentity,
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn open_verified_parent(path: &Path) -> Result<fs::File, LcmError> {
     let parent = path.parent().ok_or(LcmError::InvalidPayloadRef)?;
     open_verified_directory(parent)
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn open_verified_directory(path: &Path) -> Result<fs::File, LcmError> {
     let before = fs::symlink_metadata(path).map_err(|err| LcmError::Io(err.to_string()))?;
     ensure_directory_non_reparse(&before)?;
@@ -593,6 +626,7 @@ fn open_verified_directory(path: &Path) -> Result<fs::File, LcmError> {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn ensure_directory_non_reparse(metadata: &fs::Metadata) -> Result<(), LcmError> {
     if metadata.file_type().is_symlink()
         || metadata_is_reparse_point(metadata)
@@ -605,6 +639,7 @@ fn ensure_directory_non_reparse(metadata: &fs::Metadata) -> Result<(), LcmError>
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn classify_directory_path_error(path: &Path, error: std::io::Error) -> LcmError {
     if fs::symlink_metadata(path).is_ok_and(|metadata| {
         metadata.file_type().is_symlink()
@@ -651,6 +686,7 @@ pub(super) fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmErr
     Ok(dir)
 }
 
+#[hotpath::measure]
 pub fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
     existing_payload_dir_opt(storage_root)?.ok_or_else(|| {
         LcmError::Io(format!(
@@ -684,6 +720,7 @@ pub fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, 
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 pub(super) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
     let metadata =
         fs::symlink_metadata(storage_root).map_err(|err| LcmError::Io(err.to_string()))?;
@@ -696,6 +733,7 @@ pub(super) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, Lcm
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
     let root = open_verified_directory(storage_root)?;
     let canonical = storage_root
@@ -706,6 +744,7 @@ pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> 
     Ok(canonical)
 }
 
+#[hotpath::measure]
 fn ensure_actual_private_dir(dir: &Path, metadata: &fs::Metadata) -> Result<(), LcmError> {
     if metadata.file_type().is_symlink()
         || metadata_is_reparse_point(metadata)
@@ -718,6 +757,7 @@ fn ensure_actual_private_dir(dir: &Path, metadata: &fs::Metadata) -> Result<(), 
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn ensure_payload_dir_under_root(root: &Path, dir: &Path) -> Result<(), LcmError> {
     let canonical_dir = dir
         .canonicalize()
@@ -730,6 +770,7 @@ fn ensure_payload_dir_under_root(root: &Path, dir: &Path) -> Result<(), LcmError
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn ensure_payload_dir_under_root(root: &Path, dir: &Path) -> Result<(), LcmError> {
     let root_handle = open_verified_directory(root)?;
     let dir_handle = open_verified_directory(dir)?;
@@ -744,6 +785,7 @@ fn ensure_payload_dir_under_root(root: &Path, dir: &Path) -> Result<(), LcmError
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 pub fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
     let parent = path.parent().ok_or(LcmError::InvalidPayloadRef)?;
     if parent == root {
@@ -754,6 +796,7 @@ pub fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 pub fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
     let parent = path.parent().ok_or(LcmError::InvalidPayloadRef)?;
     if parent != root {
@@ -781,6 +824,7 @@ pub(super) fn write_private_file(
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn write_private_file_non_windows(
     path: &Path,
     content: &[u8],
@@ -813,6 +857,7 @@ fn write_private_file_non_windows(
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn write_private_file_windows(path: &Path, content: &[u8]) -> Result<PayloadFileWrite, LcmError> {
     let _parent_guard = open_verified_parent(path)?;
     let mut file = match private_create_file_options()
@@ -872,6 +917,7 @@ fn write_private_file_windows(path: &Path, content: &[u8]) -> Result<PayloadFile
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn finish_private_file_write(
     path: &Path,
     content: &[u8],
@@ -902,15 +948,18 @@ fn finish_private_file_write(
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn remove_failed_payload_create(_path: &Path, file: &fs::File) {
     let _ = delete_open_file_windows(file);
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn remove_failed_payload_create(path: &Path, _file: &fs::File) {
     let _ = fs::remove_file(path);
 }
 
+#[hotpath::measure]
 fn ensure_existing_payload_matches(
     path: &Path,
     content: &[u8],
@@ -929,6 +978,7 @@ fn ensure_existing_payload_matches(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn private_file_options() -> fs::OpenOptions {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -940,16 +990,19 @@ fn private_file_options() -> fs::OpenOptions {
 }
 
 #[cfg(all(not(unix), not(windows)))]
+#[hotpath::measure]
 fn private_file_options() -> fs::OpenOptions {
     fs::OpenOptions::new()
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn private_create_file_options() -> fs::OpenOptions {
     private_file_options()
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn private_file_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
     options
@@ -959,6 +1012,7 @@ fn private_file_options() -> fs::OpenOptions {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn private_create_file_options() -> fs::OpenOptions {
     let mut options = private_file_options();
     options.access_mode(GENERIC_READ | GENERIC_WRITE | DELETE_ACCESS);
@@ -966,6 +1020,7 @@ fn private_create_file_options() -> fs::OpenOptions {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn verification_file_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
     options
@@ -975,6 +1030,7 @@ fn verification_file_options() -> fs::OpenOptions {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn private_directory_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
     options
@@ -984,6 +1040,7 @@ fn private_directory_options() -> fs::OpenOptions {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn delete_file_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
     options
@@ -994,6 +1051,7 @@ fn delete_file_options() -> fs::OpenOptions {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn delete_open_file_windows(file: &fs::File) -> Result<(), LcmError> {
     let disposition = FileDispositionInfo { delete_file: 1 };
     // SAFETY: `file` owns a valid handle opened with DELETE access, and
@@ -1038,6 +1096,7 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+#[hotpath::measure]
 fn set_private_dir_permissions(path: &Path) -> Result<(), LcmError> {
     tracedecay_runtime_core::storage::set_private_dir_permissions(path)
         .map_err(|err| LcmError::Io(err.to_string()))

@@ -43,6 +43,7 @@ pub enum CondensationCandidateDecision {
     Condense,
 }
 
+#[hotpath::measure]
 pub fn condensation_candidate_decision(
     candidate_count: usize,
     fan_in: usize,
@@ -54,6 +55,7 @@ pub fn condensation_candidate_decision(
     }
 }
 
+#[hotpath::measure]
 pub fn incremental_max_depth_limit(configured: Option<i64>) -> i64 {
     match configured {
         Some(value) if value < 0 => i64::MAX,
@@ -62,6 +64,7 @@ pub fn incremental_max_depth_limit(configured: Option<i64>) -> i64 {
     }
 }
 
+#[hotpath::measure]
 pub fn effective_assembly_token_cap(input: AssemblyCapInput) -> Option<i64> {
     let explicit_cap = input.max_assembly_tokens.filter(|cap| *cap > 0);
     let reserve_cap = match (
@@ -98,6 +101,7 @@ pub fn overflow_recovery_assembly_cap(input: OverflowRecoveryCapInput<'_>) -> Op
     Some((assembly_cap - overhead_tokens).max(1))
 }
 
+#[hotpath::measure]
 pub fn has_eligible_backlog(backlog: &[LcmRawMessage], leaf_chunk_tokens: Option<i64>) -> bool {
     if backlog.is_empty() {
         return false;
@@ -109,6 +113,7 @@ pub fn has_eligible_backlog(backlog: &[LcmRawMessage], leaf_chunk_tokens: Option
     }
 }
 
+#[hotpath::measure]
 pub fn effective_leaf_chunk_tokens(
     leaf_chunk_tokens: Option<i64>,
     dynamic_leaf_chunk_enabled: Option<bool>,
@@ -160,6 +165,7 @@ pub fn bounded_leaf_chunk_len(
     replay_transactions::bounded_atomic_prefix_len(backlog, selected_len)
 }
 
+#[hotpath::measure]
 pub fn progress_leaf_chunk_len(
     backlog: &[LcmRawMessage],
     leaf_chunk_tokens: Option<i64>,
@@ -173,6 +179,7 @@ pub fn progress_leaf_chunk_len(
     }
 }
 
+#[hotpath::measure]
 pub fn threshold_pressure(current_tokens: Option<i64>, threshold_tokens: Option<i64>) -> bool {
     match (current_tokens, threshold_tokens) {
         (Some(current_tokens), Some(threshold_tokens)) if threshold_tokens > 0 => {
@@ -182,6 +189,7 @@ pub fn threshold_pressure(current_tokens: Option<i64>, threshold_tokens: Option<
     }
 }
 
+#[hotpath::measure]
 pub fn forced_overflow_pressure(
     current_tokens: Option<i64>,
     max_assembly_tokens: Option<i64>,
@@ -194,6 +202,7 @@ pub fn forced_overflow_pressure(
     }
 }
 
+#[hotpath::measure]
 pub fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
     backlog
         .iter()

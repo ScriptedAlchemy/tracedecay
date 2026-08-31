@@ -54,6 +54,7 @@ pub(super) async fn backup_database(
     }))
 }
 
+#[hotpath::measure]
 fn allocate_backup_directory(backup_root: &Path) -> Result<(PathBuf, PathBuf), LcmError> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -75,11 +76,13 @@ fn allocate_backup_directory(backup_root: &Path) -> Result<(PathBuf, PathBuf), L
     }
 }
 
+#[hotpath::measure]
 fn verify_sqlite_backup(path: &Path) -> Result<(), LcmError> {
     tracedecay_rusqlite_runtime::backup::verify_sqlite_snapshot(path)
         .map_err(|error| LcmError::Db(error.to_string()))
 }
 
+#[hotpath::measure]
 fn sync_file(path: &Path) -> Result<(), LcmError> {
     fs::OpenOptions::new()
         .read(true)
@@ -89,6 +92,7 @@ fn sync_file(path: &Path) -> Result<(), LcmError> {
         .map_err(|error| LcmError::Io(error.to_string()))
 }
 
+#[hotpath::measure]
 fn sync_directory(path: &Path) -> Result<(), LcmError> {
     sync_directory_io(path, DirectorySyncPolicy::Strict)
         .map_err(|error| LcmError::Io(error.to_string()))

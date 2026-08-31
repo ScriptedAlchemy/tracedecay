@@ -20,6 +20,7 @@ pub struct CompiledPatternSet {
     regexes: Vec<Regex>,
 }
 
+#[hotpath::measure_all]
 impl CompiledPatternSet {
     fn is_match(&self, value: &str) -> bool {
         self.regexes.iter().any(|regex| regex.is_match(value))
@@ -35,6 +36,7 @@ pub fn should_externalize(role: &str, kind: Option<&str>, content: &str) -> bool
 /// Reasons that externalize the whole message body rather than only the
 /// media/base64 spans inside it (quarantine, binary-ish content, oversized
 /// tool output). Substring protection is skipped for these.
+#[hotpath::measure]
 pub fn prefers_whole_message_externalization(
     role: &str,
     kind: Option<&str>,
@@ -49,10 +51,12 @@ pub fn prefers_whole_message_externalization(
     is_tool_payload(role, kind) && char_count_exceeds(content, LARGE_TOOL_OUTPUT_CHARS)
 }
 
+#[hotpath::measure]
 pub fn contains_media_payload(content: &str) -> bool {
     contains_data_uri(content) || has_long_base64_run(content)
 }
 
+#[hotpath::measure]
 pub fn quarantine_reason(role: &str, _kind: Option<&str>, content: &str) -> Option<&'static str> {
     if !role.eq_ignore_ascii_case("assistant") {
         return None;
@@ -64,6 +68,7 @@ pub fn quarantine_reason(role: &str, _kind: Option<&str>, content: &str) -> Opti
     }
 }
 
+#[hotpath::measure]
 pub fn heartbeat_noise_reason(role: &str, content: &str) -> Option<&'static str> {
     if !matches!(
         role.to_ascii_lowercase().as_str(),
@@ -92,6 +97,7 @@ pub fn heartbeat_noise_reason(role: &str, content: &str) -> Option<&'static str>
     .then_some("heartbeat_progress")
 }
 
+#[hotpath::measure]
 pub fn ignore_message_reason<S: AsRef<str>>(
     _role: &str,
     content: &str,
@@ -101,6 +107,7 @@ pub fn ignore_message_reason<S: AsRef<str>>(
     ignore_message_reason_with_compiled(content, &patterns)
 }
 
+#[hotpath::measure]
 pub fn ignore_message_reason_with_compiled(
     content: &str,
     patterns: &CompiledPatternSet,
@@ -113,6 +120,7 @@ pub fn ignore_message_reason_with_compiled(
         .then_some("ignore_message_pattern")
 }
 
+#[hotpath::measure]
 pub fn matches_any_pattern<S: AsRef<str>>(patterns: &[S], value: &str) -> bool {
     let compiled = cached_session_patterns(patterns);
     matches_any_compiled_pattern(&compiled, value)
@@ -121,6 +129,7 @@ pub fn matches_any_pattern<S: AsRef<str>>(patterns: &[S], value: &str) -> bool {
 /// Session pattern lists come from configuration and repeat on every LCM
 /// call, so compiled sets are memoized by pattern-list contents instead of
 /// being recompiled per match.
+#[hotpath::measure]
 fn cached_session_patterns<S: AsRef<str>>(patterns: &[S]) -> Arc<CompiledPatternSet> {
     let key = patterns
         .iter()
@@ -140,6 +149,7 @@ fn cached_session_patterns<S: AsRef<str>>(patterns: &[S]) -> Arc<CompiledPattern
     compiled
 }
 
+#[hotpath::measure]
 pub fn matches_any_compiled_pattern(patterns: &CompiledPatternSet, value: &str) -> bool {
     patterns.is_match(value)
 }
@@ -164,6 +174,7 @@ pub fn pattern_matches(pattern: &str, value: &str) -> bool {
     Regex::new(&session_pattern_regex(pattern)).is_ok_and(|regex| regex.is_match(value))
 }
 
+#[hotpath::measure]
 fn session_pattern_regex(pattern: &str) -> String {
     let mut regex = String::from("^");
     let mut chars = pattern.chars().peekable();
@@ -195,6 +206,7 @@ static DATA_URI_BASE64_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     .ok()
 });
 
+#[hotpath::measure]
 pub fn contains_data_uri(content: &str) -> bool {
     DATA_URI_BASE64_RE.as_ref().is_some_and(|regex| {
         regex
@@ -217,6 +229,7 @@ pub fn data_uri_spans(content: &str) -> Vec<(usize, usize)> {
     })
 }
 
+#[hotpath::measure]
 fn has_data_uri_boundary(content: &str, end: usize) -> bool {
     match content.get(end..).and_then(|suffix| suffix.chars().next()) {
         None => true,
@@ -224,6 +237,7 @@ fn has_data_uri_boundary(content: &str, end: usize) -> bool {
     }
 }
 
+#[hotpath::measure]
 fn is_data_uri_base64_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=')
 }
@@ -267,6 +281,7 @@ fn assistant_output_is_high_repetition(content: &str) -> bool {
         || (unique_token_ratio <= 0.015 && distinct_char_count(&normalized) <= 64)
 }
 
+#[hotpath::measure]
 fn word_tokens(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -283,6 +298,7 @@ fn word_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
+#[hotpath::measure]
 fn repetition_segments(text: &str) -> Vec<String> {
     text.split(['\n', '.', '!', '?'])
         .map(|segment| segment.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -291,12 +307,14 @@ fn repetition_segments(text: &str) -> Vec<String> {
         .collect()
 }
 
+#[hotpath::measure]
 fn distinct_char_count(text: &str) -> usize {
     text.chars()
         .collect::<std::collections::BTreeSet<_>>()
         .len()
 }
 
+#[hotpath::measure]
 fn is_tool_payload(role: &str, kind: Option<&str>) -> bool {
     role.eq_ignore_ascii_case("tool")
         || kind.is_some_and(|value| {
@@ -305,6 +323,7 @@ fn is_tool_payload(role: &str, kind: Option<&str>) -> bool {
         })
 }
 
+#[hotpath::measure]
 fn compile_patterns<S: AsRef<str>, F>(patterns: &[S], mut compile: F) -> CompiledPatternSet
 where
     F: FnMut(&str) -> Option<Regex>,
@@ -322,6 +341,7 @@ where
     CompiledPatternSet { regexes }
 }
 
+#[hotpath::measure]
 fn char_count_at_least(content: &str, min_chars: usize) -> bool {
     if min_chars == 0 {
         return true;
@@ -329,16 +349,19 @@ fn char_count_at_least(content: &str, min_chars: usize) -> bool {
     content.chars().take(min_chars).count() == min_chars
 }
 
+#[hotpath::measure]
 fn char_count_exceeds(content: &str, max_chars: usize) -> bool {
     content.chars().nth(max_chars).is_some()
 }
 
+#[hotpath::measure]
 pub fn has_long_base64_run(content: &str) -> bool {
     !long_base64_run_spans(content).is_empty()
 }
 
 // Hermes `_BASE64_RUN_RE` alphabet (ingest_protection.py:89): standard and
 // url-safe base64 plus padding.
+#[hotpath::measure]
 fn is_base64_run_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=' | b'_' | b'-')
 }
@@ -374,6 +397,7 @@ pub fn long_base64_run_spans(content: &str) -> Vec<(usize, usize)> {
 // Port of hermes-lcm `looks_like_long_base64` (ingest_protection.py:525-547)
 // for a maximal alphabet run: very long, length mod 4 != 1, and at least a
 // bit of mixed alphabet so a repeated-character log line does not match.
+#[hotpath::measure]
 fn looks_like_long_base64(run: &str) -> bool {
     if run.len() < GENERIC_BASE64_MIN_CHARS || run.len() % 4 == 1 {
         return false;
@@ -392,6 +416,7 @@ fn looks_like_long_base64(run: &str) -> bool {
     false
 }
 
+#[hotpath::measure]
 fn is_binaryish(content: &str) -> bool {
     let sample = content.chars().take(BINARYISH_SAMPLE_CHARS);
     let mut total = 0usize;

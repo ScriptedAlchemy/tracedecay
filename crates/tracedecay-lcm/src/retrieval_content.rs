@@ -17,18 +17,22 @@ pub struct RelatedMessageCopyIdentity<'a> {
     pub content: &'a str,
 }
 
+#[hotpath::measure]
 pub fn projected_content_hash(content: &str) -> String {
     sha256_hex(content.as_bytes())
 }
 
+#[hotpath::measure]
 pub fn derived_text_for_index(raw: &str) -> String {
     derived_text_with_cap(raw, MAX_DERIVED_TEXT_CHARS)
 }
 
+#[hotpath::measure]
 pub fn derived_text_for_snippet(raw: &str) -> String {
     derived_text_with_cap(raw, MAX_DERIVED_SNIPPET_CHARS)
 }
 
+#[hotpath::measure]
 pub fn rerank_fetch_limit(limit: usize, max_fetch: usize) -> usize {
     limit
         .saturating_mul(RERANK_OVERFETCH_FACTOR)
@@ -80,6 +84,7 @@ pub fn dedupe_related_message_copies<T>(
     kept
 }
 
+#[hotpath::measure]
 pub fn is_inventory_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let mentions_transcript_dir = lower.contains(".jsonl")
@@ -105,6 +110,7 @@ pub fn is_inventory_text(text: &str) -> bool {
     is_branch_inventory(&lower)
 }
 
+#[hotpath::measure]
 fn derived_text_with_cap(raw: &str, max_chars: usize) -> String {
     if raw.chars().count() <= max_chars {
         return raw.to_string();
@@ -117,6 +123,7 @@ fn derived_text_with_cap(raw: &str, max_chars: usize) -> String {
     derived
 }
 
+#[hotpath::measure]
 fn normalized_content_identity(text: &str) -> String {
     text.split_whitespace()
         .map(str::to_lowercase)
@@ -124,6 +131,7 @@ fn normalized_content_identity(text: &str) -> String {
         .join(" ")
 }
 
+#[hotpath::measure]
 fn is_branch_inventory(lower: &str) -> bool {
     const LISTING_INDICATORS: [&str; 9] = [
         "inventory",
@@ -148,6 +156,7 @@ fn is_branch_inventory(lower: &str) -> bool {
         .any(|indicator| lower.contains(indicator))
 }
 
+#[hotpath::measure]
 fn shows_substantive_work(lower: &str) -> bool {
     const WORK_VERBS: [&str; 4] = ["implemented", "fixed", "refactored", "committed"];
     if lower.contains("diff --git") || lower.contains("@@ ") {
@@ -158,6 +167,7 @@ fn shows_substantive_work(lower: &str) -> bool {
         .any(|verb| contains_affirmative_verb(lower, verb))
 }
 
+#[hotpath::measure]
 fn contains_affirmative_verb(lower: &str, verb: &str) -> bool {
     let mut search_from = 0;
     while let Some(rel) = lower[search_from..].find(verb) {
@@ -181,6 +191,7 @@ fn contains_affirmative_verb(lower: &str, verb: &str) -> bool {
     false
 }
 
+#[hotpath::measure]
 fn negated_before(before: &str) -> bool {
     const NEGATIONS: [&str; 4] = ["nothing", "never", "not", "no"];
     before
@@ -191,6 +202,7 @@ fn negated_before(before: &str) -> bool {
         .any(|word| NEGATIONS.contains(&word))
 }
 
+#[hotpath::measure]
 fn path_list_dominated(text: &str) -> bool {
     let mut total = 0usize;
     let mut path_like = 0usize;
@@ -203,6 +215,7 @@ fn path_list_dominated(text: &str) -> bool {
     total >= 4 && path_like >= 3 && path_like * 5 >= total * 3
 }
 
+#[hotpath::measure]
 fn token_is_path_like(token: &str) -> bool {
     let token = token
         .trim_matches(|character: char| matches!(character, '"' | '\'' | ',' | '`' | '(' | ')'));

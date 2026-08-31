@@ -44,6 +44,7 @@ pub struct LcmRawMessageMetadata {
     pub metadata_json: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl LcmRawMessage {
     pub fn into_metadata(self) -> LcmRawMessageMetadata {
         LcmRawMessageMetadata {
@@ -64,6 +65,7 @@ impl LcmRawMessage {
     }
 }
 
+#[hotpath::measure_all]
 impl LcmRawMessageMetadata {
     pub fn with_verified_content(self, content: String) -> Result<LcmRawMessage, LcmError> {
         if crate::retrieval_content::projected_content_hash(&content) != self.content_hash {
@@ -194,19 +196,24 @@ pub enum LcmRetrievalOutcome {
     },
 }
 
+#[hotpath::measure_all]
 impl LcmRetrievalOutcome {
+    #[hotpath::skip]
     pub const fn complete(freshness: LcmDataFreshness) -> Self {
         Self::Complete { freshness }
     }
 
+    #[hotpath::skip]
     pub const fn partial(freshness: LcmDataFreshness, omitted: u64) -> Self {
         Self::Partial { freshness, omitted }
     }
 
+    #[hotpath::skip]
     pub const fn stale(freshness: LcmDataFreshness) -> Self {
         Self::Stale { freshness }
     }
 
+    #[hotpath::skip]
     pub const fn freshness(self) -> LcmDataFreshness {
         match self {
             Self::Complete { freshness }
@@ -215,6 +222,7 @@ impl LcmRetrievalOutcome {
         }
     }
 
+    #[hotpath::skip]
     pub const fn omitted(self) -> u64 {
         match self {
             Self::Partial { omitted, .. } => omitted,
@@ -419,6 +427,7 @@ pub enum LcmStorageKind {
     External,
 }
 
+#[hotpath::measure_all]
 impl LcmStorageKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -441,6 +450,7 @@ impl LcmStorageKind {
 /// Containment is decided on the reference itself, before any storage root is
 /// joined, so every caller — session store, registered renderer, hydration —
 /// rejects traversal identically.
+#[hotpath::measure]
 pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
     if payload_ref.is_empty()
         || payload_ref == "."

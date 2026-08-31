@@ -11,6 +11,7 @@ pub(super) enum LcmGitScopeSessions<'a> {
     Scoped(&'a [(String, String)]),
 }
 
+#[hotpath::measure]
 pub(super) fn contains_cjk(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
@@ -111,6 +112,7 @@ pub async fn grep(
 ///
 /// Both stages are stable, preserving the relative order established by the
 /// requested `sort` within each retained group.
+#[hotpath::measure]
 fn rerank_grep_hits(
     hits: &mut Vec<LcmGrepHit>,
     sort: LcmGrepSort,
@@ -189,6 +191,7 @@ fn rerank_grep_hits(
 /// shared application classifier so the lcm/grep and global message-search
 /// re-ranks agree. Summary nodes are curated prose, never raw inventory, so
 /// they are exempt.
+#[hotpath::measure]
 fn hit_is_inventory(hit: &LcmGrepHit) -> bool {
     if hit.kind != "raw_message" {
         return false;
@@ -451,6 +454,7 @@ async fn summary_like_grep_hits(
     Ok(hits)
 }
 
+#[hotpath::measure]
 fn push_raw_grep_filters(
     request: &LcmGrepRequest,
     retrieval_filters: LcmGrepFilters,
@@ -511,6 +515,7 @@ fn push_raw_grep_filters(
     );
 }
 
+#[hotpath::measure]
 fn push_summary_grep_filters(
     request: &LcmGrepRequest,
     retrieval_filters: LcmGrepFilters,
@@ -559,6 +564,7 @@ fn push_summary_grep_filters(
     );
 }
 
+#[hotpath::measure]
 fn message_type_predicate_sql(
     alias: &str,
     has_kind_column: bool,
@@ -588,6 +594,7 @@ fn message_type_predicate_sql(
     }
 }
 
+#[hotpath::measure]
 fn push_grep_relationship_scope_filter(
     scope: crate::SessionSearchScope,
     provider_column: &str,
@@ -610,6 +617,7 @@ fn push_grep_relationship_scope_filter(
 /// Appends the provider-qualified session set preselected by the canonical Git
 /// correlation graph authority. An authoritative empty selection emits a false
 /// predicate.
+#[hotpath::measure]
 fn push_grep_git_scope_filter(
     scope: LcmGitScopeSessions<'_>,
     provider_column: &str,
@@ -634,6 +642,7 @@ fn push_grep_git_scope_filter(
     filters.push(format!("({})", selected.join(" OR ")));
 }
 
+#[hotpath::measure]
 fn grep_provider_filter(request: &LcmGrepRequest) -> Option<&str> {
     let provider = request.provider.trim();
     if provider.is_empty() || provider == "all" {
@@ -643,6 +652,7 @@ fn grep_provider_filter(request: &LcmGrepRequest) -> Option<&str> {
     }
 }
 
+#[hotpath::measure]
 fn push_grep_provider_filter(
     request: &LcmGrepRequest,
     column: &str,
@@ -662,6 +672,7 @@ struct RawGrepCandidate {
     content: String,
 }
 
+#[hotpath::measure]
 fn raw_hit_candidate_from_row(
     row: &tracedecay_runtime_core::db::engine::Row,
     like_terms: &[String],
@@ -688,6 +699,7 @@ fn raw_hit_candidate_from_row(
     })
 }
 
+#[hotpath::measure]
 fn dedupe_related_raw_hits(candidates: Vec<RawGrepCandidate>) -> Vec<LcmGrepHit> {
     dedupe_related_message_copies(candidates, |candidate| RelatedMessageCopyIdentity {
         provider: &candidate.hit.provider,
@@ -701,6 +713,7 @@ fn dedupe_related_raw_hits(candidates: Vec<RawGrepCandidate>) -> Vec<LcmGrepHit>
     .collect()
 }
 
+#[hotpath::measure]
 fn summary_hit_from_row(
     row: &tracedecay_runtime_core::db::engine::Row,
     like_terms: &[String],

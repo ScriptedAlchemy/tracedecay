@@ -86,6 +86,7 @@ pub use retention::{
 /// Named distinctly from the chars/4 `estimate_tokens` helpers in read-mode
 /// and global-db surfaces so those cannot be imported into this budget path
 /// by accident.
+#[hotpath::measure]
 pub(crate) fn lcm_budget_tokens(text: &str) -> i64 {
     text.split_whitespace().count().max(1) as i64
 }
@@ -97,6 +98,7 @@ pub(crate) fn lcm_budget_tokens(text: &str) -> i64 {
 /// `{ "text": ... }` parts contribute that text. Structured payloads with no
 /// text parts fall through to `Value`'s compact Display so a count is still
 /// produced — never a silent empty from a failed stringify.
+#[hotpath::measure]
 pub(crate) fn lcm_message_visible_text(message: &Value) -> String {
     let Some(content) = message.get("content") else {
         return String::new();
@@ -123,6 +125,7 @@ pub(crate) fn lcm_message_visible_text(message: &Value) -> String {
 }
 
 /// [`lcm_budget_tokens`] over [`lcm_message_visible_text`].
+#[hotpath::measure]
 pub(crate) fn lcm_message_budget_tokens(message: &Value) -> i64 {
     lcm_budget_tokens(&lcm_message_visible_text(message))
 }
@@ -130,6 +133,7 @@ pub(crate) fn lcm_message_budget_tokens(message: &Value) -> i64 {
 /// Return the storage representation used by LCM raw ingest for provider
 /// transcript content. This intentionally matches the active-message path:
 /// strings stay strings, structured content is compact JSON.
+#[hotpath::measure]
 pub fn message_storage_text(content: &Value) -> String {
     if let Some(text) = content.as_str() {
         return text.to_string();
@@ -148,6 +152,7 @@ pub enum SessionMessageType {
     ToolResult,
 }
 
+#[hotpath::measure_all]
 impl SessionMessageType {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
@@ -158,6 +163,7 @@ impl SessionMessageType {
         }
     }
 
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -174,6 +180,7 @@ pub enum SessionSearchScope {
     SubagentsOnly,
 }
 
+#[hotpath::measure_all]
 impl SessionSearchScope {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
@@ -184,6 +191,7 @@ impl SessionSearchScope {
         }
     }
 
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -206,7 +214,9 @@ pub struct GitScopeFilter {
     pub commit: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl GitScopeFilter {
+    #[hotpath::skip]
     pub const fn is_empty(&self) -> bool {
         self.branch.is_none() && self.worktree.is_none() && self.commit.is_none()
     }

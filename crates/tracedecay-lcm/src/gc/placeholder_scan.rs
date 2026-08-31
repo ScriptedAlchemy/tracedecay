@@ -27,6 +27,7 @@ pub(crate) struct PlaceholderTextRow {
     pub metadata_json: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl PlaceholderTextRow {
     pub(crate) fn texts(&self) -> impl Iterator<Item = &str> {
         self.content
@@ -38,6 +39,7 @@ impl PlaceholderTextRow {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn gc_prefix_like_patterns() -> Vec<String> {
     GC_PREFIXES
         .iter()
@@ -45,6 +47,7 @@ pub(crate) fn gc_prefix_like_patterns() -> Vec<String> {
         .collect()
 }
 
+#[hotpath::measure]
 pub(crate) fn gc_prefix_ref_like_patterns(payload_ref: &str) -> Vec<String> {
     GC_PREFIXES
         .iter()
@@ -60,6 +63,7 @@ pub(crate) fn gc_prefix_ref_like_patterns(payload_ref: &str) -> Vec<String> {
 /// so `%prefix%ref%` matches every row a tombstone rewrite could change. It
 /// matches strictly fewer rows than a bare `%ref%`, which also drags in inline
 /// bodies and already-tombstoned placeholders that the rewrite leaves alone.
+#[hotpath::measure]
 pub(crate) fn live_prefix_ref_like_patterns(payload_ref: &str) -> Vec<String> {
     LIVE_PREFIX_REWRITES
         .iter()
@@ -67,6 +71,7 @@ pub(crate) fn live_prefix_ref_like_patterns(payload_ref: &str) -> Vec<String> {
         .collect()
 }
 
+#[hotpath::measure]
 pub(crate) fn live_prefix_like_patterns() -> Vec<String> {
     LIVE_PREFIX_REWRITES
         .iter()
@@ -74,12 +79,14 @@ pub(crate) fn live_prefix_like_patterns() -> Vec<String> {
         .collect()
 }
 
+#[hotpath::measure]
 pub(crate) fn all_placeholder_like_patterns() -> Vec<String> {
     let mut patterns = live_prefix_like_patterns();
     patterns.extend(gc_prefix_like_patterns());
     patterns
 }
 
+#[hotpath::measure]
 pub(crate) fn placeholder_text_like_sql(pattern_count: usize) -> String {
     PLACEHOLDER_TEXT_COLUMNS
         .iter()
@@ -90,6 +97,7 @@ pub(crate) fn placeholder_text_like_sql(pattern_count: usize) -> String {
         .join(" OR ")
 }
 
+#[hotpath::measure]
 pub(crate) fn bind_placeholder_like_patterns(patterns: &[String]) -> Vec<SqlValue> {
     PLACEHOLDER_TEXT_COLUMNS
         .iter()
@@ -97,10 +105,12 @@ pub(crate) fn bind_placeholder_like_patterns(patterns: &[String]) -> Vec<SqlValu
         .collect()
 }
 
+#[hotpath::measure]
 fn session_sql_value(session_id: Option<&str>) -> SqlValue {
     session_id.map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string()))
 }
 
+#[hotpath::measure]
 fn placeholder_scan_scope_sql(scope: &PlaceholderScanScope<'_>) -> (String, Vec<SqlValue>) {
     match scope {
         PlaceholderScanScope::Unscoped => ("1 = 1".to_string(), Vec::new()),

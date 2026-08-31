@@ -57,14 +57,17 @@ pub(crate) async fn prepare_external_payload_delete_in_transaction_with_cache(
     .await
 }
 
+#[hotpath::measure]
 pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
     filesystem_authority::canonical_storage_root(storage_root)
 }
 
+#[hotpath::measure]
 pub fn payload_dir(storage_root: &Path) -> PathBuf {
     storage_root.join("lcm-payloads")
 }
 
+#[hotpath::measure]
 pub fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
     let mut refs = Vec::new();
     let mut offset = 0usize;
@@ -96,6 +99,7 @@ pub fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
     refs
 }
 
+#[hotpath::measure]
 fn is_external_payload_placeholder(value: &str) -> bool {
     gc::is_known_payload_placeholder_prefix(value)
 }
@@ -109,6 +113,7 @@ pub struct ExternalPayloadWrite<'a> {
     pub metadata_json: Option<String>,
 }
 
+#[hotpath::measure]
 pub fn write_external_payload_tracked(
     storage_root: &Path,
     write: ExternalPayloadWrite<'_>,
@@ -145,6 +150,7 @@ pub fn write_external_payload(
     .map(|(payload, _file_write)| payload)
 }
 
+#[hotpath::measure]
 fn write_external_payload_inner(
     storage_root: &Path,
     write: ExternalPayloadWrite<'_>,
@@ -301,6 +307,7 @@ pub async fn expand_payload(
     })
 }
 
+#[hotpath::measure]
 pub fn read_verified_payload_content(
     storage_root: &Path,
     payload_ref: &str,
@@ -318,6 +325,7 @@ pub fn read_verified_payload_content(
     )
 }
 
+#[hotpath::measure]
 pub fn read_verified_payload_content_with_checkpoint(
     storage_root: &Path,
     payload_ref: &str,

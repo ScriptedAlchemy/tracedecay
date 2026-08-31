@@ -6,6 +6,7 @@ use super::LcmError;
 /// SQLite bind-list chunk size shared by LCM `IN (...)` batch reads/writes.
 pub const SQLITE_IN_BATCH_SIZE: usize = 500;
 
+#[hotpath::measure]
 pub fn sql_in_placeholders(len: usize) -> String {
     if len == 0 {
         return String::new();
@@ -14,12 +15,14 @@ pub fn sql_in_placeholders(len: usize) -> String {
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 pub fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
     use std::os::unix::fs::MetadataExt;
     metadata.mtime()
 }
 
 #[cfg(not(unix))]
+#[hotpath::measure]
 pub fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
     metadata
         .modified()
@@ -29,6 +32,7 @@ pub fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
         .unwrap_or_default()
 }
 
+#[hotpath::measure]
 pub fn sha256_hex(content: &[u8]) -> String {
     tracedecay_domain::canonical_text::sha256_hex(content)
 }

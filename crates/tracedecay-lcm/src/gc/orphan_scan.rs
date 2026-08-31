@@ -7,6 +7,7 @@ use tracedecay_runtime_core::db::engine::Executor;
 use super::super::util;
 use super::{LcmError, LcmGcConfig, LcmGcReport, payload, stage_payload_delete};
 
+#[hotpath::measure]
 pub(super) fn preview_orphan_files(
     dir: &Path,
     metadata_refs: &BTreeSet<String>,
@@ -27,6 +28,7 @@ pub(super) fn preview_orphan_files(
     Ok(())
 }
 
+#[hotpath::measure]
 fn orphan_file_candidates(
     dir: &Path,
     metadata_refs: &BTreeSet<String>,
@@ -48,6 +50,7 @@ fn orphan_file_candidates(
     ))
 }
 
+#[hotpath::measure]
 fn orphan_file_candidates_from_entries<I, M>(
     dir: &Path,
     metadata_refs: &BTreeSet<String>,
@@ -146,6 +149,7 @@ pub(super) async fn stage_orphan_files(
 
 /// True when the payload file exists as a regular (non-symlink) file; a
 /// missing payload directory means no payload file can exist.
+#[hotpath::measure]
 pub(super) fn payload_file_present(
     dir: Option<&Path>,
     payload_ref: &str,
@@ -153,6 +157,7 @@ pub(super) fn payload_file_present(
     payload_file_present_with(dir, payload_ref, |path| fs::symlink_metadata(path))
 }
 
+#[hotpath::measure]
 fn payload_file_present_with<M>(
     dir: Option<&Path>,
     payload_ref: &str,
@@ -174,6 +179,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn is_payload_filename(name: &str) -> bool {
     name.len() == "payload_".len() + 64 + ".payload".len()
         && name.starts_with("payload_")

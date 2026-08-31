@@ -33,6 +33,7 @@ pub struct PayloadDeleteDrain {
     pub(super) errors: Vec<LcmGcError>,
 }
 
+#[hotpath::measure_all]
 impl PayloadDeleteDrain {
     pub(super) fn removed_bytes(&self, payload_ref: &str) -> Option<u64> {
         (self.outcomes.removed.count == 1
@@ -72,6 +73,7 @@ impl PayloadDeleteDrain {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn pending_payload_delete_key(payload_ref: &str) -> String {
     format!("{PENDING_PAYLOAD_DELETE_PREFIX}{payload_ref}")
 }

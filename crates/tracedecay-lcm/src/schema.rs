@@ -151,6 +151,7 @@ pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) 
     Some(table_current && insert_current && delete_current && update_current)
 }
 
+#[hotpath::measure]
 fn compact_sql(sql: &str) -> String {
     sql.chars()
         .filter(|character| !character.is_ascii_whitespace())

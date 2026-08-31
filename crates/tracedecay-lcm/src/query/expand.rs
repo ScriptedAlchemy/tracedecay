@@ -121,6 +121,7 @@ pub async fn expand(
 /// pure base64/hex-alphabet characters, whereas signature blobs are exactly
 /// that. Whitespace-delimited tokens are checked so ordinary URLs or paths
 /// (which contain separators well under the threshold) are never misclassified.
+#[hotpath::measure]
 pub(super) fn is_noise_block_content(content: &str) -> bool {
     const NOISE_TOKEN_MIN_CHARS: usize = 160;
     let trimmed = content.trim();
@@ -132,6 +133,7 @@ pub(super) fn is_noise_block_content(content: &str) -> bool {
         .any(|token| token_is_signature_blob(token, NOISE_TOKEN_MIN_CHARS))
 }
 
+#[hotpath::measure]
 fn token_is_signature_blob(token: &str, min_chars: usize) -> bool {
     if token.chars().count() < min_chars {
         return false;
@@ -155,6 +157,7 @@ fn token_is_signature_blob(token: &str, min_chars: usize) -> bool {
     has_lower && has_upper && has_digit
 }
 
+#[hotpath::measure]
 pub(super) fn expand_query_match_from_hit(hit: &LcmGrepHit) -> LcmExpandQueryMatch {
     LcmExpandQueryMatch {
         kind: hit.kind.clone(),
@@ -164,6 +167,7 @@ pub(super) fn expand_query_match_from_hit(hit: &LcmGrepHit) -> LcmExpandQueryMat
     }
 }
 
+#[hotpath::measure]
 pub(super) fn expand_query_synthesis_prompt(
     prompt: &str,
     context_blocks: &[LcmExpandQueryContextBlock],

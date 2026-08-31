@@ -12,6 +12,7 @@ pub struct ReplayUnit<'a> {
     pub messages: Vec<&'a LcmRawMessage>,
 }
 
+#[hotpath::measure_all]
 impl ReplayUnit<'_> {
     pub fn token_count(&self) -> i64 {
         self.messages
@@ -22,6 +23,7 @@ impl ReplayUnit<'_> {
 }
 
 /// Back a bounded prefix off when its boundary bisects a tool transaction.
+#[hotpath::measure]
 pub fn bounded_atomic_prefix_len(messages: &[LcmRawMessage], requested_len: usize) -> usize {
     let mut selected_len = requested_len.min(messages.len());
     for (start, end) in transaction_ranges(messages.iter()) {
@@ -34,6 +36,7 @@ pub fn bounded_atomic_prefix_len(messages: &[LcmRawMessage], requested_len: usiz
 
 /// Select one complete leading transaction when progress would otherwise be
 /// zero. This is the only path allowed to exceed a configured prefix cap.
+#[hotpath::measure]
 pub fn first_atomic_unit_len(messages: &[LcmRawMessage]) -> usize {
     transaction_ranges(messages.iter())
         .into_iter()
@@ -43,6 +46,7 @@ pub fn first_atomic_unit_len(messages: &[LcmRawMessage]) -> usize {
 }
 
 /// Move a suffix boundary backward when it falls inside a valid tool transaction.
+#[hotpath::measure]
 pub fn atomic_tail_start(messages: &[LcmRawMessage], requested_start: usize) -> usize {
     let mut start = requested_start.min(messages.len());
     for (transaction_start, transaction_end) in transaction_ranges(messages.iter()) {
@@ -95,6 +99,7 @@ pub fn replay_units<'a>(messages: &[&'a LcmRawMessage]) -> Vec<ReplayUnit<'a>> {
     units
 }
 
+#[hotpath::measure]
 fn transaction_ranges<'a>(
     messages: impl IntoIterator<Item = &'a LcmRawMessage>,
 ) -> Vec<(usize, usize)> {
@@ -128,6 +133,7 @@ fn transaction_ranges<'a>(
     ranges
 }
 
+#[hotpath::measure]
 fn tool_call_ids(message: &LcmRawMessage) -> Option<BTreeSet<String>> {
     let replay = active_replay_value(message)?;
     let tool_calls = replay.get("tool_calls")?.as_array()?;
@@ -141,6 +147,7 @@ fn tool_call_ids(message: &LcmRawMessage) -> Option<BTreeSet<String>> {
     )
 }
 
+#[hotpath::measure]
 fn tool_result_id(message: &LcmRawMessage) -> Option<String> {
     active_replay_value(message)?
         .get("tool_call_id")?
@@ -149,10 +156,12 @@ fn tool_result_id(message: &LcmRawMessage) -> Option<String> {
         .map(str::to_string)
 }
 
+#[hotpath::measure]
 fn active_replay_value(message: &LcmRawMessage) -> Option<Value> {
     active_replay_message_from_metadata(message)
 }
 
+#[hotpath::measure]
 fn replay_message_tokens(message: &LcmRawMessage) -> i64 {
     let mut tokens = crate::lcm_budget_tokens(&message.content);
     if let Some(mut replay) = active_replay_value(message) {
@@ -271,10 +280,12 @@ pub fn normalize_replay_tool_pairs(messages: &[Value]) -> Vec<Value> {
     normalized
 }
 
+#[hotpath::measure]
 fn replay_content_text(message: &Value) -> String {
     crate::lcm_message_visible_text(message)
 }
 
+#[hotpath::measure]
 pub fn raw_replay_message(message: &LcmRawMessage) -> Value {
     if let Some(mut replay) = active_replay_message_from_metadata(message) {
         replay["role"] = Value::String(message.role.clone());
@@ -288,6 +299,7 @@ pub fn raw_replay_message(message: &LcmRawMessage) -> Value {
     })
 }
 
+#[hotpath::measure]
 fn active_replay_message_from_metadata(message: &LcmRawMessage) -> Option<Value> {
     let metadata: Value = serde_json::from_str(message.metadata_json.as_deref()?).ok()?;
     if metadata
@@ -312,6 +324,7 @@ fn active_replay_message_from_metadata(message: &LcmRawMessage) -> Option<Value>
     Some(Value::Object(replay))
 }
 
+#[hotpath::measure]
 pub fn strip_disposable_assistant_replay_sidecars(
     replay: &mut Map<String, Value>,
     fallback_role: &str,
@@ -335,6 +348,7 @@ pub fn strip_disposable_assistant_replay_sidecars(
     }
 }
 
+#[hotpath::measure]
 fn legacy_active_replay_message_from_metadata(metadata: &Value) -> Option<Map<String, Value>> {
     let mut replay = metadata.as_object()?.clone();
     replay.remove(ACTIVE_REPLAY_METADATA_KEY);
