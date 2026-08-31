@@ -194,6 +194,14 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
         unreachable!("durability crash contract never retires a replay")
     }
 
+    fn discard_pending_replay(
+        &mut self,
+        _request: &tracedecay_store::GraphPendingReplayDiscardV1,
+        _context: &GraphPublicationOperationContextV1,
+    ) -> GraphPublicationStoreResultV1<tracedecay_store::GraphPendingReplayDiscardOutcomeV1> {
+        unreachable!("durability crash contract never discards a pending replay")
+    }
+
     fn replay_page(
         &mut self,
         _request: &GraphPublicationReplayPageRequestV1,

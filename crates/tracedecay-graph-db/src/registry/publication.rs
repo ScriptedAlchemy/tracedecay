@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tracedecay_store::runtime::{
-    GraphProjectionIdentityV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphPendingReplayDiscardOutcomeV1, GraphPendingReplayDiscardV1, GraphProjectionIdentityV1,
+    GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
     GraphPublicationReplayPageRequestV1, GraphPublicationReplayRecordV1,
     GraphPublicationReplayRetirementV1, GraphPublicationRetiredCleanupPageRequestV1,
@@ -436,6 +437,65 @@ impl GraphDbRegistry {
                 })
             }
         }
+    }
+
+    /// Discard one interrupted publication: the journaled pending replay row
+    /// a dead publisher can never complete, plus whatever partial native
+    /// generation contents its interrupted staging left behind. The target
+    /// is named by the exact observed record (compare-and-swap shaped), so a
+    /// row that completed, was superseded, or was re-journaled since the
+    /// diagnosis is refused with its evidence instead of deleted. On
+    /// `Discarded` the journal position is open again and a fresh replay for
+    /// the same generation can be journaled and published (issue #765).
+    pub fn discard_interrupted_publication(
+        &self,
+        registration: GraphDbRegistration,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        pending: &GraphPublicationReplayRecordV1,
+    ) -> Result<GraphPendingReplayDiscardOutcomeV1, GraphDbError> {
+        let operation = self.registered_operation(registration.clone())?;
+        operation.check(self, context)?;
+        require_projection_binding(&registration, &pending.publication.key.projection)?;
+        let database = operation.database().clone();
+        let locator = locator_from_key(&pending.publication.key)?;
+        // Fence the generation against concurrent recover/open while its
+        // journal row and stored rows are removed, and refuse while anything
+        // live still retains it: a retained pending generation means an
+        // in-flight publisher on this instance still holds its proof lease.
+        {
+            let mut state = database.wait_verified_generations_write()?;
+            if state.retains(&locator) || state.retiring.contains(&locator) {
+                return Err(GraphDbError::conflict(
+                    "publication.discard_interrupted.generation_retained",
+                ));
+            }
+            state.retiring.insert(locator.clone());
+        }
+        let request = GraphPendingReplayDiscardV1 {
+            key: pending.publication.key.clone(),
+            sequence: pending.sequence,
+        };
+        let outcome = match authority.discard_pending_replay(&request, context) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                clear_retiring_fence(&database, &locator)?;
+                return Err(map_publication_error(error));
+            }
+        };
+        if matches!(outcome, GraphPendingReplayDiscardOutcomeV1::Discarded(_)) {
+            // The journal discard is the linearization point. A failure here
+            // may leak partial staged rows, but the reopened journal position
+            // means the next publication of this generation restages them.
+            if let Err(error) = database.delete_generation_contents(&locator, &|| {
+                check_registration_request(&registration, "publication.interrupted_discard")
+            }) {
+                clear_retiring_fence(&database, &locator)?;
+                return Err(error);
+            }
+        }
+        clear_retiring_fence(&database, &locator)?;
+        Ok(outcome)
     }
 
     #[hotpath::measure(label = "graph_db.replay_pool.finalize", impl_type = "GraphDbRegistry")]
@@ -1826,6 +1886,16 @@ mod historical_publication_reuse_tests {
             _request: &GraphPublicationReplayRetirementV1,
             _context: &GraphPublicationOperationContextV1,
         ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+            Err(GraphPublicationStoreErrorV1::Infrastructure)
+        }
+
+        fn discard_pending_replay(
+            &mut self,
+            _request: &tracedecay_store::runtime::GraphPendingReplayDiscardV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<
+            tracedecay_store::runtime::GraphPendingReplayDiscardOutcomeV1,
+        > {
             Err(GraphPublicationStoreErrorV1::Infrastructure)
         }
 

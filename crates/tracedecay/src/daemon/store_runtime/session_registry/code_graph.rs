@@ -16,17 +16,18 @@ use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey,
 };
 use tracedecay_store::{
-    CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphProjectionIdV1,
-    GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1,
-    GraphPublicationKeyV1, GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1,
-    GraphPublicationStoreErrorV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
-    GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeRequestControlV1, RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt,
-    SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
-    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
-    SemanticVectorStagePublishSettlement, SemanticVectorStageRecord,
-    SemanticVectorStageResumeOutcome, SemanticVectorStagingStore, StoreShardIdV1,
+    CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphPendingReplayDiscardOutcomeV1,
+    GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
+    GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphPublicationReplayLookupV1, GraphPublicationReplayRecordV1, GraphPublicationStoreErrorV1,
+    GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, GraphVerifiedHeadV1, ProjectId,
+    RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome,
+    SemanticVectorStageKey, SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
+    SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
+    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStagingStore,
+    StoreShardIdV1,
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
@@ -1110,6 +1111,55 @@ impl RetainedCodeGraphRuntimeV1 {
         self.publish_prepared_sealed_generation(&prepared, &probe, &context)
     }
 
+    /// Discard one interrupted publication whose completion just refused with
+    /// a deterministic conflict verdict: the journaled pending replay row and
+    /// the partial store contents its dead publisher left behind. Every
+    /// refusal from the compare-and-swap-shaped discard means the journal
+    /// moved since the diagnosis — the caller re-reads and proceeds, so a
+    /// completed or re-journaled publication is never swept (issue #765).
+    fn discard_interrupted_publication_row(
+        &self,
+        storage: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        registration: GraphDbRegistration,
+        pending: &GraphPublicationReplayRecordV1,
+        conflict: &GraphDbError,
+    ) -> std::result::Result<(), GraphDbError> {
+        let outcome = self.graph_registry.discard_interrupted_publication(
+            registration,
+            storage,
+            context,
+            pending,
+        )?;
+        match outcome {
+            GraphPendingReplayDiscardOutcomeV1::Discarded(discarded) => {
+                tracing::warn!(
+                    event = "code_graph_interrupted_publication_discarded",
+                    generation = %discarded.publication.key.generation,
+                    sequence = discarded.sequence.get(),
+                    error = %conflict,
+                    "discarded an interrupted graph publication whose completion \
+                     conflicts deterministically; the journal position is open for \
+                     a fresh publication"
+                );
+            }
+            GraphPendingReplayDiscardOutcomeV1::Missing
+            | GraphPendingReplayDiscardOutcomeV1::CurrentVerifiedHead { .. }
+            | GraphPendingReplayDiscardOutcomeV1::Superseded { .. }
+            | GraphPendingReplayDiscardOutcomeV1::SequenceMismatch { .. } => {
+                tracing::warn!(
+                    event = "code_graph_interrupted_publication_discard_refused",
+                    generation = %pending.publication.key.generation,
+                    sequence = pending.sequence.get(),
+                    error = %conflict,
+                    "the interrupted graph publication moved before its discard; \
+                     continuing against the refreshed journal"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Acquires the per-shard serving gate for one short storage-ordered
     /// slice. The wait and hold spans at every slice are what profiles key on
     /// to attribute gate contention; with the corpus-sized prepare running
@@ -1403,16 +1453,48 @@ impl RetainedCodeGraphRuntimeV1 {
                 let bundle_identity = prepared.manifest.identity();
                 let staged_bundle =
                     self.stage_sealed_read_bundle(&prepared.manifest, &prepared.request_cancelled);
-                let publication = observe_code_graph_publication(
+                match observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::ActiveReplayPublish,
                     publish(
                         &mut storage,
                         &prepared.publication_key,
                         Some(Arc::clone(&prepared.manifest)),
                     ),
-                )?;
-                self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
-                return Ok(publication.snapshot);
+                ) {
+                    Ok(publication) => {
+                        self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
+                        return Ok(publication.snapshot);
+                    }
+                    // Resuming this publication's own journaled replay
+                    // refused deterministically: the interrupted publisher
+                    // left journal or store state that this exact resume can
+                    // never complete (issue #765). Discard the poisoned row
+                    // and its partial contents, then republish fresh through
+                    // the append path below — that is what restores service.
+                    Err(conflict @ GraphDbError::Conflict { .. }) => {
+                        drop(staged_bundle);
+                        let pending = match storage
+                            .replay(&prepared.publication_key, context)
+                            .map_err(map_publication_error)?
+                        {
+                            GraphPublicationReplayLookupV1::Active(pending) => pending,
+                            // The row moved while the resume ran; the append
+                            // path below re-reads and answers truthfully.
+                            GraphPublicationReplayLookupV1::Retired(_)
+                            | GraphPublicationReplayLookupV1::Missing => {
+                                return Err(conflict);
+                            }
+                        };
+                        self.discard_interrupted_publication_row(
+                            &mut storage,
+                            context,
+                            registration(),
+                            &pending,
+                            &conflict,
+                        )?;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             SealedPublicationClassificationV1::AppendAndPublish => {}
         }
@@ -1492,10 +1574,28 @@ impl RetainedCodeGraphRuntimeV1 {
                         );
                     }
                     completed_predecessors += 1;
-                    observe_code_graph_publication(
+                    match observe_code_graph_publication(
                         CodeGraphPublicationConflictStageV1::PendingPredecessorPublish,
                         publish(&mut storage, &pending.publication.key, None),
-                    )?;
+                    ) {
+                        Ok(_) => {}
+                        // The orphan predecessor refused deterministically:
+                        // its interrupted publisher left journal or store
+                        // state that completion can never satisfy (issue
+                        // #765). Discarding it reopens the journal position
+                        // this append is blocked on; answering Conflict here
+                        // wedged the projection forever.
+                        Err(conflict @ GraphDbError::Conflict { .. }) => {
+                            self.discard_interrupted_publication_row(
+                                &mut storage,
+                                context,
+                                registration(),
+                                &pending,
+                                &conflict,
+                            )?;
+                        }
+                        Err(error) => return Err(error),
+                    }
                     let prior = storage
                         .verified_head(&prepared.relational_projection, context)
                         .map_err(map_publication_error)?;
