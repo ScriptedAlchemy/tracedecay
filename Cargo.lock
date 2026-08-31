@@ -6313,7 +6313,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracedecay-application",
- "tracedecay-automation-runtime",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-runtime-core",
