@@ -581,6 +581,13 @@ required-features = ["test-helpers"]
 # `--list --format terse` probe used by `cargo test` and nextest.
 test = false
 
+[[bench]]
+name = "mcp_connection_pipeline"
+path = "benches/mcp_connection_pipeline.rs"
+harness = false
+required-features = ["test-transport"]
+test = false
+
 [[test]]
 name = "runtime_acceptance_suite"
 path = "tests/runtime_acceptance_suite/main.rs"

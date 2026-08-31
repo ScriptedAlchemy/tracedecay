@@ -338,8 +338,8 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
         .expect("serve legacy route");
     assert_response_order(
         &responses,
-        &[4, 5],
-        "Unix non-initialize traffic must remain sequential legacy replay",
+        &[5, 4],
+        "Unix legacy transport must emit an independent ping before the blocked read",
     );
 }
 
@@ -455,8 +455,8 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
         .expect("serve portable legacy route");
     assert_response_order(
         &responses,
-        &[4, 5],
-        "portable non-initialize traffic must remain sequential legacy replay",
+        &[5, 4],
+        "portable legacy transport must emit an independent ping before the blocked read",
     );
 }
 
@@ -465,7 +465,6 @@ struct ControlledCancellationExecutor {
     started: AtomicUsize,
     cancellation_observed: AtomicUsize,
     completed: AtomicUsize,
-    pre_cancelled: AtomicUsize,
     release_first: AtomicBool,
 }
 
@@ -476,16 +475,12 @@ impl ControlledCancellationExecutor {
             started: AtomicUsize::new(0),
             cancellation_observed: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
-            pre_cancelled: AtomicUsize::new(0),
             release_first: AtomicBool::new(false),
         }
     }
 
     async fn await_cancellation(&self, cancellation: tracedecay_application::CancellationSignal) {
         let ordinal = self.started.fetch_add(1, Ordering::SeqCst);
-        if cancellation.is_cancelled() {
-            self.pre_cancelled.fetch_add(1, Ordering::SeqCst);
-        }
         while !cancellation.is_cancelled() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -758,7 +753,7 @@ async fn selected_target_rmcp_flushes_response_and_full_disconnect_cancels_targe
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn production_rmcp_cancels_registered_and_pre_registration_requests() {
+async fn production_rmcp_cancels_concurrent_requests_before_or_after_registration() {
     let fixture = rmcp_route_fixture("rmcp-live-cancellation").await;
     let executor = Arc::new(ControlledCancellationExecutor::new());
     let project_path = fixture

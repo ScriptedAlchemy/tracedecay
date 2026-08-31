@@ -17,7 +17,7 @@ use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::sync::{RwLock, Semaphore};
 
 use tracedecay_mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
@@ -240,7 +240,8 @@ where
 /// authority.
 pub(crate) struct RmcpConnectionAdapter {
     server: Arc<McpServer>,
-    connection: Mutex<ConnectionRouteState>,
+    connection: RwLock<ConnectionRouteState>,
+    request_admission: Semaphore,
     memory_request_scope: String,
     timings_enabled: bool,
     selected_project_responses: RmcpSelectedProjectResponseAuthority,
@@ -257,6 +258,21 @@ pub(crate) struct RmcpConnectionAdapter {
     build_version: &'static str,
 }
 
+struct RmcpQueueDepthGuard;
+
+impl RmcpQueueDepthGuard {
+    fn enter() -> Self {
+        hotpath::gauge!("mcp.server.rmcp.queue_depth").inc(1_u64);
+        Self
+    }
+}
+
+impl Drop for RmcpQueueDepthGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("mcp.server.rmcp.queue_depth").dec(1_u64);
+    }
+}
+
 #[hotpath::measure_all]
 impl RmcpConnectionAdapter {
     pub(crate) fn new(
@@ -268,7 +284,8 @@ impl RmcpConnectionAdapter {
         let memory_request_scope = connection.memory_request_scope().to_owned();
         Ok(Self {
             server,
-            connection: Mutex::new(connection),
+            connection: RwLock::new(connection),
+            request_admission: Semaphore::new(super::connection::MAX_CONCURRENT_CONNECTION_READS),
             memory_request_scope,
             timings_enabled,
             selected_project_responses: RmcpSelectedProjectResponseAuthority::default(),
@@ -296,15 +313,31 @@ impl RmcpConnectionAdapter {
         method: &str,
         params: Option<Value>,
     ) -> Result<JsonRpcResponse, ErrorData> {
+        let queued_at = std::time::Instant::now();
+        let queued = RmcpQueueDepthGuard::enter();
+        let request_permit = self.acquire_request_permit().await?;
+        drop(queued);
+        hotpath::gauge!("mcp.server.rmcp.queue_wait_us")
+            .set(queued_at.elapsed().as_micros() as u64);
         // Heap-allocate the admission + dispatch composition: rmcp's generated
         // `handle_request` polls every handler-method future inline, and the
         // combined resident frame overflows the worker stack in perf-profile
         // layouts when this mega-future is embedded by value.
-        Box::pin(crate::daemon::in_connection_admission(
+        let result = Box::pin(crate::daemon::in_connection_admission(
             self.admission.clone(),
             self.dispatch_admitted(context, method, params),
         ))
-        .await
+        .await;
+        drop(request_permit);
+        result
+    }
+
+    #[hotpath::measure(label = "mcp.server.rmcp.queue_wait", future = true)]
+    async fn acquire_request_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, ErrorData> {
+        self.request_admission
+            .acquire()
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))
     }
 
     #[hotpath::measure(label = "mcp.server.rmcp.dispatch", future = true)]
@@ -324,23 +357,44 @@ impl RmcpConnectionAdapter {
             method: method.to_owned(),
             params,
         };
-        let mut connection = self.connection.lock().await;
+        if super::connection::request_is_independent_read(&request) {
+            let ordering_guard = self.connection.read().await;
+            let mut request_connection = ordering_guard.fork_for_independent_read();
+            let result = self
+                .dispatch_request_with_connection(
+                    request,
+                    id,
+                    request_cancellation,
+                    &mut request_connection,
+                )
+                .await;
+            drop(ordering_guard);
+            return result;
+        }
+        let mut connection = self.connection.write().await;
+        self.dispatch_request_with_connection(request, id, request_cancellation, &mut connection)
+            .await
+    }
+
+    #[hotpath::measure(label = "mcp.server.rmcp.dispatch_request", future = true)]
+    async fn dispatch_request_with_connection(
+        &self,
+        request: JsonRpcRequest,
+        id: Value,
+        request_cancellation: tokio_util::sync::CancellationToken,
+        connection: &mut ConnectionRouteState,
+    ) -> Result<JsonRpcResponse, ErrorData> {
         let pre_cancelled = request_cancellation.is_cancelled();
         let response = if pre_cancelled {
             self.server
-                .handle_request_for_connection(
-                    &request,
-                    self.timings_enabled,
-                    &mut connection,
-                    true,
-                )
+                .handle_request_for_connection(&request, self.timings_enabled, connection, true)
                 .await
         } else {
             await_dispatch_with_cancellation(
                 self.server.handle_request_for_connection(
                     &request,
                     self.timings_enabled,
-                    &mut connection,
+                    connection,
                     false,
                 ),
                 request_cancellation.cancelled(),
@@ -383,7 +437,7 @@ impl RmcpConnectionAdapter {
             method,
             params,
         };
-        let mut connection = self.connection.lock().await;
+        let mut connection = self.connection.write().await;
         let _ = self
             .server
             .handle_request_for_connection(&request, self.timings_enabled, &mut connection, false)
