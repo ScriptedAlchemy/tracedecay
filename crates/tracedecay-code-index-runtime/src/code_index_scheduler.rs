@@ -3007,6 +3007,13 @@ impl LatestCompleteCodeIndexV1 {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn warm_serving_caches(&self) {
         let _ = self.activate_text_serving();
+        // Mirror the persistent-graph activation warm set: the record lookup
+        // indices and the test-attribution join are pure functions of the
+        // sealed generation and must exist before the first request, not be
+        // charged to it. Neither touches exact-admission staging, so the
+        // released staging corpus stays released.
+        let _ = self.record_index();
+        let _ = self.generation.test_attribution_authority();
         let generation_id = self.generation.manifest().generation_id.clone();
         let Ok(freshness) = self.source_freshness() else {
             return;
