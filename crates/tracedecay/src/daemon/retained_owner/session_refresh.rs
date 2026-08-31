@@ -19,12 +19,12 @@ use tracedecay_domain::{
     UserProfileId, UtcMicros, WorktreeId,
 };
 use tracedecay_store::SessionRefreshFrontierV1;
-use tracedecay_usecases::context::{
+use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     session_application_grant_digest,
 };
-use tracedecay_usecases::session::{SessionRefreshTarget, SessionRequestBinding};
+use tracedecay_session_memory::session::{SessionRefreshTarget, SessionRequestBinding};
 
 pub(crate) use tracedecay_mcp::SessionRefreshServicePort as RetainedSessionRefreshPortV1;
 use tracedecay_mcp::{SessionRefreshAction, SessionRefreshCommand};

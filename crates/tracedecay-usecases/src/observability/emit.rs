@@ -5,7 +5,7 @@
 //! the production side of that contract: it builds the canonical
 //! [`ObservabilityEnvelopeV1`] for each family and persists it through the one
 //! registered observation authority, exactly as
-//! [`crate::event_lane::record_mcp_dispatch`] does for MCP dispatch receipts.
+//! [`tracedecay_session_memory::event_lane::record_mcp_dispatch`] does for MCP dispatch receipts.
 //!
 //! Two disciplines are load-bearing and deliberately repeated per family:
 //!
@@ -34,7 +34,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 
-use crate::event_lane::record_observability;
+use tracedecay_session_memory::event_lane::record_observability;
 
 use super::{BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1};
 

@@ -24,7 +24,7 @@ use tracedecay_store::{
     FactReadControl, FactWriteControl, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
     ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
 };
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     MemoryOperationContext, ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
     ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome, memory_application_for_db,
 };

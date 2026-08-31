@@ -22,7 +22,7 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     graph: &crate::tracedecay::TraceDecay,
     code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &StoreTelemetrySamplingRegistry,
-    cancellation: &tracedecay_usecases::context::CancellationToken,
+    cancellation: &tracedecay_session_memory::context::CancellationToken,
     retention: &crate::config::RetentionConfig,
     continuation: Option<MaintenanceContinuation>,
 ) -> MaintenanceTickOutcome {

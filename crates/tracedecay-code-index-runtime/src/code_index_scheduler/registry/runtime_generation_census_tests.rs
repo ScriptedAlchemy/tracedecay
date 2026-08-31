@@ -15,7 +15,7 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_runtime_core::config::PinnedUserDataDir;
-use tracedecay_usecases::runtime_telemetry::{
+use tracedecay_session_memory::runtime_telemetry::{
     GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
 

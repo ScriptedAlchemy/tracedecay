@@ -32,7 +32,7 @@ use super::{
 };
 use crate::context::read_modes;
 use crate::context::source_read::{self, SourceReadOutput, SourceReadRequest};
-use crate::context::{RequestInterruption, run_deadline_signal_interruptible};
+use tracedecay_session_memory::context::{RequestInterruption, run_deadline_signal_interruptible};
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::tracedecay::SourceReadRuntimePort;
 

@@ -3,8 +3,8 @@ use tracedecay_application::{
     OperationTermination, RequestContext,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
-use tracedecay_usecases::context::{RequestInterruption, application_observed_at};
-use tracedecay_usecases::session::lcm::{
+use tracedecay_session_memory::context::{RequestInterruption, application_observed_at};
+use tracedecay_session_memory::session::lcm::{
     LcmAuthorityOperation, LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityReceipt,
     LcmAuthorityResponse, LcmAuthorityUnavailableReason,
 };

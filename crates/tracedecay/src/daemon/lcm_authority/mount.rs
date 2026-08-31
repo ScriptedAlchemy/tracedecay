@@ -13,12 +13,12 @@ use tracedecay_application::{
 use tracedecay_domain::{ActorId, UtcMicros};
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::CapabilityId;
-use tracedecay_usecases::context::{
+use tracedecay_session_memory::context::{
     CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
     ResolvedSessionIdentity, application_observed_at, session_application_grant_digest,
 };
-use tracedecay_usecases::session::SessionRequestBinding;
-use tracedecay_usecases::session::lcm::{
+use tracedecay_session_memory::session::SessionRequestBinding;
+use tracedecay_session_memory::session::lcm::{
     LcmAuthorityInvocation, LcmAuthorityPort, LcmAuthorityRequest, LcmAuthorityResponse,
     LcmAuthorityTarget, lcm_authority_operation_identity,
 };

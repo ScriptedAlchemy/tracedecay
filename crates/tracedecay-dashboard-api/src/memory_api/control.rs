@@ -15,14 +15,14 @@ pub(crate) fn fact_read_control(control: &DashboardHttpRequestControlV1) -> Fact
     let deadline = control.deadline();
     FactReadControl::new(Arc::new(move || {
         cancellation.is_cancelled()
-            || deadline.is_elapsed_at(crate::application::context::application_observed_at())
+            || deadline.is_elapsed_at(tracedecay_session_memory::context::application_observed_at())
     }))
 }
 
 pub(super) fn request_deadline_elapsed(control: &DashboardHttpRequestControlV1) -> bool {
     control
         .deadline()
-        .is_elapsed_at(crate::application::context::application_observed_at())
+        .is_elapsed_at(tracedecay_session_memory::context::application_observed_at())
 }
 
 pub(crate) fn request_terminal_state(

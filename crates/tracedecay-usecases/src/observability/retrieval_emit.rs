@@ -49,7 +49,7 @@ use super::emit::{ObservabilityEnvelopeSpec, assemble_observability_envelope};
 use super::producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, ObservabilityProducerIdentityV1,
 };
-use crate::event_lane::record_observability;
+use tracedecay_session_memory::event_lane::record_observability;
 
 const SCHEMA_REVISION: u32 = 1;
 const CONFIGURATION_REVISION: &str = "registered-project-session.v1";

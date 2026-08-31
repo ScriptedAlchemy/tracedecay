@@ -102,20 +102,20 @@ fn attach_full_branch_status(cg: &TraceDecay, output: &mut Value) {
 
 /// Serialize the generation census exactly as the CLI decoder reads it back.
 ///
-/// [`tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
+/// [`tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
 /// authority for the `graph_statistics` field: this route serializes it and
 /// `tracedecay status` deserializes the same Rust type, so the two sides
 /// cannot drift.
 pub(crate) async fn graph_statistics_value(
     generation_census_reader: Option<
-        &tracedecay_usecases::runtime_telemetry::GenerationCensusReader,
+        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
     >,
 ) -> Result<Value> {
     let census = match generation_census_reader {
         Some(reader) => reader().await,
-        None => tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+        None => tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
             reason:
-                tracedecay_usecases::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+                tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
         },
     };
     Ok(serde_json::to_value(&census)?)
@@ -132,7 +132,7 @@ pub(crate) async fn handle_status(
         &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
     >,
     generation_census_reader: Option<
-        &tracedecay_usecases::runtime_telemetry::GenerationCensusReader,
+        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
     >,
 ) -> Result<ToolResult> {
     if status_arg_flag(&args, "admission_only", false) {
@@ -550,7 +550,7 @@ mod tests {
     use tracedecay_global_db::{
         SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     };
-    use tracedecay_usecases::runtime_telemetry::{
+    use tracedecay_session_memory::runtime_telemetry::{
         GenerationCensusReader, GenerationCensusSnapshot, GenerationCensusStatistics,
         GenerationCensusUnavailableReason,
     };

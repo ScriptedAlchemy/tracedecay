@@ -658,7 +658,7 @@ pub(super) async fn handle_dashboard(
     session_retrieval: Option<
         Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>,
     >,
-    session_identity: Option<tracedecay_usecases::context::ResolvedSessionIdentity>,
+    session_identity: Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
     registered_savings_db: Option<RegisteredGlobalDbLeaseV1>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,

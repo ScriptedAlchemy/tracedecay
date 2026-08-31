@@ -11,7 +11,7 @@ use tracedecay_store::{
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::ExecutionControl;
 use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_usecases::session::{
+use tracedecay_session_memory::session::{
     SessionRefreshConfiguration, SessionRefreshOutcome, SessionRefreshService,
     SessionRefreshTarget, SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionTemporalQuery,

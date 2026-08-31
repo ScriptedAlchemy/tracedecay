@@ -151,7 +151,7 @@ pub(super) async fn run_semantic_vector_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
-    cancellation: &tracedecay_usecases::context::CancellationToken,
+    cancellation: &tracedecay_session_memory::context::CancellationToken,
 ) -> crate::daemon::maintenance::MaintenanceTickOutcome {
     if cancellation.is_cancelled() {
         observations.record_semantic_vector_retention_failure(graph.project_root());
@@ -441,7 +441,7 @@ pub(super) async fn run_code_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
-    cancellation: &tracedecay_usecases::context::CancellationToken,
+    cancellation: &tracedecay_session_memory::context::CancellationToken,
 ) -> bool {
     if cancellation.is_cancelled() {
         log_code_generation_retention_degraded("retention_cancelled");
@@ -486,7 +486,7 @@ async fn apply_code_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
     vector_inventory: VectorRetentionInventoryV1,
-    cancellation: &tracedecay_usecases::context::CancellationToken,
+    cancellation: &tracedecay_session_memory::context::CancellationToken,
 ) -> bool {
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,

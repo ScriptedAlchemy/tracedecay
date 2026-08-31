@@ -44,8 +44,8 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) project_root: PathBuf,
     pub(crate) project_id: tracedecay_domain::ProjectId,
     pub(crate) mounted_profile_id: Option<tracedecay_domain::UserProfileId>,
-    pub(crate) mounted_session_store_id: Option<tracedecay_usecases::context::SessionStoreId>,
-    pub(crate) mounted_session_root_id: Option<tracedecay_usecases::context::SessionRootId>,
+    pub(crate) mounted_session_store_id: Option<tracedecay_session_memory::context::SessionStoreId>,
+    pub(crate) mounted_session_root_id: Option<tracedecay_session_memory::context::SessionRootId>,
     pub(crate) registered_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) project_refresh: Option<Arc<dyn session_refresh::RetainedSessionRefreshPortV1>>,
     pub(crate) project_retrieval:

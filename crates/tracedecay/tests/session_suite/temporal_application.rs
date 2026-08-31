@@ -29,12 +29,12 @@ use tracedecay_domain::{
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::context::{
+use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
-use tracedecay_usecases::session::{
+use tracedecay_session_memory::session::{
     AuthorizationGrantId, AuthorizedTemporalExecutionRequest, SessionAccess,
     SessionAuthorizationError, SessionAuthorizationGrant, SessionDataFreshness,
     SessionRequestBinding, SessionRetrievalBudgetStageV1, SessionRetrievalConfiguration,
@@ -842,7 +842,7 @@ struct QuerySpec {
     diversity: DiversityLimits,
     context_budget: ContextBudget,
     execution_limits: ExecutionLimits,
-    freshness_policy: tracedecay_usecases::session::SessionFreshnessPolicy,
+    freshness_policy: tracedecay_session_memory::session::SessionFreshnessPolicy,
     retrieval_scope: Option<SessionRetrievalScope>,
 }
 
@@ -863,7 +863,7 @@ impl Default for QuerySpec {
                 estimator_version: "words-v1".to_owned(),
             },
             execution_limits: ExecutionLimits::default(),
-            freshness_policy: tracedecay_usecases::session::SessionFreshnessPolicy::AllowStored,
+            freshness_policy: tracedecay_session_memory::session::SessionFreshnessPolicy::AllowStored,
             retrieval_scope: None,
         }
     }
@@ -1155,7 +1155,7 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
         ..QuerySpec::default()
     });
     semantic_variants.push(QuerySpec {
-        freshness_policy: tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh,
+        freshness_policy: tracedecay_session_memory::session::SessionFreshnessPolicy::RequireFresh,
         ..QuerySpec::default()
     });
 
@@ -1881,7 +1881,7 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
             query_from_spec(QuerySpec {
                 text: "stored-deleted",
                 freshness_policy:
-                    tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh,
+                    tracedecay_session_memory::session::SessionFreshnessPolicy::RequireFresh,
                 ..QuerySpec::default()
             }),
         )
@@ -1956,7 +1956,7 @@ async fn partial_freshness_and_cancellation_race_preserve_application_ownership(
             query_from_spec(QuerySpec {
                 text: "stored",
                 freshness_policy:
-                    tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh,
+                    tracedecay_session_memory::session::SessionFreshnessPolicy::RequireFresh,
                 ..QuerySpec::default()
             }),
         )

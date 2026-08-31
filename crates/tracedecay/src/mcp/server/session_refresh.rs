@@ -18,7 +18,7 @@ use tracedecay_mcp::{
     SessionRefreshServicePort, utc_micros_value,
 };
 use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
-use tracedecay_usecases::session::{
+use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
     SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,

@@ -35,7 +35,7 @@ use tracedecay_store::{
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryMemoryStatusV1,
 };
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 

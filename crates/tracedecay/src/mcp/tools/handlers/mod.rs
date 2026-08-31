@@ -238,7 +238,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) dashboard_session_retrieval_service:
         Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
     pub(crate) dashboard_session_retrieval_identity:
-        Option<tracedecay_usecases::context::ResolvedSessionIdentity>,
+        Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
     /// The canonical profile identity bound by the daemon handshake. A
     /// dashboard profile write resolves its configuration layer through this
     /// identity, so it must not be derived from the project-session store —
@@ -297,7 +297,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::mcp::server::CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority for runtime telemetry.
     pub(crate) generation_census_reader:
-        Option<tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
+        Option<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader>,
     /// Retained server authority consumed by the dashboard boundary. Project
     /// selection itself is completed before handler dispatch.
     pub(crate) retained_project_server_resolver:

@@ -29,10 +29,10 @@ use tracedecay_store::{
     StoredFactV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
-use tracedecay_usecases::anchor_resolution::{
+use tracedecay_session_memory::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
 };
-use tracedecay_usecases::memory::MemoryApplication;
+use tracedecay_session_memory::memory::MemoryApplication;
 
 const GENERATION: u64 = 7;
 const PROJECTION_SHARD: &str = "observation.projection";

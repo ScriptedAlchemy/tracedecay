@@ -6,7 +6,7 @@ use tracedecay_store::{
     ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRetrievalCommandV1,
     ProjectMemoryFactRetrievalReceiptV1, ProjectMemoryFactSearchPageV1,
 };
-use tracedecay_usecases::memory::MemoryApplication;
+use tracedecay_session_memory::memory::MemoryApplication;
 
 use super::memory::{bounded_memory_operation, fact_write_control};
 use super::memory_mapping;

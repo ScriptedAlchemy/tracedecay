@@ -13,8 +13,8 @@ pub fn cost_of_turn(
     cache_write_tokens: u64,
     cache_read_tokens: u64,
 ) -> Option<f64> {
-    let table = tracedecay_usecases::provider_pricing::load_table();
-    tracedecay_usecases::provider_pricing::cost_of_usage(
+    let table = tracedecay_session_memory::provider_pricing::load_table();
+    tracedecay_session_memory::provider_pricing::cost_of_usage(
         table,
         provider,
         model,

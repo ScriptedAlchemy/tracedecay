@@ -299,7 +299,7 @@ impl McpServer {
         };
 
         let success = tokio::task::spawn_blocking(move || {
-            let mut config = tracedecay_usecases::user_config::UserConfig::load();
+            let mut config = tracedecay_session_memory::user_config::UserConfig::load();
             config.pending_upload += delta;
             if upload_enabled && crate::cloud::flush_pending(config.pending_upload).is_some() {
                 config.pending_upload = 0;

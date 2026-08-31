@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::read_cache::{self, GLOBAL_SESSION};
+use tracedecay_session_memory::context::read_cache::{self, GLOBAL_SESSION};
 use super::read_modes::{
     self, LineRange, ReadMode, render_full, render_lines, render_map, render_signatures,
     render_symbol_context,

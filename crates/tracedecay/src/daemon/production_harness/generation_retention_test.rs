@@ -325,7 +325,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     assert!(first_source_file.is_file());
 
     let observations = resources.store_administration.store_telemetry_sampling();
-    let cancellation = tracedecay_usecases::context::CancellationToken::new();
+    let cancellation = tracedecay_session_memory::context::CancellationToken::new();
     assert!(
         !crate::daemon::maintenance::generation::run_project_generation_maintenance(
             graph.as_ref(),
@@ -428,7 +428,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     let restarted_observations = restarted_resources
         .store_administration
         .store_telemetry_sampling();
-    let restarted_cancellation = tracedecay_usecases::context::CancellationToken::new();
+    let restarted_cancellation = tracedecay_session_memory::context::CancellationToken::new();
     let mut converged = false;
     for _ in 0..4 {
         converged = crate::daemon::maintenance::generation::run_project_generation_maintenance(
@@ -595,7 +595,7 @@ async fn run_generation_cadence(
         graph.as_ref(),
         &resources.invocation.code_index_schedulers,
         &resources.store_administration.store_telemetry_sampling(),
-        &tracedecay_usecases::context::CancellationToken::new(),
+        &tracedecay_session_memory::context::CancellationToken::new(),
         &crate::config::RetentionConfig::default(),
         None,
     )

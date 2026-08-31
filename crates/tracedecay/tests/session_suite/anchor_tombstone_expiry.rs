@@ -24,7 +24,7 @@ use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
     FactWriteBatch, FactWriteControl, RetrievalAnchorQuery,
 };
-use tracedecay_usecases::memory::MemoryApplication;
+use tracedecay_session_memory::memory::MemoryApplication;
 
 use crate::common::open_graph_db_from_template;
 

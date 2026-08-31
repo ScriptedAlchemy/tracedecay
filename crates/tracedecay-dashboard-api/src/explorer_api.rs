@@ -34,7 +34,7 @@ use super::read_model::{
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
 use super::{DashboardHttpRequestControlV1, DashboardState, graph_service};
-use crate::application::context::CancellationToken;
+use tracedecay_session_memory::context::CancellationToken;
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 
 const SOURCE_IDS: [ExplorerSourceIdV1; 4] = [
@@ -667,7 +667,7 @@ async fn execute_query(
     if current.state != ExplorerRunStateV1::Pending {
         return;
     }
-    if deadline.is_elapsed_at(crate::application::context::application_observed_at()) {
+    if deadline.is_elapsed_at(tracedecay_session_memory::context::application_observed_at()) {
         mark_timed_out(&mut current);
         return;
     }

@@ -464,6 +464,12 @@ fn canonical_digests_reject_changed_fields_without_capping_generation_size() {
     large_generation
         .validate()
         .expect("stage plans are bounded by page writes, not total project size");
+    let (control, probe) = operation("begin.large-generation");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        fixture.storage().begin_stage(&large_generation, &context),
+        Ok(SemanticVectorStageBeginOutcome::Begun(_))
+    ));
     let mut invalid_dimension = exact_plan;
     invalid_dimension.recipe.embedding_dimension = 4_097;
     assert!(invalid_dimension.validate().is_err());

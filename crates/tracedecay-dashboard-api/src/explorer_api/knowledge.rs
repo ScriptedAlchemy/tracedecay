@@ -7,7 +7,7 @@ use tracedecay_application::memory::FactSearchGraphCoverageV1;
 use tracedecay_store::FactReadControl;
 
 use super::{ExplorerQueryRequestV1, ExplorerSourceIdV1, ExplorerSourceProgressV1, ready_source};
-use crate::application::context::CancellationToken;
+use tracedecay_session_memory::context::CancellationToken;
 use crate::memory_service::MemoryFactsCoverageV1;
 use crate::read_model::DashboardCoverageCompletenessV1;
 use crate::{DashboardHttpRequestControlV1, DashboardState, memory_service};
@@ -65,7 +65,7 @@ pub(super) async fn knowledge_source(
         request_cancellation.is_cancelled()
             || source_cancellation.is_cancelled()
             || request_deadline
-                .is_elapsed_at(crate::application::context::application_observed_at())
+                .is_elapsed_at(tracedecay_session_memory::context::application_observed_at())
     }));
     let facts = match memory_service::fetch_facts(
         state,
@@ -79,7 +79,7 @@ pub(super) async fn knowledge_source(
         Err(_)
             if control
                 .deadline()
-                .is_elapsed_at(crate::application::context::application_observed_at()) =>
+                .is_elapsed_at(tracedecay_session_memory::context::application_observed_at()) =>
         {
             return ExplorerSourceProgressV1::timed_out(
                 ExplorerSourceIdV1::Knowledge,
@@ -104,7 +104,7 @@ pub(super) async fn knowledge_source(
     };
     if control
         .deadline()
-        .is_elapsed_at(crate::application::context::application_observed_at())
+        .is_elapsed_at(tracedecay_session_memory::context::application_observed_at())
     {
         return ExplorerSourceProgressV1::timed_out(
             ExplorerSourceIdV1::Knowledge,

@@ -149,7 +149,7 @@ pub(crate) async fn handle_runtime(
     project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
     doctor_report_reader: Option<&tracedecay_dashboard_api::DoctorReportReader>,
     generation_census_reader: Option<
-        &tracedecay_usecases::runtime_telemetry::GenerationCensusReader,
+        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
     >,
 ) -> Result<ToolResult> {
     let authority_audit = args

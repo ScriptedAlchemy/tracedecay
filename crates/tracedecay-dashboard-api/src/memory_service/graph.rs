@@ -17,7 +17,7 @@ use tracedecay_store::{
     ProjectMemoryDashboardEntityV1, ProjectMemoryFactProjectionV1, ProjectMemoryGraphPageV1,
     ProjectMemoryGraphQueryV1, ProjectMemoryGraphTargetV1,
 };
-use tracedecay_usecases::memory::MemoryApplicationError;
+use tracedecay_session_memory::memory::MemoryApplicationError;
 
 use super::super::read_model::{DashboardCoverageV1, DashboardDomainStateV1};
 use super::super::{DashboardHttpRequestControlV1, DashboardState};
@@ -166,7 +166,7 @@ fn request_terminal_error(
     let message = message.into();
     if control
         .deadline()
-        .is_elapsed_at(crate::application::context::application_observed_at())
+        .is_elapsed_at(tracedecay_session_memory::context::application_observed_at())
     {
         Some(DashboardGraphReadError::TimedOut(message))
     } else if control.cancellation().is_cancelled() {
@@ -458,7 +458,7 @@ pub async fn graph_payload(
                 error,
                 request_control
                     .deadline()
-                    .is_elapsed_at(crate::application::context::application_observed_at()),
+                    .is_elapsed_at(tracedecay_session_memory::context::application_observed_at()),
                 request_control.cancellation().is_cancelled(),
             )
         })?;

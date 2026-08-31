@@ -58,7 +58,7 @@ use tracedecay_application::retained_surfaces::RetainedSurfaceOperation;
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityManifestV1, CatalogSnapshotV1, FeatureId, SurfaceOperationName,
 };
-use tracedecay_usecases::event_lane::ActivityFamilyV1;
+use tracedecay_session_memory::event_lane::ActivityFamilyV1;
 
 /// Absences the plan set sanctions, as `(subject, plan citation)`.
 ///

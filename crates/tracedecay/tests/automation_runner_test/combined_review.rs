@@ -38,7 +38,7 @@ impl AutomationSessionRetrieval for CountingAutomationSessionRetrieval {
 
     fn retrieve(
         &self,
-        query: tracedecay_usecases::session::SessionTemporalQuery,
+        query: tracedecay_session_memory::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'_> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.retrieve(query)
@@ -154,7 +154,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     }
 
     // Empty combined effects leave no automatic fact receipts behind.
-    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
@@ -327,7 +327,7 @@ async fn combined_review_commits_atomic_terminal_effects() {
         run.skill_writer.ledger_record.status,
         AutomationRunStatus::Succeeded
     );
-    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
@@ -813,7 +813,7 @@ async fn combined_skill_failure_preserves_the_completed_memory_authority() {
         skill_writer_record.expect("skill failure ledger").status,
         AutomationRunStatus::Failed
     );
-    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
@@ -918,7 +918,7 @@ async fn combined_review_interruption_reaches_validation_before_any_automatic_wr
 
     assert!(error.to_string().contains("interrupted"));
     interrupted.store(false, Ordering::Release);
-    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )

@@ -34,8 +34,8 @@
 //!   through [`configuration::ports`]/[`configuration::types`], not
 //!   duplicated here.
 //! - Transport-independent response handles live in
-//!   [`response_handles`]; MCP adapters should call that module rather than
-//!   keep a parallel handle store.
+//!   `tracedecay_session_memory::response_handles`; MCP adapters should call
+//!   that module rather than keep a parallel handle store.
 //!
 //! ## Packaging
 //!
@@ -97,16 +97,6 @@ pub mod stack_coordinator;
 pub mod store;
 pub mod tracedecay;
 pub mod work;
-
-// RE-EXPORT SEAM: these modules moved to `tracedecay-session-memory`. The
-// old `tracedecay_usecases::<module>` paths stay valid so the root crate,
-// `tracedecay-dashboard-api`, `tracedecay-agent-hosts`, and
-// `tracedecay-code-index-runtime` keep compiling unchanged; a later slice
-// re-points them at `tracedecay_session_memory` and deletes this block.
-pub use tracedecay_session_memory::{
-    anchor_resolution, event_lane, external_source_store, memory, provider_pricing,
-    provider_usage, response_handles, runtime_telemetry, session, user_config,
-};
 
 pub use lsp_support::analyzer_runtime_config_error;
 pub use source_authorization::{

@@ -32,7 +32,7 @@ impl crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1
     fn retrieve_admitted<'a>(
         &'a self,
         _context: &'a tracedecay_application::RequestContext,
-        _query: tracedecay_usecases::session::SessionTemporalQuery,
+        _query: tracedecay_session_memory::session::SessionTemporalQuery,
     ) -> crate::daemon::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
         Box::pin(async { crate::daemon::session_retrieval::SessionRetrievalServiceOutcome::Denied })
     }

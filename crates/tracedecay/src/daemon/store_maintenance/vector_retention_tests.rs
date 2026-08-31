@@ -35,7 +35,7 @@ struct UnseatedGraphFixture {
     store_root: PathBuf,
     schedulers: CodeIndexSchedulerRegistryV1,
     observations: StoreTelemetrySamplingRegistry,
-    cancellation: tracedecay_usecases::context::CancellationToken,
+    cancellation: tracedecay_session_memory::context::CancellationToken,
 }
 
 /// A mounted project graph whose daemon never seated a semantic runtime — the
@@ -64,7 +64,7 @@ async fn open_unseated_graph_fixture() -> UnseatedGraphFixture {
         store_root,
         schedulers: CodeIndexSchedulerRegistryV1::new(1),
         observations: StoreTelemetrySamplingRegistry::default(),
-        cancellation: tracedecay_usecases::context::CancellationToken::new(),
+        cancellation: tracedecay_session_memory::context::CancellationToken::new(),
     }
 }
 

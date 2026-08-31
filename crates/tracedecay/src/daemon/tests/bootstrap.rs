@@ -6,7 +6,7 @@ use tracedecay_mcp::JsonRpcResponse;
 #[cfg(unix)]
 use tracedecay_domain::errors::TraceDecayError;
 #[cfg(unix)]
-use tracedecay_usecases::context::CancellationToken;
+use tracedecay_session_memory::context::CancellationToken;
 
 static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

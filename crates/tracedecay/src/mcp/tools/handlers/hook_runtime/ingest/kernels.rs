@@ -29,7 +29,7 @@ use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
 use tracedecay_usecases::observation::ObservationCancellation;
-use tracedecay_usecases::session::lcm::{
+use tracedecay_session_memory::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityResponse,
     LcmTranscriptIngestCommand,
 };

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use tracedecay_store::{FactReadControl, FactWriteControl};
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     PrivacyRemediationTriggerV1, ProjectMemoryPrivacyRemediationReceiptV1,
 };
 
@@ -92,7 +92,7 @@ async fn run_project_memory_privacy_remediation(
             &remediation_write_control(),
         )
         .await
-        .map_err(tracedecay_usecases::memory::memory_application_error)
+        .map_err(tracedecay_session_memory::memory::memory_application_error)
 }
 
 fn remediation_read_control() -> FactReadControl {
@@ -122,7 +122,7 @@ mod tests {
         ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
         ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdatePatchV1,
     };
-    use tracedecay_usecases::memory::{MemoryApplication, PrivacyRemediationTriggerV1};
+    use tracedecay_session_memory::memory::{MemoryApplication, PrivacyRemediationTriggerV1};
 
     use super::{remediation_read_control, remediation_write_control};
     use crate::daemon::profile_identity;

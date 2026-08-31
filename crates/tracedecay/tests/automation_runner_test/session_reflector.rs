@@ -158,7 +158,7 @@ async fn session_reflector_interrupts_validation_before_near_match_or_apply() {
         "the canonical graph cancellation must stay typed through validation: {error}"
     );
     interrupted.store(false, Ordering::Release);
-    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
@@ -376,7 +376,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let seed_memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let seed_memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
@@ -589,7 +589,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
         run.report["accepted_facts"][2]["add_fact_request"]["trust"],
         json!(0.85)
     );
-    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
@@ -803,7 +803,7 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
         json!("applied")
     );
 
-    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
@@ -988,7 +988,7 @@ async fn session_reflector_records_terminal_quarantine_without_an_admitted_fact(
     );
     assert_eq!(run.report["quarantined_facts"].as_array().unwrap().len(), 1);
 
-    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
@@ -1011,7 +1011,7 @@ async fn session_automatic_facts_replay_same_run_idempotently() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let owner = project_memory_owner(&cg);
-    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         owner,
         tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )

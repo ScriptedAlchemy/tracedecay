@@ -9,8 +9,8 @@ use super::{
     COST_DESCRIPTOR, MeasurementDescriptor, MeasurementProvenance, MeasurementSpec, coverage,
     horizon, measurement,
 };
-use crate::provider_pricing::load_table;
-use crate::provider_usage::{
+use tracedecay_session_memory::provider_pricing::load_table;
+use tracedecay_session_memory::provider_usage::{
     AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
     price_provider_usage, provider_usage_aggregate,
 };

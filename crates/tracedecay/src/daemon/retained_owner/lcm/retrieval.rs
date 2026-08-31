@@ -24,7 +24,7 @@ use tracedecay_sessions::runtime::{
 };
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_usecases::session::{SessionRetrievalScope, SessionTemporalQuery};
+use tracedecay_session_memory::session::{SessionRetrievalScope, SessionTemporalQuery};
 
 use super::super::receipts::evidence_outcome;
 use super::super::session_retrieval_unavailable_detail;

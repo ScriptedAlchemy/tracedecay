@@ -13,7 +13,7 @@
 //! - a **truncated body preview** bounded by [`SECTION_PREVIEW_CHARS`];
 //! - a **retrieval handle** for the *full* body, minted through the same
 //!   response-handle cache that reversible MCP truncation uses
-//!   ([`crate::response_handles::store_response_handle`]), so the reader
+//!   ([`tracedecay_session_memory::response_handles::store_response_handle`]), so the reader
 //!   dereferences it with the existing `tracedecay_retrieve` tool and no
 //!   parallel mechanism exists;
 //! - the section's load-bearing **structure** — task-list checkboxes with their
@@ -36,7 +36,7 @@ use tracedecay_code_extraction::markdown_structure::{
     MarkdownSectionStructure, parse_section_structure,
 };
 
-use crate::response_handles::store_response_handle;
+use tracedecay_session_memory::response_handles::store_response_handle;
 
 /// Characters of section body carried inline before the preview truncates.
 pub const SECTION_PREVIEW_CHARS: usize = 320;

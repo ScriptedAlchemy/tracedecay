@@ -15,11 +15,11 @@ use tracedecay_lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmGcConfig, LcmPreflightRequest,
     LcmPreflightResponse, LcmStatus, LcmSummarizerMode,
 };
-use tracedecay_usecases::context::{
+use tracedecay_session_memory::context::{
     CancellationToken, RequestInterruption, application_observed_at,
     application_request_interruption, run_application_request_interruptible,
 };
-use tracedecay_usecases::session::lcm::{
+use tracedecay_session_memory::session::lcm::{
     LcmAuthorityFuture, LcmAuthorityInvocation, LcmAuthorityOperation, LcmAuthorityOutcome,
     LcmAuthorityPayload, LcmAuthorityPort, LcmAuthorityRequest, LcmAuthorityResponse,
     LcmAuthorityUnavailableReason, LcmCompactionCommand, LcmDoctorQuery, LcmStatusQuery,

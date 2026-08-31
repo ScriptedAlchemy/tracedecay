@@ -27,7 +27,7 @@ use tracedecay_domain::feedback::{
 };
 
 use crate::configuration::ConfigurationControlStore;
-use crate::context::MonotonicDeadline;
+use tracedecay_session_memory::context::MonotonicDeadline;
 use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::cycle_runtime::{CanonicalFeedbackResultV1, FeedbackCycleRuntime};
 use crate::feedback::observations::FeedbackObservationEmitterV1;

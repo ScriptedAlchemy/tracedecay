@@ -8,7 +8,7 @@ use tracedecay_store::{
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryGraphQueryV1,
     ProjectMemoryGraphStore, StoreShardIdV1,
 };
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 

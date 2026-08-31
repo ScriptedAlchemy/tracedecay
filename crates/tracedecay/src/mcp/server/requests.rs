@@ -510,13 +510,13 @@ impl McpServer {
         // project's own registered id. The application lane retains it even
         // without a connected dashboard; the SSE adapter coalesces the burst.
         let activity_project_id =
-            tracedecay_usecases::event_lane::enabled(dispatch_server.session_db.as_deref())
+            tracedecay_session_memory::event_lane::enabled(dispatch_server.session_db.as_deref())
                 .then(|| cg.store_layout().identity.project_id.clone())
                 .flatten();
         if let Some(activity_db) = dispatch_server.session_db.as_deref() {
-            tracedecay_usecases::event_lane::publish(
+            tracedecay_session_memory::event_lane::publish(
                 activity_db,
-                tracedecay_usecases::event_lane::ActivityFamilyV1::Hook,
+                tracedecay_session_memory::event_lane::ActivityFamilyV1::Hook,
                 &root,
                 activity_project_id.as_deref(),
                 1,
@@ -538,9 +538,9 @@ impl McpServer {
             if sink(root.clone(), event.rel_paths.clone()).await
                 && let Some(activity_db) = dispatch_server.session_db.as_deref()
             {
-                tracedecay_usecases::event_lane::publish(
+                tracedecay_session_memory::event_lane::publish(
                     activity_db,
-                    tracedecay_usecases::event_lane::ActivityFamilyV1::CodeIndex,
+                    tracedecay_session_memory::event_lane::ActivityFamilyV1::CodeIndex,
                     &root,
                     activity_project_id.as_deref(),
                     event.rel_paths.len() as u64,
@@ -1236,7 +1236,7 @@ impl McpServer {
     }
 
     fn publish_tool_call_activity(&self, tool_name: &str, cg: &TraceDecay) {
-        if !tracedecay_usecases::event_lane::enabled(self.session_db.as_deref()) {
+        if !tracedecay_session_memory::event_lane::enabled(self.session_db.as_deref()) {
             return;
         }
         if self
@@ -1257,9 +1257,9 @@ impl McpServer {
         let tool_name = tool_name.to_owned();
         self.spawn_background_task(async move {
             let _running = running;
-            tracedecay_usecases::event_lane::publish(
+            tracedecay_session_memory::event_lane::publish(
                 &activity_db,
-                tracedecay_usecases::event_lane::ActivityFamilyV1::ToolCall,
+                tracedecay_session_memory::event_lane::ActivityFamilyV1::ToolCall,
                 &project_root,
                 project_id.as_deref(),
                 1,
@@ -1748,12 +1748,12 @@ mod activity_dispatch_tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let observed =
-                    tracedecay_usecases::event_lane::replay_after(activity_db, &project_id, None)
+                    tracedecay_session_memory::event_lane::replay_after(activity_db, &project_id, None)
                         .await
                         .is_some_and(|replay| {
                             replay.records.iter().any(|record| {
                                 record.pulse.family
-                                    == tracedecay_usecases::event_lane::ActivityFamilyV1::ToolCall
+                                    == tracedecay_session_memory::event_lane::ActivityFamilyV1::ToolCall
                                     && record.pulse.detail.is_none()
                             })
                         });

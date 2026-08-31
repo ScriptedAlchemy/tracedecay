@@ -21,7 +21,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{FactOwnerV1, ObservationScopeV1, ProjectId};
 use tracedecay_store::{FactReadControl, StoreShardScopeV1};
-use tracedecay_usecases::memory::MemoryApplication;
+use tracedecay_session_memory::memory::MemoryApplication;
 
 use crate::daemon::retained_owner::{MemoryTargetAccessV1, open_project_retained_memory_target};
 use crate::tracedecay::TraceDecay;

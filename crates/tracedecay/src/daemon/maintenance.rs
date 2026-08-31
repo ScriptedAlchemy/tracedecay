@@ -872,7 +872,7 @@ impl Drop for MaintenancePhaseInstrumentation {
 }
 
 async fn run_maintenance_loop<F, Fut>(
-    cancellation: &tracedecay_usecases::context::CancellationToken,
+    cancellation: &tracedecay_session_memory::context::CancellationToken,
     wake: &Notify,
     interval: Duration,
     mut run_tick: F,
@@ -973,7 +973,7 @@ const BRANCH_STORE_GC_PERIOD: Duration = Duration::from_hours(24);
 
 #[derive(Clone)]
 pub(super) struct MaintenanceCoordinator {
-    cancellation: tracedecay_usecases::context::CancellationToken,
+    cancellation: tracedecay_session_memory::context::CancellationToken,
     wake: Arc<Notify>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
     metrics: Arc<Mutex<MaintenanceMetricsV1>>,
@@ -989,7 +989,7 @@ pub(super) struct MaintenanceCoordinator {
 impl Default for MaintenanceCoordinator {
     fn default() -> Self {
         Self {
-            cancellation: tracedecay_usecases::context::CancellationToken::new(),
+            cancellation: tracedecay_session_memory::context::CancellationToken::new(),
             wake: Arc::new(Notify::new()),
             task: Arc::new(Mutex::new(None)),
             metrics: Arc::new(Mutex::new(MaintenanceMetricsV1::default())),
@@ -1493,7 +1493,7 @@ async fn run_cold_store_page(
     profile_root: &Path,
     profile_database: &tracedecay_global_db::RegisteredGlobalDb,
     retention: &crate::config::RetentionConfig,
-    cancellation: &tracedecay_usecases::context::CancellationToken,
+    cancellation: &tracedecay_session_memory::context::CancellationToken,
 ) -> tracedecay_domain::errors::Result<ColdStorePageMetrics> {
     let checkpoint_path = checkpoint_path(profile_root);
     let cursor = load_cursor(&checkpoint_path).unwrap_or(ColdStoreCursorV1 {
@@ -1796,7 +1796,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn repeated_wakes_do_not_move_the_maintenance_due_deadline() {
         let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_usecases::context::CancellationToken::new();
+        let cancellation = tracedecay_session_memory::context::CancellationToken::new();
         let wake = Arc::new(Notify::new());
         let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let baseline = MAINTENANCE_FUTURES_ACTIVE.load(Ordering::SeqCst);
@@ -1855,7 +1855,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn progress_continuation_reenters_only_the_owning_phase() {
         let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_usecases::context::CancellationToken::new();
+        let cancellation = tracedecay_session_memory::context::CancellationToken::new();
         let wake = Arc::new(Notify::new());
         let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
         let task_cancellation = cancellation.clone();

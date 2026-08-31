@@ -14,8 +14,8 @@ use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationStoreError, ObservationWrite,
 };
-use tracedecay_usecases::anchor_resolution::EvidenceAnchorReportResolver;
-use tracedecay_usecases::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
+use tracedecay_session_memory::anchor_resolution::EvidenceAnchorReportResolver;
+use tracedecay_session_memory::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
 
 use super::{
     GENERATION, ProviderObservationFixture, anchor_with_aliases, cursor,

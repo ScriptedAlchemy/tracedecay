@@ -1,14 +1,14 @@
 //! Daemon-side runtime telemetry collection (issue #80).
 //!
 //! The snapshot types, the background process sampler, and the text renderer
-//! live in [`tracedecay_usecases::runtime_telemetry`]; this module owns the
+//! live in [`tracedecay_session_memory::runtime_telemetry`]; this module owns the
 //! collection pass that needs the live [`crate::tracedecay::TraceDecay`]
 //! runtime — pragma reads over the owned connection, the writer-owner probe,
 //! the reader-pool and store-runtime registry projections, and the
 //! generation-census reader attached by the exact daemon route.
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::runtime_telemetry::{
+use tracedecay_session_memory::runtime_telemetry::{
     DatabaseSnapshot, GenerationCensusReader, GenerationCensusSnapshot,
     GenerationCensusUnavailableReason, ReaderPoolOccupancy, RuntimeRegistrySnapshot,
     RuntimeSnapshot, WriterOwnerSnapshot, file_size, read_cached_process_sample, read_dirty_marker,

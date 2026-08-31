@@ -726,10 +726,10 @@ fn check_user_config(
             "Worldwide counter upload setting unavailable from canonical configuration: {error}"
         )),
     }
-    if let Some(config_path) = tracedecay_usecases::user_config::config_path()
+    if let Some(config_path) = tracedecay_session_memory::user_config::config_path()
         && config_path.exists()
     {
-        let config = tracedecay_usecases::user_config::UserConfig::load();
+        let config = tracedecay_session_memory::user_config::UserConfig::load();
         if config.pending_upload > 0 {
             dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
         }

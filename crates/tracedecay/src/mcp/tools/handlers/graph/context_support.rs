@@ -15,7 +15,7 @@ use tracedecay_store::{
     FactReadControl, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1,
     ProjectMemoryFactSearchQuery,
 };
-use tracedecay_usecases::memory::memory_application_error;
+use tracedecay_session_memory::memory::memory_application_error;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
