@@ -291,7 +291,6 @@ impl KimiSource {
         })
     }
 
-    #[hotpath::measure(label = "sessions.hosts.kimi.metadata")]
     fn metadata(
         &self,
         budget: &mut HostScanBudget,
