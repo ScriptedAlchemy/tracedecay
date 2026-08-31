@@ -55,7 +55,6 @@ pub mod lsp_wire;
 pub mod output_format;
 pub mod surface;
 pub mod transport;
-pub use tracedecay_framing as wire;
 
 pub use client::{
     AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,
