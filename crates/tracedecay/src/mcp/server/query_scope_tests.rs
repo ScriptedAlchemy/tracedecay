@@ -63,14 +63,12 @@ async fn canonical_project_id_reader_resolves_same_project_and_scope_via_applica
         Some("refs/heads/main"),
     );
 
-    // The entry-point scope equals the scope the canonical resolver derives
-    // for the same exact root: one resolution path, not two.
-    let expected = tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
-        &project_root,
-        &project_root,
-        &scope.project_id,
-    )
-    .expect("canonical resolver resolves the same root");
+    // The entry-point scope equals the daemon code-index authority for the
+    // same exact root. Registered-root authorization cannot substitute its
+    // privacy-bound provenance identifiers for this application scope.
+    let expected =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &scope.project_id)
+            .expect("daemon identity authority resolves the same root");
     assert_eq!(
         scope, &expected,
         "the routed scope must equal the canonical exact-root resolution"

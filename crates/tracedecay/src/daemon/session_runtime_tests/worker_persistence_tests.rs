@@ -9,10 +9,10 @@ use tracedecay_store::{
 };
 
 use crate::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_session_runtime::session_temporal_refresh_scheduler::apply_refresh_effect;
+use tracedecay_session_runtime::session_sync::test_harness::{
+    SessionTemporalRefreshPassReport, SessionTemporalRefreshWakeState, apply_refresh_effect,
+};
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::projector::SessionTemporalRefreshEffect;
-use tracedecay_session_runtime::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshPassReport;
-use tracedecay_session_runtime::session_temporal_refresh_scheduler::wake::SessionTemporalRefreshWakeState;
 use tracedecay_session_temporal_store::SessionRefreshRestartStateV1;
 
 #[tokio::test]

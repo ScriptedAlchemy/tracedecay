@@ -55,6 +55,10 @@ fn log_code_generation_retention_degraded_with_error(failure: &str, error: &dyn 
     );
 }
 
+#[hotpath::measure(
+    label = "daemon.git.maintenance.graph_replay_release",
+    future = true
+)]
 pub(super) async fn reconcile_graph_replay_releases(
     graph: &TraceDecay,
     store_root: &Path,

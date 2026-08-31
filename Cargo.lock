@@ -6313,7 +6313,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracedecay-application",
- "tracedecay-automation-runtime",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-runtime-core",
@@ -6638,6 +6637,7 @@ version = "0.1.0"
 dependencies = [
  "glob",
  "hotpath",
+ "ignore",
  "libc",
  "schemars",
  "serde",
@@ -6645,8 +6645,11 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "toml",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-code-extraction",
+ "tracedecay-code-index",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-graph-query",
@@ -6657,6 +6660,7 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
+ "tree-sitter",
 ]
 
 [[package]]

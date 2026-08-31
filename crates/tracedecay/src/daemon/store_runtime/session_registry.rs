@@ -2902,6 +2902,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// work. Production callers tolerate the warming window through typed
     /// retryable refusals; deterministic fixtures await settlement instead so
     /// graph-dependent operations do not race the open task.
+    #[hotpath::measure(label = "daemon.session_registry.settle_profile_graph", future = true)]
     pub(crate) async fn settle_profile_session_graph(&self) -> Result<()> {
         let waiter = {
             let mounted = self
@@ -2934,6 +2935,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     /// Project-scope counterpart of [`Self::settle_profile_session_graph`].
+    #[hotpath::measure(label = "daemon.session_registry.settle_project_graph", future = true)]
     pub(crate) async fn settle_project_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         self.project_owners.wait_for_session_graph(project_id).await
     }

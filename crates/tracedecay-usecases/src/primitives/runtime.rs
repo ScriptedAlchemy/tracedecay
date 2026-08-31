@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
@@ -530,7 +531,7 @@ pub fn open_primitive_project_runtime(
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
 ) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {
     scope.validate()?;
-    validate_admitted_root_uri(&admitted_root_uri)?;
+    let admitted_project_root = validate_admitted_root_uri(&admitted_root_uri)?;
     if access.scope != scope {
         return Err(ApplicationContractError::Inconsistent {
             field: "application primitive admitted project authority",
@@ -542,11 +543,13 @@ pub fn open_primitive_project_runtime(
             symbol_graph_cursors,
             ignored_dependency_admission,
         ));
-    let source: Arc<dyn SourceReadPrimitivePort + Send + Sync> = Arc::new(SourceReadAdapter::new(
-        Arc::clone(&source_runtime),
-        Arc::clone(&code_graph),
-        scope.clone(),
-    )?);
+    let source: Arc<dyn SourceReadPrimitivePort + Send + Sync> =
+        Arc::new(SourceReadAdapter::new_bound(
+            Arc::clone(&source_runtime),
+            Arc::clone(&code_graph),
+            scope.clone(),
+            &admitted_project_root,
+        )?);
     let services = PrimitiveProjectServices::new(
         symbol_graph,
         source,
@@ -580,7 +583,9 @@ pub fn open_primitive_project_runtime(
     Ok(PrimitiveProjectRuntime { database, dispatch })
 }
 
-fn validate_admitted_root_uri(admitted_root_uri: &str) -> Result<(), ApplicationContractError> {
+fn validate_admitted_root_uri(
+    admitted_root_uri: &str,
+) -> Result<PathBuf, ApplicationContractError> {
     if admitted_root_uri.len() > MAX_ADMITTED_ROOT_URI_BYTES {
         return Err(ApplicationContractError::InvalidRange {
             field: "application primitive admitted root URI",
@@ -603,7 +608,10 @@ fn validate_admitted_root_uri(admitted_root_uri: &str) -> Result<(), Application
             field: "application primitive admitted root URI",
         });
     }
-    Ok(())
+    uri.to_file_path()
+        .map_err(|()| ApplicationContractError::Inconsistent {
+            field: "application primitive admitted root URI",
+        })
 }
 
 #[hotpath::measure(label = "usecases.primitives.admit")]

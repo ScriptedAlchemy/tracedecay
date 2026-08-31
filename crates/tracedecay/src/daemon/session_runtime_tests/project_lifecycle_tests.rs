@@ -14,9 +14,11 @@ use tracedecay_application::{
 use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
 use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
+use tracedecay_session_runtime::session_sync::test_harness::{
+    context_count, extend_tasks, journal_key, journal_prefix, push_task, task_count,
+};
 use tracedecay_session_runtime::session_sync::{
-    DaemonSessionSyncConfig, DaemonSessionSyncService, SessionSyncTaskV1, journal_key,
-    journal_prefix,
+    DaemonSessionSyncConfig, DaemonSessionSyncService, SessionSyncTaskV1,
 };
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 
@@ -84,22 +86,9 @@ async fn shutdown_releases_registered_project_database_contexts() {
     let project_id = ProjectId::new("project.session-sync.shutdown-context").unwrap();
     let (_runtime, _project_sessions, _profile_id) = register(&service, &root, project_id).await;
 
-    assert_eq!(
-        service
-            .contexts
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len(),
-        1
-    );
+    assert_eq!(context_count(&service), 1);
     service.shutdown().await;
-    assert!(
-        service
-            .contexts
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_empty()
-    );
+    assert_eq!(context_count(&service), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -150,16 +139,15 @@ async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
                 .unwrap_or_else(PoisonError::into_inner);
         }
     });
-    service
-        .tasks
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(SessionSyncTaskV1 {
+    push_task(
+        &service,
+        SessionSyncTaskV1 {
             scope: SessionSyncScopeV1::new(project_id, profile_id),
             key: "session-sync.shutdown-task-owner".to_owned(),
             cancellation,
             task,
-        });
+        },
+    );
     entered_rx.await.unwrap();
 
     let shutdown_service = service.clone();
@@ -186,20 +174,12 @@ async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
     shutdown.abort();
     assert!(shutdown.await.unwrap_err().is_cancelled());
     assert_eq!(
-        service
-            .tasks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len(),
+        task_count(&service),
         1,
         "cancelling the shutdown waiter must return unfinished task ownership to the service"
     );
     assert_eq!(
-        service
-            .contexts
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len(),
+        context_count(&service),
         1,
         "session contexts must remain mounted until every lease-owning task joins"
     );
@@ -213,13 +193,7 @@ async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
     release_task(&release);
     retry.await.unwrap();
     assert!(released.load(Ordering::Acquire));
-    assert!(
-        service
-            .contexts
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_empty()
-    );
+    assert_eq!(context_count(&service), 0);
     drop(service);
     drop(runtime);
     session_registry.cancel_memory_graph_reconciliation_tasks();
@@ -262,11 +236,9 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
     let task_b = tokio::spawn(async move {
         task_b_release.notified().await;
     });
-    service
-        .tasks
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .extend([
+    extend_tasks(
+        &service,
+        [
             SessionSyncTaskV1 {
                 scope: SessionSyncScopeV1::new(project_a.clone(), profile_a.clone()),
                 key: "session-sync.retire-a".to_owned(),
@@ -279,7 +251,8 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
                 cancellation: cancellation_b.clone(),
                 task: task_b,
             },
-        ]);
+        ],
+    );
 
     let retire_service = service.clone();
     let retire_project = project_a.clone();
