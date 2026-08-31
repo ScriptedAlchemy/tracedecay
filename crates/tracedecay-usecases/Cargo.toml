@@ -27,6 +27,7 @@ hotpath = [
     "tracedecay-code-index/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
+    "tracedecay-graph-query/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-host-integration/hotpath",
     "tracedecay-lsp/hotpath",
@@ -55,6 +56,7 @@ hotpath-alloc = [
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-graph-query/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-host-integration/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
@@ -83,6 +85,7 @@ hotpath-cpu = [
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-graph-query/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-host-integration/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
@@ -112,7 +115,7 @@ semantic-gpu-cuda = ["tracedecay-semantic/semantic-gpu-cuda"]
 # enabling in-process transports. Forwards to tracedecay-sessions so the
 # re-exported wire test helpers (read_bounded_line, line_outcome_to_io) resolve
 # when this crate is built standalone with the feature.
-test-helpers = ["tracedecay-graph-db/test-helpers", "tracedecay-session-temporal-store/test-helpers", "tracedecay-sessions/test-helpers"]
+test-helpers = ["tracedecay-graph-db/test-helpers", "tracedecay-graph-query/test-helpers", "tracedecay-session-temporal-store/test-helpers", "tracedecay-sessions/test-helpers"]
 # Mirrors the root crate's `test-transport`: enables the in-process transport
 # seams used by integration harnesses.
 test-transport = [
@@ -156,6 +159,7 @@ tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", 
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }

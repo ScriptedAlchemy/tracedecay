@@ -67,7 +67,12 @@ pub mod advisory;
 pub mod code_index;
 pub mod config;
 pub mod configuration;
-pub mod context;
+// TEMPORARY SEAM (delete in the graph-query cutover's final slice): the
+// verified graph query and code-index-backed context readers moved to
+// `tracedecay-graph-query`; these re-exports keep the old
+// `tracedecay_usecases::{graph, context}` paths compiling until every caller
+// is re-pointed at the new crate, then they MUST be removed.
+pub use tracedecay_graph_query::context;
 pub mod dashboard_diagnostics;
 pub mod delivery;
 pub mod diagnose;
@@ -81,7 +86,8 @@ pub mod feedback;
 pub mod git_intelligence;
 pub mod git_query;
 pub mod git_reads;
-pub mod graph;
+// TEMPORARY SEAM (see the `context` re-export above): delete with it.
+pub use tracedecay_graph_query as graph;
 pub mod graph_health_delta;
 mod hotpath_observe;
 pub mod lsp_runtime;

@@ -58,7 +58,7 @@ impl<'a> GraphQueryManager<'a> {
     }
 
     #[hotpath::measure(label = "usecases.graph.query.page")]
-    pub(crate) fn page_all_symbols(
+    pub fn page_all_symbols(
         &self,
         page_size: usize,
         overflow_detail: &str,
@@ -506,7 +506,7 @@ impl<'a> GraphQueryManager<'a> {
     }
 }
 
-pub(crate) fn is_test_marker(
+pub fn is_test_marker(
     record: &tracedecay_code_index::lineage::LineageSymbolRecordV1,
 ) -> bool {
     record.kind == "annotation_usage"

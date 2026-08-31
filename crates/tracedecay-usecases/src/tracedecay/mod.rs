@@ -24,7 +24,6 @@ use tracedecay_application::source_edit::{
 };
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_runtime_core::db::Database;
 use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::path_safety::{
     normalize_source_edit_relative_path, source_edit_path_error, source_edit_unsafe_path,
@@ -198,21 +197,12 @@ pub trait SourceEditRuntimePort: Send + Sync {
     ) -> GraphFuture<'a, ()>;
 }
 
-/// Narrow root-owned filesystem authority used by source retrieval.
-///
-/// Generation-pinned symbol evidence is supplied independently through the
-/// code-graph projection port. This boundary intentionally exposes only the
-/// source decoder's real filesystem and cache dependencies.
-pub trait SourceReadRuntimePort: Send + Sync {
-    fn project_root(&self) -> &Path;
-    fn db(&self) -> &Database;
-    fn is_read_only(&self) -> bool;
-    /// Exact registered project identity this runtime may read.
-    fn project_id(&self) -> &str;
-}
+// TEMPORARY SEAM (delete in the graph-query cutover's final slice): the
+// source-read runtime port moved to `tracedecay-graph-query` with the
+// verified graph query that freezes it.
+pub use tracedecay_graph_query::{SourceReadRuntime, SourceReadRuntimePort};
 
 pub type SourceEditRuntime = dyn SourceEditRuntimePort;
-pub type SourceReadRuntime = dyn SourceReadRuntimePort;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
