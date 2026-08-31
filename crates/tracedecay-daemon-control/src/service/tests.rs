@@ -1,9 +1,11 @@
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::io::{BufRead, Write};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
@@ -11,7 +13,6 @@ use std::os::unix::net::UnixListener;
 use std::process::Command;
 use tempfile::TempDir;
 
-#[cfg(target_os = "linux")]
 use super::runner::ServiceRunner;
 use super::runner::{LaunchctlFailureMode, LaunchdCommand};
 use super::{DaemonServiceSpec, DaemonServiceState};
@@ -955,6 +956,76 @@ fn launchd_disabled_output_matches_only_the_tracedecay_label() {
         "disabled services = {\n\t\"com.example.other\" => true\n}",
         "com.tracedecay.daemon"
     ));
+}
+
+#[cfg(unix)]
+fn assert_path_lookup_skips_non_executable_shadow(program: &str, lifecycle: &str) {
+    let dir = TempDir::new().expect("temp dir");
+    let shadow_dir = dir.path().join("shadow");
+    let executable_dir = dir.path().join("executable");
+    std::fs::create_dir_all(&shadow_dir).expect("shadow dir");
+    std::fs::create_dir_all(&executable_dir).expect("executable dir");
+
+    let shadow = shadow_dir.join(program);
+    std::fs::write(&shadow, "#!/bin/sh\nexit 1\n").expect("shadow program");
+    std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o644))
+        .expect("shadow permissions");
+
+    let executable = executable_dir.join(program);
+    std::fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("executable program");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+        .expect("executable permissions");
+
+    let path_var = std::env::join_paths([shadow_dir, executable_dir]).expect("fixture PATH");
+    let resolved = super::runner::require_service_program_on_path(
+        program,
+        lifecycle,
+        Some(path_var.as_os_str()),
+    )
+    .expect("later executable PATH candidate");
+
+    assert_eq!(
+        resolved,
+        executable.canonicalize().expect("canonical executable")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn launchctl_path_lookup_skips_non_executable_shadow() {
+    assert_path_lookup_skips_non_executable_shadow("launchctl", "launchd agent management");
+}
+
+#[cfg(unix)]
+#[test]
+fn id_path_lookup_skips_non_executable_shadow() {
+    assert_path_lookup_skips_non_executable_shadow("id", "launchd user-domain resolution");
+}
+
+#[cfg(unix)]
+#[test]
+fn explicitly_injected_launchd_programs_reject_non_executable_paths() {
+    let dir = TempDir::new().expect("temp dir");
+    let launchctl = dir.path().join("launchctl");
+    let id = dir.path().join("id");
+    std::fs::write(&launchctl, "#!/bin/sh\nexit 0\n").expect("launchctl program");
+    std::fs::write(&id, "#!/bin/sh\nexit 0\n").expect("id program");
+
+    std::fs::set_permissions(&launchctl, std::fs::Permissions::from_mode(0o644))
+        .expect("launchctl permissions");
+    std::fs::set_permissions(&id, std::fs::Permissions::from_mode(0o755)).expect("id permissions");
+    let launchctl_error = ServiceRunner::launchd(&launchctl, &id)
+        .expect_err("explicit launchctl path must remain strict");
+    assert!(launchctl_error.to_string().contains("launchctl candidate"));
+    assert!(launchctl_error.to_string().contains("not executable"));
+
+    std::fs::set_permissions(&launchctl, std::fs::Permissions::from_mode(0o755))
+        .expect("launchctl permissions");
+    std::fs::set_permissions(&id, std::fs::Permissions::from_mode(0o644)).expect("id permissions");
+    let id_error =
+        ServiceRunner::launchd(&launchctl, &id).expect_err("explicit id path must remain strict");
+    assert!(id_error.to_string().contains("id candidate"));
+    assert!(id_error.to_string().contains("not executable"));
 }
 
 #[cfg(target_os = "linux")]
