@@ -1741,6 +1741,78 @@ fn saved_edit_incremental_publish() {
         .expect("graph owner is activated");
 }
 
+/// Committing content the index already serves re-seals for provenance (see
+/// `same_content_head_move_publishes_new_source_identity`), and that re-seal
+/// must be delta-empty at the parse boundary: zero capture-declared changed
+/// files and zero changed chunks, with every chunk reused. This pins the
+/// evidence the downstream phases receive — graph activation, text-artifact
+/// projection, and semantic staging currently rebuild generation-scoped
+/// state from scratch even when these counters say the corpus is
+/// byte-identical, which is what makes a small drift cost a full pass.
+#[test]
+fn provenance_only_reseal_carries_the_full_parse_forward() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n"),
+        ("src/other.rs", "pub fn gamma() -> u32 { 3 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    published(scheduler.reconcile_now().expect("initial publish"));
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    scheduler.notify_path(fixture.path().join("src/lib.rs"));
+    let dirty = published(scheduler.reconcile_now().expect("dirty incremental publish"));
+    assert!(
+        scheduler
+            .latest_complete()
+            .expect("dirty generation serves")
+            .generation()
+            .snapshot()
+            .source_revision
+            .is_none(),
+        "a dirty capture seals without an exact source revision"
+    );
+
+    git(fixture.path(), &["add", "."]);
+    git(fixture.path(), &["commit", "-qm", "commit indexed content"]);
+    let resealed = published(
+        scheduler
+            .reconcile_now()
+            .expect("provenance-only reseal publishes"),
+    );
+    assert_ne!(dirty.generation_id, resealed.generation_id);
+    assert_eq!(
+        resealed.snapshot_content_identity, dirty.snapshot_content_identity,
+        "committing indexed content must not change the content identity"
+    );
+    assert_eq!(
+        resealed.reextracted_files, 0,
+        "a provenance-only reseal declares no changed files to re-extract"
+    );
+    assert_eq!(
+        resealed.changed_chunks, 0,
+        "a provenance-only reseal produces no added, changed, or deleted chunks"
+    );
+    assert!(
+        resealed.reused_chunks > 0,
+        "a provenance-only reseal reuses every sealed chunk"
+    );
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("resealed generation serves")
+            .generation()
+            .snapshot()
+            .source_revision
+            .clone()
+            .expect("the reseal carries the committed revision")
+            .as_str(),
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        "the reseal records the moved tip as its exact source revision"
+    );
+}
+
 #[test]
 fn occurrence_graph_store_is_available_before_catalog_warm() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
