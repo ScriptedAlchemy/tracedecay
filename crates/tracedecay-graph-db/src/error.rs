@@ -133,6 +133,7 @@ impl GraphDbError {
 
     /// A conflict verdict from `site` with no compared evidence.
     #[must_use]
+    #[hotpath::skip]
     pub const fn conflict(site: &'static str) -> Self {
         Self::Conflict {
             context: GraphConflictContextV1 {
