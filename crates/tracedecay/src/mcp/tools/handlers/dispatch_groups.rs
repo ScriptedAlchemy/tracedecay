@@ -70,7 +70,7 @@ async fn admitted_graph_query(
     // graph-backed tool in the graph/info/analysis/git/health groups funnels
     // through this one open, so a slow span here is admission contention or a
     // stale generation, never handler work.
-    hotpath::future!(
+    let query = hotpath::future!(
         port.open(VerifiedGraphQueryRequest::new(
             &operation,
             request_id,
@@ -79,7 +79,16 @@ async fn admitted_graph_query(
         )),
         label = "mcp.dispatch.graph_query_admission"
     )
-    .await
+    .await?;
+    if query.freshness().is_stale() {
+        // Every graph-backed tool funnels through this open, so this is the
+        // single point that reports serve-old-while-rebuilding back to the
+        // dispatch boundary for the typed response trailer.
+        let _ = options
+            .served_stale_graph_generation
+            .set(query.generation().as_str().to_owned());
+    }
+    Ok(query)
 }
 
 /// The hard ceiling every MCP tool call is bounded by, regardless of dispatch

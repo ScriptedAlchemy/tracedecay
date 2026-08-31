@@ -10,6 +10,7 @@ use crate::config::USER_DATA_DIR_ENV;
 struct FixtureCodeGraphProjection {
     scope: tracedecay_application::ResolvedScope,
     store: Arc<tracedecay_code_index::graph_projection::CodeGraphProjectionStore>,
+    freshness: tracedecay_usecases::graph::CodeGraphReadFreshnessV1,
 }
 
 #[derive(Clone)]
@@ -68,6 +69,7 @@ impl tracedecay_usecases::graph::CodeGraphProjectionReadPort for FixtureCodeGrap
             tracedecay_usecases::graph::VerifiedCodeGraphRead::new(
                 self.scope.clone(),
                 Arc::clone(&self.store),
+                self.freshness,
             )
         })
     }
@@ -130,7 +132,33 @@ impl tracedecay_usecases::graph::CodeGraphReadAdmissionPort for FixtureCodeGraph
 
 pub(super) fn verified_graph_options<'a>(
     cg: &TraceDecay,
+    options: ToolCallRegistryOptions<'a>,
+) -> ToolCallRegistryOptions<'a> {
+    verified_graph_options_with_freshness(
+        cg,
+        options,
+        tracedecay_usecases::graph::CodeGraphReadFreshnessV1::Current,
+    )
+}
+
+/// [`verified_graph_options`] whose projection open reports the last complete
+/// generation serving through a rebuild window, for pinning the typed
+/// freshness trailer at the dispatch boundary.
+pub(super) fn verified_graph_stale_options<'a>(
+    cg: &TraceDecay,
+    options: ToolCallRegistryOptions<'a>,
+) -> ToolCallRegistryOptions<'a> {
+    verified_graph_options_with_freshness(
+        cg,
+        options,
+        tracedecay_usecases::graph::CodeGraphReadFreshnessV1::LastCompleteStale,
+    )
+}
+
+fn verified_graph_options_with_freshness<'a>(
+    cg: &TraceDecay,
     mut options: ToolCallRegistryOptions<'a>,
+    freshness: tracedecay_usecases::graph::CodeGraphReadFreshnessV1,
 ) -> ToolCallRegistryOptions<'a> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -193,6 +221,7 @@ pub(super) fn verified_graph_options<'a>(
     options.code_graph_projection_read_port = Some(Arc::new(FixtureCodeGraphProjection {
         scope: scope.clone(),
         store,
+        freshness,
     }));
     options.code_graph_read_admission_port = Some(Arc::new(FixtureCodeGraphAdmission { scope }));
     options.verified_graph_query_port = Some(

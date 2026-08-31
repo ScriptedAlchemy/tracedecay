@@ -307,6 +307,7 @@ impl McpServer {
                 generation_census_reader: self.generation_census_reader(),
                 retained_project_server_resolver: self.retained_project_server_resolver.clone(),
                 session_sync_service: session_sync_service.as_deref(),
+                served_stale_graph_generation: std::sync::Arc::new(std::sync::OnceLock::new()),
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
                     self.session_db.as_ref(),
                     self.user_session_db.as_ref(),
