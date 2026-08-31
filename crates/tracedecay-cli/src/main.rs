@@ -1082,7 +1082,7 @@ async fn dispatch_memory_command(
             )
             .await?;
             let status: tracedecay_application::retained_surfaces::MemoryStatusResultV1 =
-                serde_json::from_value(result)?;
+                commands::retained_tool_payload("tracedecay_memory_status", result)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
