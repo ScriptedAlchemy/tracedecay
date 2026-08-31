@@ -160,7 +160,24 @@ const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 
+const SEALED_STORE_FORM_COMPACT: &str = "compact";
 const SEALED_STORE_FORM_REPLAY: &str = "replay";
+
+/// Whether Bytes-carrying generations may seal in compact columnar form on
+/// the pinned grafeo revision.
+///
+/// The pinned rev (`0c4f93a584e9`) carries both compact Bytes dictionary
+/// markers and stable preserved-edge ordering: equal-source edge IDs stay in
+/// the same order as the native CSR topology. A 45,000-entity /
+/// 51,428-relation Bytes generation passed the full post-reopen recovered
+/// digest proof in compact form before this contract was enabled.
+///
+/// Vector-carrying generations never compact regardless of this constant
+/// (`saw_vector_property` in [`seal_generation_store`]): the sealed lane
+/// never serves vector search, so the columnar base buys them nothing, and
+/// mixed-dimension vector columns fall back to the dictionary codec's
+/// `Display` encoding, which does not round-trip.
+const COMPACT_ROUND_TRIPS_BYTES: bool = true;
 
 /// Receipt binding a sealed store directory to the exact generation and
 /// recovered digest it was built from. Written after the compacted database
@@ -169,10 +186,9 @@ const SEALED_STORE_FORM_REPLAY: &str = "replay";
 #[derive(Debug, Deserialize, Serialize)]
 struct SealedStoreReceiptV1 {
     version: u32,
-    /// The durable form the rows were sealed in. New artifacts always seal
-    /// in `"replay"` (LPG replay) form; `"compact"` survives only in
-    /// receipts written before compaction was retired (see the form note in
-    /// [`seal_generation_store`]) and is verified by the same digest proof.
+    /// `"compact"` when the store serves from a columnar `CompactStore`
+    /// base, `"replay"` when it stayed in LPG replay form (see
+    /// [`COMPACT_ROUND_TRIPS_BYTES`]).
     form: String,
     namespace: String,
     projection: String,
@@ -383,6 +399,24 @@ impl SealedCopyPager {
         sealed.apply_sealed_copy_batch(batch, &endpoint_namespaces, None, check)?;
         Ok(())
     }
+}
+
+#[hotpath::measure]
+fn properties_carry_bytes(
+    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
+) -> bool {
+    properties
+        .values()
+        .any(|property| matches!(property, crate::GraphProperty::Bytes(_)))
+}
+
+#[hotpath::measure]
+fn properties_carry_vectors(
+    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
+) -> bool {
+    properties
+        .values()
+        .any(|property| matches!(property, crate::GraphProperty::Vector(_)))
 }
 
 #[hotpath::measure]
@@ -837,6 +871,12 @@ fn copy_compact_and_close(
     drop(endpoint_cache);
     let entity_count = entity_nodes.len();
     let relation_count = relation_rows.len();
+    let mut saw_bytes_property = relation_rows
+        .iter()
+        .any(|relation| properties_carry_bytes(&relation.properties));
+    let mut saw_vector_property = relation_rows
+        .iter()
+        .any(|relation| properties_carry_vectors(&relation.properties));
 
     // 1. Dependency endpoint copies, so cross-generation edges resolve.
     for (projection, copies) in dependency_endpoints {
@@ -849,6 +889,8 @@ fn copy_compact_and_close(
         let mut pager = SealedCopyPager::new(namespace, projection.projection.clone(), identity);
         for (_, entity) in copies {
             check()?;
+            saw_bytes_property |= properties_carry_bytes(&entity.properties);
+            saw_vector_property |= properties_carry_vectors(&entity.properties);
             let live_bytes = entity_copy_live_bytes(&entity);
             pager.push(
                 &sealed,
@@ -886,6 +928,8 @@ fn copy_compact_and_close(
             }
         }
         for entity in loaded {
+            saw_bytes_property |= properties_carry_bytes(&entity.properties);
+            saw_vector_property |= properties_carry_vectors(&entity.properties);
             let live_bytes = entity_copy_live_bytes(&entity);
             pager.push(
                 &sealed,
@@ -958,24 +1002,27 @@ fn copy_compact_and_close(
         check,
     )?;
 
-    // Every artifact seals in replay (LPG) form. The pinned engine's
-    // compacted columnar form fails its post-reopen recovered-digest proof
-    // with "relation scalar endpoints do not match native topology": first
-    // observed scale-shaped on real code generations (~45k Bytes-carrying
-    // entities, while toy code fixtures passed), and then shape-shaped on
-    // project-memory relation graphs, which corrupt at single-digit row
-    // counts and wedge memory reconciliation permanently behind the failing
-    // proof. Vector columns additionally fall back to the dictionary codec's
-    // `Display` encoding in compact form, which does not round-trip. Replay
-    // form seals, proves, and serves every shape; re-introduce compaction
-    // only with a generation-scale compact seal and a project-memory seal
-    // proven end to end. The post-reopen digest proof stays either way, so
-    // copy or persistence corruption surfaces as typed refusal rather than
-    // silently wrong reads.
+    // Compact only when the pinned engine round-trips every scalar the rows
+    // carry; otherwise the artifact stays in replay form, still isolated per
+    // generation. Vector-carrying generations always stay in replay form:
+    // the sealed lane never serves vector search, so the columnar base buys
+    // those generations nothing, and mixed-dimension vectors fall back to a
+    // lossy display dictionary. The post-reopen digest proof checks the exact
+    // durable form before installation, so copy, compaction, or persistence
+    // corruption all surface as typed refusal rather than silently wrong
+    // reads.
+    let form = if saw_vector_property || (saw_bytes_property && !COMPACT_ROUND_TRIPS_BYTES) {
+        SEALED_STORE_FORM_REPLAY
+    } else {
+        sealed
+            .compact_for_seal()
+            .map_err(|error| sealed_store_failure("compact failed", error))?;
+        SEALED_STORE_FORM_COMPACT
+    };
     sealed
         .close()
         .map_err(|error| sealed_store_failure("durable close failed", error))?;
-    Ok((entity_count, relation_count, SEALED_STORE_FORM_REPLAY))
+    Ok((entity_count, relation_count, form))
 }
 
 /// Opens the artifact under `directory` and proves it against `expected`.
@@ -1096,9 +1143,8 @@ fn sealed_copy_proof(
 }
 
 /// Measurement harness for the sealed-store verification path, phase by
-/// phase, against production-shaped rows (a Bytes payload on every entity —
-/// the shape that forces replay form today — or a String payload for the
-/// compact-form comparison).
+/// phase, against production-shaped rows (a Bytes payload on every entity by
+/// default, or a String payload when `TRACEDECAY_VERIFY_PROBE_FORM=compact`).
 ///
 /// ```text
 /// TRACEDECAY_VERIFY_PROBE_ROWS=50000 TRACEDECAY_VERIFY_PROBE_PAYLOAD=700 \
@@ -1379,6 +1425,7 @@ mod cost_probe {
         let _ = marker_hit.database().close();
         drop(marker_hit);
 
+        let staging_bytes = directory_bytes(&database_path);
         let artifact_bytes = directory_bytes(&directory);
         let receipt = std::fs::read_to_string(directory.join("sealed.json")).unwrap();
         let form = receipt

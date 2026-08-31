@@ -2086,11 +2086,9 @@ mod historical_publication_reuse_tests {
                             GraphPropertyName::new("marker").unwrap(),
                             GraphProperty::String("reuse".to_owned()),
                         ),
-                        // A Bytes property seals this generation in replay
-                        // form, the shape every production code graph takes
-                        // (see `COMPACT_ROUND_TRIPS_BYTES`), so these reuse
-                        // and marker tests exercise the production artifact
-                        // form.
+                        // A Bytes property matches the serialized-record shape
+                        // every production code graph takes, so these reuse
+                        // and marker tests exercise the compact artifact form.
                         (
                             GraphPropertyName::new("payload").unwrap(),
                             GraphProperty::Bytes(vec![0x7d, 0x11, 0x03]),

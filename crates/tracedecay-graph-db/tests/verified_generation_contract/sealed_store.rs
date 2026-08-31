@@ -227,12 +227,11 @@ fn seal_builds_compact_store_while_second_generation_stages_and_seals() {
     assert_snapshot_reads(&g1_commit.snapshot, &identity, "one");
 }
 
-/// Rows carrying Bytes properties seal in replay form and still read exactly.
-/// The dictionary codec round-trips Bytes at the pinned rev, but compact form
-/// stays off for these generations until a generation-scale compact seal
-/// passes its post-reopen proof (see `COMPACT_ROUND_TRIPS_BYTES`).
+/// Rows carrying Bytes properties seal in compact form and still read exactly.
+/// The pinned engine preserves both dictionary values and edge topology
+/// through the post-reopen recovered-digest proof.
 #[test]
-fn bytes_rows_seal_in_replay_form_and_read_exactly() {
+fn bytes_rows_seal_in_compact_form_and_read_exactly() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -264,8 +263,8 @@ fn bytes_rows_seal_in_replay_form_and_read_exactly() {
     let receipt = receipt_for_generation(temp.path(), "bytes-g1")
         .expect("seal must write the artifact receipt");
     assert!(
-        receipt.contains("\"form\": \"replay\""),
-        "Bytes rows must seal in replay form until compact seals prove out at scale: {receipt}"
+        receipt.contains("\"form\": \"compact\""),
+        "Bytes rows must seal in compact form after the scale proof: {receipt}"
     );
     assert_snapshot_reads(&commit.snapshot, &identity, "payload");
     let entity = commit
@@ -284,10 +283,9 @@ fn bytes_rows_seal_in_replay_form_and_read_exactly() {
     );
 }
 
-/// Rows carrying Vector properties seal in replay form — the pinned engine
-/// does not round-trip a vector generation through compaction (its
-/// post-reopen recovered-digest proof fails on relation endpoints), and the
-/// sealed lane never serves vector search — and still read exactly.
+/// Rows carrying Vector properties seal in replay form: the sealed lane never
+/// serves vector search, so compacting these rows buys nothing, and
+/// mixed-dimension vectors still fall back to a lossy display dictionary.
 #[test]
 fn vector_rows_seal_in_replay_form_and_read_exactly() {
     let temp = TempDir::new().unwrap();
