@@ -15,10 +15,10 @@ use std::sync::{
 
 use tempfile::TempDir;
 use tracedecay_domain::{ActorId, Confidence, FactCategoryV1, FactOwnerV1, ProjectId};
-use tracedecay_store::{FactWriteControl, ProjectMemoryFactProjectionV1};
 use tracedecay_session_memory::memory::{
     MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
+use tracedecay_store::{FactWriteControl, ProjectMemoryFactProjectionV1};
 
 use super::{DaemonSessionRuntimeRegistryV1, ProjectRuntimeOwnerStateV1};
 use tracedecay_daemon_identity::profile_identity;

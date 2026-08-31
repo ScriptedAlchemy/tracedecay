@@ -27,6 +27,7 @@ use super::resolver::{
     LocalStoreRuntimeResolverV1,
 };
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
 use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
@@ -34,7 +35,6 @@ use tracedecay_runtime_core::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1,
     DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
 };
@@ -2934,10 +2934,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     /// Project-scope counterpart of [`Self::settle_profile_session_graph`].
-    pub(crate) async fn settle_project_session_graph(
-        &self,
-        project_id: &ProjectId,
-    ) -> Result<()> {
+    pub(crate) async fn settle_project_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         self.project_owners.wait_for_session_graph(project_id).await
     }
 

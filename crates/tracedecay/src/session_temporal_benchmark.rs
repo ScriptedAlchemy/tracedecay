@@ -35,12 +35,6 @@ use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
 use tracedecay_runtime_core::timeutil::nearest_rank;
-use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
-use tracedecay_sessions::observation::ObservationCancellation;
-use tracedecay_sessions::runtime::codex;
-use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-use tracedecay_temporal_query::ports::ExecutionControl;
-use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
@@ -52,6 +46,12 @@ use tracedecay_session_memory::session::{
     SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalService,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalQuery,
 };
+use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_sessions::observation::ObservationCancellation;
+use tracedecay_sessions::runtime::codex;
+use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::ranking::DiversityLimits;
 
 mod root_relation_fixture;
 
@@ -341,7 +341,11 @@ pub fn validate_contract() -> BenchResult<()> {
         json!(HARNESS_PATH),
         "implementation path",
     )?;
-    require_json_value(&workload["runner"]["path"], json!(RUNNER_PATH), "runner path")?;
+    require_json_value(
+        &workload["runner"]["path"],
+        json!(RUNNER_PATH),
+        "runner path",
+    )?;
     validate_bench_profile(&root)?;
     validate_sanitization_receipt(&root)?;
 
@@ -650,8 +654,8 @@ async fn capture_measurement() -> BenchResult<Value> {
         }));
     }
 
-    let records_per_repetition = records_per_repetition
-        .ok_or_else(|| "measurement produced no record count".to_owned())?;
+    let records_per_repetition =
+        records_per_repetition.ok_or_else(|| "measurement produced no record count".to_owned())?;
     Ok(json!({
         "warmup_repetitions": WARMUP_REPETITIONS,
         "measured_repetitions": MEASURED_REPETITIONS,
@@ -712,8 +716,9 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     let project_id = enroll_benchmark_project(&project)?;
 
     let profile = env.data_dir().join("profile");
-    let profile_identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
-        .map_err(|error| format!("create benchmark profile identity: {error}"))?;
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
+            .map_err(|error| format!("create benchmark profile identity: {error}"))?;
     let brain_id = profile_identity.brain_id().clone();
     let profile_id = profile_identity.profile_id().clone();
     let _daemon_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
@@ -1271,10 +1276,7 @@ mod tests {
         );
         assert_eq!(result["source_identity"]["harness"], json!(HARNESS_PATH));
         assert_eq!(result["source_identity"]["runner"], json!(RUNNER_PATH));
-        assert_eq!(
-            result["measurement"]["records_per_repetition"],
-            json!(2),
-        );
+        assert_eq!(result["measurement"]["records_per_repetition"], json!(2),);
     }
 
     #[test]

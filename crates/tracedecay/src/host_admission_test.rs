@@ -164,10 +164,9 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     let repository_root = root.path().join("repository");
     initialize_repository(&repository_root);
     let project_id = ProjectId::new("project.host-provenance").unwrap();
-    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(
-        &root.path().join("profile"),
-    )
-    .unwrap();
+    let identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&root.path().join("profile"))
+            .unwrap();
     let _daemon_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,

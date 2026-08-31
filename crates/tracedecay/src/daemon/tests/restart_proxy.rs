@@ -415,9 +415,7 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
     let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.clone());
     let first_listener = tokio::net::UnixListener::bind(&socket).expect("bind first socket");
     let first_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
-        &profile,
-        &endpoint,
-        "first",
+        &profile, &endpoint, "first",
     )
     .expect("first daemon authority");
     let first_token = first_authority.auth_token().to_string();
