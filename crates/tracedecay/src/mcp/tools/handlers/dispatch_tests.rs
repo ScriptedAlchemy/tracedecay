@@ -623,6 +623,124 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
     cg.close();
 }
 
+/// Status must report the serving truth the retrieval lanes enforce. On a
+/// fresh daemon the census answers before any generation seals; claiming
+/// `serving_branch` there contradicted every lane's truthful
+/// `generation_rebuilding` refusal. Once a sealed complete generation exists,
+/// the branch claim returns together with the typed `retrieval_serving`
+/// state.
+#[tokio::test]
+async fn status_serving_branch_reports_the_lane_serving_truth() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("status-serving-truth");
+    fs::create_dir_all(project.join("src")).unwrap();
+    run_git_in(&project, &["init", "-b", "main"]);
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "initial"]);
+    let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-status-serving-truth",
+    )
+    .await
+    .unwrap();
+    // Publish store branch metadata and reopen, so `serving_branch` is a
+    // claim the store would actually make — the exact claim the gate must
+    // withhold while nothing serves.
+    cg.checkpoint().await.unwrap();
+    let layout = cg.store_layout().clone();
+    cg.close();
+    let meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+    let cg = runtime
+        .open_project_graph_for_test(
+            &project,
+            crate::tracedecay::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cg.serving_branch(),
+        Some("main"),
+        "the store must publish a branch claim for this test to be falsifiable",
+    );
+
+    let freshness_reader = |latest_generation_id: Option<&str>| {
+        let latest_generation_id = latest_generation_id.map(str::to_owned);
+        let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+            std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+                let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: worktree_root.display().to_string(),
+                    latest_generation_id: latest_generation_id.clone(),
+                    ..Default::default()
+                };
+                Box::pin(async move { Some(freshness) })
+            });
+        reader
+    };
+    let status_output = |result: ToolResult| {
+        serde_json::from_str::<Value>(
+            result.value["content"][0]["text"]
+                .as_str()
+                .expect("status JSON text"),
+        )
+        .expect("parse status JSON")
+    };
+
+    // Fresh daemon: the census answers, nothing has sealed yet.
+    let rebuilding = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(freshness_reader(None)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("status answers while nothing serves");
+    let rebuilding = status_output(rebuilding);
+    assert_eq!(
+        rebuilding["retrieval_serving"],
+        json!({"status": "unavailable", "reason": "generation_rebuilding"}),
+        "status must carry the same typed refusal the lanes enforce",
+    );
+    assert!(
+        rebuilding.get("serving_branch").is_none(),
+        "no branch is served before the first sealed generation: {rebuilding}",
+    );
+
+    // A sealed complete generation exists: the branch claim is truthful again.
+    let serving = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(freshness_reader(Some(
+                "generation.status-serving-truth.1",
+            ))),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("status answers while serving");
+    let serving = status_output(serving);
+    assert_eq!(serving["retrieval_serving"], json!({"status": "serving"}));
+    assert_eq!(
+        serving["serving_branch"], json!("main"),
+        "a serving census restores the branch claim: {serving}",
+    );
+
+    cg.checkpoint().await.unwrap();
+    cg.close();
+}
+
 #[tokio::test]
 async fn unsupported_selector_tool_rejects_explicit_project_selector() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -1483,6 +1601,64 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
         started.elapsed(),
     );
     assert!(result.value["content"][0]["text"].is_string());
+
+    cg.close();
+}
+
+/// Serve-old-while-rebuilding is typed on the wire: when the one verified-
+/// graph open funnel answered from the last complete seated generation, the
+/// dispatch boundary appends the `code_graph_freshness` trailer naming the
+/// serving generation; a proven-current open leaves the response untouched.
+#[tokio::test]
+async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("stale-graph-trailer");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-stale-graph-trailer",
+    )
+    .await
+    .unwrap();
+
+    let stale = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_files",
+        json!({}),
+        None,
+        None,
+        verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a stale-served graph read still answers");
+    let rendered = serde_json::to_string(&stale.value).unwrap();
+    assert!(
+        rendered.contains("code_graph_freshness: stale"),
+        "a stale-served response must carry the typed freshness trailer: {rendered}",
+    );
+    assert!(
+        rendered.contains("generation.mcp-verified-graph-fixture.1"),
+        "the trailer must name the serving generation: {rendered}",
+    );
+
+    let current = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_files",
+        json!({}),
+        None,
+        None,
+        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a proven-current graph read answers");
+    let rendered = serde_json::to_string(&current.value).unwrap();
+    assert!(
+        !rendered.contains("code_graph_freshness"),
+        "a proven-current response must not carry a freshness trailer: {rendered}",
+    );
 
     cg.close();
 }

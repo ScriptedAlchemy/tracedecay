@@ -34,6 +34,7 @@ pub(crate) use memory_target::{MemoryTargetAccessV1, open_project_retained_memor
 pub(crate) use profile::{
     ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1,
     execute_profile_retained_application, profile_retained_connection_authority,
+    profile_session_retrieval_serving_identity,
 };
 
 /// Exact authorities used by independently mounted project retained families.

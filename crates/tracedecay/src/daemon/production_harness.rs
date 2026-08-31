@@ -918,7 +918,7 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
     .await;
     hotpath::future!(
         shutdown_detached_project_servers(
-            tokio::time::Instant::now() + super::DAEMON_SHUTDOWN_DEADLINE,
+            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
             servers,
         ),
         label = "daemon.harness.shutdown_detached"

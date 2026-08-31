@@ -504,7 +504,7 @@ fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
 /// "run install-service and ensure the service is running" text used to hide.
 fn check_daemon_service(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mDaemon service\x1b[0m");
-    match crate::daemon::installed_service_state() {
+    match tracedecay_daemon_control::installed_service_state() {
         Ok(state) => {
             let message = state.lifecycle_operator_advice();
             match daemon_service_doctor_verdict(state) {
@@ -525,15 +525,19 @@ enum DaemonServiceDoctorVerdict {
 }
 
 fn daemon_service_doctor_verdict(
-    state: crate::daemon::DaemonServiceState,
+    state: tracedecay_daemon_control::DaemonServiceState,
 ) -> DaemonServiceDoctorVerdict {
     match state {
-        crate::daemon::DaemonServiceState::RunningEnabled => DaemonServiceDoctorVerdict::Pass,
-        crate::daemon::DaemonServiceState::Missing
-        | crate::daemon::DaemonServiceState::RunningDisabled => DaemonServiceDoctorVerdict::Warn,
-        crate::daemon::DaemonServiceState::StoppedEnabled
-        | crate::daemon::DaemonServiceState::StoppedDisabled
-        | crate::daemon::DaemonServiceState::Masked => DaemonServiceDoctorVerdict::Fail,
+        tracedecay_daemon_control::DaemonServiceState::RunningEnabled => {
+            DaemonServiceDoctorVerdict::Pass
+        }
+        tracedecay_daemon_control::DaemonServiceState::Missing
+        | tracedecay_daemon_control::DaemonServiceState::RunningDisabled => {
+            DaemonServiceDoctorVerdict::Warn
+        }
+        tracedecay_daemon_control::DaemonServiceState::StoppedEnabled
+        | tracedecay_daemon_control::DaemonServiceState::StoppedDisabled
+        | tracedecay_daemon_control::DaemonServiceState::Masked => DaemonServiceDoctorVerdict::Fail,
     }
 }
 
@@ -560,7 +564,7 @@ fn check_binary(dc: &mut DoctorCounters) {
 fn check_watcher(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mWatcher\x1b[0m");
 
-    if !crate::daemon::daemon_reachable() {
+    if !tracedecay_daemon_control::daemon_reachable() {
         dc.info("Daemon not running — watcher inactive; sync happens on hook/read events");
         return;
     }

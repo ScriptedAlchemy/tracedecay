@@ -5916,6 +5916,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-code-index-retention",
  "tracedecay-code-index-runtime",
+ "tracedecay-daemon-control",
  "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
  "tracedecay-daemon-service",
@@ -6143,6 +6144,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-daemon-control",
  "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
  "tracedecay-dashboard-api",
@@ -6283,6 +6285,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-daemon-control"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "hex",
+ "hotpath",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tracedecay-daemon-identity",
+ "tracedecay-daemon-protocol",
+ "tracedecay-domain",
+ "tracedecay-runtime-core",
+]
+
+[[package]]
 name = "tracedecay-daemon-identity"
 version = "0.1.0"
 dependencies = [
@@ -6294,7 +6313,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracedecay-application",
- "tracedecay-automation-runtime",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-runtime-core",

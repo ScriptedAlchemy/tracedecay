@@ -1,25 +1,15 @@
 //! Process-state factories for the daemon handshake wire contract.
 //!
 //! The handshake type lives in `tracedecay-daemon-protocol`. Construction that
-//! reads this process's identity, build version, and run id stays here.
+//! reads portable process identity lives in `tracedecay-daemon-control`; this
+//! root adapter supplies the build.rs-backed binary version and root open type.
 
 use std::path::PathBuf;
 
-use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake, MovedStoreAdoption};
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::config::{global_db_path, user_data_dir};
+use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_domain::errors::Result;
 
 pub use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
-
-fn current_daemon_client_identity() -> Result<DaemonClientIdentity> {
-    let profile_root = user_data_dir().ok_or_else(|| TraceDecayError::Config {
-        message: "could not determine TraceDecay user data directory".to_string(),
-    })?;
-    let global_db_path = global_db_path().ok_or_else(|| TraceDecayError::Config {
-        message: "could not determine TraceDecay global database path".to_string(),
-    })?;
-    Ok(DaemonClientIdentity::new(profile_root, global_db_path))
-}
 
 /// Handshake for this process's current client identity and binary version.
 pub fn handshake_for_current_client(
@@ -28,19 +18,13 @@ pub fn handshake_for_current_client(
     timings: bool,
     allow_init: bool,
 ) -> Result<DaemonHandshake> {
-    Ok(DaemonHandshake {
+    tracedecay_daemon_control::handshake_for_current_client(
+        binary_version(),
         project_path,
         scope_prefix,
         timings,
         allow_init,
-        allow_initialize_root_routing: false,
-        client_identity: current_daemon_client_identity()?,
-        client_version: binary_version().to_string(),
-        client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
-        tool_list_changed_capable: false,
-        catalog_version: String::new(),
-        moved_store_adoption: MovedStoreAdoption::Never,
-    })
+    )
 }
 
 pub fn handshake_open_options(

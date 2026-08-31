@@ -4,9 +4,7 @@ use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_lcm::{
-    LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSummarizerMode,
-};
+use tracedecay_lcm::{LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSummarizerMode};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
 
@@ -19,7 +17,7 @@ const LCM_EFFECT_WORK_LIMIT: usize = 4_096;
 /// call this service so a disconnect or deadline can still roll back the open
 /// transaction before its commit checkpoint.
 #[derive(Clone)]
-pub struct DaemonLcmEffectService {
+pub(super) struct DaemonLcmEffectService {
     db: RegisteredGlobalDbLeaseV1,
     control: LcmEffectControl,
 }
@@ -88,7 +86,7 @@ impl LcmEffectControl {
 }
 
 impl DaemonLcmEffectService {
-    pub fn new(
+    pub(super) fn new(
         db: RegisteredGlobalDbLeaseV1,
         deadline: Option<&Deadline>,
         cancellation: Option<&CancellationSignal>,
@@ -99,7 +97,7 @@ impl DaemonLcmEffectService {
         }
     }
 
-    pub async fn compress(
+    pub(super) async fn compress(
         &self,
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
@@ -189,7 +187,7 @@ impl DaemonLcmEffectService {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn session_boundary(
+    pub(super) async fn session_boundary(
         &self,
         request: LcmSessionBoundaryRequest,
     ) -> Result<LcmSessionBoundaryResponse, LcmError> {
@@ -207,6 +205,28 @@ impl DaemonLcmEffectService {
             )
             .await
     }
+}
+
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub async fn lcm_compress_for_test(
+    db: RegisteredGlobalDbLeaseV1,
+    request: LcmCompressionRequest,
+) -> Result<LcmCompressionResponse, LcmError> {
+    DaemonLcmEffectService::new(db, None, None)
+        .compress(request)
+        .await
+}
+
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub async fn lcm_session_boundary_for_test(
+    db: RegisteredGlobalDbLeaseV1,
+    request: LcmSessionBoundaryRequest,
+) -> Result<LcmSessionBoundaryResponse, LcmError> {
+    DaemonLcmEffectService::new(db, None, None)
+        .session_boundary(request)
+        .await
 }
 
 /// Terminal compression outcomes for profiling, including deferrals and

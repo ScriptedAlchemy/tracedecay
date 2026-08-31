@@ -254,8 +254,8 @@ impl CodeGraphActivationAuthorityV1 {
                 ..
             } => {
                 let generation_id = latest.generation().manifest().generation_id.clone();
-                let retained = runtime
-                    .retain_code_graph_runtime(
+                let retained = hotpath::future!(
+                    runtime.retain_code_graph_runtime(
                         project_id.clone(),
                         repository_id.clone(),
                         worktree_id.clone(),
@@ -264,11 +264,11 @@ impl CodeGraphActivationAuthorityV1 {
                         Arc::clone(project_database),
                         replay_binding,
                         Some(latest.generation_handle()),
-                    )
-                    .await
-                    .map_err(|error| {
-                        CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
-                    })?;
+                    ),
+                    label = "code_graph.activation.retain_runtime"
+                )
+                .await
+                .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
                 retained
                     .sweep_aborted_read_bundle_temporaries()
                     .map_err(|error| {
@@ -458,6 +458,7 @@ impl PendingInteractiveCatalogWarmV1 {
 }
 
 impl LatestCompleteCodeIndexV1 {
+    #[hotpath::measure(label = "code_graph.activation.persistent")]
     fn activate_persistent_graph(
         &self,
         retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,

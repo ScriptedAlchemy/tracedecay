@@ -55,6 +55,11 @@ impl RegisteredGraphDbOperationV1 {
             || current.verified_locator != self.verified_locator
             || current.canonical_path != self.canonical_path
         {
+            tracing::warn!(
+                event = "graph_operation_binding_conflict",
+                "graph operation lease no longer matches its mounted registry entry; \
+                 the operation conflicts"
+            );
             return Err(GraphDbError::Conflict);
         }
         check_context(context)
@@ -72,6 +77,12 @@ impl RegisteredGraphDbOperationV1 {
         projection: &GraphProjectionIdentityV1,
     ) -> Result<(), GraphDbError> {
         if projection.shard_id != self.binding.shard_id {
+            tracing::warn!(
+                event = "graph_projection_binding_conflict",
+                requested = ?projection.shard_id,
+                bound = ?self.binding.shard_id,
+                "publication projection names a foreign shard; the operation conflicts"
+            );
             return Err(GraphDbError::Conflict);
         }
         Ok(())
@@ -130,6 +141,11 @@ impl GraphDbRegistry {
                 | super::RegistryEntry::Retiring { owner_id, .. }
                     if *owner_id == lease_owner_id =>
                 {
+                    tracing::warn!(
+                        event = "graph_operation_owner_retiring_conflict",
+                        "graph operation lease belongs to an owner that is closing or \
+                         retiring; the operation conflicts"
+                    );
                     return Err(GraphDbError::Conflict);
                 }
                 super::RegistryEntry::Faulted {
@@ -213,9 +229,9 @@ impl GraphDbRegistry {
                 )?;
                 Err(error.clone())
             }
-            _ => Err(GraphDbError::unavailable(
-                "graph runtime is not ready for verified reads",
-            )),
+            super::RegistryEntry::Opening { .. } => not_ready_for_verified_reads("opening"),
+            super::RegistryEntry::Closing { .. } => not_ready_for_verified_reads("closing"),
+            super::RegistryEntry::Retiring { .. } => not_ready_for_verified_reads("retiring"),
         }
     }
 
@@ -240,6 +256,20 @@ impl GraphDbRegistry {
         collect_closure(&head, &mut closure)?;
         Ok(VerifiedGraphSnapshot::new(database, head, closure))
     }
+}
+
+/// Typed refusal for a registry entry observed mid-transition, with the exact
+/// state recorded so an activation retry loop can be attributed to the
+/// specific lifecycle phase that refused it.
+fn not_ready_for_verified_reads<T>(state: &'static str) -> Result<T, GraphDbError> {
+    tracing::warn!(
+        event = "graph_runtime_not_ready_for_verified_reads",
+        state,
+        "graph runtime registry entry is not ready for verified reads"
+    );
+    Err(GraphDbError::unavailable(
+        "graph runtime is not ready for verified reads",
+    ))
 }
 
 pub(super) fn dependency_key_for_binding(
@@ -413,6 +443,12 @@ pub(super) fn require_projection_binding(
     projection: &GraphProjectionIdentityV1,
 ) -> Result<(), GraphDbError> {
     if projection.shard_id != registration.binding().shard_id {
+        tracing::warn!(
+            event = "graph_projection_binding_conflict",
+            requested = ?projection.shard_id,
+            bound = ?registration.binding().shard_id,
+            "publication projection names a foreign shard; the operation conflicts"
+        );
         return Err(GraphDbError::Conflict);
     }
     Ok(())

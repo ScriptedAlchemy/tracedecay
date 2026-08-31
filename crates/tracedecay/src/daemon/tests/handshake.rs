@@ -189,11 +189,32 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
     client.write_all(b"\n").await.expect("write newline");
     client.shutdown().await.expect("shutdown client");
 
-    let error = server
+    let mut lines = tokio::io::BufReader::new(client).lines();
+    let refusal_line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("refusal must arrive before the read deadline")
+        .expect("the refusal read must not fail with a transport reset")
+        .expect("missing auth must produce a typed refusal");
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
+        .expect("the refusal line must parse");
+    assert_eq!(
+        refusal.refusal,
+        tracedecay_daemon_protocol::DaemonHandshakeRefusalReason::AuthenticationRejected
+    );
+    assert!(
+        !refusal_line.contains(TOKEN),
+        "the refusal must not echo the daemon token"
+    );
+    let eof = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("connection close must arrive before the read deadline")
+        .expect("the close must be a clean EOF");
+    assert_eq!(eof, None, "no frames follow the refusal");
+
+    server
         .await
         .expect("server task")
-        .expect_err("missing auth must fail closed");
-    assert!(error.to_string().contains("authentication failed"));
+        .expect("an auth refusal is a served connection");
     assert!(lifecycle.accepting());
     assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 0);
     assert!(owners.lock().await.values().next().is_none());
@@ -236,11 +257,32 @@ async fn socket_client_requires_authentication_before_routing() {
     client.write_all(b"\n").await.expect("write newline");
     client.shutdown().await.expect("shutdown client");
 
-    let error = server
+    let mut lines = tokio::io::BufReader::new(client).lines();
+    let refusal_line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("refusal must arrive before the read deadline")
+        .expect("the refusal read must not fail with a transport reset")
+        .expect("missing auth must produce a typed refusal");
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
+        .expect("the refusal line must parse");
+    assert_eq!(
+        refusal.refusal,
+        tracedecay_daemon_protocol::DaemonHandshakeRefusalReason::AuthenticationRejected
+    );
+    assert!(
+        !refusal_line.contains(TOKEN),
+        "the refusal must not echo the daemon token"
+    );
+    let eof = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("connection close must arrive before the read deadline")
+        .expect("the close must be a clean EOF");
+    assert_eq!(eof, None, "no frames follow the refusal");
+
+    server
         .await
         .expect("server task")
-        .expect_err("missing authentication must fail closed");
-    assert!(error.to_string().contains("authentication failed"));
+        .expect("an auth refusal is a served connection");
 }
 
 #[test]

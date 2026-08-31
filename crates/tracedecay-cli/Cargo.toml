@@ -44,6 +44,7 @@ hotpath = [
     "tracedecay-automation-runtime/hotpath",
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
+    "tracedecay-daemon-control/hotpath",
     "tracedecay-daemon-identity/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-dashboard-api/hotpath",
@@ -69,6 +70,7 @@ hotpath-alloc = [
     "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
+    "tracedecay-daemon-control/hotpath-alloc",
     "tracedecay-daemon-identity/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-dashboard-api/hotpath-alloc",
@@ -94,6 +96,7 @@ hotpath-cpu = [
     "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
+    "tracedecay-daemon-control/hotpath-cpu",
     "tracedecay-daemon-identity/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-dashboard-api/hotpath-cpu",
@@ -187,6 +190,7 @@ tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0"
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
