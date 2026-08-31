@@ -9,7 +9,7 @@ use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngest
 use tracedecay_global_db::{
     GlobalDbGitCorrelationStore, GlobalDbWorkflowStore, RegisteredGlobalDb,
 };
-use tracedecay_usecases::store::transcript::GlobalDbTranscriptStore;
+use tracedecay_session_memory::transcript::GlobalDbTranscriptStore;
 
 use crate::{HostAdmissionAuthorities, HostAdmissionFacade};
 

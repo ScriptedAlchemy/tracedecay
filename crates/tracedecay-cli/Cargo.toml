@@ -57,7 +57,7 @@ hotpath = [
     "tracedecay-runtime-core/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-tool-catalog/hotpath",
-    "tracedecay-usecases/hotpath",
+    "tracedecay-session-memory/hotpath",
 ]
 hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
@@ -81,7 +81,7 @@ hotpath-alloc = [
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
 ]
 hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
@@ -105,7 +105,7 @@ hotpath-cpu = [
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
 ]
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 production = ["tracedecay/production"]
@@ -196,9 +196,9 @@ tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-sdk = { path = "../tracedecay-sdk", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 tracing = "0.1"
 ureq = { version = "3", features = ["json"] }
 url = "2"
@@ -219,8 +219,15 @@ toml = "1"
 tower = "0.5"
 tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+# The shared root fixture (`crates/tracedecay/tests/common`) names the LCM
+# contracts directly since the lcm extraction; CLI test targets compile that
+# fixture via `#[path]` and need the extern.
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+# Dev-only: `tests/work_route_exposure_conformance.rs` still asserts against
+# the usecases `operation_stream` authority; production code is off usecases.
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 ureq = { version = "3", features = ["json"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

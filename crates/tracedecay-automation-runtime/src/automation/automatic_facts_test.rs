@@ -18,7 +18,7 @@ use tracedecay_store::{
     ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1,
 };
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     MemoryApplicationError, MemoryMutationError, ProjectMemoryFactAddRequest,
     automatic_fact_add_command,
 };

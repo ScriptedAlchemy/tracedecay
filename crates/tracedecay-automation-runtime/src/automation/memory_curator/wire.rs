@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_domain::{Confidence, FactCategoryV1, FactEventId, FactId, FactRelationKindV1};
 use tracedecay_store::ProjectMemoryFactUpdatePatchV1;
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
     ProjectMemoryFactAddRequest,
 };

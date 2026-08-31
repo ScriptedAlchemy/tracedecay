@@ -3,7 +3,7 @@ use std::io;
 use tracedecay_domain::{CanonicalObservationIdV1, ObservationCollisionOutcomeV1, PayloadDigestV1};
 use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
 
-use tracedecay_usecases::observation::{
+use tracedecay_sessions::observation::{
     CaptureClaudeObservationRequestError, ObservationApplicationError,
 };
 

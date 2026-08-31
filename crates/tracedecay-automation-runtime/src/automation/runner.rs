@@ -34,7 +34,7 @@ use crate::store::memory::DatabaseFactStore;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_policy::CurationApplyAuthorityV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
-use tracedecay_usecases::memory::MemoryApplication;
+use tracedecay_session_memory::memory::MemoryApplication;
 
 mod curation;
 mod evidence;

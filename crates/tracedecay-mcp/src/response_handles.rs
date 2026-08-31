@@ -15,7 +15,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 // The transport-neutral handle authority lives in `tracedecay-usecases`. This
 // module keeps the MCP telemetry and adapters.
-pub use tracedecay_usecases::response_handles::{
+pub use tracedecay_session_memory::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup, ResponseHandleRecord,
 };
 pub const RESPONSE_RETRIEVE_TOOL: &str = "tracedecay_retrieve";
@@ -154,7 +154,7 @@ pub fn response_handle_stats_json(project_root: Option<&Path>) -> Value {
     });
     if let (Some(project_root), Some(object)) = (project_root, stats.as_object_mut()) {
         let on_disk =
-            match tracedecay_usecases::response_handles::inventory_response_handles(project_root) {
+            match tracedecay_session_memory::response_handles::inventory_response_handles(project_root) {
                 Ok(inventory) => json!({
                     "available": true,
                     "file_count": inventory.file_count,
@@ -187,7 +187,7 @@ pub fn store_response_handle(
     let telemetry = telemetry();
     telemetry.store_attempts.fetch_add(1, Ordering::Relaxed);
     let result =
-        tracedecay_usecases::response_handles::store_response_handle(project_root, content, now);
+        tracedecay_session_memory::response_handles::store_response_handle(project_root, content, now);
     telemetry
         .store_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -224,7 +224,7 @@ pub fn retrieve_response_handle(
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     let result =
-        tracedecay_usecases::response_handles::retrieve_response_handle(project_root, handle, now);
+        tracedecay_session_memory::response_handles::retrieve_response_handle(project_root, handle, now);
     telemetry
         .retrieve_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -281,7 +281,7 @@ pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result
     let telemetry = telemetry();
     telemetry.cleanup_runs.fetch_add(1, Ordering::Relaxed);
     let result =
-        tracedecay_usecases::response_handles::cleanup_expired_response_handles(project_root, now);
+        tracedecay_session_memory::response_handles::cleanup_expired_response_handles(project_root, now);
     telemetry
         .cleanup_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);

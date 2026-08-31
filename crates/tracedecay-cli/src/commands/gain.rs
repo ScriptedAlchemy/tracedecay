@@ -20,8 +20,8 @@ struct SavingsTotalPayload {
 ///
 /// Pure lookup against the deterministic bundled pricing authority.
 pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> Option<f64> {
-    let table = tracedecay_usecases::provider_pricing::load_table();
-    let price = tracedecay_usecases::provider_pricing::resolve_model_price(
+    let table = tracedecay_session_memory::provider_pricing::load_table();
+    let price = tracedecay_session_memory::provider_pricing::resolve_model_price(
         table,
         "claude",
         "claude-sonnet-4-6",
@@ -50,7 +50,7 @@ fn handle_gain_inner(
     // Erase the deeply nested gain-read future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        let since = tracedecay_usecases::provider_usage::provider_usage_range_start(range)
+        let since = tracedecay_session_memory::provider_usage::provider_usage_range_start(range)
             .map_err(
                 |message| tracedecay_domain::errors::TraceDecayError::Config { message },
             )?;

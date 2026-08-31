@@ -7,7 +7,7 @@ use tracedecay_store::{
     ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
     ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
 };
-use tracedecay_usecases::memory::MemoryApplication;
+use tracedecay_session_memory::memory::MemoryApplication;
 
 use crate::errors::Result;
 

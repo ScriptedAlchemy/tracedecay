@@ -6,7 +6,7 @@ use tracedecay_store::{
     ProjectMemoryFactProjectionV1, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
 };
-use tracedecay_usecases::memory::ProjectMemoryFactAddRequest;
+use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
 
 use crate::application::memory::MemoryApplication;
 use crate::automation::lifecycle::AutomationRunControl;

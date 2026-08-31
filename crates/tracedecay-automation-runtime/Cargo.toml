@@ -31,7 +31,7 @@ hotpath = [
     "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
     "tracedecay-tool-catalog/hotpath",
-    "tracedecay-usecases/hotpath",
+    "tracedecay-session-memory/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
@@ -51,7 +51,7 @@ hotpath-alloc = [
     "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
@@ -71,7 +71,7 @@ hotpath-cpu = [
     "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
 ]
 default = []
 # Forwards the kernel test-transport seam so this crate's unit tests can
@@ -120,7 +120,7 @@ tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3"

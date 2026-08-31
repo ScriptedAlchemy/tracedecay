@@ -25,18 +25,18 @@ use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus, HostProjectionDrainOutcome,
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
-use tracedecay_usecases::anchor_resolution::{
+use tracedecay_global_db::GlobalDbObservationStore;
+use tracedecay_session_memory::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
 };
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchor,
 };
-use tracedecay_usecases::observation::{
+use tracedecay_sessions::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
     ExternalSourceProjectionRetryHandleV1, ExternalSourceProjectionStateV1, ObservationApplication,
     ObservationApplicationError, ObservationCancellation,
 };
-use tracedecay_usecases::store::observation::GlobalDbObservationStore;
 
 mod discovery_queue;
 mod hotpath_observe;
@@ -1029,11 +1029,11 @@ fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome 
 }
 
 fn classify_external_source_error(
-    error: tracedecay_usecases::external_source_store::RuntimeExternalSourceErrorV1,
+    error: tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1,
 ) -> HostAdmissionOutcome {
     tracing::warn!(%error, "registered external-source commit failed");
     match error {
-        tracedecay_usecases::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
+        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
             HostAdmissionOutcome::retained_unavailable("external_source_runtime_unavailable")
         }
         _ => HostAdmissionOutcome::retained_unavailable("external_source_commit_failed"),
@@ -1050,13 +1050,13 @@ async fn project_captured_outcome(
     else {
         return Ok(outcome);
     };
-    let projection = tracedecay_usecases::external_source_store::RuntimeExternalSourceStore::new(
+    let projection = tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
         database.runtime_client(),
     )
     .capture_host_observation(persisted.receipt())
     .await
     .map_err(classify_external_source_error)?;
-    if let tracedecay_usecases::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) =
+    if let tracedecay_session_memory::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) =
         projection
     {
         return accepted_for_external_source_replay(outcome, receipt);
@@ -1082,7 +1082,7 @@ async fn project_captured_outcomes(
     if receipts.is_empty() {
         return Ok(outcomes);
     }
-    let projections = tracedecay_usecases::external_source_store::RuntimeExternalSourceStore::new(
+    let projections = tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
         database.runtime_client(),
     )
     .capture_host_observations(&receipts)
@@ -1099,7 +1099,7 @@ async fn project_captured_outcomes(
     for (slot, outcome) in outcomes.into_iter().enumerate() {
         if let Some((projected_slot, projection)) = pending.take() {
             if projected_slot == slot {
-                if let tracedecay_usecases::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(
+                if let tracedecay_session_memory::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(
                     receipt,
                 ) = projection
                 {

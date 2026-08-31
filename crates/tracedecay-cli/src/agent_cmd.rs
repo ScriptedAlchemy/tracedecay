@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use tracedecay::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, sync_parent_directory};
-use tracedecay_usecases::user_config::UserConfig;
+use tracedecay_session_memory::user_config::UserConfig;
 
 mod automation;
 pub(crate) use automation::CodexAutomationInstall;
@@ -84,7 +84,7 @@ pub(crate) async fn handle_host_bundle_component_command(
                 message: format!("could not resolve host lifecycle root: {error}"),
             },
         )?;
-    let mut user_config = tracedecay_usecases::user_config::UserConfig::load();
+    let mut user_config = tracedecay_session_memory::user_config::UserConfig::load();
     let explicitly_scoped = agent.is_some();
     let agent_ids = match agent {
         Some(agent) => vec![agent],

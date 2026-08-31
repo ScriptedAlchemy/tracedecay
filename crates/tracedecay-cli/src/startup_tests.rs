@@ -12,7 +12,7 @@ use super::{
 use clap::{CommandFactory, Parser};
 use std::iter;
 use std::path::PathBuf;
-use tracedecay_usecases::user_config::UserConfig;
+use tracedecay_session_memory::user_config::UserConfig;
 
 fn parse_command(args: &[&str]) -> Commands {
     Cli::try_parse_from(iter::once("tracedecay").chain(args.iter().copied()))
