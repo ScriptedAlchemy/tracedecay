@@ -449,10 +449,7 @@ async fn classify_registered_schema_admission(
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    "configuration",
-                    reason,
-                )
+                tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
             }
             configuration::ConfigurationSchemaError::Storage(error) => {
                 global_db_operation_error("inspect configuration schema freshness", error)
@@ -468,10 +465,7 @@ async fn classify_registered_schema_admission(
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    "configuration",
-                    reason,
-                )
+                tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
             }
             configuration::ConfigurationSchemaError::Storage(error) => {
                 global_db_operation_error("admit configuration schema", error)
@@ -484,12 +478,10 @@ async fn classify_registered_schema_admission(
     if configuration_fresh.is_none()
         && let Err(error) = validate_remote_deletion_schema_contract(connection).await
     {
-        return Err(
-            tracedecay_domain::errors::TraceDecayError::reset_required(
-                "remote deletion tombstones",
-                error.to_string(),
-            ),
-        );
+        return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+            "remote deletion tombstones",
+            error.to_string(),
+        ));
     }
     Ok(RegisteredSchemaAdmissionClassification {
         configuration_fresh,
@@ -586,10 +578,7 @@ async fn install_registered_schema_stages(
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    "configuration",
-                    reason,
-                )
+                tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
             }
             configuration::ConfigurationSchemaError::Storage(error) => {
                 global_db_operation_error("initialize configuration schema", error)
@@ -633,12 +622,10 @@ async fn install_registered_schema_stages(
         if is_fresh {
             return Err(error);
         }
-        return Err(
-            tracedecay_domain::errors::TraceDecayError::reset_required(
-                project_registry::PROJECT_REGISTRY_AUTHORITY,
-                error.to_string(),
-            ),
-        );
+        return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+            project_registry::PROJECT_REGISTRY_AUTHORITY,
+            error.to_string(),
+        ));
     }
     project_registry::validate_project_rows_have_canonical_keys(transaction).await?;
 
@@ -1048,9 +1035,7 @@ async fn inspect_workflow_schema_for_admission(
     Ok(WorkflowSchemaAdmission::Complete)
 }
 
-fn workflow_schema_reset_required(
-    reason: &str,
-) -> tracedecay_domain::errors::TraceDecayError {
+fn workflow_schema_reset_required(reason: &str) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::reset_required("workflow", reason)
 }
 

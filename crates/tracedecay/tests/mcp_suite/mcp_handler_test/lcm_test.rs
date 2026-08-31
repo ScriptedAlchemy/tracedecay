@@ -10,15 +10,13 @@ use tracedecay::host_admission::LcmLineageFaultForTest;
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
-use tracedecay_mcp::get_tool_definitions;
-#[cfg(feature = "test-transport")]
-use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
 use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 #[cfg(feature = "test-transport")]
-use tracedecay_lcm::{
-    LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
-};
+use tracedecay_lcm::{LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay_mcp::get_tool_definitions;
+#[cfg(feature = "test-transport")]
+use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -181,7 +179,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         default_provider_grep_payload["omitted"], 1,
         "default-provider root-wide grep payload: {default_provider_grep_payload}"
     );
-    assert_eq!(default_provider_grep_payload["temporal"]["coverage"]["unknown"], 1);
+    assert_eq!(
+        default_provider_grep_payload["temporal"]["coverage"]["unknown"],
+        1
+    );
     assert_eq!(default_provider_grep_payload["provider"], "all");
     assert_eq!(
         default_provider_grep_payload["hits"]
@@ -265,7 +266,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         serde_json::from_str(extract_text(&provider_local_load.value)).unwrap();
     assert_eq!(provider_local_load_payload["status"], "partial");
     assert_eq!(provider_local_load_payload["omitted"], 2);
-    assert_eq!(provider_local_load_payload["temporal"]["coverage"]["unknown"], 2);
+    assert_eq!(
+        provider_local_load_payload["temporal"]["coverage"]["unknown"],
+        2
+    );
     assert_eq!(provider_local_load_payload["provider"], "all");
     let loaded_providers = provider_local_load_payload["messages"]
         .as_array()
@@ -288,7 +292,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     // The session's temporal page still carries the unknown-coverage record
     // seeded above, so the retained describe truthfully reports partial while
     // the description itself is complete.
-    assert_eq!(described_payload["status"], "partial", "{described_payload}");
+    assert_eq!(
+        described_payload["status"], "partial",
+        "{described_payload}"
+    );
     assert_eq!(described_payload["description"]["raw_message_count"], 1);
     assert!(
         described_payload["description"]["raw_messages"][0]
@@ -623,8 +630,19 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     );
     assert_eq!(node_payload["grain"], "summary");
     assert_eq!(node_payload["state"], "available");
-    assert_eq!(node_payload["temporal"]["anchors"].as_array().unwrap().len(), 1);
-    assert!(node_payload["temporal"]["watermarks"]["generation"].as_u64().unwrap() > 0);
+    assert_eq!(
+        node_payload["temporal"]["anchors"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        node_payload["temporal"]["watermarks"]["generation"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     assert_eq!(node_payload["temporal"]["coverage"]["visible"], 1);
     assert_eq!(node_payload["lineage"].as_array().unwrap().len(), 1);
 
@@ -655,7 +673,13 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     );
     assert_eq!(payload_payload["grain"], "occurrence");
     assert_eq!(payload_payload["state"], "available");
-    assert_eq!(payload_payload["temporal"]["anchors"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        payload_payload["temporal"]["anchors"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 
     let rendered = format!(
         "{}\n{}",
@@ -1381,8 +1405,18 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     assert_eq!(pagination["remaining_sources"], 1);
     assert_eq!(payload["grain"], "summary");
     assert_eq!(payload["state"], "available");
-    assert!(!payload["temporal"]["anchors"].as_array().unwrap().is_empty());
-    assert!(payload["temporal"]["watermarks"]["generation"].as_u64().unwrap() > 0);
+    assert!(
+        !payload["temporal"]["anchors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        payload["temporal"]["watermarks"]["generation"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     assert!(payload["temporal"]["coverage"]["visible"].as_u64().unwrap() > 0);
     let cursor = payload["temporal"]["next_cursor"]
         .as_str()
@@ -1607,7 +1641,12 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     assert_eq!(payload["state"], "available");
     assert_eq!(payload["grain"], "occurrence");
     assert_eq!(payload["temporal"]["anchors"].as_array().unwrap().len(), 1);
-    assert!(payload["temporal"]["watermarks"]["generation"].as_u64().unwrap() > 0);
+    assert!(
+        payload["temporal"]["watermarks"]["generation"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     server.shutdown().await;
 }
 
@@ -2299,7 +2338,9 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     assert_eq!(payload["status"], "ok");
     let lcm = &payload["lcm"];
     assert_eq!(lcm["store"]["messages"], 1);
-    assert_eq!(lcm["store"]["estimated_tokens"], 4);
+    assert_eq!(lcm["store"]["estimated_tokens"], 0);
+    assert_eq!(lcm["store"]["token_estimate"]["complete"], false);
+    assert_eq!(lcm["store"]["token_estimate"]["scanned_messages"], 0);
     assert_eq!(lcm["dag"]["total_nodes"], 1);
     assert_eq!(lcm["dag"]["total_tokens"], 6);
     assert_eq!(lcm["dag"]["total_source_tokens"], 24);
@@ -2350,7 +2391,11 @@ async fn lcm_status_all_provider_aggregates_provider_counts() {
     assert_eq!(payload["provider"], "all");
     assert_eq!(payload["lcm"]["raw_message_count"], 2);
     assert_eq!(payload["lcm"]["store"]["messages"], 2);
-    assert_eq!(payload["lcm"]["store"]["estimated_tokens"], 5);
+    assert_eq!(payload["lcm"]["store"]["estimated_tokens"], 0);
+    assert_eq!(
+        payload["lcm"]["store"]["token_estimate"]["complete"],
+        false
+    );
 }
 
 #[cfg(feature = "test-transport")]

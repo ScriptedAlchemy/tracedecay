@@ -653,11 +653,7 @@ impl Clone for ProjectRuntimeRequestLeaseV1 {
 }
 
 impl ProjectRuntimeRequestLeaseV1 {
-    pub fn covers(
-        &self,
-        registry: &ProjectRuntimeRegistryV1,
-        project_root: &Path,
-    ) -> bool {
+    pub fn covers(&self, registry: &ProjectRuntimeRegistryV1, project_root: &Path) -> bool {
         Arc::ptr_eq(&self.inner.registry.root_fences, &registry.root_fences)
             && (self.inner.roots.contains(project_root)
                 || project_root
@@ -1208,10 +1204,7 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn feedback_publication_state(
-        &self,
-        project_root: &Path,
-    ) -> (bool, bool, bool) {
+    pub async fn feedback_publication_state(&self, project_root: &Path) -> (bool, bool, bool) {
         let runtimes = self.lock_runtimes();
         let runtime = runtimes.get(project_root);
         (
@@ -1230,10 +1223,7 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn arm_shutdown_drain_waiting(
-        &self,
-        drain_waiting: tokio::sync::oneshot::Sender<()>,
-    ) {
+    pub fn arm_shutdown_drain_waiting(&self, drain_waiting: tokio::sync::oneshot::Sender<()>) {
         *self
             .drain_waiting
             .lock()

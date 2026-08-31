@@ -671,9 +671,11 @@ impl GraphDb {
                     {
                         return Ok(GraphBatchPlan::Settled(existing.commit, ()));
                     }
-                    return Err(self
-                        .sealed_write_refusal(&context.locator)
-                        .unwrap_or(GraphDbError::Conflict));
+                    return Err(self.sealed_write_refusal(&context.locator).unwrap_or(
+                        GraphDbError::conflict(
+                            "generation_runtime.apply_generation_stage_page_with_context",
+                        ),
+                    ));
                 }
                 if let Some(predecessor) = predecessor {
                     let (prior_key, prior_input) =
@@ -689,7 +691,9 @@ impl GraphDb {
                         )
                     })?;
                     if prior.input_digest != prior_input {
-                        return Err(GraphDbError::Conflict);
+                        return Err(GraphDbError::conflict(
+                            "generation_runtime.apply_generation_stage_page_with_context",
+                        ));
                     }
                 } else if let Some(existing) = latest_projection(
                     database,
@@ -704,9 +708,11 @@ impl GraphDb {
                         && existing.commit.watermark == identity.watermark
                         && existing.commit.generation_dependency_digest.is_none();
                     if !exact_incomplete_legacy {
-                        return Err(self
-                            .sealed_write_refusal(&context.locator)
-                            .unwrap_or(GraphDbError::Conflict));
+                        return Err(self.sealed_write_refusal(&context.locator).unwrap_or(
+                            GraphDbError::conflict(
+                                "generation_runtime.apply_generation_stage_page_with_context",
+                            ),
+                        ));
                     }
                 }
                 let (batch, endpoint_namespaces, digest) = match prepared {
@@ -781,7 +787,9 @@ impl GraphDb {
             || existing.commit.source_generation != identity.source_generation
             || existing.commit.watermark != identity.watermark
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "generation_runtime.has_exact_legacy_stage_prefix",
+            ));
         }
         Ok(true)
     }
@@ -816,9 +824,9 @@ impl GraphDb {
                     {
                         return Ok(GraphBatchPlan::Settled(existing.commit, ()));
                     }
-                    return Err(self
-                        .sealed_write_refusal(&context.locator)
-                        .unwrap_or(GraphDbError::Conflict));
+                    return Err(self.sealed_write_refusal(&context.locator).unwrap_or(
+                        GraphDbError::conflict("generation_runtime.finalize_staged_generation"),
+                    ));
                 }
                 if let Some(last_page) = last_page {
                     let (last_key, last_input) =
@@ -832,7 +840,9 @@ impl GraphDb {
                         GraphDbError::unavailable("graph generation final page is not applied")
                     })?;
                     if last.input_digest != last_input {
-                        return Err(GraphDbError::Conflict);
+                        return Err(GraphDbError::conflict(
+                            "generation_runtime.finalize_staged_generation",
+                        ));
                     }
                 }
                 let batch = GraphWriteBatch::new_canonical_checked(
@@ -1451,7 +1461,9 @@ impl GraphDb {
             });
         }
         if state.retiring.contains(locator) || state.collected.contains(locator) {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "generation_runtime.verified_generation",
+            ));
         }
         if let Some(installed) = state.heads.get(&locator.projection)
             && installed.locator == *locator
@@ -1500,10 +1512,14 @@ impl GraphDb {
                 dependency.generation.clone(),
             );
             if state.retiring.contains(&locator) || state.collected.contains(&locator) {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict(
+                    "generation_runtime.require_exact_dependencies",
+                ));
             }
             let Some(head) = state.known.get(&locator).and_then(std::sync::Weak::upgrade) else {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict(
+                    "generation_runtime.require_exact_dependencies",
+                ));
             };
             namespaces.insert(
                 dependency.projection.clone(),
@@ -1828,7 +1844,9 @@ fn prepare_generation_stage_batch(
         GenerationStagePageKind::Entities => manifest
             .entities
             .get(page.range.clone())
-            .ok_or(GraphDbError::Conflict)?
+            .ok_or(GraphDbError::conflict(
+                "generation_runtime.prepare_generation_stage_batch",
+            ))?
             .iter()
             .map(|entity| {
                 check()?;
@@ -1838,7 +1856,9 @@ fn prepare_generation_stage_batch(
         GenerationStagePageKind::Relations => manifest
             .relations
             .get(page.range.clone())
-            .ok_or(GraphDbError::Conflict)?
+            .ok_or(GraphDbError::conflict(
+                "generation_runtime.prepare_generation_stage_batch",
+            ))?
             .iter()
             .map(|relation| {
                 check()?;
@@ -2923,7 +2943,7 @@ mod tests {
                     &divergent_sealed,
                     &|| Ok(())
                 ),
-                Err(GraphDbError::Conflict)
+                Err(GraphDbError::Conflict { .. })
             ),
             "a legacy prefix may be replaced only by its exact source authority"
         );

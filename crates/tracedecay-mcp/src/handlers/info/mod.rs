@@ -5,23 +5,31 @@
 //! handler dispatcher calls.
 
 mod body;
+mod config;
 mod files;
 mod outline;
 mod port_order;
 mod port_status;
 mod read;
+mod registry;
+mod remote_status;
 mod signature_search;
+mod simplify_scan;
 mod todos;
 mod type_hierarchy;
 mod verified;
 
 pub use body::{extract_lines, handle_body};
+pub use config::handle_config;
 pub use files::handle_files;
 pub use outline::handle_outline;
 pub use port_order::handle_port_order;
 pub use port_status::handle_port_status;
 pub use read::handle_read;
+pub use registry::{handle_project_context, handle_project_list, handle_project_search};
+pub use remote_status::handle_remote_status;
 pub use signature_search::handle_signature_search;
+pub use simplify_scan::handle_simplify_scan;
 pub use todos::handle_todos;
 pub use type_hierarchy::handle_type_hierarchy;
 
@@ -29,10 +37,10 @@ use std::path::Path;
 
 use crate::tools::render::Md;
 use serde_json::Value;
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_graph_query::context::markdown_sections::{
     SectionEnrichment, is_markdown_file, section_summary_lines,
 };
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Adds the section lane — title, truncated preview, full-body retrieval
 /// handle, line span, and parsed section structure — to every markdown section

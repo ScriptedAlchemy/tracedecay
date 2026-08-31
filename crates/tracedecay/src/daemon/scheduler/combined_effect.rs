@@ -780,8 +780,7 @@ async fn run_execute_pair(
                     error: error.into(),
                 })),
                 DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                    error: tracedecay_domain::errors::TraceDecayError::Config { message }
-                        .into(),
+                    error: tracedecay_domain::errors::TraceDecayError::Config { message }.into(),
                 })),
                 PairResultOrder::ReflectorFirst,
                 PairResultMode::Handled,

@@ -57,6 +57,7 @@ pub mod project_registry;
 pub mod remote;
 pub mod request_identity;
 pub mod result;
+pub mod retained_receipts;
 pub mod retained_surfaces;
 pub mod retrieval;
 pub mod sdk_catalog;
@@ -260,7 +261,7 @@ pub use project_registry::{
     ProjectRegistryListingFuture, ProjectRegistryListingOutcome, ProjectRegistryListingScope,
     ProjectRegistryListingView, ProjectRegistryReadPort, ProjectRegistrySelector,
     ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup, PublicCodeProject,
-    list_registered_projects, read_registered_project_context,
+    list_registered_projects, read_registered_project_context, render_project_registry_view,
 };
 pub use remote::status::RemoteOperationalStatusReadPort;
 pub use result::{
@@ -277,6 +278,11 @@ pub use result::{
     RetrievalEvidence, RetrieverContribution, RetrieverContributionState, RetryDirective,
     RetryScope, SafeDiagnostic, ScoreId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
     StreamTermination, StreamValidationError, TemporalState, validate_stream,
+};
+pub use retained_receipts::{
+    PreparedRetainedEffect, authority_receipt, effective_memory_deadline, evidence_outcome,
+    measured_budget, memory_expiry_partial, prepare_retained_effect, retained_effect_outcome,
+    session_refresh_effect_outcome,
 };
 pub use retained_surfaces::{
     RetainedLcmExecutionPortV1, RetainedLcmRequestV1, RetainedMemoryExecutionPortV1,
@@ -370,12 +376,11 @@ pub use work_evidence::{
     WorkEvidenceContinuationV1, WorkEvidenceCoverageStateV1, WorkEvidenceCoverageV1,
     WorkEvidenceExpansionSelectorV1, WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1,
     WorkEvidenceOmissionReasonV1, WorkEvidenceOmissionV1, WorkEvidenceRetrievalPortV1,
-    WorkEvidenceRetrievalServiceV1,
-    WorkEvidenceRetrievalV1, WorkEvidenceRetrieveRequestV1, WorkEvidenceRootReadErrorV1,
-    WorkEvidenceRootReadPortV1, WorkEvidenceSourceV1, WorkTaskSessionContinuationV1,
-    WorkTaskSessionCoverageV1, WorkTaskSessionEvidenceV1, WorkTaskSessionFuture,
-    WorkTaskSessionHydrationStateV1, WorkTaskSessionHydrationV1, WorkTaskSessionPortV1,
-    WorkTaskSessionRankContributionV1, WorkTaskSessionRankedAnchorV1,
+    WorkEvidenceRetrievalServiceV1, WorkEvidenceRetrievalV1, WorkEvidenceRetrieveRequestV1,
+    WorkEvidenceRootReadErrorV1, WorkEvidenceRootReadPortV1, WorkEvidenceSourceV1,
+    WorkTaskSessionContinuationV1, WorkTaskSessionCoverageV1, WorkTaskSessionEvidenceV1,
+    WorkTaskSessionFuture, WorkTaskSessionHydrationStateV1, WorkTaskSessionHydrationV1,
+    WorkTaskSessionPortV1, WorkTaskSessionRankContributionV1, WorkTaskSessionRankedAnchorV1,
     WorkTaskSessionReauthorizationErrorV1, WorkTaskSessionReauthorizationPortV1,
     WorkTaskSessionRequestV1,
 };
