@@ -12,11 +12,16 @@ use tracedecay_domain::{BrainId, ObservationScopeV1, ProjectId, UserProfileId};
 use tracedecay_store::StoreShardScopeV1;
 
 use super::failure::{
-    IngestPassCoverage, IngestPassOutcome, ProviderRunFold, TranscriptCatchUpFailure,
-    claude_catch_up_failure,
+    IngestPassBounds, IngestPassOutcome, ProviderRunFold, RoundRobinAdmission,
+    TranscriptCatchUpFailure, allocate_pass_byte_budgets, claude_catch_up_failure,
+    plan_round_robin_admission, scheduling_write_required,
 };
 use super::project_provider::{PROJECT_CATCH_UP_PROVIDERS, ProjectProviderRun};
-use super::scheduler::{default_ingest_pass_bounds, merge_project_provider_backpressure};
+use super::scheduler::{
+    PROJECT_INGEST_PROVIDER_FRONTIER_KEY, default_ingest_pass_bounds,
+    merge_project_provider_backpressure, plan_provider_rotation_admission, read_ingest_frontier,
+    write_ingest_frontier,
+};
 use super::startup::TranscriptIngestOutcome;
 use super::user::provider_selected;
 
@@ -121,6 +126,32 @@ pub async fn ingest_project_sources_for_provider_with_cancellation_and_codex_sta
     .await
 }
 
+/// Bounded project catch-up pass with caller-supplied bounds, so tests can
+/// drive rotation and byte-budget behavior deterministically. Production
+/// callers go through the wrappers above, which use the default pass bounds.
+#[cfg(any(test, feature = "test-helpers"))]
+pub async fn ingest_project_sources_for_provider_bounded<A: SessionIngestAuthority>(
+    registered: (&BrainId, &UserProfileId, &A),
+    project_root: &Path,
+    project_id: Option<ProjectId>,
+    provider: Option<SessionProvider>,
+    include_hermes: bool,
+    bounds: IngestPassBounds,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestOutcome {
+    ingest_project_sources_for_provider_bounded_inner(
+        registered,
+        project_root,
+        project_id,
+        provider,
+        include_hermes,
+        bounds,
+        cancellation,
+        None,
+    )
+    .await
+}
+
 /// Standalone callers do not own a registered runtime and therefore fail
 /// closed for observation providers. Daemon-owned callers must use
 /// [`ingest_project_sources_for_provider`] with their retained registry mount.
@@ -153,13 +184,67 @@ pub async fn ingest_project_sources_for_provider_without_registered_authority<
     )
 }
 
-#[hotpath::measure(label = "sessions.ingest.project", future = true)]
 async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
     registered: (&BrainId, &UserProfileId, &A),
     project_root: &Path,
     project_id: Option<ProjectId>,
     provider: Option<SessionProvider>,
     include_hermes: bool,
+    cancellation: &ObservationCancellation,
+    codex_discovery: Option<(&crate::runtime::codex::CodexDiscoveryHub, &str)>,
+) -> TranscriptIngestOutcome {
+    ingest_project_sources_for_provider_bounded_inner(
+        registered,
+        project_root,
+        project_id,
+        provider,
+        include_hermes,
+        default_ingest_pass_bounds(),
+        cancellation,
+        codex_discovery,
+    )
+    .await
+}
+
+/// Plans which providers one bounded pass may attempt.
+///
+/// The full catch-up sweep (`provider == None`) rotates through the provider
+/// ring from the durable frontier so consecutive passes — including passes
+/// separated by a daemon restart — cover every provider without restarting at
+/// the first one. Single-provider calls are hook-driven and run directly.
+#[hotpath::measure(label = "sessions.ingest.project.rotation_plan", future = true)]
+async fn plan_project_provider_rotation<S: crate::runtime::store_port::TranscriptIngestStore>(
+    transcript_store: &S,
+    provider: Option<SessionProvider>,
+    selected_count: usize,
+    bounds: IngestPassBounds,
+) -> Result<(Option<u64>, RoundRobinAdmission), TranscriptCatchUpFailure> {
+    if provider.is_some() {
+        return Ok((
+            None,
+            plan_round_robin_admission(selected_count, 0, selected_count.max(1)),
+        ));
+    }
+    let Some(frontier) =
+        read_ingest_frontier(transcript_store, PROJECT_INGEST_PROVIDER_FRONTIER_KEY).await
+    else {
+        return Err(TranscriptCatchUpFailure::pass_frontier_unavailable());
+    };
+    Ok((
+        Some(frontier),
+        plan_provider_rotation_admission(selected_count, frontier, bounds),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "sessions.ingest.project", future = true)]
+async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAuthority>(
+    registered: (&BrainId, &UserProfileId, &A),
+    project_root: &Path,
+    project_id: Option<ProjectId>,
+    provider: Option<SessionProvider>,
+    include_hermes: bool,
+    bounds: IngestPassBounds,
     cancellation: &ObservationCancellation,
     codex_discovery: Option<(&crate::runtime::codex::CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestOutcome {
@@ -193,19 +278,6 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
             )],
         );
     }
-    // File-transcript multi-source scheduling is retired: every catch-up
-    // provider is observation/port driven. Start at complete coverage and fold
-    // provider-run backpressure onto that baseline.
-    let mut source_outcome = IngestPassOutcome {
-        stats: TranscriptIngestStats::default(),
-        failures: Vec::new(),
-        coverage: IngestPassCoverage::Complete,
-        scheduling_state_written: false,
-        units_admitted: 0,
-        units_completed: 0,
-        units_failed: 0,
-        byte_bounds_enforced: true,
-    };
     let scope = ObservationScopeV1::Project {
         project_id: canonical_project_id.clone(),
     };
@@ -227,7 +299,6 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
         repository_provenance,
     });
     let facade = facade.as_ref();
-    let provider_byte_cap = default_ingest_pass_bounds().bytes_per_unit;
     let mut provider_runs = ProviderRunFold::default();
     let selected: Vec<SessionProvider> = PROJECT_CATCH_UP_PROVIDERS
         .iter()
@@ -237,15 +308,50 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
                 && (!candidate.scans_all_destinations() || include_hermes)
         })
         .collect();
+    let transcript_store = registered.transcript_store();
+    let (rotation_frontier, plan) =
+        match plan_project_provider_rotation(&transcript_store, provider, selected.len(), bounds)
+            .await
+        {
+            Ok(planned) => planned,
+            Err(failure) => return IngestPassOutcome::failed(failure).into_transcript_outcome(),
+        };
+    // File-transcript multi-source scheduling is retired: every catch-up
+    // provider is observation/port driven. Start at the rotation plan's
+    // coverage and fold provider-run backpressure onto that baseline.
+    let mut source_outcome = IngestPassOutcome {
+        stats: TranscriptIngestStats::default(),
+        failures: Vec::new(),
+        coverage: plan.coverage,
+        scheduling_state_written: false,
+        units_admitted: 0,
+        units_completed: 0,
+        units_failed: 0,
+        byte_bounds_enforced: true,
+    };
+    let initial_budgets = allocate_pass_byte_budgets(plan.admitted_indices.len(), bounds);
+    let mut remaining_bytes = initial_budgets
+        .iter()
+        .copied()
+        .fold(0_u64, u64::saturating_add);
     let mut attempted = 0usize;
     let mut cancelled = false;
     let mut claude_projected_session_ids = BTreeSet::new();
-    for candidate in selected.iter().copied() {
+    for &index in &plan.admitted_indices {
         if cancellation.is_cancelled() {
             cancelled = true;
             provider_runs
                 .failures
                 .push(TranscriptCatchUpFailure::pass_cancelled());
+            break;
+        }
+        let Some(candidate) = selected.get(index).copied() else {
+            continue;
+        };
+        // Pass byte budget exhausted: the remaining admitted providers defer
+        // to the next pass, whose rotation resumes right after `attempted`.
+        let grant = remaining_bytes.min(bounds.bytes_per_unit);
+        if grant == 0 {
             break;
         }
         attempted = attempted.saturating_add(1);
@@ -255,14 +361,17 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
             facade,
             scope: &scope,
             candidate,
-            max_new_bytes: provider_byte_cap,
+            max_new_bytes: grant,
             cancellation,
             codex_discovery,
         }
         .run()
         .await;
         claude_projected_session_ids.extend(provider_run.claude_projected_session_ids);
-        provider_runs.record(provider_run.outcome);
+        let mut unit_result = provider_run.outcome;
+        unit_result.byte_bounds_enforced &= unit_result.bytes_consumed <= grant;
+        remaining_bytes = remaining_bytes.saturating_sub(unit_result.bytes_consumed.min(grant));
+        provider_runs.record(unit_result);
         if cancellation.is_cancelled() {
             cancelled = true;
             provider_runs
@@ -300,11 +409,18 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
             }
         }
     }
+    let admitted_planned = plan.admitted_indices.len();
     if cancelled {
         provider_runs.deferred_units = provider_runs.deferred_units.saturating_add(
-            u64::try_from(selected.len().saturating_sub(attempted))
+            u64::try_from(admitted_planned.saturating_sub(attempted))
                 .unwrap_or(u64::MAX)
                 .max(1),
+        );
+    } else {
+        // Admitted by rotation but never attempted: the pass byte budget ran
+        // out first. They stay deferred so the next pass resumes with them.
+        provider_runs.deferred_units = provider_runs.deferred_units.saturating_add(
+            u64::try_from(admitted_planned.saturating_sub(attempted)).unwrap_or(u64::MAX),
         );
     }
     source_outcome.coverage = merge_project_provider_backpressure(
@@ -348,6 +464,25 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
             provider_runs.units_admitted,
             provider_runs.deferred_units,
         );
+    }
+    // A bounded partial pass persists the rotation cursor so the next pass —
+    // in this process or after a daemon restart — resumes at the provider
+    // after the last one attempted instead of restarting the sweep.
+    if let Some(frontier) = rotation_frontier
+        && scheduling_write_required(source_outcome.coverage, attempted, cancelled)
+    {
+        source_outcome.scheduling_state_written = write_ingest_frontier(
+            &transcript_store,
+            PROJECT_INGEST_PROVIDER_FRONTIER_KEY,
+            frontier,
+            attempted,
+        )
+        .await;
+        if !source_outcome.scheduling_state_written {
+            provider_runs
+                .failures
+                .push(TranscriptCatchUpFailure::pass_frontier_unavailable());
+        }
     }
     source_outcome.stats = source_outcome.stats.merge(provider_runs.stats);
     source_outcome.failures.extend(provider_runs.failures);
