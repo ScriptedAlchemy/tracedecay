@@ -68,6 +68,7 @@ pub use tracedecay_capture::cursor_composer::{
 /// per-project `sessions.db` namespace and dedupe by `(provider, message_id)`.
 pub const PROVIDER: &str = "cursor";
 
+#[hotpath::measure_all]
 impl CursorComposerSource {
     /// Ingest composer sessions belonging to `project_root`, bounded to
     /// `envelope_cap` newly changed sessions.
