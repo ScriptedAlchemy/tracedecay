@@ -69,6 +69,22 @@ fn assert_namespace_absent(path: &Path, context: &str) {
     }
 }
 
+/// Guarantees a fixture project carries no repo-local `.tracedecay` marker
+/// directory. Repository identity moved into the git common dir, so the
+/// profile-sharded fixture no longer plants one — a fixture that must model
+/// the "registry-backed, no repo marker" shape treats an already-absent
+/// directory as exactly that shape rather than a setup failure.
+fn remove_repo_local_marker_dir_if_present(project: &Path) {
+    match std::fs::remove_dir_all(project.join(".tracedecay")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!(
+            "could not clear the repo-local marker directory in {}: {error}",
+            project.display()
+        ),
+    }
+}
+
 fn tracedecay_command_without_daemon(home: &std::path::Path, project: &std::path::Path) -> Command {
     let home = canonical_temp_path(home);
     let profile_root = profile_root(&home);
@@ -1760,7 +1776,7 @@ async fn list_all_uses_registry_profile_shard_when_enrollment_marker_missing() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    std::fs::remove_dir_all(project.path().join(".tracedecay")).unwrap();
+    remove_repo_local_marker_dir_if_present(project.path());
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
@@ -1794,7 +1810,7 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    std::fs::remove_dir_all(project.path().join(".tracedecay")).unwrap();
+    remove_repo_local_marker_dir_if_present(project.path());
     let shard_root = profile_shard_root(home.path());
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
