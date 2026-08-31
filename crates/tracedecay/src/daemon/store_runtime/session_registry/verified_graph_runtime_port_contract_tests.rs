@@ -429,7 +429,7 @@ async fn exact_publication_replay_returns_the_same_verified_head() {
     assert_eq!(replay.verified_head(), first.verified_head());
     assert!(matches!(
         reconcile_through_database(&database, &changed, key("exact-replay")),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
     let retained = snapshot_through_database(&database, &projection)
         .expect("verified snapshot after changed-input conflict")
@@ -452,7 +452,7 @@ async fn stale_republication_conflicts_after_a_new_head_wins() {
 
     assert!(matches!(
         publish_through_database(&database, &first, key("stale-first"), false),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
 }
 
@@ -867,7 +867,7 @@ async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
     let changed = manifest(&projection, "resume-journaled", "changed");
     assert!(matches!(
         publish_through_database(&project_database, &changed, key("resume-journaled"), false),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
     let published = publish_through_database(
         &project_database,

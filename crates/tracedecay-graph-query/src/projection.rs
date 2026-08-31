@@ -312,7 +312,7 @@ pub fn map_projection_error(error: CodeGraphProjectionError) -> CodeGraphReadErr
                 detail: budget.to_string(),
             }
         }
-        unavailable @ (CodeGraphProjectionError::Conflict
+        unavailable @ (CodeGraphProjectionError::Conflict { .. }
         | CodeGraphProjectionError::DurabilityUncertain(_)
         | CodeGraphProjectionError::Closed) => CodeGraphReadError::Unavailable {
             detail: unavailable.to_string(),
