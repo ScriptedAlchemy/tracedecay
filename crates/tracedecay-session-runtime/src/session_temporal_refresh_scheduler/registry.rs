@@ -444,9 +444,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 entry.state.mark_history_pending();
             }
             drop(retained);
-            if installed {
-                entry.state.wake_history();
-            }
+            entry.state.wake_history();
         }
         wake
     }
@@ -474,9 +472,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 entry.state.mark_history_pending();
             }
             drop(retained);
-            if installed {
-                entry.state.wake_history();
-            }
+            entry.state.wake_history();
         }
         wake
     }
