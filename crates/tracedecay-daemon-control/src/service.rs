@@ -22,6 +22,10 @@ mod windows_task;
 #[allow(clippy::expect_used)]
 mod tests;
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod update_restore_tests;
+
 pub use probe::daemon_reachable;
 pub use unit_file::installed_service_socket_path;
 
@@ -90,6 +94,10 @@ pub enum DaemonServiceState {
 pub struct QuiescedDaemonLifecycle {
     previous_state: DaemonServiceState,
     lifecycle_lease: Option<tracedecay_runtime_core::lifecycle_lease::LifecycleLease>,
+    /// Version the daemon protocol must report to lifecycle operations: the
+    /// quiesced daemon's version at acquire time, replaced by the freshly
+    /// installed version once a maintenance action reports an install —
+    /// restore starts that binary, so readiness must validate it.
     expected_version: String,
     restored: bool,
 }
@@ -182,6 +190,19 @@ impl QuiescedDaemonLifecycle {
         self.finish_with_state(target)
     }
 
+    /// Adopts a maintenance action's [`MaintenanceWindowOutcome`], returning
+    /// the action's value. When the action installed a new binary, the daemon
+    /// started by the restore IS that binary, so restore-side readiness must
+    /// expect the installed version rather than the one quiesced at acquire
+    /// time. Without a reported install the same binary restarts and the
+    /// acquire-time version stays authoritative.
+    fn adopt_maintenance_outcome<T>(&mut self, outcome: MaintenanceWindowOutcome<T>) -> T {
+        if let Some(installed_version) = outcome.installed_version {
+            self.expected_version = installed_version;
+        }
+        outcome.value
+    }
+
     pub fn finish_without_restore(mut self) {
         drop(self.lifecycle_lease.take());
         self.restored = true;
@@ -265,15 +286,34 @@ pub fn with_quiesced_installed_service<T>(
     combine_operation_and_restore(operation, operation_result, restore_result)
 }
 
+/// What a maintenance-window action reports back to the surrounding guard:
+/// the action's own value plus the version of the binary the action
+/// installed, when it installed one. `installed_version: None` states that
+/// the running binary was not replaced (or, for delegated package managers,
+/// that the replacement's version could not be determined), so the restore
+/// keeps validating the acquire-time version.
+#[derive(Debug)]
+pub struct MaintenanceWindowOutcome<T> {
+    pub value: T,
+    pub installed_version: Option<String>,
+}
+
 /// Runs `action` inside an exclusive daemon maintenance window, handing it the
 /// lifecycle lease owner token. On Windows the exclusive lease is released
 /// before `action` runs so the running executable can be replaced; other
 /// platforms retain it for the duration and restore the daemon afterward.
+///
+/// `expected_version` is the version of the daemon being quiesced (the
+/// currently running binary). The action reports the version it installed, if
+/// any, through [`MaintenanceWindowOutcome`], so the restore validates the
+/// daemon it actually starts: the freshly installed binary after an install,
+/// the acquire-time binary otherwise. An action that fails reports nothing
+/// and the restore validates the acquire-time version.
 #[hotpath::measure(label = "daemon.service.maintenance_window")]
 pub fn with_exclusive_maintenance_window<T>(
     operation: &str,
     expected_version: &str,
-    action: impl FnOnce(&str) -> Result<T>,
+    action: impl FnOnce(&str) -> Result<MaintenanceWindowOutcome<T>>,
 ) -> Result<T> {
     let mut guard = QuiescedDaemonLifecycle::acquire(operation, expected_version)?;
     let token = guard
@@ -284,7 +324,7 @@ pub fn with_exclusive_maintenance_window<T>(
         })?
         .to_string();
     guard.release_lease_for_executable_replacement();
-    let operation_result = action(&token);
+    let operation_result = action(&token).map(|outcome| guard.adopt_maintenance_outcome(outcome));
     let restore_result = guard.finish_after_update();
     combine_operation_and_restore(operation, operation_result, restore_result)
 }
@@ -428,8 +468,8 @@ impl DaemonServiceSpec {
              [Install]\n\
              WantedBy=default.target\n",
             systemd_escape_env_value(&service_path),
-            self.tracedecay_bin.display(),
-            self.socket_path.display(),
+            systemd_quote_exec_argument_if_needed(&self.tracedecay_bin.display().to_string()),
+            systemd_quote_exec_argument_if_needed(&self.socket_path.display().to_string()),
             remote_arguments,
             DAEMON_RESTART_SEC,
             DAEMON_STOP_TIMEOUT_SECS,
@@ -612,6 +652,25 @@ fn systemd_escape_exec_argument(value: &str) -> String {
             .replace('$', "$$")
             .replace('%', "%%")
     )
+}
+
+/// Quotes one `ExecStart=` argument only when systemd would otherwise
+/// misparse it: whitespace splits words, `"`/`'` open quotes, `\` escapes,
+/// and `%`/`$` expand specifiers and variables (systemd.service(5),
+/// systemd.syntax(7)). Arguments without those characters stay bare, keeping
+/// the rendered unit byte-identical to previously installed units; arguments
+/// that need quoting use the escaped form the quote-aware
+/// `unit_file::systemd_exec_tokens` parser round-trips for every ExecStart
+/// read-back (the socket path and the Remote Brain TLS paths alike).
+fn systemd_quote_exec_argument_if_needed(value: &str) -> String {
+    let needs_quoting = value
+        .chars()
+        .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '\\' | '%' | '$'));
+    if needs_quoting {
+        systemd_escape_exec_argument(value)
+    } else {
+        value.to_owned()
+    }
 }
 
 fn daemon_service_path_env(tracedecay_bin: &Path) -> String {
@@ -1125,7 +1184,32 @@ pub fn start_service(expected_version: &str) -> Result<()> {
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
-    ServiceRunner::current()?.start(&service_path, &socket_path, expected_version)
+    let runner = ServiceRunner::current()?;
+    let pre_start_state = runner.service_state(&socket_path)?;
+    runner.start(&service_path, &socket_path, expected_version)?;
+    if matches!(runner, ServiceRunner::WindowsTask) {
+        // `windows_task::start` already polls authenticated readiness
+        // internally; a second wait would double the start path.
+        return Ok(());
+    }
+    // The service managers report a successful `start` once the daemon is
+    // forked, not once it serves its socket. Starting is idempotent for a
+    // running unit and never changes enablement, so the pre-start enablement
+    // names the state an authenticated daemon must actually reach.
+    let expected = match pre_start_state {
+        DaemonServiceState::RunningEnabled | DaemonServiceState::StoppedEnabled => {
+            DaemonServiceState::RunningEnabled
+        }
+        DaemonServiceState::RunningDisabled | DaemonServiceState::StoppedDisabled => {
+            DaemonServiceState::RunningDisabled
+        }
+        // The unit file exists (checked above), so `service_state` cannot
+        // report `Missing`, and both Unix service managers refuse to start a
+        // masked unit, so a successful start cannot originate from `Masked`;
+        // there is no post-start shape to verify beyond the runner's success.
+        DaemonServiceState::Missing | DaemonServiceState::Masked => return Ok(()),
+    };
+    wait_for_installed_service_state(expected, expected_version)
 }
 
 #[hotpath::measure(label = "daemon.service.stop")]
@@ -1153,20 +1237,27 @@ pub fn wait_for_installed_service_state(
     // before it answers its first initialize, so the restoration window is
     // generous — bounded, with progress visibility — rather than a snap
     // judgement that fails a healthy, still-converging service.
-    //
+    const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(3);
+    wait_for_installed_service_state_with(expected, expected_version, TOTAL_TIMEOUT)
+}
+
+fn wait_for_installed_service_state_with(
+    expected: DaemonServiceState,
+    expected_version: &str,
+    total_timeout: std::time::Duration,
+) -> Result<()> {
     // The bound is a wall-clock deadline, not an attempt count: each attempt
     // calls into `query_daemon_identity`, which itself has a per-probe
     // timeout for a connect-but-never-answer daemon. An attempt-count bound
     // multiplies that per-probe timeout by the attempt count in the worst
     // case, which can stretch total wait time (and the progress-message
-    // cadence) far past what the comment above promises. Bounding by
+    // cadence) far past what the caller's window promises. Bounding by
     // elapsed wall-clock time keeps the overall wait — and how often we
     // report progress — independent of per-probe cost.
-    const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(3);
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
     const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
-    let deadline = std::time::Instant::now() + TOTAL_TIMEOUT;
+    let deadline = std::time::Instant::now() + total_timeout;
     let mut last = installed_service_status_snapshot(expected_version)?;
     let mut last_progress = std::time::Instant::now();
     loop {
