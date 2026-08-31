@@ -171,7 +171,8 @@ mod tests {
     fn cancellation_guard_signals_worker_on_drop() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
-            let _guard = crate::handlers::bounded_search::CancelSearchOnDrop::new(cancelled.clone());
+            let _guard =
+                crate::handlers::bounded_search::CancelSearchOnDrop::new(cancelled.clone());
         }
         assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
     }

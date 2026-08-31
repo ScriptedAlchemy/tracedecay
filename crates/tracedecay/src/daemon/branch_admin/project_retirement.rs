@@ -493,8 +493,8 @@ mod tests {
     ) {
         std::fs::create_dir_all(profile_root).expect("isolated profile root");
         std::fs::create_dir_all(project_root).expect("isolated project root");
-        let project_id =
-            tracedecay_domain::ProjectId::new(project_id.to_owned()).expect("typed project identity");
+        let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
+            .expect("typed project identity");
         let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
             profile_root,
             project_root,
@@ -525,8 +525,8 @@ mod tests {
         crate::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(project_root).expect("isolated sibling project root");
-        let project_id =
-            tracedecay_domain::ProjectId::new(project_id.to_owned()).expect("typed project identity");
+        let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
+            .expect("typed project identity");
         let sibling = runtime
             .sibling_project(project_root, project_id)
             .await
@@ -848,12 +848,8 @@ mod tests {
         let projects = tempfile::tempdir().expect("project roots");
         let idle_project = projects.path().join("idle");
         let replacement_project = projects.path().join("replacement");
-        let (idle_graph, idle_runtime) = isolated_registered_graph(
-            &profile,
-            &idle_project,
-            "project.retirement-idle",
-        )
-        .await;
+        let (idle_graph, idle_runtime) =
+            isolated_registered_graph(&profile, &idle_project, "project.retirement-idle").await;
         let idle_server = crate::mcp::McpServer::new(idle_graph, None).await;
         let idle_lifecycle = idle_server.project_server_response_lifecycle();
         let idle_witness = Arc::downgrade(&idle_server);

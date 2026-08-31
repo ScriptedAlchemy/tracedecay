@@ -60,8 +60,9 @@ pub trait ProjectSemanticActivationExt {
         &self,
     ) -> Option<ProductionSemanticRetrievalConfigurationStoreV1>;
 
-    fn semantic_activation_coordinator(&self)
-    -> Option<Arc<InstalledSemanticActivationCoordination>>;
+    fn semantic_activation_coordinator(
+        &self,
+    ) -> Option<Arc<InstalledSemanticActivationCoordination>>;
 
     fn authorize_semantic_configuration_mutation(
         &self,
@@ -223,8 +224,7 @@ impl ProjectSemanticActivationExt for ProjectConfigurationRuntime {
         trigger: String,
         freshness_vector_digest: ManifestDigest,
         now: UtcMicros,
-    ) -> std::result::Result<SemanticRollbackReceiptV1, SemanticActivationCoordinationErrorV1>
-    {
+    ) -> std::result::Result<SemanticRollbackReceiptV1, SemanticActivationCoordinationErrorV1> {
         let capability = retrieval_profile_mutation_capability(
             self,
             authority,

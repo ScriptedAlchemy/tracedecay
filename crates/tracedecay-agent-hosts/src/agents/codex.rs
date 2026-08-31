@@ -426,10 +426,7 @@ impl AgentIntegration for CodexIntegration {
         // TraceDecay stages the personal marketplace entry; Codex's
         // `plugin remove` never clears it. Leaving it would hold post-uninstall
         // registration at Repairable via [`codex_registration_residue`].
-        remove_codex_marketplace_entry_at(
-            &codex_personal_marketplace_path(&ctx.home),
-            "personal",
-        )?;
+        remove_codex_marketplace_entry_at(&codex_personal_marketplace_path(&ctx.home), "personal")?;
         // `codex plugin remove` deliberately never touches `[hooks.state]`,
         // so the managed trust records written at install/update time would
         // otherwise survive as registration residue and hold uninstall

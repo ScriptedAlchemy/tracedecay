@@ -1,5 +1,8 @@
 //! Canonical retained-memory request and result mapping.
 
+use crate::memory::{
+    MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+};
 use serde_json::Value;
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_application::retained_surfaces::{
@@ -34,9 +37,6 @@ use tracedecay_store::{
     ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryMemoryStatusV1,
-};
-use crate::memory::{
-    MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 
 pub const MAX_RETAINED_FACT_LIMIT: usize = 200;
@@ -308,9 +308,7 @@ pub fn confidence(
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
-pub const fn feedback_action(
-    action: FactFeedbackActionV1,
-) -> ProjectMemoryFactFeedbackActionV1 {
+pub const fn feedback_action(action: FactFeedbackActionV1) -> ProjectMemoryFactFeedbackActionV1 {
     match action {
         FactFeedbackActionV1::Helpful => ProjectMemoryFactFeedbackActionV1::Helpful,
         FactFeedbackActionV1::Unhelpful => ProjectMemoryFactFeedbackActionV1::Unhelpful,

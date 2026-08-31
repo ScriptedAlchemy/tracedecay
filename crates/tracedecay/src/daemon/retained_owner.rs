@@ -23,13 +23,13 @@ mod profile;
 mod session;
 pub(crate) mod session_refresh;
 
+pub(crate) use memory_target::{MemoryTargetAccessV1, open_project_retained_memory_target};
 pub(crate) use tracedecay_application::retained_receipts as receipts;
 pub(crate) use tracedecay_session_memory::memory_mapping;
 pub(crate) use tracedecay_session_memory::memory_mapping::search_page;
 pub(crate) use tracedecay_session_memory::memory_mutation;
 pub(crate) use tracedecay_session_memory::memory_tracking;
 pub(crate) use tracedecay_session_runtime::session_queries;
-pub(crate) use memory_target::{MemoryTargetAccessV1, open_project_retained_memory_target};
 
 pub(crate) use profile::{
     ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1,

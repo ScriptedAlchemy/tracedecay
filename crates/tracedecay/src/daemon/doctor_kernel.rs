@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::PinnedRuntimeConfiguration;
-use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_application::doctor::{
     AdvisoryFeedbackReadV1, CodeIndexMountReadV1, CodeIndexMountStateV1,
     ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
@@ -32,6 +31,7 @@ use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
+use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 
 use super::maintenance::GuardedStoreTelemetryPort;
 use tracedecay_daemon_service::DaemonFeedbackRuntimeRegistrar;

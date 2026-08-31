@@ -26,6 +26,7 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
+use tracedecay_configuration::ConfigurationControlStore;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
@@ -34,7 +35,6 @@ use tracedecay_global_db::configuration::{
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 use tracedecay_semantic_contracts::SemanticConfig;
-use tracedecay_configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_usecases::config::retrieval;
@@ -1184,9 +1184,9 @@ async fn open_runtime_configuration_from_store(
                     Ok(state) => state,
                     // A concurrent open won the swap; adopt what it
                     // published and re-verify it exactly.
-                    Err(
-                        tracedecay_configuration::ConfigurationError::RevisionConflict,
-                    ) => store.current().await.map_err(map_configuration_error)?,
+                    Err(tracedecay_configuration::ConfigurationError::RevisionConflict) => {
+                        store.current().await.map_err(map_configuration_error)?
+                    }
                     Err(error) => return Err(map_configuration_error(error)),
                 };
             }
@@ -1323,9 +1323,7 @@ fn registered_configuration_database_required() -> TraceDecayError {
     )
 }
 
-fn map_configuration_error(
-    error: tracedecay_configuration::ConfigurationError,
-) -> TraceDecayError {
+fn map_configuration_error(error: tracedecay_configuration::ConfigurationError) -> TraceDecayError {
     match error {
         tracedecay_configuration::ConfigurationError::ResetRequired { reason } => {
             TraceDecayError::reset_required("configuration", reason)

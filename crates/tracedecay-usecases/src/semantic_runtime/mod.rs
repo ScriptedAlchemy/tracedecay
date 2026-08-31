@@ -46,7 +46,7 @@ pub use configuration_operation::{
     SemanticEvaluationDiversityCandidateV1, SemanticEvaluationFusionCandidateV1,
     SemanticEvaluationProfileCandidateV1, SemanticEvaluationPublicationSnapshotPortV1,
     SemanticEvaluationPublicationSnapshotV1, SemanticEvaluationRerankCandidateV1,
-    SemanticEvaluationSnapshotPortV1,     SemanticProtectedActivationOperationV1,
+    SemanticEvaluationSnapshotPortV1, SemanticProtectedActivationOperationV1,
     SemanticProtectedRollbackOperationV1,
 };
 pub use configuration_runtime::{

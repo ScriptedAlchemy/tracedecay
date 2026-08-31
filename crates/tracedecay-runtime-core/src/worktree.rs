@@ -73,9 +73,7 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
 /// this binds that authority to their canonical Git common directory.
 /// Independent clones retain distinct locators. Non-Git projects fall back
 /// to their canonical root.
-pub fn locator_digest_for_project(
-    project_root: &Path,
-) -> Result<ManifestDigest, TraceDecayError> {
+pub fn locator_digest_for_project(project_root: &Path) -> Result<ManifestDigest, TraceDecayError> {
     let repository_locator = git_common_dir(project_root).unwrap_or_else(|| {
         project_root
             .canonicalize()

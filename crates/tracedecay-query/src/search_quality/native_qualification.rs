@@ -36,7 +36,9 @@ use super::evaluate::{
     load_default_evaluated_profile_material,
 };
 use super::packaged;
-use super::report::{DirectEvaluationReportV1, PortableNativeQualificationValidationErrorV1, raw_output_digest};
+use super::report::{
+    DirectEvaluationReportV1, PortableNativeQualificationValidationErrorV1, raw_output_digest,
+};
 use super::semantic_native::SemanticNativeStageResultV1;
 
 const PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION: u32 = 1;
@@ -441,8 +443,7 @@ fn redact_genuine_vector_generations(
             .as_mut()
             .ok_or(PackagedNativeQualificationErrorV1::IncompleteNativeEvidence)?;
         for sample in resources.samples.values_mut() {
-            let SemanticNativeStageResultV1::Complete(sample) = sample
-            else {
+            let SemanticNativeStageResultV1::Complete(sample) = sample else {
                 return Err(PackagedNativeQualificationErrorV1::IncompleteNativeEvidence);
             };
             if sample
@@ -473,8 +474,7 @@ fn validate_redacted_vector_generation_shape(
             continue;
         };
         for sample in resources.samples.values() {
-            let SemanticNativeStageResultV1::Complete(sample) = sample
-            else {
+            let SemanticNativeStageResultV1::Complete(sample) = sample else {
                 continue;
             };
             if sample.provenance.vector_generation_id.is_some() {
@@ -998,8 +998,7 @@ fn validate_report_runtime_bindings(
                 .samples
                 .get(scale)
                 .ok_or(PackagedNativeQualificationErrorV1::IncompleteNativeEvidence)?;
-            let SemanticNativeStageResultV1::Complete(sample) = sample
-            else {
+            let SemanticNativeStageResultV1::Complete(sample) = sample else {
                 return Err(PackagedNativeQualificationErrorV1::IncompleteNativeEvidence);
             };
             if sample.provenance.artifact_digest.as_deref()

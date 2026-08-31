@@ -19,20 +19,11 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use tracedecay_query::search_quality::semantic_native::{
-    SemanticChannelAblationV1, SemanticNativeHydrationMeasurementV1, SemanticNativeQueryInputV1,
-    SemanticNativeQueryOutputV1, SemanticNativeQueryStageMeasurementsV1,
-    SemanticNativeRerankInputV1, SemanticNativeResourceEvidenceV1, SemanticNativeResourceSampleV1,
-    SemanticNativeSemanticInputV1, SemanticNativeStageMeasurementV1, SemanticNativeStageResultV1,
-    SemanticProjectionCaseSampleV1, SemanticProjectionCaseV1, evaluate_native_query,
-};
 use tracedecay_application::historical_query::{
     HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
     HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
 };
-use tracedecay_application::{
-    NativeHistoricalBlobReaderV1, ResolvedScope,
-};
+use tracedecay_application::{NativeHistoricalBlobReaderV1, ResolvedScope};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
@@ -81,6 +72,13 @@ use tracedecay_query::retrieval::lexical::{
     LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
+use tracedecay_query::search_quality::semantic_native::{
+    SemanticChannelAblationV1, SemanticNativeHydrationMeasurementV1, SemanticNativeQueryInputV1,
+    SemanticNativeQueryOutputV1, SemanticNativeQueryStageMeasurementsV1,
+    SemanticNativeRerankInputV1, SemanticNativeResourceEvidenceV1, SemanticNativeResourceSampleV1,
+    SemanticNativeSemanticInputV1, SemanticNativeStageMeasurementV1, SemanticNativeStageResultV1,
+    SemanticProjectionCaseSampleV1, SemanticProjectionCaseV1, evaluate_native_query,
+};
 
 use tracedecay_query::search_quality::candidate_output::{
     CorpusDocumentV1, EVALUATION_CACHE_STATE, EVALUATION_MODEL_REVISION,
@@ -94,17 +92,16 @@ pub use tracedecay_query::search_quality::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, DirectEvaluatedProfileMaterialV1,
     EvaluationConcurrencyContractV1, EvaluationExecutionContractV1,
     GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1, IncrementalFixtureV1,
-    OptionalStageMeasurementV1, OptionalStageMeasurementsV1, PRODUCTION_BOUNDARY, ProfileSpecV1,
+    OptionalStageMeasurementV1, OptionalStageMeasurementsV1, PRODUCTION_BOUNDARY,
     ProductionCandidateNativeExecutionAuthorityV1, ProductionCandidateNativeGenerationResourcesV1,
     ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
     ProductionCandidateNativeResourceContextV1, ProductionCandidateOutputV1,
-    ProductionCandidateSemanticProjectionSourcesV1, QueryCandidateRowV1, RankedCandidateRowV1,
-    ResourceMeasurementStatusV1, ResourceSampleV1, WORKLOAD_RELATIVE, WorkloadQueryV1,
-    compute_corpus_digest, compute_corpus_digest_from_embedded_bytes,
+    ProductionCandidateSemanticProjectionSourcesV1, ProfileSpecV1, QueryCandidateRowV1,
+    RankedCandidateRowV1, ResourceMeasurementStatusV1, ResourceSampleV1, WORKLOAD_RELATIVE,
+    WorkloadQueryV1, compute_corpus_digest, compute_corpus_digest_from_embedded_bytes,
     compute_profile_material_digest, compute_workload_digest, direct_evaluated_profile_material,
     load_candidate_workload, load_direct_evaluated_profile_material, validate_workload_for_tuning,
 };
-
 
 mod control;
 use control::ActiveControl;
@@ -115,7 +112,6 @@ use cancellation::prove_cancellation;
 mod environment;
 
 use environment::{hardware_fingerprint, toolchain_fingerprint};
-
 
 #[derive(Clone, Debug)]
 pub struct GenerateCandidateOutputsOptions<'a> {
@@ -364,7 +360,6 @@ fn build_query_projections(
     }
     Ok((lexical, graph))
 }
-
 
 /// The corpora published for one candidate-generation call, memoized by scale.
 ///
@@ -1056,7 +1051,6 @@ fn apply_native_resource_evidence(
     output.native_resources = Some(evidence.clone());
     Ok(())
 }
-
 
 /// Direct production call for one query/profile — used by tests to prove the
 /// generator emits identical candidate bytes.
@@ -2458,7 +2452,6 @@ fn graph_seeds_from_outcomes(
     seeds
 }
 
-
 fn retrieval_request(
     profile_id: &str,
     published: &PublishedCorpus,
@@ -2502,7 +2495,6 @@ fn lexical_projection_profile_digest() -> Result<ManifestDigest, CandidateOutput
     ))?;
     id(&digest)
 }
-
 
 fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<(), CandidateOutputError> {
     let bytes = serde_json::to_vec_pretty(value)

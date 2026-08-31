@@ -57,10 +57,11 @@ pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> 
         })?;
     }
     materialize_git_authority(directory.path())?;
-    let materialized_workload =
-        tracedecay_query::search_quality::load_candidate_workload(&directory.path().join(
-            "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json",
-        ))?;
+    let materialized_workload = tracedecay_query::search_quality::load_candidate_workload(
+        &directory
+            .path()
+            .join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
+    )?;
     if materialized_workload != workload {
         return Err(SearchEvalError::Contract(
             "materialized evaluator workload differs from packaged bytes".to_owned(),

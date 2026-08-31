@@ -765,8 +765,9 @@ mod activation_resource_tests {
 #[cfg(test)]
 mod pairwise_and_native_method_tests {
     use super::{
-        DirectEvaluationStatusV1, DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1,
-        pairwise_query_pairs, semantic_distance_summary, validate_native_measurement_method,
+        DirectEvaluationStatusV1, DirectQueryEvaluationV1, DirectQueryQualityV1,
+        DirectRatioMetricV1, pairwise_query_pairs, semantic_distance_summary,
+        validate_native_measurement_method,
     };
 
     fn diagnostic_query(query_id: &str, first_useful_rank: u32) -> DirectQueryEvaluationV1 {

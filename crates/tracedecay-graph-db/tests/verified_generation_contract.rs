@@ -438,9 +438,7 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
             interruption.store(1, Ordering::SeqCst);
         }
         if self.cas_reports_own_head_as_conflict {
-            return Ok(GraphVerifiedHeadCasOutcomeV1::Conflict {
-                actual: Some(head),
-            });
+            return Ok(GraphVerifiedHeadCasOutcomeV1::Conflict { actual: Some(head) });
         }
         Ok(GraphVerifiedHeadCasOutcomeV1::Advanced(head))
     }
