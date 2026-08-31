@@ -92,11 +92,7 @@ async fn recover_truncated_payload(
     deadline: Option<Instant>,
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
     let payload = tracedecay::daemon::tool_json_payload(&result, tool_name)?;
-    if payload
-        .get("truncated")
-        .and_then(serde_json::Value::as_bool)
-        != Some(true)
-    {
+    if !is_truncation_envelope(&payload) {
         return Ok(payload);
     }
     let handle = payload
@@ -156,11 +152,7 @@ pub(crate) async fn recover_truncated_mcp_result(
     let Ok(payload) = tracedecay::daemon::tool_json_payload(&result, tool_name) else {
         return Ok(result);
     };
-    if payload
-        .get("truncated")
-        .and_then(serde_json::Value::as_bool)
-        != Some(true)
-    {
+    if !is_truncation_envelope(&payload) {
         return Ok(result);
     }
     let recovered =
@@ -227,4 +219,30 @@ pub(crate) fn reject_truncation_envelope(
         _ => format!("daemon tool {tool_name} returned truncated JSON"),
     };
     Err(tracedecay_domain::errors::TraceDecayError::Config { message })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::is_truncation_envelope;
+
+    #[test]
+    fn bounded_tool_coverage_is_not_a_transport_truncation_envelope() {
+        let grep_payload = json!({
+            "results": [],
+            "match_count": 0,
+            "truncated": true,
+            "coverage": { "completeness": "partial" },
+        });
+
+        assert!(!is_truncation_envelope(&grep_payload));
+        assert!(is_truncation_envelope(&json!({
+            "truncated": true,
+            "original_chars": 20_000,
+            "preview_chars": 10_000,
+            "preview": "prefix",
+            "handle": "rh_0123456789abcdef01234567",
+        })));
+    }
 }
