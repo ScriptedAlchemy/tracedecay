@@ -300,8 +300,17 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         message: &SessionMessageRecord,
         payload_rollback: &mut PayloadFileRollback,
     ) -> Result<(), TranscriptPersistenceError> {
-        let mut canonical_message = message.clone();
-        canonical_message.timestamp = Self::normalize_session_message_timestamp(message.timestamp);
+        // Clone-on-normalize: message text can be hundreds of kilobytes, and
+        // most providers already emit in-range timestamps, so the full-record
+        // copy is paid only when the timestamp actually changes.
+        let normalized_timestamp = Self::normalize_session_message_timestamp(message.timestamp);
+        let canonical_message = if normalized_timestamp == message.timestamp {
+            std::borrow::Cow::Borrowed(message)
+        } else {
+            let mut owned = message.clone();
+            owned.timestamp = normalized_timestamp;
+            std::borrow::Cow::Owned(owned)
+        };
         let storage_root = self
             .db_path()
             .parent()
@@ -309,14 +318,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         let raw = raw::upsert_raw_message_with_payload_tracked(
             conn,
             storage_root,
-            &canonical_message,
+            canonical_message.as_ref(),
             payload_rollback,
         )
         .await
         .map_err(|error| TranscriptPersistenceError::storage("upsert LCM raw message", error))?;
         if !Self::upsert_session_message_projection(
             conn,
-            &canonical_message,
+            canonical_message.as_ref(),
             &raw.projection_text,
             raw.projection_metadata_json.as_deref(),
         )
@@ -452,6 +461,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .map_err(|error| error.to_string())
     }
 
+    #[hotpath::measure(label = "sessions.store.transcript.write_batches", future = true)]
     async fn upsert_transcript_batches_inner(
         &self,
         batches: &[TranscriptBatch],
