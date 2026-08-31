@@ -351,12 +351,34 @@ impl AgentIntegration for CodexIntegration {
         components: &[super::host_bundle_v2::HostBundleComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        let _ = components;
-        self.host_registration_paths(home)
+        let mut paths = self.host_registration_paths(home);
+        // `~/.codex/agents` is Core registration surface: current exports plus
+        // the ownership manifest (and prior-manifest direct children) so a
+        // transaction that retires stale exports can still roll them back.
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
+            match tracedecay_automation_runtime::automation::agent_targets::managed_agent_transaction_paths(
+                home,
+            ) {
+                Ok(managed) => paths.extend(managed),
+                // Host I/O ports unregistered: keep non-agent registration
+                // paths rather than inventing an empty agents inventory.
+                Err(_) => {}
+            }
+        }
+        paths
     }
 
     #[hotpath::measure(label = "hosts.agent.codex.plugin_activate")]
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        // `~/.codex/agents` is registration surface, not deployed component
+        // assets: `host_component_registration_paths` declares every generated
+        // export plus the ownership manifest for Core. Activation must refresh
+        // current exports and retire previous-bundle stale ones — otherwise
+        // Core install through the receipt-backed lifecycle never writes them
+        // and never retires them (byte-for-byte rollback then fails).
+        tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
+            &ctx.home,
+        )?;
         if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             let marketplace_name = codex_cached_marketplace_name(&ctx.home);
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
@@ -390,6 +412,19 @@ impl AgentIntegration for CodexIntegration {
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
             plugin_registry::codex_plugin_remove_with(&codex_cli, &ctx.home, &marketplace_name)?;
         }
+        // Managed agent exports are Core registration surface (not artifacts).
+        // Clear them here so uninstall verification can reach Missing and so
+        // a rolled-back deactivate restores the pre-op exports byte-for-byte.
+        tracedecay_automation_runtime::automation::agent_targets::remove_managed_agents(
+            &ctx.home.join(".codex/agents"),
+        )?;
+        // TraceDecay stages the personal marketplace entry; Codex's
+        // `plugin remove` never clears it. Leaving it would hold post-uninstall
+        // registration at Repairable via [`codex_registration_residue`].
+        remove_codex_marketplace_entry_at(
+            &codex_personal_marketplace_path(&ctx.home),
+            "personal",
+        )?;
         // `codex plugin remove` deliberately never touches `[hooks.state]`,
         // so the managed trust records written at install/update time would
         // otherwise survive as registration residue and hold uninstall
