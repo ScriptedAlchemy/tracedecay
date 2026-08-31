@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::semantic_code::SemanticLifecycleVerifiedReadyEventV1;
+use tracedecay_semantic_contracts::SemanticLifecycleVerifiedReadyEventV1;
 use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticActivationCoordinationErrorV1,
 };
@@ -33,9 +33,7 @@ pub struct DaemonSemanticActivationReconcilerV1 {
 impl DaemonSemanticActivationReconcilerV1 {
     pub fn spawn(
         coordinator: Arc<ProductionSemanticActivationCoordinatorV1>,
-        mut lifecycle_events: tokio::sync::watch::Receiver<
-            crate::semantic_code::SemanticLifecycleVerifiedReadyEventV1,
-        >,
+        mut lifecycle_events: tokio::sync::watch::Receiver<SemanticLifecycleVerifiedReadyEventV1>,
     ) -> Self {
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();

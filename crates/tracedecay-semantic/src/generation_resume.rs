@@ -4,12 +4,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1};
+use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
 use crate::fastembed_adapter::FastEmbedEmbeddingRuntime;
 use crate::runtime_query::CurrentSemanticQueryRuntimeV1;
-use crate::{
-    PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1, SemanticRuntimeService,
-};
+use crate::{PreparedSemanticRuntimeCommitV1, SemanticRuntimeService};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticProjectionResumeOutcomeV1 {
@@ -82,6 +81,7 @@ pub(super) fn install_candidate_on_success(
 #[cfg(test)]
 mod tests {
     use super::{SemanticProjectionResumeOutcomeV1, completed_batch_offset};
+    use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
     #[test]
     fn published_resume_is_distinct_from_a_large_batch_count() {
@@ -95,7 +95,7 @@ mod tests {
     fn completed_batch_offset_rejects_progress_beyond_the_canonical_plan() {
         assert_eq!(
             completed_batch_offset(SemanticProjectionResumeOutcomeV1::CompletedBatches(2), 1),
-            Err(super::SemanticRuntimeScheduleFailureV1::Publication)
+            Err(SemanticRuntimeScheduleFailureV1::Publication)
         );
         assert_eq!(
             completed_batch_offset(SemanticProjectionResumeOutcomeV1::AlreadyPublished, 1),

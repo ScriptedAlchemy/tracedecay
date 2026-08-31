@@ -19,6 +19,9 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
+};
 
 use super::{
     VectorRetentionInventoryV1, apply_code_generation_retention, classify_vector_readable_sources,
@@ -214,7 +217,7 @@ fn record_paging_census(observations: &StoreTelemetrySamplingRegistry, project_r
 
 #[test]
 fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
-    let selection = crate::config::SemanticProfileSelection {
+    let selection = SemanticProfileSelection {
         profile_id: "profile.retention-fixture".to_owned(),
         accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
             "sha256:{}",
@@ -224,19 +227,19 @@ fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
         artifact_digest: format!("sha256:{}", "b".repeat(64)),
         artifact_path: PathBuf::from("/fixture/semantic-model"),
     };
-    let disabled = crate::config::SemanticConfig {
-        selected_model: Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+    let disabled = SemanticConfig {
+        selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
         auto_download: false,
         active_profile: None,
         rollback_profile: None,
-        resources: crate::config::SemanticResourceCeilings::default(),
+        resources: SemanticResourceCeilings::default(),
     };
     assert!(
         super::semantic_retrieval_profiles_disabled(&disabled),
         "no committed retrieval profile is the genuine Plan 20 default-off state"
     );
 
-    let active = crate::config::SemanticConfig {
+    let active = SemanticConfig {
         active_profile: Some(selection.clone()),
         ..disabled.clone()
     };
@@ -245,7 +248,7 @@ fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
         "a committed active profile expects a seated coordinator: stay retryable"
     );
 
-    let rollback_only = crate::config::SemanticConfig {
+    let rollback_only = SemanticConfig {
         rollback_profile: Some(selection),
         ..disabled
     };

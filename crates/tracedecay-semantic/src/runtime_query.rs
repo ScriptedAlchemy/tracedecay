@@ -10,12 +10,13 @@ use tracedecay_query::retrieval::ports::RetrievalPortError;
 use tracedecay_query::retrieval::semantic::{
     EphemeralQueryEmbeddingV1, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
 };
+use tracedecay_semantic_contracts::SemanticGenerationPointerV1;
 
 use super::fastembed_adapter::{
     BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, EmbeddingSession,
     SemanticExecutionAuthority, SemanticExecutionInterruptionV1,
 };
-use super::runtime_service::{SemanticGenerationPointerV1, SemanticRuntimeService};
+use super::runtime_service::SemanticRuntimeService;
 use super::session_pool::SessionAcquireError;
 
 /// Owned factory for request-scoped query embedders.

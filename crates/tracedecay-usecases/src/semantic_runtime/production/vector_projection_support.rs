@@ -9,10 +9,10 @@ use tracedecay_domain::{
     ProjectionBatchRequestV1, ProjectionOperationV1, ProjectionOutcomeV1,
 };
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
 use tracedecay_semantic::projector::{
     PreparedVectorGenerationV1, ProjectedChunkVectorV1, VectorTombstoneV1, split_projection_request,
 };
+use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
 use crate::store::vector_generations::{
     GraphVectorGenerationStoreV1, VectorGenerationBuildIdV1, VectorGenerationPublicationV1,

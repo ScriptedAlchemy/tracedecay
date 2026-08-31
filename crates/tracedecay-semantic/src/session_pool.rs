@@ -953,18 +953,20 @@ pub mod test_support {
     // alike).
     use super::super::artifact_store::AdmittedArtifactV1;
     use super::super::fastembed_adapter::AdmittedProjectionArtifactV1;
-    use super::super::manifest::{
-        ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
-        DeviceClassV1, EmbeddingNormalizationV1 as ManifestNormalizationV1,
-        EmbeddingPoolingV1 as ManifestPoolingV1, EmbeddingPrecisionV1 as ManifestPrecisionV1,
-        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1, ModelArtifactManifestV1,
-        PlatformTargetV1, ResourceCeilingV1, RuntimeCompatibilityV1, SemanticMetricV1,
-        Sha256DigestHex, TruncationPolicyV1, TruncationSideV1, UpstreamSourceV1,
-    };
     use tracedecay_domain::{
-        ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-        EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-        EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId,
+        ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingDeviceClassV1 as DeviceClassV1,
+        EmbeddingMetricV1, EmbeddingMetricV1 as SemanticMetricV1, EmbeddingNormalizationV1,
+        EmbeddingNormalizationV1 as ManifestNormalizationV1, EmbeddingPoolingV1,
+        EmbeddingPoolingV1 as ManifestPoolingV1, EmbeddingPrecisionV1,
+        EmbeddingPrecisionV1 as ManifestPrecisionV1, EmbeddingProjectionKeyV1,
+        EmbeddingTruncationSideV1, EmbeddingTruncationSideV1 as TruncationSideV1, ManifestDigest,
+        PrivacyDomainId,
+    };
+    use tracedecay_semantic_contracts::{
+        ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
+        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1, ModelArtifactManifestV1,
+        PlatformTargetV1, ResourceCeilingV1, RuntimeCompatibilityV1, Sha256DigestHex,
+        TruncationPolicyV1, UpstreamSourceV1,
     };
 
     pub fn domain_id<T>(value: &str) -> T
@@ -1198,13 +1200,13 @@ mod tests {
         BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, FakeEmbeddingRuntime,
         FakeEmbeddingSession, ManualCancellation, ProjectionArtifactPinV1, RuntimeFailureKindV1,
     };
-    use super::super::manifest::{ArtifactProfileKindV1, Sha256DigestHex};
     use super::test_support::*;
     use super::*;
     use tracedecay_domain::{
         EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
         EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId,
     };
+    use tracedecay_semantic_contracts::{ArtifactProfileKindV1, Sha256DigestHex};
 
     fn fake_pool(
         max_sessions: usize,

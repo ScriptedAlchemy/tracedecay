@@ -13,6 +13,7 @@ use tracedecay_domain::{
     EphemeralSanitizedQueryViewV1, OptionalStagePublicStatus, RetrievalRequest, RetrieverKind,
     SemanticRetrievalContinuationV1,
 };
+use tracedecay_semantic_contracts::RerankCompatibilityPinsV1;
 
 use super::CodeIndexSchedulerRegistryV1;
 use super::query_runtime::{
@@ -20,7 +21,7 @@ use super::query_runtime::{
 };
 use super::registry::unique_mounted_for_scope;
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
-use crate::config::retrieval::{RerankCompatibilityPinsV1, SemanticCompatibilityPinsV1};
+use crate::config::retrieval::SemanticCompatibilityPinsV1;
 use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;

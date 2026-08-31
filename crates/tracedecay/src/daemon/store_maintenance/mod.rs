@@ -15,6 +15,7 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 use tracedecay_runtime_core::branch::BranchAdminAction;
+use tracedecay_semantic_contracts::SemanticConfig;
 
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
@@ -275,7 +276,7 @@ pub(super) async fn run_semantic_vector_generation_retention(
 /// configuration commits neither an active nor a rollback retrieval profile.
 /// A committed profile with an unseated activation coordinator is a transient
 /// (or genuinely degraded) state that must stay retryable, not a quiet pin.
-fn semantic_retrieval_profiles_disabled(semantic: &crate::config::SemanticConfig) -> bool {
+fn semantic_retrieval_profiles_disabled(semantic: &SemanticConfig) -> bool {
     semantic.active_profile.is_none() && semantic.rollback_profile.is_none()
 }
 
@@ -1823,9 +1824,7 @@ enum RetainedCompactionStore<'a> {
 }
 
 impl RetainedCompactionStore<'_> {
-    async fn storage_page_counts(
-        &self,
-    ) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
+    async fn storage_page_counts(&self) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
         match self {
             Self::Registered(database) => database.storage_page_counts().await,
             Self::Project(database) => database.storage_page_counts().await,

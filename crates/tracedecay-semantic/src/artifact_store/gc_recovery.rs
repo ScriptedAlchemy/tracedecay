@@ -1,5 +1,7 @@
 //! Garbage collection and crash-recovery flows for ModelArtifactStore.
 
+use tracedecay_semantic_contracts::ModelArtifactManifestV1;
+
 use super::*;
 
 impl ModelArtifactStore {

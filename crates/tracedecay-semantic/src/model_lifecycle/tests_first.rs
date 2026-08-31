@@ -13,12 +13,18 @@
     #[cfg(feature = "semantic-fastembed")]
     use std::time::Instant;
 
-    use super::super::manifest::{
-        ArtifactMemberPinV1, ArtifactPackageMemberV1, ArtifactProfileKindV1, DeviceClassV1,
+    use tracedecay_domain::{
+        EmbeddingDeviceClassV1 as DeviceClassV1, EmbeddingMetricV1 as SemanticMetricV1,
         EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
-        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1, PlatformTargetV1,
-        ResourceCeilingV1, RuntimeCompatibilityV1, SemanticMetricV1, Sha256DigestHex,
-        TruncationPolicyV1, TruncationSideV1, UpstreamSourceV1,
+        EmbeddingTruncationSideV1 as TruncationSideV1,
+    };
+    use tracedecay_semantic_contracts::{
+        ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
+        DEFAULT_FASTEMBED_MODEL_ID, MODEL_ARTIFACT_MANIFEST_SCHEMA_V1,
+        ModelArtifactManifestPayloadV1, ModelArtifactManifestV1, PlatformTargetV1,
+        RerankCompatibilityPinsV1, RerankerArtifactLifecycleStatusV1, ResourceCeilingV1,
+        RuntimeCompatibilityV1, SemanticModelLifecycleStateV1, SemanticResourceCeilings,
+        Sha256DigestHex, TruncationPolicyV1, UpstreamSourceV1,
     };
     use super::super::model_catalog::{CatalogMemberPinV1, CatalogSourceV1};
 

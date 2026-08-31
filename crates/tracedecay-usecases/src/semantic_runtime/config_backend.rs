@@ -1,11 +1,12 @@
 use crate::config::retrieval::RetrievalProfileAuditOperationV1;
 use std::sync::{Arc, Mutex};
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
 use super::ports::{
     CommittedRetrievalProfileStateV1, RetrievalProfileActivationObserverErrorV1,
     RetrievalProfileActivationObserverV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
     SemanticConfigurationBackendErrorV1, SemanticConfigurationPinV1,
-    SemanticConfigurationTransitionV1, SemanticFallbackReasonV1, SemanticLinkedTransitionV1,
+    SemanticConfigurationTransitionV1, SemanticLinkedTransitionV1,
     SemanticRetrievalConfigurationPortV1, SemanticRollbackCommandV1, SemanticRollbackReceiptV1,
     SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1, SemanticRuntimeContractErrorV1,
     SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStateV1,

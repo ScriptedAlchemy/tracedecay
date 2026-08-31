@@ -1,4 +1,5 @@
 use super::*;
+use tracedecay_semantic_contracts::SemanticRuntimeScheduleStatusV1;
 
 #[test]
 fn semantic_profile_transition_coordinates_only_when_a_profile_changes() {
@@ -39,7 +40,7 @@ async fn semantic_scheduler_is_daemon_private_retained_state_not_a_wire_operatio
             .await
             .expect("retained semantic scheduler")
             .status(),
-        tracedecay_semantic::SemanticRuntimeScheduleStatusV1::Unavailable
+        SemanticRuntimeScheduleStatusV1::Unavailable
     );
     assert!(matches!(
         registrar.register(project_root, handle).await,

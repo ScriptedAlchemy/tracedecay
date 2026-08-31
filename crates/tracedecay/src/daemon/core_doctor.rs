@@ -7,8 +7,8 @@ use tokio::time::{Duration, timeout};
 
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
-use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_domain::errors::Result;
+use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 #[path = "core_doctor_schema.rs"]
@@ -467,7 +467,10 @@ fn doctor_semantic_runtime_status(
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> serde_json::Value {
     serde_json::to_value(
-        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(project_path, configuration),
+        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
+            project_path,
+            configuration,
+        ),
     )
     .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
@@ -572,9 +575,12 @@ mod doctor_runtime_route_tests {
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
     use tracedecay_daemon_protocol::DaemonClientIdentity;
     use tracedecay_mcp::McpTransport;
+    use tracedecay_semantic_contracts::{
+        SemanticFallbackReasonV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
+        SemanticModelRemediationV1,
+    };
     use tracedecay_usecases::semantic_runtime::{
-        SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
-        SemanticRuntimeStatusV1,
+        SemanticConfigurationPinV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
     };
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -905,7 +911,7 @@ mod doctor_runtime_route_tests {
         assert!(matches!(
             status.state,
             tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
-                reason: tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::ConfigurationUnavailable,
+                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
             }
         ));
     }
@@ -929,14 +935,14 @@ mod doctor_runtime_route_tests {
 
     fn lifecycle_status(
         selected_model: Option<&str>,
-        state: Option<tracedecay_semantic::SemanticModelLifecycleStateV1>,
-    ) -> tracedecay_semantic::SemanticModelLifecycleStatusV1 {
-        tracedecay_semantic::SemanticModelLifecycleStatusV1 {
+        state: Option<SemanticModelLifecycleStateV1>,
+    ) -> SemanticModelLifecycleStatusV1 {
+        SemanticModelLifecycleStatusV1 {
             selected_model: selected_model.map(str::to_owned),
             auto_download: false,
             catalog_model_ids: Vec::new(),
             state,
-            remediation: tracedecay_semantic::SemanticModelRemediationV1 {
+            remediation: SemanticModelRemediationV1 {
                 retry: false,
                 remove: false,
                 rollback: false,
@@ -959,15 +965,13 @@ mod doctor_runtime_route_tests {
         let digest = "b".repeat(64);
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
-            Some(
-                tracedecay_semantic::SemanticModelLifecycleStateV1::Downloading {
-                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                    revision: "rev".to_owned(),
-                    artifact_digest: digest,
-                    bytes_received: 4,
-                    bytes_total: 16,
-                },
-            ),
+            Some(SemanticModelLifecycleStateV1::Downloading {
+                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                revision: "rev".to_owned(),
+                artifact_digest: digest,
+                bytes_received: 4,
+                bytes_total: 16,
+            }),
         );
         let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
             Some(seated_generic_unavailable()),
@@ -994,15 +998,13 @@ mod doctor_runtime_route_tests {
         let digest = "c".repeat(64);
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
-            Some(
-                tracedecay_semantic::SemanticModelLifecycleStateV1::Failed {
-                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                    revision: "rev".to_owned(),
-                    artifact_digest: digest,
-                    detail: "artifact verify failed".to_owned(),
-                    retryable: false,
-                },
-            ),
+            Some(SemanticModelLifecycleStateV1::Failed {
+                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                revision: "rev".to_owned(),
+                artifact_digest: digest,
+                detail: "artifact verify failed".to_owned(),
+                retryable: false,
+            }),
         );
         let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
             Some(seated_generic_unavailable()),
@@ -1033,15 +1035,13 @@ mod doctor_runtime_route_tests {
         );
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
-            Some(
-                tracedecay_semantic::SemanticModelLifecycleStateV1::Downloading {
-                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                    revision: "rev".to_owned(),
-                    artifact_digest: "d".repeat(64),
-                    bytes_received: 1,
-                    bytes_total: 2,
-                },
-            ),
+            Some(SemanticModelLifecycleStateV1::Downloading {
+                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                revision: "rev".to_owned(),
+                artifact_digest: "d".repeat(64),
+                bytes_received: 1,
+                bytes_total: 2,
+            }),
         );
         let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
             Some(broken.clone()),

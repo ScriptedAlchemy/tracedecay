@@ -58,13 +58,14 @@ use tracedecay_domain::{
     EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
     EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId,
 };
+use tracedecay_semantic_contracts::{
+    ArtifactMemberRoleV1, ArtifactProfileKindV1, SemanticResourceCeilings, Sha256DigestHex,
+};
 
 use super::artifact_store::{
     AdmittedArtifactV1, FASTEMBED_RUNTIME_BUILD_REVISION_V1, FASTEMBED_RUNTIME_FAMILY_V1,
 };
-use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1, Sha256DigestHex};
 use super::model_catalog::{CatalogMemberPinV1, CatalogedFastEmbedModelV1, catalog_package_digest};
-use crate::SemanticResourceCeilings;
 
 mod pins;
 pub use pins::ProjectionArtifactPinV1;
@@ -1610,13 +1611,13 @@ pub(crate) mod lifecycle_test_support {
 
     use sha2::{Digest, Sha256};
     use tracedecay_domain::{ChunkerRevision, PrivacyDomainId};
+    use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
     use super::super::model_catalog::{
         CatalogMemberPinV1, CatalogSourceV1, CatalogedFastEmbedModelV1,
     };
     use super::AdmittedProjectionArtifactV1;
     use super::EmbedError;
-    use crate::SemanticResourceCeilings;
 
     pub(crate) struct LifecycleInstallFixtureV1 {
         pub(crate) install: tempfile::TempDir,

@@ -593,6 +593,7 @@ fn redundancy_authority_from_committed(
 mod tests {
     use super::project_semantic_activation_gate;
     use std::path::Path;
+    use tracedecay_semantic_contracts::{SemanticFallbackReasonV1, SemanticGenerationPointerV1};
 
     /// End-to-end status coherence: a concurrent activation that mutates the
     /// receipt under the project activation gate is never interleaved into
@@ -604,18 +605,16 @@ mod tests {
         use super::{SemanticProjectRedundancyStateV1, redundancy_states};
         use crate::semantic_runtime::{
             SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticActivationRequestV1,
-            SemanticConfigurationPinV1, SemanticFallbackReasonV1,
-            SemanticRetainedVectorGenerationsV1, SemanticRuntimeStateV1,
-            project_semantic_application_status, register_project_semantic_runtime,
-            unregister_project_semantic_runtime,
+            SemanticConfigurationPinV1, SemanticRetainedVectorGenerationsV1,
+            SemanticRuntimeStateV1, project_semantic_application_status,
+            register_project_semantic_runtime, unregister_project_semantic_runtime,
         };
         use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
         use tracedecay_domain::{
             CodeGenerationId, ManifestDigest, UtcMicros, VectorGenerationIdV1,
         };
         use tracedecay_semantic::{
-            DaemonSemanticRuntimeHandleV1, PreparedSemanticRuntimeCommitV1,
-            SemanticGenerationPointerV1, SemanticRuntimeWorkV1,
+            DaemonSemanticRuntimeHandleV1, PreparedSemanticRuntimeCommitV1, SemanticRuntimeWorkV1,
         };
 
         let project_root = Path::new("/tmp/tracedecay-activation-snapshot-gate").to_path_buf();

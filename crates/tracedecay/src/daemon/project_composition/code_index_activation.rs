@@ -5,6 +5,7 @@
 //! reachable from the published MCP servers.
 
 use super::*;
+use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
 /// Bundled so the builder keeps one argument list instead of thirteen
@@ -16,7 +17,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) store_root: PathBuf,
     pub(super) semantic_runtime: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
     pub(super) semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-    pub(super) semantic_resources: crate::config::SemanticResourceCeilings,
+    pub(super) semantic_resources: SemanticResourceCeilings,
     pub(super) native_graph_activation: bool,
     pub(super) scope: tracedecay_application::ResolvedScope,
     pub(super) route_registered: Arc<AtomicBool>,

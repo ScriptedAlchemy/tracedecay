@@ -26,13 +26,14 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
     ProfileCodeIndexWorkerConfigurationV1,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_semantic_contracts::SemanticConfig;
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
@@ -69,14 +70,6 @@ pub use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
 /// versioned unit the daemon backstop reads, mirroring the semantic key. Absent
 /// or unset resolves to [`RetentionConfig::default`]'s bounded safe policy.
 pub const SYNC_RETENTION_SETTING_KEY: &str = "sync.retention.v1";
-
-/// Canonical pinned semantic runtime configuration.
-///
-/// Re-exported from the global configuration authority so historical
-/// `crate::config::<item>` paths retain nominal type identity.
-pub use tracedecay_global_db::configuration::semantic::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
-};
 
 /// The shared generated/vendored segment list and its membership test moved
 /// into `tracedecay_runtime_core::config`: the extracted migration inventory

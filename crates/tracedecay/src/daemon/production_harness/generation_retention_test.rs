@@ -16,6 +16,9 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_semantic::projector::{PreparedVectorGenerationV1, ProjectedChunkVectorV1};
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticResourceCeilings,
+};
 
 use super::journey_test_support::git;
 use super::*;
@@ -524,12 +527,12 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
         )
         .expect("semantic runtime setting key"),
         value: tracedecay_domain::configuration::ConfigurationValueV1::Text(
-            serde_json::to_string(&crate::config::SemanticConfig {
-                selected_model: Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+            serde_json::to_string(&SemanticConfig {
+                selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
                 auto_download: false,
                 active_profile: None,
                 rollback_profile: None,
-                resources: crate::config::SemanticResourceCeilings::default(),
+                resources: SemanticResourceCeilings::default(),
             })
             .expect("disabled semantic runtime JSON"),
         ),
@@ -642,7 +645,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
     seed_distribution_fixture(&lifecycle_root, &fixture_root, &lifecycle);
     lifecycle
-        .select_model(Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID), true)
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select production semantic model");
     lifecycle
         .acquire_blocking_for_tests()

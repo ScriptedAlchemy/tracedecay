@@ -129,6 +129,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }

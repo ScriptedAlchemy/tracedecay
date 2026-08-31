@@ -1,11 +1,15 @@
 //! I/O and validation primitives for the model artifact store.
 
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_semantic_contracts::{
+    ArtifactMemberRoleV1, ArtifactPackageMemberV1, ResourceCeilingV1, RuntimeCompatibilityV1,
+    Sha256DigestHex,
+};
 
 use super::*;
 
 pub(super) fn check_compatibility(
-    required: &super::super::manifest::RuntimeCompatibilityV1,
+    required: &RuntimeCompatibilityV1,
     env: &RuntimeEnvironmentV1,
 ) -> Result<(), SemanticCapabilityDisabledV1> {
     if required.runtime != env.runtime || required.build_revision != env.build_revision {
