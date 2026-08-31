@@ -1566,8 +1566,7 @@ dependencies = [
 [[package]]
 name = "fastembed"
 version = "5.17.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c8600c9ec79b51d60c19911fe14eac04fe9c2895e87d2a3e80e2213d645a32"
+source = "git+https://github.com/ScriptedAlchemy/fastembed-rs.git?rev=ad2af71090615b4e36bb106ce19207f84cbe38e0#ad2af71090615b4e36bb106ce19207f84cbe38e0"
 dependencies = [
  "anyhow",
  "hf-hub",
