@@ -913,9 +913,13 @@ pub(super) async fn handle_dashboard(
                 Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>
             });
             crate::hooks::install_dashboard_hook_readiness_projection()?;
+            // One fetch covers the served bundle and the advertised build
+            // version; both come from the registered product runtime.
+            let product_runtime = crate::product_runtime::product_runtime()?;
             let state = build_state_with_automation_reconciler(
                 retained_cg.clone(),
                 DashboardStateCompositionV1 {
+                    build_version: product_runtime.build_version(),
                     project_graph_resolver: dashboard_project_graph_resolver,
                     code_graph_read_admission,
                     code_graph_projection_read_port,
@@ -944,7 +948,12 @@ pub(super) async fn handle_dashboard(
             )
             .await?;
 
-            let app = router(retained_cg.as_ref(), state, crate::dashboard::spa_router()).await?;
+            let app = router(
+                retained_cg.as_ref(),
+                state,
+                crate::dashboard::spa_router(product_runtime.dashboard()),
+            )
+            .await?;
             let (listener, addr) = bind_dashboard(&host, port).await?;
             let app = tracedecay_dashboard_api::with_dashboard_http_admission(app, addr);
             let url = format!("http://{addr}/");

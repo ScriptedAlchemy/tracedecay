@@ -11,17 +11,15 @@ readme = "../../README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "semantic-search"]
 categories = ["development-tools", "command-line-utilities"]
 # Explicit source-archive whitelist retained for local distribution validation.
-# Frontend sources are deliberately excluded: build.rs embeds the canonical
-# prebuilt dashboard/app-dist. Keep that packaged-asset check in build.rs in
-# sync if the dashboard entries below change.
+# Frontend sources and the prebuilt dashboard/app-dist are deliberately
+# excluded: the CLI package stages and embeds the dashboard bundle and
+# registers it into this library at process start.
 include = [
     "/CHANGELOG.md",
     "/LICENSE",
     "/README.md",
     "/rust-toolchain.toml",
     "/.cargo/config.toml",
-    "/build.rs",
-    "/build-support/dashboard_manifest.rs",
     "/src/**",
     "/benches/**",
     "/examples/**",
@@ -57,7 +55,6 @@ include = [
     "/plugin/cursor-native-extension/LICENSE",
     "/plugin/cursor-native-extension/embedded/extension.js",
     "/vendor/**",
-    "/dashboard/app-dist/**",
     "/dashboard/hermes-wrapper/manifest.json",
     "/dashboard/hermes-wrapper/plugin_api.py",
     "/dashboard/hermes-wrapper/src/**",
@@ -497,9 +494,6 @@ windows = { version = "0.62.2", features = [
     "Win32_System_TaskScheduler",
     "Win32_System_Variant",
 ] }
-
-[build-dependencies]
-serde_json = "1"
 
 [dev-dependencies]
 sha2 = "0.11"

@@ -246,6 +246,10 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     async fn open(profile_root: PathBuf, project: Option<(PathBuf, ProjectId)>) -> Result<Self> {
+        // Fixture compositions run in-process daemon code that reads the
+        // registered product runtime (handshakes, initialize payloads);
+        // test processes only ever register the canonical fixture.
+        crate::product_runtime::register_fixture_product_runtime();
         ensure_process_background_cpu_authority()?;
         prepare_host_admission_test_profile_root(&profile_root)?;
         if let Some((project_root, project_id)) = project.as_ref() {

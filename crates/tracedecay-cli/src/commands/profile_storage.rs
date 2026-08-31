@@ -626,7 +626,7 @@ fn handle_backup_profile(
         )?;
     let backup = tracedecay_daemon_control::with_quiesced_installed_service(
         "complete profile backup",
-        tracedecay::version::build_version(),
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
         |lifecycle| {
             tracedecay_maintenance::profile_backup::create_complete_profile_backup(
                 &profile_root,

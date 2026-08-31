@@ -66,7 +66,7 @@ async fn run_foreground_loopback(
         "managed daemon database ownership",
     )?;
     let mut authority =
-        authority::DaemonAuthority::acquire(&profile_root, &requested, binary_version())?;
+        authority::DaemonAuthority::acquire(&profile_root, &requested, binary_version()?)?;
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         authority.record().epoch,
@@ -471,7 +471,7 @@ async fn run_foreground_unix(
         "managed daemon database ownership",
     )?;
     let mut authority =
-        authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version())?;
+        authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version()?)?;
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         authority.record().epoch,

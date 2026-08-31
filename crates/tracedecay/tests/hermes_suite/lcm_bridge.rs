@@ -66,6 +66,11 @@ spec.loader.exec_module(plugin)
 /// Part of the bundle fingerprint: changing it changes the rendered plugin.
 const FIXTURE_TRACEDECAY_BIN: &str = "/usr/local/bin/tracedecay";
 
+/// Generator commit baked into the rendered bundle's provenance header. A
+/// fixed 40-hex fixture value keeps the shared cross-process install
+/// byte-stable regardless of the checkout that runs the suite.
+const GENERATOR_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 /// One unpinned Hermes install shared by every check.
 ///
 /// The embedded host catalog regenerates the full plugin from embedded
@@ -139,6 +144,7 @@ fn render_install(home: &Path) -> std::io::Result<()> {
         &[HostBundleComponentV1::Core],
         0,
         FIXTURE_TRACEDECAY_BIN,
+        GENERATOR_COMMIT,
     )
     .map_err(std::io::Error::other)?;
     for component in component_set.component_set.components {

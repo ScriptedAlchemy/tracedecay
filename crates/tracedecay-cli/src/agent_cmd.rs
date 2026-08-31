@@ -212,6 +212,7 @@ fn canonical_host_component_set_with_tracedecay_bin(
         &requested,
         now_unix,
         tracedecay_bin,
+        crate::product_runtime::PRODUCT_FULL_SHA,
     )
     .map(Some)
     .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
@@ -1094,8 +1095,13 @@ fn feedback_rollback_inputs(
     )?;
     let component = selected_feedback_component(&previous)?;
     let mut target =
-        tracedecay::agents::host_bundle_registry::verified_embedded_host_bundle(host, component, 0)
-            .map_err(
+        tracedecay::agents::host_bundle_registry::verified_embedded_host_bundle(
+            host,
+            component,
+            0,
+            crate::product_runtime::PRODUCT_FULL_SHA,
+        )
+        .map_err(
                 |error| tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
                         "compiled feedback route is unavailable for {agent_id}: {error}"

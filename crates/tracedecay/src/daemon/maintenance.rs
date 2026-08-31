@@ -1588,7 +1588,9 @@ impl MaintenanceCoordinator {
 /// here — the gauge and the admission cell consume the same sample.
 #[cfg(target_os = "linux")]
 fn record_process_resident_memory_gauge() {
-    if let Some(bytes) = read_linux_process_resident_bytes() {
+    if let Some(bytes) =
+        tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
+    {
         hotpath::gauge!("daemon.process.resident_bytes").set(bytes);
         let state = tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1()
             .publish_observed_resident_bytes(bytes);
@@ -1612,19 +1614,6 @@ fn record_process_resident_memory_gauge() {
 
 #[cfg(not(target_os = "linux"))]
 fn record_process_resident_memory_gauge() {}
-
-#[cfg(target_os = "linux")]
-fn read_linux_process_resident_bytes() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let kib = status
-        .lines()
-        .find_map(|line| line.strip_prefix("VmRSS:"))?
-        .split_whitespace()
-        .next()?
-        .parse::<u64>()
-        .ok()?;
-    kib.checked_mul(1_024)
-}
 
 #[derive(Debug)]
 struct ColdStorePageMetrics {

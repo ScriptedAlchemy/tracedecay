@@ -183,11 +183,17 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
 pub fn verified_embedded_default_host_component_set(
     host: HostKindV1,
     now_unix: u64,
+    generator_commit: &str,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
     if let Some(reason) = unsupported_host_component_set_reason(host) {
         return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
     }
-    verified_embedded_host_component_set(host, &default_components(host), now_unix)
+    verified_embedded_host_component_set(
+        host,
+        &default_components(host),
+        now_unix,
+        generator_commit,
+    )
 }
 
 /// Build a canonical one-or-more component set. A caller selecting
@@ -197,6 +203,7 @@ pub fn verified_embedded_host_component_set(
     host: HostKindV1,
     requested_components: &[HostBundleComponentV1],
     now_unix: u64,
+    generator_commit: &str,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
     let tracedecay_bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
     verified_embedded_host_component_set_with_tracedecay_bin(
@@ -204,6 +211,7 @@ pub fn verified_embedded_host_component_set(
         requested_components,
         now_unix,
         &tracedecay_bin,
+        generator_commit,
     )
 }
 
@@ -213,6 +221,7 @@ pub fn verified_embedded_host_component_set_with_tracedecay_bin(
     requested_components: &[HostBundleComponentV1],
     now_unix: u64,
     tracedecay_bin: &str,
+    generator_commit: &str,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
     if let Some(reason) = unsupported_host_component_set_reason(host) {
         return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
@@ -238,6 +247,7 @@ pub fn verified_embedded_host_component_set_with_tracedecay_bin(
             component,
             now_unix,
             tracedecay_bin,
+            generator_commit,
         )?;
         if !bundle
             .manifest
@@ -268,9 +278,16 @@ pub fn verified_embedded_host_bundle(
     host: HostKindV1,
     component: HostBundleComponentV1,
     now_unix: u64,
+    generator_commit: &str,
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
     let tracedecay_bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-    verified_embedded_host_bundle_with_tracedecay_bin(host, component, now_unix, &tracedecay_bin)
+    verified_embedded_host_bundle_with_tracedecay_bin(
+        host,
+        component,
+        now_unix,
+        &tracedecay_bin,
+        generator_commit,
+    )
 }
 
 #[hotpath::measure(label = "host_bundle_registry_verify")]
@@ -279,13 +296,14 @@ fn verified_embedded_host_bundle_with_tracedecay_bin(
     component: HostBundleComponentV1,
     _now_unix: u64,
     tracedecay_bin: &str,
+    generator_commit: &str,
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
     require_component_capabilities(host, component)
         .map_err(|_| HostBundleRegistryError::Incompatible)?;
     let host_descriptor = host.descriptor();
     let host_name = host_descriptor.slug();
     let component_name = component_name(component);
-    let assets = component_assets(host, component, tracedecay_bin)?;
+    let assets = component_assets(host, component, tracedecay_bin, generator_commit)?;
     let artifacts = assets
         .iter()
         .map(|(path, bytes)| HostBundleArtifactV1 {
@@ -373,6 +391,7 @@ fn component_assets(
     host: HostKindV1,
     component: HostBundleComponentV1,
     tracedecay_bin: &str,
+    generator_commit: &str,
 ) -> Result<Vec<(String, Vec<u8>)>, HostBundleRegistryError> {
     // Use Hermes' canonical rendered inventory with the installed binary path.
     // Rendering the inventory with the `"__TRACEDECAY_BIN__"` sentinel
@@ -382,7 +401,7 @@ fn component_assets(
     // installed path (for example `./target/release/tracedecay reinstall`) and
     // corrupted every Hermes transaction.
     if (host, component) == (HostKindV1::Hermes, HostBundleComponentV1::Core) {
-        let files = super::hermes::rendered_plugin_files(tracedecay_bin)
+        let files = super::hermes::rendered_plugin_files(tracedecay_bin, generator_commit)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
             .into_iter()
@@ -705,7 +724,13 @@ mod tests {
                 "tracedecay/opencode.registration.json",
             ),
         ] {
-            let bundle = verified_embedded_host_bundle(host, component, 0).unwrap();
+            let bundle = verified_embedded_host_bundle(
+                host,
+                component,
+                0,
+                crate::agents::TEST_GENERATOR_COMMIT,
+            )
+            .unwrap();
             assert!(!bundle.contents.is_empty());
             assert!(
                 bundle
@@ -729,6 +754,7 @@ mod tests {
             HostKindV1::CursorDesktop,
             HostBundleComponentV1::Agent,
             installed,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         let extension = assets
@@ -755,6 +781,7 @@ mod tests {
             HostKindV1::OpenCode,
             HostBundleComponentV1::ContextMcp,
             installed,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         let registration = assets
@@ -776,9 +803,13 @@ mod tests {
 
     #[test]
     fn kimi_component_renderer_eliminates_every_hook_v2_placeholder() {
-        let bundle =
-            verified_embedded_host_bundle(HostKindV1::KimiCode, HostBundleComponentV1::Core, 0)
-                .unwrap();
+        let bundle = verified_embedded_host_bundle(
+            HostKindV1::KimiCode,
+            HostBundleComponentV1::Core,
+            0,
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .unwrap();
         for content in bundle.contents {
             let body = String::from_utf8(content.bytes).unwrap();
             for placeholder in [
@@ -807,6 +838,7 @@ mod tests {
             HostBundleComponentV1::Core,
             0,
             &bin,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
 
@@ -841,7 +873,13 @@ mod tests {
             std::collections::BTreeMap::new();
         for host in HostKindV1::ALL {
             for component in default_components(host) {
-                let bundle = verified_embedded_host_bundle(host, component, 0).unwrap();
+                let bundle = verified_embedded_host_bundle(
+                    host,
+                    component,
+                    0,
+                    crate::agents::TEST_GENERATOR_COMMIT,
+                )
+                .unwrap();
                 for artifact in &bundle.manifest.artifacts {
                     if let Some(other) = owner_by_path.insert(artifact.relative_path.clone(), host)
                         && other != host
@@ -867,6 +905,7 @@ mod tests {
             HostBundleComponentV1::Core,
             0,
             &bin,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
 
@@ -901,6 +940,7 @@ mod tests {
             HostKindV1::OpenCode,
             HostBundleComponentV1::Core,
             &installed,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(assets.len(), 1);
@@ -920,12 +960,15 @@ mod tests {
     #[test]
     fn hermes_catalog_assets_match_canonical_renderer() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let rendered = super::super::hermes::rendered_plugin_files(&bin).unwrap();
+        let rendered =
+            super::super::hermes::rendered_plugin_files(&bin, crate::agents::TEST_GENERATOR_COMMIT)
+                .unwrap();
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::Hermes,
             HostBundleComponentV1::Core,
             0,
             &bin,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
 
@@ -956,8 +999,13 @@ mod tests {
             .unwrap_or_default();
         let installed =
             super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let assets =
-            component_assets(HostKindV1::Hermes, HostBundleComponentV1::Core, &installed).unwrap();
+        let assets = component_assets(
+            HostKindV1::Hermes,
+            HostBundleComponentV1::Core,
+            &installed,
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .unwrap();
         let tools = assets
             .iter()
             .find(|(path, _)| path == ".hermes/plugins/tracedecay/tools.py")
@@ -986,7 +1034,13 @@ mod tests {
         let expected_catalog_digest = catalog.canonical_authority_digest().unwrap();
         for host in HostKindV1::ALL {
             for component in default_components(host) {
-                let bundle = verified_embedded_host_bundle(host, component, 0).unwrap();
+                let bundle = verified_embedded_host_bundle(
+                    host,
+                    component,
+                    0,
+                    crate::agents::TEST_GENERATOR_COMMIT,
+                )
+                .unwrap();
                 assert_eq!(bundle.manifest.catalog_digest, expected_catalog_digest);
                 assert_eq!(
                     bundle.manifest.integration_manifest_digest,
@@ -1024,7 +1078,15 @@ mod tests {
         for host in RECEIPT_BACKED_HOST_KINDS {
             let bundles = default_components(host)
                 .into_iter()
-                .map(|component| verified_embedded_host_bundle(host, component, 0).unwrap())
+                .map(|component| {
+                    verified_embedded_host_bundle(
+                        host,
+                        component,
+                        0,
+                        crate::agents::TEST_GENERATOR_COMMIT,
+                    )
+                    .unwrap()
+                })
                 .collect::<Vec<_>>();
             let mut paths = std::collections::BTreeSet::new();
             for bundle in bundles {
@@ -1037,8 +1099,12 @@ mod tests {
 
     #[test]
     fn canonical_component_set_uses_one_verifier_for_default_and_explicit_selection() {
-        let default_set = verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0)
-            .expect("OpenCode has a compiled default set");
+        let default_set = verified_embedded_default_host_component_set(
+            HostKindV1::OpenCode,
+            0,
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .expect("OpenCode has a compiled default set");
         assert_eq!(
             default_set
                 .component_set
@@ -1058,6 +1124,7 @@ mod tests {
             HostKindV1::OpenCode,
             &[HostBundleComponentV1::ContextMcp],
             0,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .expect("explicit component uses the same set transaction input");
         assert_eq!(single.component_set.components.len(), 1);
@@ -1077,7 +1144,12 @@ mod tests {
             (HostKindV1::KimiCode, HostBundleComponentV1::OperatorMcp),
         ] {
             assert_eq!(
-                verified_embedded_host_bundle(host, unsupported, 0),
+                verified_embedded_host_bundle(
+                    host,
+                    unsupported,
+                    0,
+                    crate::agents::TEST_GENERATOR_COMMIT
+                ),
                 Err(HostBundleRegistryError::Incompatible)
             );
         }
@@ -1107,9 +1179,21 @@ mod tests {
                 vec![HostBundleComponentV1::ContextMcp]
             );
             assert_eq!(unsupported_host_component_set_reason(host), None);
-            assert!(verified_embedded_default_host_component_set(host, 0).is_ok());
+            assert!(
+                verified_embedded_default_host_component_set(
+                    host,
+                    0,
+                    crate::agents::TEST_GENERATOR_COMMIT
+                )
+                .is_ok()
+            );
             assert_eq!(
-                verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
+                verified_embedded_host_component_set(
+                    host,
+                    &[HostBundleComponentV1::Core],
+                    0,
+                    crate::agents::TEST_GENERATOR_COMMIT
+                ),
                 Err(HostBundleRegistryError::Incompatible)
             );
         }
@@ -1134,6 +1218,7 @@ mod tests {
             HostBundleComponentV1::ContextMcp,
             0,
             "/opt/tracedecay-distinct/bin/tracedecay",
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(bundle.contents.len(), 1);
@@ -1156,7 +1241,8 @@ mod tests {
             verified_embedded_host_component_set(
                 HostKindV1::Kiro,
                 &[HostBundleComponentV1::Core],
-                0
+                0,
+                crate::agents::TEST_GENERATOR_COMMIT
             ),
             Err(HostBundleRegistryError::Incompatible)
         );
@@ -1190,6 +1276,7 @@ mod tests {
             HostBundleComponentV1::ContextMcp,
             0,
             installed,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(bundle.contents.len(), 1);
@@ -1217,7 +1304,8 @@ mod tests {
             verified_embedded_host_component_set(
                 HostKindV1::Copilot,
                 &[HostBundleComponentV1::Core],
-                0
+                0,
+                crate::agents::TEST_GENERATOR_COMMIT
             ),
             Err(HostBundleRegistryError::Incompatible)
         );
@@ -1250,6 +1338,7 @@ mod tests {
             HostBundleComponentV1::ContextMcp,
             0,
             installed,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         let rendered = super::super::gemini::rendered_extension_files(installed).unwrap();
@@ -1294,7 +1383,8 @@ mod tests {
             verified_embedded_host_component_set(
                 HostKindV1::Gemini,
                 &[HostBundleComponentV1::Core],
-                0
+                0,
+                crate::agents::TEST_GENERATOR_COMMIT
             ),
             Err(HostBundleRegistryError::Incompatible)
         );
@@ -1307,11 +1397,16 @@ mod tests {
             Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
         );
         for outcome in [
-            verified_embedded_default_host_component_set(HostKindV1::CursorCloud, 0),
+            verified_embedded_default_host_component_set(
+                HostKindV1::CursorCloud,
+                0,
+                crate::agents::TEST_GENERATOR_COMMIT,
+            ),
             verified_embedded_host_component_set(
                 HostKindV1::CursorCloud,
                 &[HostBundleComponentV1::Core],
                 0,
+                crate::agents::TEST_GENERATOR_COMMIT,
             ),
         ] {
             assert_eq!(
@@ -1343,8 +1438,12 @@ mod tests {
 
     #[test]
     fn opencode_component_set_carries_lsp_policy_and_hook_guidance_delivery() {
-        let component_set =
-            verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0).unwrap();
+        let component_set = verified_embedded_default_host_component_set(
+            HostKindV1::OpenCode,
+            0,
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .unwrap();
         let registration = component_set
             .component_set
             .components
@@ -1373,7 +1472,12 @@ mod tests {
 
     #[test]
     fn kimi_rendered_bundle_registers_native_scout_lifecycle_events() {
-        let kimi = verified_embedded_default_host_component_set(HostKindV1::KimiCode, 0).unwrap();
+        let kimi = verified_embedded_default_host_component_set(
+            HostKindV1::KimiCode,
+            0,
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .unwrap();
         let manifest = kimi
             .component_set
             .components

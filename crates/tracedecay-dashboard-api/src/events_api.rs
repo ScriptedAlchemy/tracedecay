@@ -944,6 +944,7 @@ pub(crate) async fn dashboard_state_fixture(
     std::fs::create_dir_all(&dashboard_root).expect("fixture dashboard root");
 
     let state = DashboardState {
+        build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         project_id: Some(project_identity.as_str().to_owned()),
         resolved_scope: crate::scope::resolve_dashboard_scope(
             &project_root,

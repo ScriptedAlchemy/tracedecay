@@ -293,27 +293,34 @@ impl DaemonEngine {
     pub(super) async fn client_version_skew_to_log(
         &self,
         handshake: &DaemonHandshake,
-    ) -> Option<String> {
-        let skew = client_version_skew(&handshake.client_version, binary_version())?;
+    ) -> Result<Option<String>> {
+        let Some(skew) = client_version_skew(&handshake.client_version, binary_version()?) else {
+            return Ok(None);
+        };
         let mut logged = self.logged_client_version_skews.lock().await;
-        logged.insert(skew.clone()).then_some(skew)
+        Ok(logged.insert(skew.clone()).then_some(skew))
     }
 
     /// Logs a `daemon_version_skew` event when this handshake's client runs a
     /// different binary version, deduped per distinct client version.
-    pub(super) async fn log_client_version_skew(&self, handshake: &DaemonHandshake) {
-        let Some(client_version) = self.client_version_skew_to_log(handshake).await else {
-            return;
+    pub(super) async fn log_client_version_skew(
+        &self,
+        handshake: &DaemonHandshake,
+    ) -> Result<()> {
+        let Some(client_version) = self.client_version_skew_to_log(handshake).await? else {
+            return Ok(());
         };
-        let hint = version_skew_action(binary_version(), &client_version).to_string();
+        let daemon_version = binary_version()?;
+        let hint = version_skew_action(daemon_version, &client_version).to_string();
         log_daemon_event(
             "daemon_version_skew",
             &[
-                ("daemon_version", binary_version().to_string()),
+                ("daemon_version", daemon_version.to_string()),
                 ("client_version", client_version),
                 ("hint", hint),
             ],
         );
+        Ok(())
     }
 
     /// Claims the one catalog-refresh notification for this client in the

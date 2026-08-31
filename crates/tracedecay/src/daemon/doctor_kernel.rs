@@ -985,6 +985,14 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             };
             let host_project_root = project_root.clone();
             let host_components_root = profile_root.join("host-components");
+            // Staleness comparison against the installed plugins' provenance
+            // headers requires this binary's exact generator commit.
+            let generator_commit = crate::product_runtime::product_runtime()
+                .map_err(|_| ApplicationContractError::Inconsistent {
+                    field: "registered product runtime source provenance",
+                })?
+                .source()
+                .full_sha;
             let host_scan = tokio::task::spawn_blocking(move || {
                 hotpath::measure_block!("daemon.doctor.host_scan", {
                     host_home
@@ -997,6 +1005,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                             crate::agents::inspect_receipt_backed_host_components(
                                 &context,
                                 &host_components_root,
+                                generator_commit,
                             )
                             .as_ref()
                             .map_or(

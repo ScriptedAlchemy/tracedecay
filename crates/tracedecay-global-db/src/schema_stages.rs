@@ -548,6 +548,20 @@ pub async fn ensure_registered_schema_for_admission(
         .map_err(|error| {
             global_db_operation_error("initialize observation projection indexes", error)
         })?;
+    // Stores installed before the LCM status indexes existed are already at
+    // the current LCM schema version, so the in-transaction LCM stage above
+    // returned without touching them. Each build is one idempotent
+    // authority-revalidated batch outside the shared schema transaction: a
+    // real-scale index build over the raw-message store gets the long lease
+    // instead of holding every other admission stage open.
+    for sql in tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL {
+        installation
+            .execute_authority_revalidated_batch(sql)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize LCM status performance indexes", error)
+            })?;
+    }
     validate_authority_schema_contract(installation).await?;
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
@@ -868,6 +882,15 @@ pub async fn ensure_attached_registered_schema(
             .await?;
         transaction.execute_batch(sql).await.map_err(|error| {
             global_db_operation_error("initialize observation projection indexes", error)
+        })?;
+        transaction.commit().await?;
+    }
+    for sql in tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL {
+        let transaction = database
+            .begin_bulk_write_transaction("install LCM status performance index")
+            .await?;
+        transaction.execute_batch(sql).await.map_err(|error| {
+            global_db_operation_error("initialize LCM status performance indexes", error)
         })?;
         transaction.commit().await?;
     }

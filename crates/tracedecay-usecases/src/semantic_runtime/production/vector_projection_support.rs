@@ -42,10 +42,16 @@ pub(super) fn projection_input_bytes(
 /// Commit an already-embedded evaluation generation in the same page size
 /// production uses. A one-shot corpus commit exceeds the durable stage batch
 /// bound (`MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH` / mutation budget).
+///
+/// The prepared corpus is borrowed and each page is reconstructed only when
+/// its commit runs, then dropped: the additional live float set is one page,
+/// never a second copy of the corpus (the whole-corpus materialization this
+/// pages over is the evaluation journey's own retained projection).
+#[hotpath::measure(label = "semantic.evaluation.commit_paged", future = true)]
 pub(super) async fn commit_evaluation_prepared_generation(
     store: &GraphVectorGenerationStoreV1,
     build: &VectorGenerationBuildIdV1,
-    prepared: PreparedVectorGenerationV1,
+    prepared: &PreparedVectorGenerationV1,
     canonical_chunks: &[Arc<CodeSearchChunkV1>],
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<(), SemanticRuntimeScheduleFailureV1> {
@@ -60,18 +66,14 @@ pub(super) async fn commit_evaluation_prepared_generation(
     let mut checkpoint = None;
     if pages.len() <= 1 {
         store
-            .commit_batch(build, None, prepared, cancellation)
+            .commit_batch(build, None, prepared.clone(), cancellation)
             .await
             .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         return Ok(());
     }
-    let mut prepared = EvaluationPreparedPageIndexV1::new(prepared)?;
-    let mut prepared_pages = Vec::with_capacity(pages.len());
+    let mut index = EvaluationPreparedPageIndexV1::new(prepared)?;
     for page in pages {
-        prepared_pages.push(evaluation_prepared_page(&mut prepared, page.request)?);
-    }
-    prepared.finish()?;
-    for page in prepared_pages {
+        let page = evaluation_prepared_page(&mut index, page.request)?;
         checkpoint = Some(
             store
                 .commit_batch(build, checkpoint.as_ref(), page, Arc::clone(&cancellation))
@@ -79,37 +81,43 @@ pub(super) async fn commit_evaluation_prepared_generation(
                 .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
         );
     }
+    index.finish()?;
     Ok(())
 }
 
-struct EvaluationPreparedPageIndexV1 {
-    embedding_key: AdmittedEmbeddingProjectionKeyV1,
-    vectors: BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
-    tombstones: BTreeMap<CodeSearchChunkId, VectorTombstoneV1>,
+/// Borrowed row index over one prepared corpus. Pages consume entries so a
+/// row can serve exactly one page and [`Self::finish`] can prove nothing was
+/// left unrequested; the corpus itself is never copied.
+struct EvaluationPreparedPageIndexV1<'corpus> {
+    embedding_key: &'corpus AdmittedEmbeddingProjectionKeyV1,
+    vectors: BTreeMap<&'corpus CodeSearchChunkId, &'corpus ProjectedChunkVectorV1>,
+    tombstones: BTreeMap<&'corpus CodeSearchChunkId, &'corpus VectorTombstoneV1>,
 }
 
-impl EvaluationPreparedPageIndexV1 {
-    fn new(prepared: PreparedVectorGenerationV1) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
+impl<'corpus> EvaluationPreparedPageIndexV1<'corpus> {
+    fn new(
+        prepared: &'corpus PreparedVectorGenerationV1,
+    ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
         let mut vectors = BTreeMap::new();
-        for vector in prepared.vectors {
-            let chunk_id = vector.chunk_id.clone();
-            if vectors.insert(chunk_id.clone(), vector).is_some() {
+        for vector in &prepared.vectors {
+            if vectors.insert(&vector.chunk_id, vector).is_some() {
                 return Err(SemanticRuntimeScheduleFailureV1::projection(format!(
-                    "evaluation paging received duplicate prepared vector {chunk_id}"
+                    "evaluation paging received duplicate prepared vector {}",
+                    vector.chunk_id
                 )));
             }
         }
         let mut tombstones = BTreeMap::new();
-        for tombstone in prepared.tombstones {
-            let chunk_id = tombstone.chunk_id.clone();
-            if tombstones.insert(chunk_id.clone(), tombstone).is_some() {
+        for tombstone in &prepared.tombstones {
+            if tombstones.insert(&tombstone.chunk_id, tombstone).is_some() {
                 return Err(SemanticRuntimeScheduleFailureV1::projection(format!(
-                    "evaluation paging received duplicate prepared tombstone {chunk_id}"
+                    "evaluation paging received duplicate prepared tombstone {}",
+                    tombstone.chunk_id
                 )));
             }
         }
         Ok(Self {
-            embedding_key: prepared.embedding_key,
+            embedding_key: &prepared.embedding_key,
             vectors,
             tombstones,
         })
@@ -130,20 +138,27 @@ impl EvaluationPreparedPageIndexV1 {
     }
 }
 
+/// Reconstruct one page-sized `PreparedVectorGenerationV1`, cloning only the
+/// rows this page names out of the borrowed corpus.
+#[hotpath::measure(label = "semantic.evaluation.page")]
 fn evaluation_prepared_page(
-    prepared: &mut EvaluationPreparedPageIndexV1,
+    prepared: &mut EvaluationPreparedPageIndexV1<'_>,
     page_request: ProjectionBatchRequestV1,
 ) -> Result<PreparedVectorGenerationV1, SemanticRuntimeScheduleFailureV1> {
     let mut vectors = Vec::new();
     let mut tombstones = Vec::new();
     let mut decisions = Vec::new();
     for change in &page_request.changes.added_or_changed {
-        let mut vector = prepared.vectors.remove(&change.chunk_id).ok_or_else(|| {
-            SemanticRuntimeScheduleFailureV1::projection(format!(
-                "evaluation page is missing prepared vector {}",
-                change.chunk_id
-            ))
-        })?;
+        let mut vector = prepared
+            .vectors
+            .remove(&change.chunk_id)
+            .ok_or_else(|| {
+                SemanticRuntimeScheduleFailureV1::projection(format!(
+                    "evaluation page is missing prepared vector {}",
+                    change.chunk_id
+                ))
+            })?
+            .clone();
         vector.source_manifest_digest = page_request.changes.manifest_digest.clone();
         decisions.push(ChunkProjectionDecisionV1 {
             chunk_id: change.chunk_id.clone(),
@@ -168,7 +183,8 @@ fn evaluation_prepared_page(
                     "evaluation page is missing prepared tombstone {}",
                     change.chunk_id
                 ))
-            })?;
+            })?
+            .clone();
         decisions.push(ChunkProjectionDecisionV1 {
             chunk_id: change.chunk_id.clone(),
             prior_chunk_digest: change.prior_digest.clone(),
@@ -180,7 +196,8 @@ fn evaluation_prepared_page(
         tombstones.push(tombstone);
     }
     for change in &page_request.changes.reused {
-        if let Some(mut vector) = prepared.vectors.remove(&change.chunk_id) {
+        if let Some(vector) = prepared.vectors.remove(&change.chunk_id) {
+            let mut vector = vector.clone();
             vector.source_manifest_digest = page_request.changes.manifest_digest.clone();
             decisions.push(ChunkProjectionDecisionV1 {
                 chunk_id: change.chunk_id.clone(),
@@ -220,10 +237,13 @@ mod tests {
     use super::*;
     use tracedecay_code_index::projection::expected_request_digest;
     use tracedecay_domain::{
-        ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision, CodeGenerationId,
-        ContentDigest, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-        EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-        EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId, ProjectionReplayReasonV1,
+        BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
+        CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, ContentDigest,
+        EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
+        EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
+        FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
+        PrivacyDomainId, ProjectionReplayReasonV1, SanitizerRevision, SensitivityDecision,
+        SensitivityLevelV1, SourceSpan,
     };
 
     fn id<T>(value: &str) -> T
@@ -493,8 +513,8 @@ mod tests {
     fn indexed_page_reconstruction_is_byte_equal_to_the_reference_algorithm() {
         let prepared = prepared_fixture();
         let expected = reference_page(&prepared, prepared.request.clone());
-        let mut index = EvaluationPreparedPageIndexV1::new(prepared.clone())
-            .expect("duplicate-free prepared index");
+        let mut index =
+            EvaluationPreparedPageIndexV1::new(&prepared).expect("duplicate-free prepared index");
         let actual = evaluation_prepared_page(&mut index, prepared.request.clone())
             .expect("indexed page reconstruction");
         index.finish().expect("page consumes every prepared row");
@@ -509,14 +529,190 @@ mod tests {
     fn indexed_page_reconstruction_rejects_duplicates_and_unrequested_rows() {
         let mut duplicate = prepared_fixture();
         duplicate.vectors.push(duplicate.vectors[0].clone());
-        assert!(EvaluationPreparedPageIndexV1::new(duplicate).is_err());
+        assert!(EvaluationPreparedPageIndexV1::new(&duplicate).is_err());
 
         let extra = prepared_fixture();
         let page_request = request(&[], &[("chunk.deleted", 'c')], &[]);
         let mut index =
-            EvaluationPreparedPageIndexV1::new(extra).expect("duplicate-free extra fixture");
+            EvaluationPreparedPageIndexV1::new(&extra).expect("duplicate-free extra fixture");
         let _ = evaluation_prepared_page(&mut index, page_request)
             .expect("page with deliberately unrequested vectors");
         assert!(index.finish().is_err());
+    }
+
+    fn canonical_chunk(
+        chunk_id: &str,
+        generation: &CodeGenerationId,
+        digest: char,
+        ordinal: u32,
+    ) -> Arc<CodeSearchChunkV1> {
+        let text = format!("canonical chunk body {ordinal}");
+        Arc::new(CodeSearchChunkV1 {
+            id: id(chunk_id),
+            anchor: CodeSearchChunkAnchorV1 {
+                generation_id: generation.clone(),
+                file_occurrence_id: FileOccurrenceId::new(format!("{chunk_id}.rs"))
+                    .expect("file fixture"),
+                symbol_occurrence_id: None,
+                parent_chunk_id: None,
+                source_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: u64::try_from(text.len()).expect("fixture span"),
+                },
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                ordinal: 0,
+            },
+            content_digest: content_digest(digest),
+            language_descriptor_revision: LanguageDescriptorRevision::new("rust.v1")
+                .expect("language fixture"),
+            chunker_revision: id::<ChunkerRevision>("chunker.v1"),
+            sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("sanitizer fixture"),
+            sensitivity: SensitivityDecision {
+                level: SensitivityLevelV1::Public,
+                policy_revision: PolicyRevisionId::new("policy.v1").expect("policy fixture"),
+            },
+            exact_terms: Vec::new(),
+            subtokens: Vec::new(),
+            sanitized_text: BoundedSanitizedText::new(&text).expect("sanitized fixture"),
+        })
+    }
+
+    /// Committing lazily reconstructed pages publishes byte-identical vector
+    /// content to committing the whole prepared corpus in one batch: same
+    /// generation identity, same rows. Only execution evidence (per-batch
+    /// receipts and the checkpoint) legitimately differs. Tombstone and
+    /// reused-lane page reconstruction is proven byte-exactly by
+    /// `indexed_page_reconstruction_is_byte_equal_to_the_reference_algorithm`.
+    #[test]
+    fn paged_commit_publishes_identical_content_to_the_unpaged_commit() {
+        use crate::store::vector_generations::{
+            VectorGenerationPlanV1, VectorGenerationStateMachineV1,
+        };
+
+        let embedding = embedding();
+        let added = (0..6)
+            .map(|ordinal| format!("chunk.added.{ordinal:02}"))
+            .collect::<Vec<_>>();
+        let added_specs = added
+            .iter()
+            .map(|chunk_id| (chunk_id.as_str(), None, 'b'))
+            .collect::<Vec<_>>();
+        let request = request(&added_specs, &[], &[]);
+        let canonical_chunks = added
+            .iter()
+            .enumerate()
+            .map(|(ordinal, chunk_id)| {
+                canonical_chunk(
+                    chunk_id,
+                    &request.changes.to_generation,
+                    'b',
+                    u32::try_from(ordinal).expect("fixture ordinal"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let vectors = added
+            .iter()
+            .enumerate()
+            .map(|(ordinal, chunk_id)| {
+                vector(&embedding, &request, chunk_id, 'b', 0.125 + ordinal as f32)
+            })
+            .collect::<Vec<_>>();
+        let decisions = vectors
+            .iter()
+            .map(|vector| ChunkProjectionDecisionV1 {
+                chunk_id: vector.chunk_id.clone(),
+                prior_chunk_digest: None,
+                current_chunk_digest: Some(vector.chunk_digest.clone()),
+                operation: ProjectionOperationV1::Added,
+                outcome: ProjectionOutcomeV1::Applied,
+                output_digest: Some(vector.output_digest.clone()),
+            })
+            .collect::<Vec<_>>();
+        let receipt = build_batch_receipt(&request, &decisions).expect("corpus receipt");
+        let prepared = PreparedVectorGenerationV1 {
+            embedding_key: embedding.clone(),
+            request,
+            receipt,
+            vectors,
+            tombstones: Vec::new(),
+        };
+        let plan = VectorGenerationPlanV1 {
+            target_projection_key: embedding.projection_key().clone(),
+            source_generation: prepared.request.changes.to_generation.clone(),
+            source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
+            expected_chunk_ids: prepared
+                .vectors
+                .iter()
+                .map(|vector| vector.chunk_id.clone())
+                .collect::<Vec<_>>()
+                .into(),
+            base_generation: None,
+        };
+
+        let mut unpaged = VectorGenerationStateMachineV1::new();
+        let unpaged_build = unpaged
+            .begin_generation(plan.clone())
+            .expect("unpaged build");
+        unpaged
+            .commit_batch(&unpaged_build, None, prepared.clone())
+            .expect("one whole-corpus commit");
+        let unpaged_publication = unpaged
+            .publish_generation(&unpaged_build)
+            .expect("unpaged publication");
+
+        // Two encoder groups per page (inference batch size 8 from the
+        // fixture would keep everything on one page, so page by pairs).
+        let pages = split_projection_request(&prepared.request, &canonical_chunks, 2, 2, 1 << 20)
+            .expect("paged split");
+        assert!(
+            pages.len() > 1,
+            "the fixture must actually split into multiple pages"
+        );
+        let mut index =
+            EvaluationPreparedPageIndexV1::new(&prepared).expect("borrowed corpus index");
+        let mut paged = VectorGenerationStateMachineV1::new();
+        let paged_build = paged.begin_generation(plan).expect("paged build");
+        let mut checkpoint = None;
+        for page in pages {
+            let page = evaluation_prepared_page(&mut index, page.request)
+                .expect("lazily reconstructed page");
+            checkpoint = Some(
+                paged
+                    .commit_batch(&paged_build, checkpoint.as_ref(), page)
+                    .expect("paged commit"),
+            );
+        }
+        index.finish().expect("every prepared row served one page");
+        let paged_publication = paged
+            .publish_generation(&paged_build)
+            .expect("paged publication");
+
+        assert_eq!(
+            paged_publication.generation_id,
+            unpaged_publication.generation_id
+        );
+        assert_eq!(
+            paged_publication.manifest_digest,
+            unpaged_publication.manifest_digest
+        );
+        let paged_generation = paged
+            .generation(&paged_publication.generation_id)
+            .expect("paged generation");
+        let unpaged_generation = unpaged
+            .generation(&unpaged_publication.generation_id)
+            .expect("unpaged generation");
+        assert_eq!(
+            serde_json::to_vec(paged_generation.vectors()).expect("paged rows"),
+            serde_json::to_vec(unpaged_generation.vectors()).expect("unpaged rows"),
+            "paged and unpaged publications carry byte-identical vector rows"
+        );
+        assert_eq!(
+            paged_generation.tombstone_digests(),
+            unpaged_generation.tombstone_digests()
+        );
+        assert!(
+            paged_generation.receipts().len() > unpaged_generation.receipts().len(),
+            "execution evidence is per batch by design"
+        );
     }
 }

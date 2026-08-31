@@ -547,7 +547,10 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
                     "capabilities": { "tools": {} },
                     "serverInfo": {
                         "name": "sentinel-proxy-first-daemon",
-                        "version": tracedecay::version::build_version()
+                        // The fixture build version: the value only needs to
+                        // round-trip through the proxy, not match the child.
+                        "version": tracedecay::product_runtime::register_fixture_product_runtime()
+                            .build_version()
                     }
                 }
             });

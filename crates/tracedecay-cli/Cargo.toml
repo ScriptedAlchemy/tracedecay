@@ -6,6 +6,17 @@ edition.workspace = true
 description = "TraceDecay command-line interface and daemon binary"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
+# Packaged-crate whitelist. `/dashboard/app-dist/**` is staged into the crate
+# directory by release packaging (the distribution gate validates it); the
+# packaged-crate mode in build.rs embeds it from there, mirroring the old
+# root-crate arrangement.
+include = [
+    "/build.rs",
+    "/build-support/**",
+    "/src/**",
+    "/tests/**",
+    "/dashboard/app-dist/**",
+]
 
 [[bin]]
 name = "tracedecay"
@@ -253,3 +264,5 @@ ignored = ["fs2"]
 
 [build-dependencies]
 logo-art = "0.2"
+serde_json = "1"
+sha2 = "0.11"

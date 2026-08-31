@@ -1425,6 +1425,7 @@ mod tests {
             &default_components(HostKindV1::CursorDesktop),
             0,
             tracedecay_bin,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .expect("the packaged Cursor Desktop component set must verify")
     }
@@ -1584,6 +1585,7 @@ mod tests {
                 project_path: project.path().to_path_buf(),
             },
             lifecycle.path(),
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .expect("Doctor must inspect the transaction receipts through production registration");
         assert_eq!(
@@ -1622,7 +1624,11 @@ mod tests {
         assert_eq!(std::fs::read(&user_config).unwrap(), user_config_bytes);
 
         assert_eq!(
-            verified_embedded_default_host_component_set(HostKindV1::CursorCloud, 0),
+            verified_embedded_default_host_component_set(
+                HostKindV1::CursorCloud,
+                0,
+                crate::agents::TEST_GENERATOR_COMMIT
+            ),
             Err(HostBundleRegistryError::HostComponentSetUnavailable {
                 host: HostKindV1::CursorCloud,
                 reason: HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported,
@@ -1717,6 +1723,7 @@ mod tests {
                     project_path: project.path().to_path_buf(),
                 },
                 lifecycle.path(),
+                crate::agents::TEST_GENERATOR_COMMIT,
             )
             .expect("Doctor must inspect the adopted bundle through its new receipts");
             assert_eq!(

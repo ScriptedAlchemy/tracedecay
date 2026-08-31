@@ -29,9 +29,6 @@ on:
 permissions:
   contents: read
 
-env:
-  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -131,6 +128,10 @@ jobs:
     name: MCP conformance smoke
     needs: dashboard-assets
     runs-on: ubuntu-latest
+    # The only job here that compiles tracedecay-cli, so the skip flag is
+    # scoped to it instead of the whole workflow.
+    env:
+      TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
     # Cold `cargo build -p tracedecay-cli --bin tracedecay` plus the SDK smoke has been
     # cancelled at exactly 20m during the compile step. 30 leaves
     # headroom without hiding a hung linker.
@@ -146,6 +147,13 @@ jobs:
 
       - name: Validate downloaded dashboard bundle
         run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+
+      # Skip-mode CLI builds require the validated bundle's expected digest.
+      - name: Export dashboard bundle digest for skip-mode builds
+        run: |
+          set -euo pipefail
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v5
         with:

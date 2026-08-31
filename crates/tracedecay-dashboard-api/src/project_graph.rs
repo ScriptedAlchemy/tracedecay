@@ -15,9 +15,8 @@ use crate::tracedecay::TraceDecay;
 
 pub type RetainedProjectGraphFuture = std::pin::Pin<
     Box<
-        dyn std::future::Future<
-                Output = tracedecay_domain::errors::Result<Option<Arc<TraceDecay>>>,
-            > + Send
+        dyn std::future::Future<Output = tracedecay_domain::errors::Result<Option<Arc<TraceDecay>>>>
+            + Send
             + 'static,
     >,
 >;

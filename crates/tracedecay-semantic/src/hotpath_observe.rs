@@ -96,6 +96,7 @@ pub(crate) fn session_acquire_error_class(error: &SessionAcquireError) -> &'stat
         SessionAcquireError::Cancelled => "cancelled",
         SessionAcquireError::DeadlineExceeded { .. } => "deadline_exceeded",
         SessionAcquireError::LoadDeadlineExceeded { .. } => "load_deadline_exceeded",
+        SessionAcquireError::ResidentCeilingExceeded { .. } => "resident_ceiling_exceeded",
         SessionAcquireError::Open(inner) => embed_error_class(inner),
         SessionAcquireError::Closed => "closed",
     }

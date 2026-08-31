@@ -161,15 +161,24 @@ pub enum CodeGraphReadFreshnessV1 {
     /// The last complete seated generation answered because no proven-current
     /// generation was admissible (the scheduler owns a rebuild pass or the
     /// checkout drifted past the currency witness). Recall is sound for the
-    /// served generation; freshness is not.
-    LastCompleteStale,
+    /// served generation; freshness is not. The payload carries the evidence
+    /// a caller needs to say how stale and whether a remedy is in motion: a
+    /// seat sealed days ago with no rebuild pass in flight is a wedged route,
+    /// not a routine rebuild window.
+    LastCompleteStale {
+        /// When the served generation was durably sealed.
+        sealed_at: UtcMicros,
+        /// Whether a reconcile pass or pending scheduler wake existed for the
+        /// route when the read opened.
+        rebuild_in_flight: bool,
+    },
 }
 
 impl CodeGraphReadFreshnessV1 {
     pub fn is_stale(self) -> bool {
         match self {
             Self::Current => false,
-            Self::LastCompleteStale => true,
+            Self::LastCompleteStale { .. } => true,
         }
     }
 }

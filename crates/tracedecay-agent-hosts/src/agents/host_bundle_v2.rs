@@ -1609,6 +1609,7 @@ pub fn inspect_installed_host_bundle_components_at(
     artifact_root: &Path,
     lifecycle_root: &Path,
     registrations: &impl HostBundleRegistrationInspectorV1,
+    generator_commit: &str,
 ) -> Result<HostBundleDoctorReportV1, HostBundleError> {
     match fs::symlink_metadata(lifecycle_root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -1721,6 +1722,7 @@ pub fn inspect_installed_host_bundle_components_at(
             receipt.host,
             receipt.component,
             0,
+            generator_commit,
         )
         .ok()
         .is_some_and(|bundle| {
@@ -5557,6 +5559,7 @@ mod tests {
             root.path(),
             root.path(),
             &CurrentRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert!(
@@ -6490,6 +6493,7 @@ mod tests {
             HostKindV1::OpenCode,
             HostBundleComponentV1::Core,
             0,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(
@@ -7112,6 +7116,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &CurrentRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(report.components.len(), 1);
@@ -7131,6 +7136,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &MissingRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(
@@ -7159,6 +7165,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &MissingRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert!(uninstalled.components.is_empty());
@@ -7170,6 +7177,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &CurrentRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(orphaned.components.len(), 1);
@@ -7207,6 +7215,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &CurrentRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(
@@ -7243,6 +7252,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &CurrentRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(
@@ -7258,6 +7268,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &CurrentRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(
@@ -7314,6 +7325,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &CurrentRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert!(
@@ -7338,6 +7350,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &CurrentRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(
@@ -7452,6 +7465,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &InteractiveActivationRegistration(HostBundleRegistrationStateV1::Repairable),
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
 
@@ -7494,6 +7508,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &InteractiveActivationRegistration(HostBundleRegistrationStateV1::Repairable),
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
 
@@ -7525,6 +7540,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &InteractiveActivationRegistration(HostBundleRegistrationStateV1::Missing),
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
 
@@ -7557,6 +7573,7 @@ mod tests {
             artifacts.path(),
             lifecycle.path(),
             &NonInteractiveStagedRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
 
@@ -7591,6 +7608,7 @@ mod tests {
             root.path(),
             root.path(),
             &CurrentRegistration,
+            crate::agents::TEST_GENERATOR_COMMIT,
         )
         .unwrap();
         assert_eq!(report.components.len(), 1);

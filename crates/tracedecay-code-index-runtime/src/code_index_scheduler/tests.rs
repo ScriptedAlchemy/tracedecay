@@ -5332,7 +5332,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
 /// mutex for its whole pass — sealing a production-scale corpus holds it for
 /// minutes per generation — while the seated serving generation stays fully
 /// decoded, activated, and proven current from before the pass began.
-/// Verified graph reads (redundancy, diagnose, dead_code, callers, impact)
+/// Verified graph reads (redundancy, diagnose, `dead_code`, callers, impact)
 /// resolve through `latest_complete_ready_decoded_for_root_scope`; refusing
 /// them "not ready" for the whole pass turned bounded background work into a
 /// tool outage that outlived exact/lexical retrieval by 25+ minutes.
@@ -12504,10 +12504,9 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
                 ref reason,
             },
         ) = freshness.code_graph_serving
+            && reason != "generation_unavailable"
         {
-            if reason != "generation_unavailable" {
-                break reason.clone();
-            }
+            break reason.clone();
         }
         assert!(
             Instant::now() <= deadline,

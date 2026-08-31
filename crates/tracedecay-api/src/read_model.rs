@@ -258,8 +258,9 @@ impl DashboardCoverageV1 {
 /// Freshness of the observed state relative to its live source watermark.
 /// `Absent` (no source produced anything) and `Unsupported` (no source wired)
 /// are distinct from `Stale` (behind the watermark) and `Unknown`.
-// `Stale`/`Absent` are normative freshness states not yet emitted by the current
-// read sources.
+// `Stale` is emitted by verified graph reads that served the last complete
+// generation during a rebuild; `Absent` is a normative freshness state not yet
+// emitted by the current read sources.
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DashboardFreshnessStateV1 {

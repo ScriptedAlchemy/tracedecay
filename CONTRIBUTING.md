@@ -14,14 +14,17 @@ cargo nextest run --workspace --all-features --no-fail-fast
 Requires **Rust 1.85+** (edition 2024) and **Node.js 22+ with npm**.
 
 The dashboard bundle at `dashboard/app-dist/` is generated output and is
-git-ignored, so a fresh clone has none. `build.rs` therefore runs `npm ci`
-(when `dashboard/node_modules` is absent) and `npm run build` before embedding
-the UI, and fails the Rust build if npm is missing. `TRACEDECAY_SKIP_DASHBOARD_BUILD`
-only helps when an `app-dist` already exists but is stale — in a fresh clone it
-skips the build and then trips the "`dashboard/app-dist/index.html` is missing
-after build" assertion. CI builds the bundle once in the `dashboard-assets`
-job and every Rust job downloads it as an artifact. GitHub Releases ship
-prebuilt binaries; workspace Cargo packages are private.
+git-ignored, so a fresh clone has none. The CLI build script
+(`crates/tracedecay-cli/build.rs`) — the only crate that embeds the bundle —
+runs `npm ci` (when `dashboard/node_modules` is absent) and `npm run build`
+before embedding the UI, and fails the Rust build if npm is missing. Setting
+`TRACEDECAY_SKIP_DASHBOARD_BUILD` skips that npm rebuild only when
+`TRACEDECAY_DASHBOARD_BUNDLE_SHA256` holds the existing bundle's digest
+(print it with `python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+--print-digest`); a missing or mismatched digest fails the build. CI builds
+the bundle once in the `dashboard-assets` job and every Rust job downloads it
+as an artifact. GitHub Releases ship prebuilt binaries; workspace Cargo
+packages are private.
 
 Do not assume a green baseline for the full suite: run it and read the
 failures; treat new failures in code you touched as yours.

@@ -737,6 +737,48 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         "a serving census restores the branch claim: {serving}",
     );
 
+    // A seat sealed long ago surfaces its age inside the serving claim, so a
+    // wedged daemon serving days-old answers is visibly wedged rather than a
+    // bare "serving".
+    let sealed_at_micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64
+        - 3 * 86_400 * 1_000_000;
+    let aged_reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+        std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+            let freshness =
+                tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: worktree_root.display().to_string(),
+                    latest_generation_id: Some("generation.status-serving-truth.1".to_owned()),
+                    sealed_at_micros: Some(sealed_at_micros),
+                    ..Default::default()
+                };
+            Box::pin(async move { Some(freshness) })
+        });
+    let aged = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(aged_reader),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("status answers for an aged seat");
+    let aged = status_output(aged);
+    assert_eq!(aged["retrieval_serving"]["status"], json!("serving"));
+    let age_seconds = aged["retrieval_serving"]["seated_generation_age_seconds"]
+        .as_i64()
+        .expect("an aged seat reports its age in the serving claim");
+    assert!(
+        age_seconds >= 3 * 86_400 - 60,
+        "the serving claim must expose the seat age: {aged}",
+    );
+
     cg.checkpoint().await.unwrap();
     cg.close();
 }
@@ -1642,6 +1684,30 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     assert!(
         rendered.contains("generation.mcp-verified-graph-fixture.1"),
         "the trailer must name the serving generation: {rendered}",
+    );
+    assert!(
+        rendered.contains("(sealed 1m ago) while the code index rebuilds"),
+        "a rebuild-in-flight serve must state the seat age and the rebuild: {rendered}",
+    );
+
+    let wedged = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_files",
+        json!({}),
+        None,
+        None,
+        verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a wedged stale serve still answers");
+    let rendered = serde_json::to_string(&wedged.value).unwrap();
+    assert!(
+        rendered.contains("no rebuild pass in flight"),
+        "a wedged route must not claim a rebuild is in flight: {rendered}",
+    );
+    assert!(
+        !rendered.contains("while the code index rebuilds"),
+        "a wedged route must not present itself as a routine rebuild: {rendered}",
     );
 
     let current = handle_tool_call_with_registry_options(

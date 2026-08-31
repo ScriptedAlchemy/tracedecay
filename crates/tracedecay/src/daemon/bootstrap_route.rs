@@ -114,7 +114,12 @@ pub(super) fn daemon_bootstrap_response(
 ) -> Option<Option<JsonRpcResponse>> {
     match classify_mcp_method(&request.method) {
         McpMethod::Initialize => Some(request.id.clone().map(|id| {
-            let mut response = JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS));
+            let mut response = match initialize_result(SERVER_INSTRUCTIONS) {
+                Ok(result) => JsonRpcResponse::success(id, result),
+                Err(error) => {
+                    return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+                }
+            };
             if let Some(route) = route {
                 attach_initialize_route_metadata(&mut response, route);
             }

@@ -462,6 +462,29 @@ pub trait TranscriptSource: Send + Sync {
     }
 }
 
+/// Runs one synchronous transcript discovery/parse section without stalling
+/// the async worker that drives ingest.
+///
+/// [`TranscriptSource`] is deliberately synchronous: adapters walk host
+/// directories and read transcript files with plain `std` IO. Ingest runs on
+/// the daemon's Tokio workers, and a catch-up walk or a large parse would
+/// otherwise pin one worker for its whole duration. `block_in_place` hands
+/// the worker's run queue to another thread for the section; it panics
+/// outside a multi-thread runtime, so the flavor is checked first and
+/// everything else (current-thread runtimes, plain threads) keeps the
+/// previous inline behavior. The remaining `block_in_place` panic case is a
+/// `LocalSet` on a multi-thread runtime, which this workspace does not use.
+/// `spawn_blocking` is not usable at this boundary because the section
+/// borrows `&dyn TranscriptSource`, which is not `'static`.
+pub(crate) fn run_blocking_transcript_section<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 /// Fallible production boundary that drives a single source to completion
 /// against `store`, ingesting every transcript it locates for `project_root`.
 /// Source parse misses are skipped; authoritative store failures abort the
@@ -486,8 +509,12 @@ pub async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<TranscriptIngestStats> {
     let mut stats = TranscriptIngestStats::default();
-    let discovery =
-        source.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk());
+    let discovery = hotpath::measure_block!(
+        "sessions.ingest.discover_blocking",
+        run_blocking_transcript_section(|| {
+            source.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
+        })
+    );
     for path in discovery.paths {
         stats = stats.merge(ingest_one(store, source, &path, project_root, max_new_bytes).await?);
     }
@@ -509,7 +536,12 @@ async fn ingest_one<S: TranscriptIngestStore>(
 ) -> TranscriptIngestResult<TranscriptIngestStats> {
     let loaded = load_transcript_cursor(store, source.cursor_key(path)).await?;
     let previous = loaded.checkpoint.clone();
-    let Some(parsed) = source.try_parse_new(path, previous.state, project_root, max_new_bytes)?
+    let Some(parsed) = hotpath::measure_block!(
+        "sessions.ingest.parse_blocking",
+        run_blocking_transcript_section(|| {
+            source.try_parse_new(path, previous.state, project_root, max_new_bytes)
+        })
+    )?
     else {
         return Ok(TranscriptIngestStats::default());
     };
