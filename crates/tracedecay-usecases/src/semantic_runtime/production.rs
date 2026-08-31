@@ -844,7 +844,7 @@ impl ProductionSemanticRuntimeV1 {
         commit_evaluation_prepared_generation(
             &replay_store,
             &replay_build,
-            clean_prepared.clone(),
+            clean_prepared,
             clean.code.chunks().chunks(),
             Arc::clone(&cancellation),
         )
@@ -928,7 +928,7 @@ impl ProductionSemanticRuntimeV1 {
             &one_symbol_store,
             &cancellation,
             sources.one_symbol,
-            one_symbol.clone(),
+            &one_symbol,
             Some(clean_publication.generation_id.clone()),
         )
         .await?;
@@ -961,7 +961,7 @@ impl ProductionSemanticRuntimeV1 {
             &no_op_store,
             &cancellation,
             sources.no_op,
-            no_op.clone(),
+            &no_op,
             Some(one_symbol_publication.generation_id.clone()),
         )
         .await?;
@@ -994,7 +994,7 @@ impl ProductionSemanticRuntimeV1 {
             &deletion_store,
             &cancellation,
             sources.deletion,
-            deletion.clone(),
+            &deletion,
             Some(no_op_publication.generation_id.clone()),
         )
         .await?;
@@ -1160,7 +1160,7 @@ impl ProductionSemanticRuntimeV1 {
         commit_evaluation_prepared_generation(
             &incompatible_store,
             &incompatible_build,
-            incompatible.clone(),
+            &incompatible,
             sources.one_symbol.chunks().chunks(),
             Arc::clone(&cancellation),
         )
@@ -3422,13 +3422,13 @@ async fn publish_evaluation_projection_case_isolated(
     store: &GraphVectorGenerationStoreV1,
     cancellation: &Arc<dyn GraphCancellation>,
     generation: &CodeIndexPublishedGenerationV1,
-    prepared: PreparedVectorGenerationV1,
+    prepared: &PreparedVectorGenerationV1,
     base_generation: Option<VectorGenerationIdV1>,
 ) -> Result<
     crate::store::vector_generations::VectorGenerationPublicationV1,
     SemanticRuntimeScheduleFailureV1,
 > {
-    let plan = evaluation_projection_plan(generation, &prepared, base_generation)?;
+    let plan = evaluation_projection_plan(generation, prepared, base_generation)?;
     let build = store
         .rebuild_generation(plan, Arc::clone(cancellation))
         .await
