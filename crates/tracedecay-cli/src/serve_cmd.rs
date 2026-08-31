@@ -67,7 +67,7 @@ pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
 #[hotpath::measure(label = "cli.serve.proxy", future = true)]
 pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
-    let socket_path = tracedecay::daemon::default_socket_path()?;
+    let socket_path = tracedecay_daemon_control::default_socket_path()?;
     if !tracedecay::daemon::should_proxy_serve_to_daemon(&socket_path).await {
         return Err(tracedecay::daemon::unavailable_error(&socket_path));
     }

@@ -460,7 +460,7 @@ async fn handle_storage_report(
     };
     let daemon_owns_profile = profile_root == default_profile_root;
     let project_root = project_root.map(PathBuf::from);
-    let report = if daemon_owns_profile && tracedecay::daemon::daemon_reachable() {
+    let report = if daemon_owns_profile && tracedecay_daemon_control::daemon_reachable() {
         brokered_storage_report(project_id.as_deref(), project_root.as_deref()).await?
     } else {
         let offline = match (&project_id, &project_root) {
@@ -624,8 +624,9 @@ fn handle_backup_profile(
                 message: "system clock exceeds supported backup timestamp range".to_owned(),
             },
         )?;
-    let backup = tracedecay::daemon::with_quiesced_installed_service(
+    let backup = tracedecay_daemon_control::with_quiesced_installed_service(
         "complete profile backup",
+        tracedecay::version::build_version(),
         |lifecycle| {
             tracedecay_maintenance::profile_backup::create_complete_profile_backup(
                 &profile_root,

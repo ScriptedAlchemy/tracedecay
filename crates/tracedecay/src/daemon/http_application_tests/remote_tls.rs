@@ -43,7 +43,7 @@ const REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE: &[u8] =
 
 fn remote_tls_fixture(
     temporary: &tempfile::TempDir,
-) -> (crate::daemon::RemoteBrainTlsConfig, PathBuf) {
+) -> (tracedecay_daemon_control::RemoteBrainTlsConfig, PathBuf) {
     let certificate = temporary.path().join("remote.crt.pem");
     let private_key = temporary.path().join("remote.key.pem");
     std::fs::write(&certificate, REMOTE_TLS_CERTIFICATE).expect("write TLS certificate fixture");
@@ -54,7 +54,7 @@ fn remote_tls_fixture(
         std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o600))
             .expect("restrict TLS key fixture");
     }
-    let config = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+    let config = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some("127.0.0.1:0".parse().expect("ephemeral TLS listener")),
         Some(certificate.clone()),
         Some(private_key),
@@ -428,7 +428,7 @@ async fn remote_tls_h2_only_handshake_is_rejected(
 fn remote_tls_configuration_rejects_partial_and_wildcard_admission() {
     let path = PathBuf::from("remote.pem");
     assert!(
-        crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+        tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
             Some("127.0.0.1:7443".parse().unwrap()),
             Some(path.clone()),
             None,
@@ -436,7 +436,7 @@ fn remote_tls_configuration_rejects_partial_and_wildcard_admission() {
         .is_err()
     );
     assert!(
-        crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+        tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
             Some("0.0.0.0:7443".parse().unwrap()),
             Some(path.clone()),
             Some(path),
@@ -458,7 +458,7 @@ async fn remote_tls_startup_rejects_invalid_identity_and_occupied_address() {
         std::fs::set_permissions(&invalid_key, std::fs::Permissions::from_mode(0o600))
             .expect("restrict invalid key fixture");
     }
-    let invalid = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+    let invalid = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some("127.0.0.1:0".parse().unwrap()),
         Some(invalid_certificate),
         Some(invalid_key),
@@ -479,7 +479,7 @@ async fn remote_tls_startup_rejects_invalid_identity_and_occupied_address() {
 
     let (valid, valid_certificate) = remote_tls_fixture(&temporary);
     let invalid_key = temporary.path().join("invalid.key.pem");
-    let invalid_key_config = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+    let invalid_key_config = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some("127.0.0.1:0".parse().unwrap()),
         Some(valid_certificate),
         Some(invalid_key),
@@ -501,7 +501,7 @@ async fn remote_tls_startup_rejects_invalid_identity_and_occupied_address() {
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("occupied address");
-    let occupied_config = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+    let occupied_config = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some(occupied.local_addr().expect("occupied address")),
         Some(valid.certificate_chain().to_path_buf()),
         Some(valid.private_key().to_path_buf()),
@@ -543,7 +543,8 @@ async fn remote_tls_startup_rejects_unusable_leaf_and_chain_constraints() {
         )
         .expect("restrict leaf-only TLS private key");
     }
-    let leaf_without_anchor_config = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+    let leaf_without_anchor_config =
+        tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some("127.0.0.1:0".parse().unwrap()),
         Some(leaf_without_anchor),
         Some(leaf_without_anchor_key),
@@ -595,7 +596,7 @@ async fn remote_tls_startup_rejects_unusable_leaf_and_chain_constraints() {
             std::fs::set_permissions(&private_key_path, std::fs::Permissions::from_mode(0o600))
                 .expect("restrict TLS private key fixture");
         }
-        let config = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+        let config = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
             Some("127.0.0.1:0".parse().unwrap()),
             Some(certificate_path),
             Some(private_key_path),
@@ -630,7 +631,7 @@ async fn remote_tls_startup_rejects_unusable_leaf_and_chain_constraints() {
         std::fs::set_permissions(&unrelated_key, std::fs::Permissions::from_mode(0o600))
             .expect("restrict TLS private key fixture");
     }
-    let unrelated = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+    let unrelated = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some("127.0.0.1:0".parse().unwrap()),
         Some(unrelated_chain),
         Some(unrelated_key),
@@ -713,7 +714,7 @@ async fn remote_tls_startup_rejects_non_private_or_non_regular_key_handles() {
     std::fs::write(&private_key, REMOTE_TLS_PRIVATE_KEY).expect("write TLS key fixture");
     std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o644))
         .expect("make TLS key fixture non-private");
-    let exposed = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+    let exposed = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some("127.0.0.1:0".parse().unwrap()),
         Some(certificate.clone()),
         Some(private_key.clone()),
@@ -736,7 +737,7 @@ async fn remote_tls_startup_rejects_non_private_or_non_regular_key_handles() {
         .expect("restore private TLS key fixture");
     let key_link = temporary.path().join("remote-link.key.pem");
     symlink(&private_key, &key_link).expect("symlink TLS key fixture");
-    let linked = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+    let linked = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some("127.0.0.1:0".parse().unwrap()),
         Some(certificate.clone()),
         Some(key_link),
@@ -759,7 +760,7 @@ async fn remote_tls_startup_rejects_non_private_or_non_regular_key_handles() {
     std::fs::create_dir(&directory).expect("TLS key directory fixture");
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o600))
         .expect("restrict TLS key directory fixture");
-    let directory_key = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+    let directory_key = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some("127.0.0.1:0".parse().unwrap()),
         Some(certificate),
         Some(directory),

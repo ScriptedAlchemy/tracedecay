@@ -9,9 +9,9 @@ use tracing_subscriber::Layer as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
-#[cfg(unix)]
-use super::SERVICE_NAME;
 use super::{Path, TraceDecayError};
+#[cfg(unix)]
+use tracedecay_daemon_control::SERVICE_NAME;
 /// A single git-watcher lifecycle event recovered from the daemon log, for the
 /// `tracedecay doctor` watcher-health section.
 #[cfg(unix)]
@@ -384,7 +384,7 @@ fn read_daemon_log_tail(max_lines: usize) -> String {
 }
 
 pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
-    let advice = super::unavailable_daemon_socket_advice(socket_path, None);
+    let advice = tracedecay_daemon_control::unavailable_daemon_socket_advice(socket_path, None);
     TraceDecayError::Config {
         message: format!(
             "TraceDecay daemon socket '{}' is not available. {advice}",

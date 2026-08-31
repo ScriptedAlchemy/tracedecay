@@ -74,6 +74,7 @@ pub(super) enum DaemonProtocolState {
     IdentityMismatch {
         name: Option<String>,
         version: Option<String>,
+        expected_version: String,
     },
 }
 
@@ -83,40 +84,63 @@ impl std::fmt::Display for DaemonProtocolState {
             Self::NotRequired => f.write_str("not required"),
             Self::Ready => f.write_str("ready"),
             Self::Unresponsive(error) => write!(f, "unresponsive ({error})"),
-            Self::IdentityMismatch { name, version } => write!(
+            Self::IdentityMismatch {
+                name,
+                version,
+                expected_version,
+            } => write!(
                 f,
                 "identity mismatch (name={}, version={}, expected name=tracedecay, version={})",
                 name.as_deref().unwrap_or("missing"),
                 version.as_deref().unwrap_or("missing"),
-                crate::version::build_version()
+                expected_version
             ),
         }
     }
 }
 
 #[cfg(unix)]
-pub(super) fn daemon_protocol_state(socket_path: &Path) -> DaemonProtocolState {
-    daemon_protocol_state_with_timeout(socket_path, std::time::Duration::from_secs(10))
+pub(super) fn daemon_protocol_state(
+    socket_path: &Path,
+    expected_version: &str,
+) -> DaemonProtocolState {
+    daemon_protocol_state_with_timeout(
+        socket_path,
+        expected_version,
+        std::time::Duration::from_secs(10),
+    )
 }
 
 #[cfg(not(unix))]
-pub(super) fn daemon_protocol_state(transport_hint: &Path) -> DaemonProtocolState {
-    daemon_protocol_state_with_timeout(transport_hint, std::time::Duration::from_secs(10))
+pub(super) fn daemon_protocol_state(
+    transport_hint: &Path,
+    expected_version: &str,
+) -> DaemonProtocolState {
+    daemon_protocol_state_with_timeout(
+        transport_hint,
+        expected_version,
+        std::time::Duration::from_secs(10),
+    )
 }
 
 #[hotpath::measure(label = "daemon.service.probe.protocol_state")]
 pub(super) fn daemon_protocol_state_with_timeout(
     transport_hint: &Path,
+    expected_version: &str,
     timeout: std::time::Duration,
 ) -> DaemonProtocolState {
-    match query_daemon_identity(transport_hint, timeout) {
+    match query_daemon_identity(transport_hint, expected_version, timeout) {
         Ok((name, version))
             if name.as_deref() == Some("tracedecay")
-                && version.as_deref() == Some(crate::version::build_version()) =>
+                && version.as_deref() == Some(expected_version) =>
         {
             DaemonProtocolState::Ready
         }
-        Ok((name, version)) => DaemonProtocolState::IdentityMismatch { name, version },
+        Ok((name, version)) => DaemonProtocolState::IdentityMismatch {
+            name,
+            version,
+            expected_version: expected_version.to_owned(),
+        },
         Err(error) => DaemonProtocolState::Unresponsive(error.to_string()),
     }
 }
@@ -124,6 +148,7 @@ pub(super) fn daemon_protocol_state_with_timeout(
 #[cfg(unix)]
 fn query_daemon_identity(
     socket_path: &Path,
+    expected_version: &str,
     probe_timeout: std::time::Duration,
 ) -> Result<(Option<String>, Option<String>)> {
     let deadline = std::time::Instant::now() + probe_timeout;
@@ -132,29 +157,36 @@ fn query_daemon_identity(
     // healthy daemon as unresponsive.
     let connection = client_connection(socket_path)?;
     let stream = StdUnixStream::connect(socket_path)?;
-    query_daemon_identity_stream(stream, connection.auth_token.as_deref(), deadline)
+    query_daemon_identity_stream(
+        stream,
+        connection.auth_token.as_deref(),
+        expected_version,
+        deadline,
+    )
 }
 
 #[cfg(not(unix))]
 fn query_daemon_identity(
     socket_path: &Path,
+    expected_version: &str,
     probe_timeout: std::time::Duration,
 ) -> Result<(Option<String>, Option<String>)> {
     let deadline = std::time::Instant::now() + probe_timeout;
-    let (address, auth_token) =
+    let (address, auth_token, _) =
         current_loopback_authority(socket_path)?.ok_or_else(missing_loopback_authority)?;
     let remaining = remaining_probe_time(deadline, "daemon readiness probe")?;
     let stream = StdTcpStream::connect_timeout(&address, remaining)?;
-    query_daemon_identity_stream(stream, Some(&auth_token), deadline)
+    query_daemon_identity_stream(stream, Some(&auth_token), expected_version, deadline)
 }
 
 fn query_daemon_identity_stream(
     mut stream: impl ProbeStream,
     auth_token: Option<&str>,
+    client_version: &str,
     deadline: std::time::Instant,
 ) -> Result<(Option<String>, Option<String>)> {
     const REQUEST_ID: i64 = 1;
-    let handshake = crate::daemon::handshake_for_current_client(None, None, false, false)?;
+    let handshake = crate::handshake_for_current_client(client_version, None, None, false, false)?;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": REQUEST_ID,
@@ -214,28 +246,32 @@ pub(super) enum DaemonShutdownRequest {
 }
 
 #[cfg(not(unix))]
-pub(super) fn request_daemon_shutdown(transport_hint: &Path) -> Result<DaemonShutdownRequest> {
+pub(super) fn request_daemon_shutdown(
+    transport_hint: &Path,
+    client_version: &str,
+) -> Result<DaemonShutdownRequest> {
     const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let deadline = std::time::Instant::now() + SHUTDOWN_TIMEOUT;
-    let (address, auth_token) =
+    let (address, auth_token, _) =
         current_loopback_authority(transport_hint)?.ok_or_else(missing_loopback_authority)?;
     let remaining = remaining_probe_time(deadline, "daemon shutdown request")?;
     let stream = StdTcpStream::connect_timeout(&address, remaining)?;
-    request_daemon_shutdown_stream(stream, &auth_token, deadline)
+    request_daemon_shutdown_stream(stream, &auth_token, client_version, deadline)
 }
 
 #[cfg(not(unix))]
 fn request_daemon_shutdown_stream(
     mut stream: impl ProbeStream,
     auth_token: &str,
+    client_version: &str,
     deadline: std::time::Instant,
 ) -> Result<DaemonShutdownRequest> {
     const REQUEST_ID: i64 = 2;
-    let handshake = crate::daemon::handshake_for_current_client(None, None, false, false)?;
+    let handshake = crate::handshake_for_current_client(client_version, None, None, false, false)?;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": REQUEST_ID,
-        "method": super::super::DAEMON_SHUTDOWN_METHOD,
+        "method": crate::DAEMON_SHUTDOWN_METHOD,
     });
     let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(auth_token).to_line()?;
     let handshake = handshake.to_line()?;
@@ -344,7 +380,7 @@ pub(super) fn daemon_socket_state_with_timeout(
     timeout: std::time::Duration,
 ) -> DaemonSocketState {
     let address = match current_loopback_authority(transport_hint) {
-        Ok(Some((address, _))) => address,
+        Ok(Some((address, _, _))) => address,
         Ok(None) => return DaemonSocketState::Missing,
         Err(_) => return DaemonSocketState::PresentUnreachable,
     };
@@ -369,7 +405,7 @@ pub(super) fn daemon_transport_display(transport_hint: &Path) -> String {
         |authority| {
             authority.map_or_else(
                 || "authority record unavailable".to_string(),
-                |(address, _)| format!("tcp://{address}"),
+                |(address, _, _)| format!("tcp://{address}"),
             )
         },
     )
@@ -378,7 +414,7 @@ pub(super) fn daemon_transport_display(transport_hint: &Path) -> String {
 #[cfg(not(unix))]
 fn current_loopback_authority(
     transport_hint: &Path,
-) -> Result<Option<(std::net::SocketAddr, String)>> {
+) -> Result<Option<(std::net::SocketAddr, String, String)>> {
     let profile_root = transport_hint
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -402,7 +438,7 @@ fn current_loopback_authority(
             message: format!("daemon authority endpoint '{address}' is not loopback"),
         });
     }
-    Ok(Some((address, record.auth_token)))
+    Ok(Some((address, record.auth_token, record.version)))
 }
 
 #[cfg(not(unix))]

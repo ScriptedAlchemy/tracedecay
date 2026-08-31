@@ -51,9 +51,7 @@ use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
-pub const SERVICE_NAME: &str = "tracedecay.service";
 pub use tracedecay_daemon_protocol::SOCKET_ENV;
-pub(crate) const DAEMON_SHUTDOWN_METHOD: &str = "tracedecay/daemon/shutdown";
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
     "is warming in the background; retry the same tool shortly";
 #[cfg(unix)]
@@ -355,7 +353,6 @@ mod lcm_summarization;
 mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
-mod service;
 pub(crate) mod session_retrieval;
 pub(crate) mod session_sync;
 pub(crate) mod session_temporal_refresh_scheduler;
@@ -368,19 +365,7 @@ use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };
 
-pub use bootstrap::{RemoteBrainTlsConfig, run_foreground};
-pub use service::{
-    DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
-    default_socket_path, install_service, install_service_under_lease,
-    installed_service_socket_path, prepare_scoop_package_service,
-    quiesce_installed_service_before_lease, refresh_installed_service_under_lease_with_state,
-    restore_installed_service_after_update, restore_scoop_package_service, service_spec,
-    service_spec_with_remote_tls, service_status, socket_path_or_default, start_service,
-    stop_service, uninstall_service, verify_installed_service_quiesced_under_lease,
-    wait_for_installed_service_state, with_exclusive_maintenance_window,
-    with_quiesced_installed_service,
-};
-pub(crate) use service::{installed_service_state, unavailable_daemon_socket_advice};
+pub use bootstrap::run_foreground;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

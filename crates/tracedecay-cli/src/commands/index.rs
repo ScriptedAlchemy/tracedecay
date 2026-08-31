@@ -94,7 +94,7 @@ pub(crate) async fn handle_init(
     )?;
     handshake.moved_store_adoption = adoption;
     #[cfg(unix)]
-    let daemon_available = tracedecay::daemon::daemon_reachable();
+    let daemon_available = tracedecay_daemon_control::daemon_reachable();
     #[cfg(not(unix))]
     let daemon_available = true;
 
