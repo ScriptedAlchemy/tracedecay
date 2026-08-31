@@ -205,6 +205,7 @@ impl ProjectCiRetainedObservationStoreV1 {
 
     /// Loads only the canonical, structurally validated inventory for the
     /// exact admitted scope. Point records remain behind bounded entry reads.
+    #[hotpath::measure(label = "usecases.advisory.ci.load_inventory", future = true)]
     pub async fn load_inventory_manifest(
         &self,
         context: &RequestContext,
@@ -262,6 +263,7 @@ impl ProjectCiRetainedObservationStoreV1 {
     /// Loads one manifest-selected point record within the caller's remaining
     /// byte budget. The encoded size is checked before deserialization and the
     /// decoded record is bound back to both immutable identities in the entry.
+    #[hotpath::measure(label = "usecases.advisory.ci.load_entry", future = true)]
     pub async fn load_bounded_entry(
         &self,
         context: &RequestContext,
@@ -319,6 +321,7 @@ impl ProjectCiRetainedObservationStoreV1 {
 
     /// Loads the exact-scope bounded inventory and verifies every retained
     /// record against the manifest's canonical content identity.
+    #[hotpath::measure(label = "usecases.advisory.ci.load_manifest", future = true)]
     pub async fn load_manifest(
         &self,
         context: &RequestContext,
@@ -405,19 +408,22 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
         context: &'a RequestContext,
         request: &'a CiFailureLocalizationRequestV1,
     ) -> FeedbackPortFuture<'a, Option<CiRetainedProviderRecordV1>> {
-        Box::pin(async move {
-            if !context_allows_feedback_operation(
-                context,
-                &self.scope,
-                CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
-                CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
-            ) {
-                return None;
-            }
-            let key = self.key(request)?;
-            let encoded = self.database.get_metadata(&key).await.ok()??;
-            Self::decode_record(request, &encoded)
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                if !context_allows_feedback_operation(
+                    context,
+                    &self.scope,
+                    CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+                    CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+                ) {
+                    return None;
+                }
+                let key = self.key(request)?;
+                let encoded = self.database.get_metadata(&key).await.ok()??;
+                Self::decode_record(request, &encoded)
+            },
+            label = "usecases.advisory.ci.load_record"
+        ))
     }
 
     fn retain<'a>(
@@ -428,8 +434,9 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
         state: CiFailureLocalizationStateV1,
         coverage: CiFailureCoverageV1,
     ) -> FeedbackPortFuture<'a, Option<CiRetainedProviderObservationV1>> {
-        Box::pin(async move {
-            if !context_allows_feedback_operation(
+        Box::pin(hotpath::future!(
+            async move {
+                if !context_allows_feedback_operation(
                 context,
                 &self.scope,
                 CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
@@ -549,7 +556,9 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
                 return None;
             }
             Some(observation)
-        })
+            },
+            label = "usecases.advisory.ci.retain_observation"
+        ))
     }
 }
 
@@ -599,8 +608,9 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
         request: &'a CiFailureLocalizationRequestV1,
         record: &'a CiRetainedProviderRecordV1,
     ) -> FeedbackPortFuture<'a, Option<CiExactCodeEvidenceV1>> {
-        Box::pin(async move {
-            if !context_allows_feedback_operation(
+        Box::pin(hotpath::future!(
+            async move {
+                if !context_allows_feedback_operation(
                 context,
                 &self.scope,
                 CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
@@ -794,7 +804,9 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
                 callers,
                 tests,
             })
-        })
+            },
+            label = "usecases.advisory.ci.resolve_code_anchor"
+        ))
     }
 }
 

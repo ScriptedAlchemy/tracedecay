@@ -397,6 +397,7 @@ pub struct RetrievalEmissionSummaryV1 {
 /// accounted, never awaited. An envelope this lane cannot even build (a
 /// payload the domain validator rejects) is counted as `invalid` and skipped
 /// rather than substituted with a permissive one.
+#[hotpath::measure(label = "usecases.observability.emit_pipeline")]
 pub fn emit_retrieval_pipeline(
     producer: &BoundedObservabilityProducerV1,
     identity: &ObservabilityProducerIdentityV1,
@@ -460,6 +461,7 @@ pub fn emit_retrieval_pipeline(
 
 /// Records one planner admission decision through the project-bound
 /// observation authority.
+#[hotpath::measure(label = "usecases.observability.record_planner", future = true)]
 pub async fn record_retrieval_planner(
     db: &RegisteredGlobalDb,
     observation: ObservedWithCoverageV1<RetrievalPlannerObservedV1>,
@@ -482,6 +484,7 @@ pub async fn record_retrieval_planner(
 }
 
 /// Records one lane's candidate accounting.
+#[hotpath::measure(label = "usecases.observability.record_retriever", future = true)]
 pub async fn record_retriever(
     db: &RegisteredGlobalDb,
     observation: ObservedWithCoverageV1<RetrieverObservedV1>,
@@ -504,6 +507,7 @@ pub async fn record_retriever(
 }
 
 /// Records one fusion-synthesis result.
+#[hotpath::measure(label = "usecases.observability.record_synthesis", future = true)]
 pub async fn record_retrieval_synthesis(
     db: &RegisteredGlobalDb,
     observation: ObservedWithCoverageV1<RetrievalSynthesisObservedV1>,
@@ -526,6 +530,7 @@ pub async fn record_retrieval_synthesis(
 }
 
 /// Records one cataloged source's census for a query.
+#[hotpath::measure(label = "usecases.observability.record_source", future = true)]
 pub async fn record_retrieval_source(
     db: &RegisteredGlobalDb,
     observation: ObservedWithCoverageV1<RetrievalSourceObservedV1>,
@@ -548,6 +553,7 @@ pub async fn record_retrieval_source(
 }
 
 /// Records one context packet's observed linkage to a downstream outcome.
+#[hotpath::measure(label = "usecases.observability.record_context_outcome", future = true)]
 pub async fn record_context_outcome(
     db: &RegisteredGlobalDb,
     observation: ObservedWithCoverageV1<ContextOutcomeObservedV1>,
@@ -570,6 +576,7 @@ pub async fn record_context_outcome(
 }
 
 /// Records one frozen baseline-versus-candidate retrieval ablation.
+#[hotpath::measure(label = "usecases.observability.record_ablation", future = true)]
 pub async fn record_retrieval_ablation(
     db: &RegisteredGlobalDb,
     observation: RetrievalAblationObservedV1,
@@ -596,6 +603,7 @@ pub async fn record_retrieval_ablation(
 /// `Ok(None)` means there was no transition to record: re-asserting the mode
 /// already in force is a configuration no-op, and minting a consent receipt for
 /// it would overstate how often consent actually changed.
+#[hotpath::measure(label = "usecases.observability.record_consent", future = true)]
 pub async fn record_analytics_consent(
     db: &RegisteredGlobalDb,
     previous: AnalyticsModeV1,
@@ -655,6 +663,7 @@ impl AblationDimensionV1 {
 /// projection reports the value it can and drops coverage to
 /// [`CoverageStateV1::Unknown`] so the rollup will not publish a point value
 /// derived from an empty denominator.
+#[hotpath::measure(label = "usecases.observability.observe_ablation")]
 pub fn observe_stage_ablation(
     descriptor_revision: &str,
     dimension: AblationDimensionV1,
