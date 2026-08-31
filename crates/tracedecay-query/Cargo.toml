@@ -106,3 +106,9 @@ harness = false
 name = "tracedecay-index-bench"
 path = "src/bin/tracedecay_index_bench.rs"
 test = false
+
+# Daemon-free search-lane query latency workload over a published artifact.
+[[bin]]
+name = "tracedecay-search-bench"
+path = "src/bin/tracedecay_search_bench.rs"
+test = false
