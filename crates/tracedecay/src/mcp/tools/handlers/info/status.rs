@@ -69,6 +69,8 @@ enum CodeIndexRetrievalServingV1 {
     /// daemon serving stale answers with nothing progressing, and "serving"
     /// alone must not mask that.
     Serving {
+        freshness: &'static str,
+        condition: Option<&'static str>,
         seated_generation_age_seconds: Option<i64>,
         last_reconcile_age_seconds: Option<i64>,
     },
@@ -83,10 +85,18 @@ impl CodeIndexRetrievalServingV1 {
     fn attach(&self, output: &mut Value) -> bool {
         match self {
             Self::Serving {
+                freshness,
+                condition,
                 seated_generation_age_seconds,
                 last_reconcile_age_seconds,
             } => {
-                let mut serving = json!({"status": "serving"});
+                let mut serving = json!({
+                    "status": "serving",
+                    "freshness": freshness,
+                });
+                if let Some(condition) = condition {
+                    serving["condition"] = json!(condition);
+                }
                 if let Some(age) = seated_generation_age_seconds {
                     serving["seated_generation_age_seconds"] = json!(age);
                 }
@@ -260,7 +270,18 @@ pub(crate) async fn handle_status(
                 // exists for the worktree; until the first seal every
                 // retrieval lane refuses `generation_rebuilding`.
                 let retrieval_serving = if freshness.latest_generation_id.is_some() {
+                    let (serving_freshness, condition) = match freshness.staleness_state.as_deref()
+                    {
+                        Some("fresh") => ("current", None),
+                        Some(_) if freshness.rebuild_in_flight => {
+                            ("last_complete_stale", Some("rebuilding"))
+                        }
+                        Some(_) => ("last_complete_stale", Some("stalled")),
+                        None => ("unknown", None),
+                    };
                     CodeIndexRetrievalServingV1::Serving {
+                        freshness: serving_freshness,
+                        condition,
                         seated_generation_age_seconds: age_seconds(freshness.sealed_at_micros),
                         last_reconcile_age_seconds: age_seconds(freshness.last_reconcile_micros),
                     }

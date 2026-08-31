@@ -274,10 +274,8 @@ mod tests {
     use tracedecay_domain::SessionId;
     use tracedecay_global_db::RegisteredGlobalDb;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_lcm::{LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode};
     use tracedecay_runtime_core::db::engine::params;
-    use tracedecay_lcm::{
-        LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode,
-    };
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
     fn session(provider: &str, session_id: &str) -> SessionRecord {

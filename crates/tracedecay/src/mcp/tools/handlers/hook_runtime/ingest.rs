@@ -7,15 +7,15 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay_session_memory::session::lcm::{
+    LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,
+    LcmCompactionCommand, LcmCompressionEvidence, LcmHostProtocol,
+};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
 use tracedecay_sessions::runtime::source::TranscriptSource;
 use tracedecay_usecases::observation::ObservationCancellation;
-use tracedecay_session_memory::session::lcm::{
-    LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,
-    LcmCompactionCommand, LcmCompressionEvidence, LcmHostProtocol,
-};
 
 use super::super::SessionAuthorities;
 
@@ -537,8 +537,8 @@ pub(super) async fn accounting_receipt(
     .await;
     let prices = tracedecay_session_memory::provider_pricing::load_table();
     let priced = tracedecay_session_memory::provider_usage::price_provider_usage(&usage, prices, 0);
-    let complete =
-        priced.coverage == tracedecay_session_memory::provider_usage::ProviderUsageCoverageV1::Complete;
+    let complete = priced.coverage
+        == tracedecay_session_memory::provider_usage::ProviderUsageCoverageV1::Complete;
     let tokens_consumed = complete
         .then(|| {
             priced
