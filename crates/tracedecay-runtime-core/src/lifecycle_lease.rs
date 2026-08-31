@@ -36,6 +36,20 @@ pub enum SharedLeaseAttempt {
     Busy,
 }
 
+/// Outcome of a non-blocking exclusive acquisition. Contention is a typed
+/// state, not an error, so a caller can coordinate with the holder (for
+/// example by quiescing the managed daemon, which retains a shared lease for
+/// its whole lifetime) instead of telling the operator to retry against a
+/// process that may never exit.
+#[derive(Debug)]
+pub enum ExclusiveLeaseAttempt {
+    Acquired(LifecycleLease),
+    /// Another live process holds the lease. `owner_operation` is the
+    /// recorded operation of an exclusive owner; shared holders (the managed
+    /// daemon, doctor, hooks) record no owner metadata.
+    Busy { owner_operation: Option<String> },
+}
+
 impl LifecycleLease {
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
@@ -144,6 +158,26 @@ pub fn acquire_exclusive_for_profile(
     operation: &str,
 ) -> Result<LifecycleLease> {
     acquire_exclusive_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
+}
+
+/// Attempts the exclusive profile lease without blocking, reporting
+/// contention as [`ExclusiveLeaseAttempt::Busy`] instead of a refusal error.
+pub fn try_acquire_exclusive_for_profile(
+    profile_root: &Path,
+    operation: &str,
+) -> Result<ExclusiveLeaseAttempt> {
+    let path = lifecycle_lock_path_for_profile(profile_root)?;
+    let mut file = open_lock_file(&path)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => own_exclusive(file, &path, operation).map(ExclusiveLeaseAttempt::Acquired),
+        Err(error) if is_lock_contended(&error) => Ok(ExclusiveLeaseAttempt::Busy {
+            owner_operation: read_owner(&mut file, &path)
+                .as_deref()
+                .and_then(|owner| owner.split('\t').nth(1))
+                .map(str::to_string),
+        }),
+        Err(error) => Err(lock_error(&path, operation, &error)),
+    }
 }
 
 /// Waits for the current exclusive owner to finish, then acquires a shared
@@ -584,9 +618,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        SharedLeaseAttempt, acquire_exclusive_at, acquire_exclusive_at_with_timeout,
-        acquire_exclusive_or_inherited_at, acquire_shared_at, acquire_shared_or_inherited_at,
-        try_acquire_shared_at, try_acquire_shared_for_profile,
+        ExclusiveLeaseAttempt, SharedLeaseAttempt, acquire_exclusive_at,
+        acquire_exclusive_at_with_timeout, acquire_exclusive_or_inherited_at, acquire_shared_at,
+        acquire_shared_or_inherited_at, try_acquire_exclusive_for_profile, try_acquire_shared_at,
+        try_acquire_shared_for_profile,
     };
 
     #[test]
@@ -751,6 +786,54 @@ mod tests {
             try_acquire_shared_at(&path, "hook").unwrap(),
             SharedLeaseAttempt::Busy
         ));
+    }
+
+    #[test]
+    fn nonblocking_exclusive_attempt_reports_a_shared_holder_as_busy_without_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let path = profile.join("lifecycle.lock");
+        let daemon_like = acquire_shared_at(&path, "daemon run").unwrap();
+
+        let attempt = try_acquire_exclusive_for_profile(&profile, "wipe").unwrap();
+
+        // Shared holders record no owner metadata, so the busy state carries
+        // no operation — the caller must not pretend to know the holder.
+        match attempt {
+            ExclusiveLeaseAttempt::Busy { owner_operation } => {
+                assert_eq!(owner_operation, None);
+            }
+            ExclusiveLeaseAttempt::Acquired(_) => {
+                panic!("a live shared holder must report Busy")
+            }
+        }
+        drop(daemon_like);
+        assert!(matches!(
+            try_acquire_exclusive_for_profile(&profile, "wipe").unwrap(),
+            ExclusiveLeaseAttempt::Acquired(_)
+        ));
+    }
+
+    #[test]
+    fn nonblocking_exclusive_attempt_names_an_exclusive_owner_operation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let path = profile.join("lifecycle.lock");
+        let owner = acquire_exclusive_at(&path, "upgrade").unwrap();
+
+        let attempt = try_acquire_exclusive_for_profile(&profile, "wipe").unwrap();
+
+        match attempt {
+            ExclusiveLeaseAttempt::Busy { owner_operation } => {
+                assert_eq!(owner_operation.as_deref(), Some("upgrade"));
+            }
+            ExclusiveLeaseAttempt::Acquired(_) => {
+                panic!("a live exclusive owner must report Busy")
+            }
+        }
+        drop(owner);
     }
 
     #[test]

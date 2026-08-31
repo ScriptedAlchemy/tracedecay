@@ -23,4 +23,7 @@ pub(crate) use settings::{
     handle_gitignore, handle_upload_counter, mutate_project_configuration,
     project_configuration_set, report_configuration_receipt,
 };
-pub(crate) use storage::{handle_list, handle_wipe};
+pub(crate) use storage::{
+    ProfileOfflineAuthority, handle_list, handle_wipe, join_outcome_and_restore,
+    take_profile_offline,
+};

@@ -16,5 +16,6 @@ mod multi_connection_test;
 mod native_project_alias_test;
 mod profile_storage_reset_test;
 mod project_identity_collapse_test;
+mod projects_forget_test;
 mod storage_resolver_test;
 mod worktree_canonical_root_guard_test;

@@ -898,6 +898,25 @@ fn validate_host_bundle_options(
         }
         return Ok(());
     }
+    // `projects forget` destroys one registered project's rows and stores, so
+    // it REQUIRES `--yes` (its handler refuses to run without it) and takes
+    // the global `--dry-run` as its preview. It owns no host component.
+    if matches!(
+        command,
+        Commands::Projects {
+            action: ProjectsAction::Forget { .. },
+        }
+    ) {
+        if host_bundle.component.is_some() || host_bundle.adopt {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "projects forget accepts --yes to confirm and --dry-run to preview; \
+                          --component and --adopt are only valid with install, update-plugin, \
+                          reinstall, or uninstall"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    }
     // The scoped storage resets destroy refused store state, so they REQUIRE
     // the same `--yes` confirmation (their handlers refuse to run without it).
     // Like `wipe`, they own no host component and have no preview.
@@ -975,7 +994,7 @@ async fn dispatch_command(
     validate_host_bundle_options(&command, family, &host_bundle)?;
     match family {
         CommandFamily::Project => {
-            dispatch_project_command(command, host_bundle.yes).await?;
+            dispatch_project_command(command, host_bundle.yes, host_bundle.dry_run).await?;
             Ok(CommandOutcome::Success)
         }
         CommandFamily::Runtime => {
@@ -1009,6 +1028,7 @@ async fn dispatch_command(
 async fn dispatch_project_command(
     command: Commands,
     assume_yes: bool,
+    dry_run: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::Init {
@@ -1053,7 +1073,7 @@ async fn dispatch_project_command(
                 .await?;
         }
         Commands::Projects { action } => {
-            project_cmd::handle_projects_action(action).await?;
+            project_cmd::handle_projects_action(action, assume_yes, dry_run).await?;
         }
         Commands::Branch { action } => {
             commands::handle_branch_action(action).await?;
