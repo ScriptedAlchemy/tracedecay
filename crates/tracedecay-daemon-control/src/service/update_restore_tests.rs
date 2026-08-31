@@ -19,6 +19,7 @@ use tempfile::TempDir;
 #[cfg(unix)]
 use tracedecay_runtime_core::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
 
+use super::runner::ServiceRunner;
 use super::{DaemonServiceState, MaintenanceWindowOutcome, QuiescedDaemonLifecycle};
 
 const QUIESCED_VERSION: &str = "0.1.0-test+quiesced";
@@ -33,6 +34,7 @@ fn quiesced_guard() -> QuiescedDaemonLifecycle {
         previous_state: DaemonServiceState::RunningEnabled,
         lifecycle_lease: None,
         expected_version: QUIESCED_VERSION.to_owned(),
+        runner: ServiceRunner::WindowsTask,
         restored: true,
     }
 }
