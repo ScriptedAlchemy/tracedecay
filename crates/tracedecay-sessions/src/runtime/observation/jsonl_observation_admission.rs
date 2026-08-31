@@ -87,6 +87,7 @@ pub(in crate::runtime) struct JsonlObservationAdmissionRequest<'request> {
     shared_frame_preparation: SharedJsonlFramePreparation,
 }
 
+#[hotpath::measure_all]
 impl<'request> JsonlObservationAdmissionRequest<'request> {
     pub(in crate::runtime) fn new(
         provider: &'static str,
@@ -152,6 +153,7 @@ pub(in crate::runtime) enum JsonlFrameAdmission {
     NeedsPreparation,
 }
 
+#[hotpath::measure_all]
 impl JsonlFrameAdmission {
     pub(in crate::runtime) fn durable(
         parsed_record: ParsedObservationRecordV1,
@@ -192,6 +194,7 @@ impl JsonlFrameAdmission {
         }
     }
 
+    #[hotpath::skip]
     pub(in crate::runtime) const fn needs_preparation() -> Self {
         Self::NeedsPreparation
     }
@@ -232,7 +235,9 @@ struct JsonlCheckpoint {
     resume_fingerprint: u64,
 }
 
+#[hotpath::measure_all]
 impl JsonlCheckpoint {
+    #[hotpath::skip]
     const fn new(offset: u64, end_offset: u64, resume_fingerprint: u64) -> Self {
         Self {
             offset,
@@ -265,6 +270,7 @@ struct SharedJsonlPreparationAuthority {
 static SHARED_JSONL_PREPARATION_AUTHORITY: OnceLock<SharedJsonlPreparationAuthority> =
     OnceLock::new();
 
+#[hotpath::measure]
 pub(crate) fn install_shared_jsonl_preparation_authority(
     memory: Arc<ProcessResidentMemoryV1>,
 ) -> TranscriptIngestResult<()> {
@@ -285,6 +291,7 @@ pub(crate) fn install_shared_jsonl_preparation_authority(
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })
 }
 
+#[hotpath::measure]
 pub(crate) fn shared_jsonl_preparation_workers() -> usize {
     process_background_cpu().map_or(1, |authority| {
         shared_jsonl_preparation_workers_from(authority.width().get())
@@ -301,6 +308,7 @@ const fn shared_jsonl_preparation_workers_from(installed_width: usize) -> usize 
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn shared_jsonl_preparation_capacity() -> usize {
     let cpu_width = shared_jsonl_preparation_workers();
     let Some(authority) = SHARED_JSONL_PREPARATION_AUTHORITY.get() else {
@@ -310,6 +318,7 @@ pub(crate) fn shared_jsonl_preparation_capacity() -> usize {
     shared_jsonl_preparation_capacity_from(cpu_width, memory.limit_bytes, memory.used_bytes)
 }
 
+#[hotpath::measure]
 fn shared_jsonl_max_preparation_capacity() -> usize {
     let cpu_width = shared_jsonl_preparation_workers();
     let Some(authority) = SHARED_JSONL_PREPARATION_AUTHORITY.get() else {
@@ -322,6 +331,7 @@ fn shared_jsonl_max_preparation_capacity() -> usize {
         .max(1)
 }
 
+#[hotpath::measure]
 fn shared_jsonl_preparation_capacity_from(
     cpu_width: usize,
     memory_limit_bytes: u64,
@@ -341,6 +351,7 @@ const fn shared_jsonl_speculative_capacity_from(total_capacity: usize) -> usize 
     total_capacity.saturating_sub(1)
 }
 
+#[hotpath::measure]
 pub(in crate::runtime) fn shared_jsonl_background_cpu()
 -> TranscriptIngestResult<Arc<ProcessBackgroundCpuV1>> {
     process_background_cpu().ok_or(TranscriptIngestError::BackgroundResourceUnavailable {
@@ -349,6 +360,7 @@ pub(in crate::runtime) fn shared_jsonl_background_cpu()
     })
 }
 
+#[hotpath::measure]
 pub(in crate::runtime) fn reserve_shared_jsonl_page()
 -> TranscriptIngestResult<Option<ProcessSharedMemoryReservationV1>> {
     reserve_shared_jsonl_bytes(
@@ -357,6 +369,7 @@ pub(in crate::runtime) fn reserve_shared_jsonl_page()
     )
 }
 
+#[hotpath::measure]
 pub(crate) fn reserve_shared_jsonl_bytes(
     bytes: u64,
     resource: &'static str,
@@ -427,6 +440,7 @@ pub(in crate::runtime) struct JsonlFrameHints {
     pub may_change_codex_context: bool,
 }
 
+#[hotpath::measure]
 fn jsonl_frame_hints(bytes: &[u8]) -> JsonlFrameHints {
     const TOKEN_LEN: usize = 12;
     const SESSION_META: &[u8; TOKEN_LEN] = b"session_meta";
@@ -493,6 +507,7 @@ struct SharedJsonlInFlight {
     abandoned: std::sync::atomic::AtomicBool,
 }
 
+#[hotpath::measure_all]
 impl SharedJsonlInFlight {
     fn new() -> Self {
         Self {
@@ -507,6 +522,7 @@ struct SharedJsonlInFlightGuard {
     armed: bool,
 }
 
+#[hotpath::measure_all]
 impl SharedJsonlInFlightGuard {
     fn new(state: Arc<SharedJsonlInFlight>) -> Self {
         Self { state, armed: true }
@@ -528,6 +544,7 @@ impl Drop for SharedJsonlInFlightGuard {
     }
 }
 
+#[hotpath::measure]
 fn discard_abandoned_shared_jsonl_in_flight(cache: &mut SharedJsonlPageCache) {
     let abandoned = cache
         .in_flight
@@ -545,6 +562,7 @@ fn discard_abandoned_shared_jsonl_in_flight(cache: &mut SharedJsonlPageCache) {
     hotpath::gauge!("jsonl_shared_pages_in_flight").set(cache.in_flight.len() as f64);
 }
 
+#[hotpath::measure]
 fn reserve_shared_jsonl_speculative_slot(
     cache: &mut SharedJsonlPageCache,
     key: &SharedJsonlPageKey,
@@ -657,6 +675,7 @@ impl Drop for SharedJsonlFramePreparationGuard {
 
 struct SharedJsonlPreparationWaitGuard;
 
+#[hotpath::measure_all]
 impl SharedJsonlPreparationWaitGuard {
     fn new() -> Self {
         hotpath::gauge!("jsonl_shared_prep_waiting").inc(1.0);
@@ -680,6 +699,7 @@ impl Drop for SharedJsonlPreparationActiveGuard {
 
 struct SharedJsonlQueuedPathGuard;
 
+#[hotpath::measure_all]
 impl SharedJsonlQueuedPathGuard {
     fn new() -> Self {
         hotpath::gauge!("jsonl_shared_generation_paths_queued").inc(1.0);
@@ -699,6 +719,7 @@ struct SharedJsonlPreparedBytesGuard {
     bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl SharedJsonlPreparedBytesGuard {
     fn new(bytes: u64) -> Self {
         use std::sync::atomic::Ordering;
@@ -730,6 +751,7 @@ pub(crate) struct SharedJsonlPathPin {
     prefetches: Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
+#[hotpath::measure]
 pub(crate) fn pin_shared_jsonl_paths(paths: &[PathBuf]) -> SharedJsonlPathPin {
     let mut canonical = Vec::with_capacity(paths.len());
     for path in paths {
@@ -754,6 +776,7 @@ pub(crate) fn pin_shared_jsonl_paths(paths: &[PathBuf]) -> SharedJsonlPathPin {
     }
 }
 
+#[hotpath::measure_all]
 impl SharedJsonlPathPin {
     pub(crate) fn start_prefetches(&self, paths: &[PathBuf]) {
         if self
@@ -797,6 +820,7 @@ impl Drop for SharedJsonlPathPin {
     }
 }
 
+#[hotpath::measure]
 fn shared_jsonl_path_is_pinned(path: &Path) -> bool {
     SHARED_JSONL_PATH_PINS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -805,6 +829,7 @@ fn shared_jsonl_path_is_pinned(path: &Path) -> bool {
         .contains_key(path)
 }
 
+#[hotpath::measure]
 pub(in crate::runtime) fn shared_jsonl_file_identity(
     path: &Path,
 ) -> TranscriptIngestResult<SharedJsonlFileIdentity> {
@@ -839,6 +864,7 @@ struct SharedJsonlBuildOptions {
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
+#[hotpath::measure]
 fn build_shared_jsonl_page(
     path: PathBuf,
     previous: StoredCursor,
@@ -1552,6 +1578,7 @@ struct ActiveAdmission<'request> {
     cancellation: ObservationCancellation,
 }
 
+#[hotpath::measure_all]
 impl ActiveAdmission<'_> {
     fn cursor_at(
         &self,
@@ -1568,6 +1595,7 @@ impl ActiveAdmission<'_> {
         .with_resume_checkpoint(self.file_identity, resume_fingerprint))
     }
 
+    #[hotpath::skip]
     async fn advance_coverage(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,
@@ -1666,6 +1694,7 @@ impl ActiveAdmission<'_> {
         })
     }
 
+    #[hotpath::skip]
     async fn apply_capture_result(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,
@@ -1760,6 +1789,7 @@ impl ActiveAdmission<'_> {
         }
     }
 
+    #[hotpath::skip]
     async fn capture(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,
@@ -1778,6 +1808,7 @@ impl ActiveAdmission<'_> {
             .await
     }
 
+    #[hotpath::skip]
     async fn capture_window(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,
@@ -1992,6 +2023,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     let mut pending_bytes = 0_u64;
     let mut pending_start_state: Option<State> = None;
 
+    #[hotpath::skip]
     async fn flush_pending<State: Clone>(
         active: &ActiveAdmission<'_>,
         window: PendingAdmissionWindow<'_, State>,
@@ -2396,6 +2428,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
 /// unbound authorities, retryable races — says nothing about the record and
 /// must surface as a typed block instead of writing coverage over a commit
 /// that never landed (or one that already landed and advanced the cursor).
+#[hotpath::measure]
 fn is_deterministic_content_refusal(outcome: &HostAdmissionOutcome) -> bool {
     matches!(
         outcome.recovery,
@@ -2410,11 +2443,13 @@ fn is_deterministic_content_refusal(outcome: &HostAdmissionOutcome) -> bool {
 /// Log identity for a transcript file. Transcript paths sit under the
 /// operator's home directory and name real sessions, so ingest logs carry the
 /// basename only rather than persisting an absolute path into the daemon log.
+#[hotpath::measure]
 fn transcript_log_identity(path: &Path) -> Cow<'_, str> {
     path.file_name()
         .map_or(Cow::Borrowed("<unnamed>"), |name| name.to_string_lossy())
 }
 
+#[hotpath::measure]
 fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
     match reason {
         RawJsonlSkippedReason::Whitespace => ObservationCoverageReason::BlankFrame,
@@ -2422,6 +2457,7 @@ fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
     }
 }
 
+#[hotpath::measure]
 pub(in crate::runtime) fn namespace_replacement_message_ids(
     messages: &mut [SessionMessageRecord],
     generation: u64,
@@ -2431,6 +2467,7 @@ pub(in crate::runtime) fn namespace_replacement_message_ids(
     }
 }
 
+#[hotpath::measure]
 pub(in crate::runtime) fn preflight_and_parse_new(
     provider: &'static str,
     path: &Path,

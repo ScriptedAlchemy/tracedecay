@@ -17,7 +17,9 @@ pub(super) enum GitHistoryFailureReason {
     UnsupportedCanonicalWorktreeEncoding,
 }
 
+#[hotpath::measure_all]
 impl GitHistoryFailureReason {
+    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::UnsupportedSourceFraming => "unsupported_source_framing",
@@ -90,6 +92,7 @@ pub(super) struct GitHistoryFailureRow {
     pub reflog_digest: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl GitHistoryFailureRow {
     pub(super) fn from_candidate(
         row: &SessionActivityRow,
@@ -129,6 +132,7 @@ impl GitHistoryFailureRow {
         }
     }
 
+    #[hotpath::skip]
     pub(super) const fn frontier(&self) -> GitHistoryIndexFrontier {
         GitHistoryIndexFrontier {
             activity_timestamp: self.activity_timestamp,

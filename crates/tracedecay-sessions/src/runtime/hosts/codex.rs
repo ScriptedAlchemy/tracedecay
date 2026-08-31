@@ -331,6 +331,7 @@ pub(crate) enum CodexDiscoveryDelivery {
     Waiting,
 }
 
+#[hotpath::measure_all]
 impl CodexDiscoveryHub {
     pub fn configure_preparation_resources(
         &self,
@@ -420,6 +421,7 @@ impl CodexDiscoveryHub {
         hotpath::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
     }
 
+    #[hotpath::skip]
     pub(crate) async fn discover(
         &self,
         consumer: &str,
@@ -954,6 +956,7 @@ impl PartialOrd for CodexFileIdentity {
     }
 }
 
+#[hotpath::measure_all]
 impl CodexDiscoveryState {
     pub fn acknowledge(&mut self) {
         self.pending = None;
@@ -970,6 +973,7 @@ impl CodexDiscoveryState {
     }
 }
 
+#[hotpath::measure_all]
 impl CodexRetainedScan {
     fn new(source: &CodexSource, validation: bool) -> Self {
         Self {
@@ -1057,6 +1061,7 @@ impl Default for CodexExactSessionPathAuthority {
     }
 }
 
+#[hotpath::measure_all]
 impl CodexExactSessionPathAuthority {
     fn issue_lease(&mut self) -> TranscriptIngestResult<u128> {
         let lease = self.next_lease;
@@ -1196,6 +1201,7 @@ struct UserCodexScope {
     registered_roots: Vec<PathBuf>,
 }
 
+#[hotpath::measure_all]
 impl CodexSource {
     fn discovery_key(&self) -> CodexDiscoverySourceKey {
         CodexDiscoverySourceKey {
@@ -1771,7 +1777,9 @@ enum CodexDiscoverySweep {
     Complete,
 }
 
+#[hotpath::measure_all]
 impl CodexDiscoveryFrontier {
+    #[hotpath::skip]
     pub(crate) const fn initial() -> Self {
         Self {
             epoch: CodexCorpusEpoch::initial(),
@@ -1779,6 +1787,7 @@ impl CodexDiscoveryFrontier {
         }
     }
 
+    #[hotpath::skip]
     const fn in_progress(epoch: CodexCorpusEpoch) -> Self {
         Self {
             epoch,
@@ -1786,6 +1795,7 @@ impl CodexDiscoveryFrontier {
         }
     }
 
+    #[hotpath::skip]
     const fn complete(epoch: CodexCorpusEpoch) -> Self {
         Self {
             epoch,
@@ -1793,10 +1803,12 @@ impl CodexDiscoveryFrontier {
         }
     }
 
+    #[hotpath::skip]
     pub(crate) const fn is_complete(self) -> bool {
         matches!(self.state, CodexDiscoverySweep::Complete)
     }
 
+    #[hotpath::skip]
     pub(crate) const fn for_coverage(self, coverage_complete: bool) -> Self {
         if self.is_complete() && !coverage_complete {
             Self::in_progress(self.epoch)
@@ -1825,6 +1837,7 @@ impl CodexDiscoveryFrontier {
         Ok(decoded)
     }
 
+    #[hotpath::skip]
     pub(crate) const fn into_parse_offsets(self) -> (ParseOffset, ParseOffset) {
         if self.epoch.is_initial() && matches!(self.state, CodexDiscoverySweep::InProgress) {
             return (
@@ -1862,7 +1875,9 @@ pub(crate) struct CodexCorpusEpoch {
     files: u64,
 }
 
+#[hotpath::measure_all]
 impl CodexCorpusEpoch {
+    #[hotpath::skip]
     const fn initial() -> Self {
         Self {
             high: 0,
@@ -1871,10 +1886,12 @@ impl CodexCorpusEpoch {
         }
     }
 
+    #[hotpath::skip]
     const fn is_initial(self) -> bool {
         self.high == 0 && self.low == 0 && self.files == 0
     }
 
+    #[hotpath::skip]
     const fn from_parse_offset(offset: ParseOffset) -> Self {
         Self {
             high: offset.byte_offset,
@@ -1883,6 +1900,7 @@ impl CodexCorpusEpoch {
         }
     }
 
+    #[hotpath::skip]
     const fn into_parse_offset(self) -> ParseOffset {
         ParseOffset {
             byte_offset: self.high,
@@ -1916,6 +1934,7 @@ pub struct CodexDiscoveryPass {
     _shared_page_pin: Option<std::sync::Arc<SharedJsonlPathPin>>,
 }
 
+#[hotpath::measure]
 fn retained_scan_step(
     source: &CodexSource,
     state: &mut CodexDiscoveryState,
@@ -2407,6 +2426,7 @@ fn retained_scan_step(
     })
 }
 
+#[hotpath::measure]
 fn retain_active_file(
     files: &mut BinaryHeap<Reverse<CodexFileIdentity>>,
     candidate: CodexFileIdentity,
@@ -2428,6 +2448,7 @@ fn retain_active_file(
     }
 }
 
+#[hotpath::measure]
 fn codex_directory_identity(path: &Path) -> TranscriptIngestResult<Option<[u8; 32]>> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -2453,6 +2474,7 @@ fn codex_directory_identity(path: &Path) -> TranscriptIngestResult<Option<[u8; 3
     Ok(Some(codex_corpus_identity(path, &metadata)?))
 }
 
+#[hotpath::measure]
 fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult<u64> {
     u64::try_from(path_byte_len(path))
         .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
@@ -2464,6 +2486,7 @@ fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult
         })
 }
 
+#[hotpath::measure]
 fn codex_corpus_identity(
     path: &Path,
     metadata: &std::fs::Metadata,
@@ -2506,6 +2529,7 @@ fn codex_corpus_identity(
 }
 
 #[cfg(not(any(unix, windows)))]
+#[hotpath::measure]
 fn hash_system_time(
     hasher: &mut Sha256,
     path: &Path,
@@ -2526,6 +2550,7 @@ fn hash_system_time(
     Ok(())
 }
 
+#[hotpath::measure]
 fn path_byte_len(path: &Path) -> usize {
     #[cfg(unix)]
     {
@@ -2546,6 +2571,7 @@ fn path_byte_len(path: &Path) -> usize {
     }
 }
 
+#[hotpath::measure]
 fn hash_path(hasher: &mut Sha256, path: &Path) {
     #[cfg(unix)]
     {

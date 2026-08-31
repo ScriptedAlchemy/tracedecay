@@ -55,6 +55,7 @@ impl AnalyticsSessionTimestampSource for AnalyticsSessionTimestamp {
     }
 }
 
+#[hotpath::measure]
 pub fn git_evidence_projection_identity(
     namespace: GraphNamespace,
 ) -> Result<GraphProjectionIdentity, GitCorrelationError> {
@@ -64,6 +65,7 @@ pub fn git_evidence_projection_identity(
     ))
 }
 
+#[hotpath::measure]
 pub fn git_evidence_generation_id(
     projection: &GitEvidenceProjectionV1,
     projector_revision: &GraphProjectorRevision,
@@ -80,6 +82,7 @@ pub fn git_evidence_generation_id(
     .map_err(Into::into)
 }
 
+#[hotpath::measure]
 pub fn build_git_evidence_manifest_checked(
     identity: GraphProjectionIdentity,
     projection: &GitEvidenceProjectionV1,
@@ -182,6 +185,7 @@ impl std::fmt::Debug for GitEvidenceProjectionStore {
     }
 }
 
+#[hotpath::measure_all]
 impl GitEvidenceProjectionStore {
     pub fn from_verified_snapshot(
         snapshot: VerifiedGraphSnapshot,
@@ -299,6 +303,7 @@ impl GitEvidenceProjectionStore {
     }
 }
 
+#[hotpath::measure]
 pub fn publish_git_evidence_projection(
     runtime: &dyn VerifiedGraphRuntimePortV1,
     identity: GraphProjectionIdentity,
@@ -331,6 +336,7 @@ pub fn publish_git_evidence_projection(
 /// Recovers the published Git evidence projection, answering `Ok(None)` when
 /// the projection has never published a verified head — the typed empty start
 /// of a project without any recorded Git evidence.
+#[hotpath::measure]
 pub fn recover_git_evidence_projection(
     runtime: &dyn VerifiedGraphRuntimePortV1,
     identity: &GraphProjectionIdentity,
@@ -351,6 +357,7 @@ pub fn recover_git_evidence_projection(
     .map(Some)
 }
 
+#[hotpath::measure]
 fn require_git_evidence_projection_identity(
     identity: &GraphProjectionIdentity,
 ) -> Result<(), GitCorrelationError> {
@@ -364,6 +371,7 @@ fn require_git_evidence_projection_identity(
     Ok(())
 }
 
+#[hotpath::measure]
 fn require_git_evidence_generation(
     snapshot: &VerifiedGraphSnapshot,
     projection: &GitEvidenceProjectionV1,
@@ -380,6 +388,7 @@ fn require_git_evidence_generation(
     Ok(())
 }
 
+#[hotpath::measure]
 fn projection_entity(source_watermark: &str) -> Result<GraphEntity, GitCorrelationError> {
     GraphEntity::new(
         GraphEntityId::new("projection:session-git-evidence")?,
@@ -392,6 +401,7 @@ fn projection_entity(source_watermark: &str) -> Result<GraphEntity, GitCorrelati
     .map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn session_entity(session_id: &str, provider: &str) -> Result<GraphEntity, GitCorrelationError> {
     GraphEntity::new(
         session_entity_id(session_id)?,
@@ -404,6 +414,7 @@ fn session_entity(session_id: &str, provider: &str) -> Result<GraphEntity, GitCo
     .map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn span_entity(span: &SessionGitSpan) -> Result<GraphEntity, GitCorrelationError> {
     GraphEntity::new(
         span_entity_id(&span.span_id)?,
@@ -416,6 +427,7 @@ fn span_entity(span: &SessionGitSpan) -> Result<GraphEntity, GitCorrelationError
     .map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn commit_entity(commit_sha: &str) -> Result<GraphEntity, GitCorrelationError> {
     GraphEntity::new(
         commit_entity_id(commit_sha)?,
@@ -428,6 +440,7 @@ fn commit_entity(commit_sha: &str) -> Result<GraphEntity, GitCorrelationError> {
     .map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn session_span_relation(
     projection: &GraphProjectionIdentity,
     span: &SessionGitSpan,
@@ -442,6 +455,7 @@ fn session_span_relation(
     .map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn session_commit_relation(
     projection: &GraphProjectionIdentity,
     record: &CommitSessionRecord,
@@ -462,18 +476,22 @@ fn session_commit_relation(
     .map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn session_entity_id(session_id: &str) -> Result<GraphEntityId, GitCorrelationError> {
     GraphEntityId::new(stable_identity("session", session_id)).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn span_entity_id(span_id: &str) -> Result<GraphEntityId, GitCorrelationError> {
     GraphEntityId::new(stable_identity("span", span_id)).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn commit_entity_id(commit_sha: &str) -> Result<GraphEntityId, GitCorrelationError> {
     GraphEntityId::new(stable_identity("commit", commit_sha)).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn stable_identity(kind: &str, material: &str) -> String {
     format!(
         "{kind}:{}",

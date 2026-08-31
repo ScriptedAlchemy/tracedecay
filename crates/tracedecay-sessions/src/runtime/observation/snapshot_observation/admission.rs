@@ -46,6 +46,7 @@ pub trait SnapshotAdmissionRecord {
     }
 }
 
+#[hotpath::measure]
 pub fn snapshot_capture_request<R>(
     record: &R,
     scope: ObservationScopeV1,
@@ -193,6 +194,7 @@ impl SnapshotAdmissionRunner {
         self.budget.defer();
     }
 
+    #[hotpath::skip]
     pub async fn admit_batch<R, F>(
         &mut self,
         facade: &dyn HostAdmission,
@@ -361,6 +363,7 @@ impl SnapshotAdmissionRunner {
     }
 }
 
+#[hotpath::measure]
 fn ensure_snapshot_admission_active(
     provider: &'static str,
     cancellation: &ObservationCancellation,
@@ -400,6 +403,7 @@ async fn session_cursor(
     Ok(cursor)
 }
 
+#[hotpath::measure]
 pub fn snapshot_source_identity(
     provider: &'static str,
     session_id: &str,
@@ -502,6 +506,7 @@ pub async fn snapshot_range_was_committed(
     snapshot_cursor_covers_range(cursor.as_ref(), generation, range)
 }
 
+#[hotpath::measure]
 pub fn snapshot_cursor_covers_range(
     cursor: Option<&ObservationSourceCursorV1>,
     generation: ObservationSourceGenerationV1,

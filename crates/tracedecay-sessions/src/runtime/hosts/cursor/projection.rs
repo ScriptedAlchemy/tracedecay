@@ -45,6 +45,7 @@ pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
     .await
 }
 
+#[hotpath::measure]
 pub fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>(
     project_root: &'a Path,
     project_id: ProjectId,
@@ -145,6 +146,7 @@ pub(in crate::runtime) async fn drain_cursor_observation_projections_with_sessio
     })
 }
 
+#[hotpath::measure_all]
 impl CursorProjectionDrainStats {
     fn into_transcript_stats(self) -> CursorTranscriptIngestStats {
         CursorTranscriptIngestStats {
@@ -168,6 +170,7 @@ impl CursorProjectionDrainStats {
     }
 }
 
+#[hotpath::measure]
 pub(in crate::runtime) fn cursor_ingest_or_default(
     result: &TranscriptIngestResult<CursorTranscriptIngestStats>,
 ) -> CursorTranscriptIngestStats {

@@ -57,6 +57,7 @@ fn text_bytes<const N: usize>(values: [Option<&str>; N]) -> u64 {
     })
 }
 
+#[hotpath::measure]
 pub(super) fn hermes_native_payload_bytes(row: &HermesRow) -> u64 {
     let text_bytes = text_bytes([
         Some(row.session_id.as_str()),
@@ -81,12 +82,14 @@ pub(super) fn hermes_native_payload_bytes(row: &HermesRow) -> u64 {
     text_bytes.saturating_add(scalar_count.saturating_mul(8))
 }
 
+#[hotpath::measure]
 fn hermes_row_bytes(row: &HermesRow) -> u64 {
     hermes_native_payload_bytes(row)
         .saturating_add(text_bytes([row.session_cwd.as_deref()]))
         .saturating_add(16)
 }
 
+#[hotpath::measure]
 pub(super) fn hermes_budget_bytes(row: &HermesRow) -> u64 {
     let capped = u64::try_from(MAX_OBSERVATION_RECORD_BYTES)
         .unwrap_or(u64::MAX)
@@ -98,6 +101,7 @@ pub(super) fn hermes_budget_bytes(row: &HermesRow) -> u64 {
         .min(capped)
 }
 
+#[hotpath::measure]
 pub(super) fn hermes_page_row_charge(sql_measured_bytes: u64) -> u64 {
     let capped = u64::try_from(MAX_HERMES_VALUE_BYTES)
         .unwrap_or(u64::MAX)

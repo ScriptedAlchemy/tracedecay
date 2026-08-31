@@ -676,6 +676,7 @@ pub async fn capture_kimi_observations(
     .await
 }
 
+#[hotpath::measure]
 fn isolatable_source_error(error: &TranscriptIngestError) -> bool {
     matches!(
         error,
@@ -686,6 +687,7 @@ fn isolatable_source_error(error: &TranscriptIngestError) -> bool {
     )
 }
 
+#[hotpath::measure]
 fn warn_isolated_source(path: &Path, failure_kind: &'static str) {
     tracing::warn!(
         provider = PROVIDER,
@@ -698,6 +700,7 @@ fn warn_isolated_source(path: &Path, failure_kind: &'static str) {
     );
 }
 
+#[hotpath::measure]
 fn kimi_session_id(path: &Path) -> TranscriptIngestResult<String> {
     let session_id = if path.file_name().and_then(|name| name.to_str()) == Some("context.jsonl") {
         path.parent()

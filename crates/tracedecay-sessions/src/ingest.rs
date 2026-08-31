@@ -4,6 +4,7 @@ pub struct TranscriptIngestStats {
     pub messages_upserted: u64,
 }
 
+#[hotpath::measure_all]
 impl TranscriptIngestStats {
     /// Accumulates another pass's counters without wrapping.
     #[must_use]

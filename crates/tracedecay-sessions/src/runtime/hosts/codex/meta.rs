@@ -31,6 +31,7 @@ pub(super) struct CodexMetaWithProvenance {
     source_frame_bytes: usize,
 }
 
+#[hotpath::measure_all]
 impl CodexMetaWithProvenance {
     pub(super) fn retained_bytes(&self) -> u64 {
         // The parsed native JSON tree can retain substantially more allocator
@@ -72,10 +73,12 @@ pub struct CodexTurnContext {
 }
 
 /// Read the leading `session_meta` line of a rollout for cwd/session-id/model.
+#[hotpath::measure]
 pub(super) fn session_meta(path: &Path) -> Option<CodexMeta> {
     session_meta_with_provenance(path).map(|parsed| parsed.meta)
 }
 
+#[hotpath::measure]
 pub(super) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithProvenance> {
     #[cfg(test)]
     {
@@ -122,10 +125,12 @@ pub(crate) fn session_meta_read_count_for_test(path: &Path) -> usize {
         .unwrap_or_default()
 }
 
+#[hotpath::measure]
 pub fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
     session_meta_with_provenance_from_record(record, path).map(|parsed| parsed.meta)
 }
 
+#[hotpath::measure]
 fn session_meta_with_provenance_from_record(
     record: &Value,
     path: &Path,
@@ -193,6 +198,7 @@ fn session_meta_with_provenance_from_record(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn string_field(payload: &Value, key: &str) -> Option<String> {
     payload
         .get(key)
@@ -201,6 +207,7 @@ pub(super) fn string_field(payload: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+#[hotpath::measure]
 pub(super) fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
     payload
         .pointer(pointer)
@@ -211,6 +218,7 @@ pub(super) fn nested_string_field(payload: &Value, pointer: &str) -> Option<Stri
 
 /// Context recorded on a `turn_context` line. Real rollouts use this for the
 /// active model and current cwd; both can change mid-session.
+#[hotpath::measure]
 pub fn turn_context_from_record(record: &Value) -> Option<CodexTurnContext> {
     if record.get("type").and_then(Value::as_str) != Some("turn_context") {
         return None;

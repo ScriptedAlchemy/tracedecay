@@ -339,10 +339,12 @@ async fn capture_vibe_path(
 /// Fixed metadata charge per directory entry (mirrors discovery walk accounting).
 const ENTRY_METADATA_CHARGE_BYTES: u64 = std::mem::size_of::<std::fs::Metadata>() as u64;
 
+#[hotpath::measure]
 fn is_eligible_vibe_transcript(path: &Path) -> bool {
     path.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
 }
 
+#[hotpath::measure]
 fn path_mtime_secs(path: &Path) -> u64 {
     std::fs::metadata(path)
         .ok()
@@ -355,6 +357,7 @@ fn path_mtime_secs(path: &Path) -> u64 {
 ///
 /// Ineligible `.jsonl` siblings are examined for metadata budget but never
 /// retained, so they cannot crowd the file-count cap before eligibility.
+#[hotpath::measure]
 fn collect_eligible_messages_jsonl(
     dir: &Path,
     max_depth: u8,
@@ -394,6 +397,7 @@ fn collect_eligible_messages_jsonl(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn collect_eligible_messages_jsonl_walk(
     dir: &Path,
     depth: u8,
@@ -475,6 +479,7 @@ fn collect_eligible_messages_jsonl_walk(
     }
 }
 
+#[hotpath::measure]
 fn try_retain_eligible(
     path: PathBuf,
     bounds: TranscriptDiscoveryBounds,
@@ -503,6 +508,7 @@ fn try_retain_eligible(
 /// Newest-first selection under `max_files` with path ascending tie-break.
 ///
 /// `start_offset` pages through the current newest-first eligible ranking.
+#[hotpath::measure]
 fn select_newest_eligible_page(
     mut collected: FileDiscoveryReport,
     max_files: usize,
@@ -546,6 +552,7 @@ struct VibeMeta {
     model: Option<String>,
 }
 
+#[hotpath::measure]
 fn read_meta(path: &Path) -> Option<VibeMeta> {
     let text = read_snapshot_text_bounded(PROVIDER, path, MAX_SNAPSHOT_METADATA_BYTES)
         .ok()
@@ -590,6 +597,7 @@ fn read_meta(path: &Path) -> Option<VibeMeta> {
     })
 }
 
+#[hotpath::measure]
 fn message_from_line(
     record: &Value,
     meta: &VibeMeta,
@@ -641,6 +649,7 @@ fn message_from_line(
     })
 }
 
+#[hotpath::measure]
 fn session_metadata(meta: &VibeMeta) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -655,6 +664,7 @@ fn session_metadata(meta: &VibeMeta) -> Value {
     Value::Object(metadata)
 }
 
+#[hotpath::measure]
 fn message_metadata(record: &Value, meta: &VibeMeta) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(

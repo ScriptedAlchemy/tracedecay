@@ -82,6 +82,7 @@ pub enum TranscriptPersistenceError {
     },
 }
 
+#[hotpath::measure_all]
 impl TranscriptPersistenceError {
     pub fn storage(operation: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
         Self::Storage {

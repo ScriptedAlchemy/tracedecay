@@ -16,6 +16,7 @@ use crate::runtime::SessionMessageRecord;
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
 
+#[hotpath::measure_all]
 impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     pub async fn lcm_read_snapshot(&self) -> Result<DatabaseEngineReadSnapshot, LcmError> {
         self.read_snapshot()
@@ -30,6 +31,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             .ok_or_else(|| LcmError::Db("registered session database has no parent".to_string()))
     }
 
+    #[hotpath::skip]
     pub async fn lcm_status(
         &self,
         provider: &str,
@@ -39,6 +41,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_describe(
         &self,
         request: LcmDescribeRequest,
@@ -56,6 +59,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         query::expand(&snapshot, self.lcm_storage_root()?, request).await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_expand_summary_node(
         &self,
         provider: &str,
@@ -66,6 +70,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         dag::expand_summary_node(&snapshot, provider, session_id, node_id).await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_expand_query(
         &self,
         request: LcmExpandQueryRequest,
@@ -78,6 +83,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     ///
     /// The temporal git-scope resolution lives above this crate; global-db
     /// runs that pre-pass and then calls this method.
+    #[hotpath::skip]
     pub async fn lcm_grep(
         &self,
         request: LcmGrepRequest,
@@ -102,6 +108,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         query::load_session(&snapshot, request).await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_recent_sessions(
         &self,
         provider: Option<&str>,
@@ -111,11 +118,13 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         query::recent_sessions(&snapshot, provider, limit).await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_session_providers(&self, session_id: &str) -> Result<Vec<String>, LcmError> {
         let snapshot = self.lcm_read_snapshot().await?;
         query::session_providers(&snapshot, session_id).await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_session_replay_slice(
         &self,
         request: &LcmSessionReplayRequest,
@@ -128,6 +137,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     ///
     /// Production callers that do not need content must use this metadata-only
     /// route. Content hydration remains owned by authorized temporal execution.
+    #[hotpath::skip]
     pub async fn lcm_raw_message_store_id(
         &self,
         provider: &str,
@@ -169,6 +179,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_session_boundary_guarded<F>(
         &self,
         request: LcmSessionBoundaryRequest,
@@ -187,6 +198,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         Ok(response)
     }
 
+    #[hotpath::skip]
     pub async fn lcm_preflight(
         &self,
         request: LcmPreflightRequest,
@@ -195,6 +207,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         compression::preflight(&snapshot, request).await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_payload_health_detail(
         &self,
         storage_root: &Path,
@@ -217,6 +230,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_preview_payload_gc(
         &self,
         storage_root: &Path,
@@ -229,6 +243,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         gc::run_payload_gc(&snapshot, storage_root, provider, session_id, cfg, now).await
     }
 
+    #[hotpath::skip]
     pub async fn lcm_run_payload_gc_apply(
         &self,
         storage_root: &Path,
@@ -284,6 +299,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     /// projection through the privacy firewall, binding the receipt the
     /// verified raw loads require. Already-protected rows are left untouched,
     /// making the pass idempotent and bounded to one session.
+    #[hotpath::skip]
     pub async fn lcm_protect_session_raw_messages(
         &self,
         provider: &str,

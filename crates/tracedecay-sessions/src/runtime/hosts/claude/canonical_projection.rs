@@ -22,6 +22,7 @@ use super::source_records::{
 };
 use super::{CLAUDE_MESSAGE_LOCATION_KEYS, PROVIDER};
 
+#[hotpath::measure]
 pub(super) fn map_canonical_claude_record(
     envelope: &CanonicalObservationEnvelopeV1,
     context: &ClaudeRecordContext<'_>,
@@ -186,6 +187,7 @@ pub(super) fn map_canonical_claude_record(
     }
 }
 
+#[hotpath::measure]
 fn map_canonical_marker_row(
     envelope: &CanonicalObservationEnvelopeV1,
     context: &ClaudeRecordContext<'_>,
@@ -242,6 +244,7 @@ fn map_canonical_marker_row(
     None
 }
 
+#[hotpath::measure]
 fn canonical_message_metadata_from_facts(
     envelope: &CanonicalObservationEnvelopeV1,
     context: &ClaudeRecordContext<'_>,
@@ -380,6 +383,7 @@ fn canonical_message_metadata_from_facts(
     metadata
 }
 
+#[hotpath::measure]
 fn append_edited_file_from_native(metadata: &mut Map<String, Value>, native: &Value) {
     let Some(tool_use_result) = native
         .get("toolUseResult")
@@ -411,6 +415,7 @@ fn append_edited_file_from_native(metadata: &mut Map<String, Value>, native: &Va
     metadata.insert("edited_file".to_string(), Value::Object(edited));
 }
 
+#[hotpath::measure]
 fn canonical_role(role: CanonicalMessageRoleV1) -> &'static str {
     match role {
         CanonicalMessageRoleV1::User => "user",

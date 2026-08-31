@@ -311,6 +311,7 @@ pub async fn upsert_agent(
 const RUN_COLUMNS: &str = "run_id, parent_session_id, name, description, phase_json,
      status, started_ts, ended_ts, result_summary, agent_count";
 
+#[hotpath::measure]
 fn row_to_run(row: &Row) -> Result<WorkflowRun, WorkflowIndexError> {
     let status: String = row.get(5)?;
     Ok(WorkflowRun {
@@ -330,6 +331,7 @@ fn row_to_run(row: &Row) -> Result<WorkflowRun, WorkflowIndexError> {
 const AGENT_COLUMNS: &str = "run_id, agent_label, agent_id, phase, transcript_path,
      agent_session_id, status, model, tokens, started_ts, ended_ts";
 
+#[hotpath::measure]
 fn row_to_agent(row: &Row) -> Result<WorkflowAgent, WorkflowIndexError> {
     let status: String = row.get(6)?;
     Ok(WorkflowAgent {
@@ -347,6 +349,7 @@ fn row_to_agent(row: &Row) -> Result<WorkflowAgent, WorkflowIndexError> {
     })
 }
 
+#[hotpath::measure]
 fn clamp_limit(limit: usize) -> i64 {
     limit.clamp(1, MAX_WORKFLOW_LIMIT) as i64
 }
@@ -359,6 +362,7 @@ pub struct RegisteredWorkflowIndexSnapshot<S = DatabaseEngineReadSnapshot> {
     snapshot: S,
 }
 
+#[hotpath::measure_all]
 impl RegisteredWorkflowIndexSnapshot {
     /// Retains the registered database's guarded snapshot for one workflow
     /// read operation. Dropping this value releases the database client lease.
@@ -382,6 +386,7 @@ impl<S> RegisteredWorkflowIndexSnapshot<S>
 where
     S: QueryExecutor + Send + Sync,
 {
+    #[hotpath::skip]
     async fn has_tables(&self, names: &[&str]) -> Result<bool, WorkflowIndexError> {
         if names.is_empty() {
             return Ok(true);
@@ -410,10 +415,12 @@ where
     /// The query methods below already treat an absent index as empty, which is
     /// safe but indistinguishable from a built index holding nothing. Callers
     /// that report to a user ask this first so they can say which one it is.
+    #[hotpath::skip]
     pub async fn workflow_tables_present(&self) -> Result<bool, WorkflowIndexError> {
         self.has_tables(&["workflow_runs", "workflow_agents"]).await
     }
 
+    #[hotpath::skip]
     pub async fn runs_for_session(
         &self,
         parent_session_id: &str,
@@ -443,6 +450,7 @@ where
         Ok(runs)
     }
 
+    #[hotpath::skip]
     pub async fn run_for_id(
         &self,
         run_id: &str,
@@ -458,6 +466,7 @@ where
         rows.next().await?.map(|row| row_to_run(&row)).transpose()
     }
 
+    #[hotpath::skip]
     pub async fn agents_for_run(
         &self,
         run_id: &str,
@@ -487,6 +496,7 @@ where
         Ok(agents)
     }
 
+    #[hotpath::skip]
     pub async fn agent_count_for_run(&self, run_id: &str) -> Result<i64, WorkflowIndexError> {
         if !self
             .has_tables(&["workflow_runs", "workflow_agents"])
@@ -507,6 +517,7 @@ where
         Ok(row.get(0)?)
     }
 
+    #[hotpath::skip]
     pub async fn agent_for_run_label(
         &self,
         run_id: &str,
@@ -532,6 +543,7 @@ where
         rows.next().await?.map(|row| row_to_agent(&row)).transpose()
     }
 
+    #[hotpath::skip]
     pub async fn runs_for_git_scope(
         &self,
         session_ids: Option<&[(String, String)]>,

@@ -86,6 +86,7 @@ pub(super) async fn snapshot_database(
     ))
 }
 
+#[hotpath::measure]
 fn measure_database_family(
     path: &Path,
     mut budget: HostScanBudget,
@@ -140,6 +141,7 @@ fn measure_database_family(
     Ok((Some(identity), budget))
 }
 
+#[hotpath::measure]
 fn database_generation(
     path: &Path,
     error_path: &Path,
@@ -177,18 +179,21 @@ fn database_generation(
     Ok((Some(generation), budget))
 }
 
+#[hotpath::measure]
 fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
 }
 
+#[hotpath::measure]
 pub(super) fn snapshot_scratch_root() -> Option<PathBuf> {
     tracedecay_runtime_core::storage::default_profile_root()
         .ok()
         .map(|root| root.join("scratch/sqlite-read/opencode"))
 }
 
+#[hotpath::measure]
 fn scan_error(
     operation: &'static str,
     path: &Path,

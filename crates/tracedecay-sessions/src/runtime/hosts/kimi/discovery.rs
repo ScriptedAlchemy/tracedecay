@@ -36,6 +36,7 @@ pub(super) struct KimiDiscoveryReport {
     pub(super) reached_end: bool,
 }
 
+#[hotpath::measure_all]
 impl KimiDiscoveryReport {
     pub(super) fn record_failure(
         &mut self,
@@ -73,10 +74,12 @@ pub(super) struct KimiWorkDir {
     pub(super) kaos: String,
 }
 
+#[hotpath::measure]
 fn local_kaos() -> String {
     "local".to_owned()
 }
 
+#[hotpath::measure]
 pub(super) fn charge_discovered_path(
     budget: &mut HostScanBudget,
     path: &Path,

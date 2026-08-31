@@ -5,15 +5,18 @@ use tracedecay_capture::claude::{encode_cursor_key, encode_source_id, observatio
 
 use crate::runtime::source::TranscriptCursorKey;
 
+#[hotpath::measure]
 pub(super) fn claude_source_id(path: &Path) -> Option<String> {
     path.file_stem().map(claude_source_component)
 }
 
+#[hotpath::measure]
 pub(super) fn claude_observation_source_id(path: &Path) -> String {
     let transcript_id = path.file_stem().unwrap_or(path.as_os_str());
     observation_source_id(claude_source_component(transcript_id).as_bytes())
 }
 
+#[hotpath::measure]
 pub(super) fn claude_source_component(component: &OsStr) -> String {
     if let Some(component) = component.to_str() {
         return component.to_owned();
@@ -21,6 +24,7 @@ pub(super) fn claude_source_component(component: &OsStr) -> String {
     claude_non_unicode_source_id(component)
 }
 
+#[hotpath::measure]
 pub(super) fn claude_cursor_key(path: &Path) -> TranscriptCursorKey {
     if path.to_str().is_some() {
         return TranscriptCursorKey::for_path(path);
@@ -29,6 +33,7 @@ pub(super) fn claude_cursor_key(path: &Path) -> TranscriptCursorKey {
     TranscriptCursorKey::opaque(claude_non_unicode_cursor_key(path))
 }
 
+#[hotpath::measure]
 fn claude_non_unicode_cursor_key(path: &Path) -> String {
     encode_cursor_key(
         claude_native_platform(),
@@ -36,6 +41,7 @@ fn claude_non_unicode_cursor_key(path: &Path) -> String {
     )
 }
 
+#[hotpath::measure]
 fn claude_non_unicode_source_id(component: &OsStr) -> String {
     encode_source_id(
         claude_native_platform(),
@@ -44,16 +50,19 @@ fn claude_non_unicode_source_id(component: &OsStr) -> String {
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn claude_native_platform() -> &'static str {
     "unix-bytes"
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn claude_native_platform() -> &'static str {
     "windows-utf16le"
 }
 
 #[cfg(not(any(unix, windows)))]
+#[hotpath::measure]
 fn claude_native_platform() -> &'static str {
     "rust-os-str"
 }

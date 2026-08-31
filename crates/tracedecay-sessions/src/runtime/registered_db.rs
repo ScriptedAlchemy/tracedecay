@@ -118,11 +118,14 @@ pub trait SessionRegisteredDb: Sync {
 #[derive(Clone, Copy)]
 pub struct SessionStoreAccess<'a, D: SessionRegisteredDb + ?Sized>(&'a D);
 
+#[hotpath::measure_all]
 impl<'a, D: SessionRegisteredDb + ?Sized> SessionStoreAccess<'a, D> {
+    #[hotpath::skip]
     pub const fn new(db: &'a D) -> Self {
         Self(db)
     }
 
+    #[hotpath::skip]
     pub const fn inner(&self) -> &'a D {
         self.0
     }

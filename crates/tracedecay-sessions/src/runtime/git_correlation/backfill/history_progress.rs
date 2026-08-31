@@ -159,7 +159,9 @@ pub(super) enum GitHistoryScanMode {
     Publish,
 }
 
+#[hotpath::measure_all]
 impl GitHistoryScanMode {
+    #[hotpath::skip]
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::ReflogCapture => "reflog_capture",
@@ -189,7 +191,9 @@ pub(super) enum GitHistoryCursorHeadState {
     Detached,
 }
 
+#[hotpath::measure_all]
 impl GitHistoryCursorHeadState {
+    #[hotpath::skip]
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::LocalBranch => "local_branch",
@@ -678,6 +682,7 @@ pub(super) async fn insert_seen(
         == 1)
 }
 
+#[hotpath::measure]
 fn progress_from_row(row: &Row) -> Result<GitHistoryProgressRow, GitCorrelationError> {
     Ok(GitHistoryProgressRow {
         key: GitHistoryProgressKey {
@@ -718,6 +723,7 @@ fn progress_from_row(row: &Row) -> Result<GitHistoryProgressRow, GitCorrelationE
     })
 }
 
+#[hotpath::measure]
 fn segment_from_row(row: &Row) -> Result<GitHistorySegmentRow, GitCorrelationError> {
     Ok(GitHistorySegmentRow {
         key: GitHistoryProgressKey {
@@ -733,6 +739,7 @@ fn segment_from_row(row: &Row) -> Result<GitHistorySegmentRow, GitCorrelationErr
     })
 }
 
+#[hotpath::measure]
 fn pending_from_row(row: &Row) -> Result<GitHistoryPendingRow, GitCorrelationError> {
     Ok(GitHistoryPendingRow {
         key: GitHistoryProgressKey {
@@ -743,6 +750,7 @@ fn pending_from_row(row: &Row) -> Result<GitHistoryPendingRow, GitCorrelationErr
     })
 }
 
+#[hotpath::measure]
 fn progress_params(
     progress: &GitHistoryProgressRow,
     consulted_ref_seal_json: &str,
@@ -784,10 +792,12 @@ fn progress_params(
     ]
 }
 
+#[hotpath::measure]
 fn key_params(key: GitHistoryProgressKey) -> impl tracedecay_runtime_core::db::engine::IntoParams {
     params![key.source_rowid]
 }
 
+#[hotpath::measure]
 fn validate_progress(progress: &GitHistoryProgressRow) -> Result<(), GitCorrelationError> {
     if progress.window_start > progress.window_end
         || !(progress.window_start..=progress.window_end).contains(&progress.segment_end)
@@ -855,6 +865,7 @@ struct ConsultedRefSealEntry {
     oid: Option<String>,
 }
 
+#[hotpath::measure]
 fn encode_consulted_refs(
     consulted_refs: &BTreeMap<Vec<u8>, Option<String>>,
 ) -> Result<String, GitCorrelationError> {
@@ -871,6 +882,7 @@ fn encode_consulted_refs(
     Ok(json)
 }
 
+#[hotpath::measure]
 fn decode_consulted_refs(
     json: &str,
 ) -> Result<BTreeMap<Vec<u8>, Option<String>>, GitCorrelationError> {
@@ -913,6 +925,7 @@ fn decode_consulted_refs(
     Ok(consulted_refs)
 }
 
+#[hotpath::measure]
 fn canonical_consulted_refs_json(
     consulted_refs: &BTreeMap<Vec<u8>, Option<String>>,
 ) -> serde_json::Result<String> {
@@ -931,6 +944,7 @@ const fn bool_value(value: bool) -> i64 {
     if value { 1 } else { 0 }
 }
 
+#[hotpath::measure]
 fn stored_bool(value: i64, column: &str) -> Result<bool, GitCorrelationError> {
     match value {
         0 => Ok(false),
@@ -939,6 +953,7 @@ fn stored_bool(value: i64, column: &str) -> Result<bool, GitCorrelationError> {
     }
 }
 
+#[hotpath::measure]
 fn invalid_stored_value(column: &str, value: &str) -> GitCorrelationError {
     GitCorrelationError::Db(format!(
         "invalid git history index {column} value `{value}`"

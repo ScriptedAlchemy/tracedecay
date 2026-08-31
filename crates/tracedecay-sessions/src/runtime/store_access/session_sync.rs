@@ -8,6 +8,7 @@ use super::super::registered_db::{SessionExec, SessionRegisteredDb, SessionStore
 
 const SESSION_SYNC_RECOVERY_PAGE_ROWS: i64 = 8;
 
+#[hotpath::measure]
 fn store_operation_error(
     operation: &'static str,
     source: impl std::error::Error + Send + Sync + 'static,
@@ -15,6 +16,7 @@ fn store_operation_error(
     TraceDecayError::database_operation(operation, source)
 }
 
+#[hotpath::measure]
 fn store_operation_message(operation: &'static str, message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Database {
         message: message.into(),
@@ -22,6 +24,7 @@ fn store_operation_message(operation: &'static str, message: impl Into<String>) 
     }
 }
 
+#[hotpath::measure_all]
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     #[hotpath::measure(future = true, label = "global_db.registered.session_sync.frontiers")]
     /// Reads every committed source cursor through bounded `rowid` keyset
@@ -60,6 +63,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         Ok(frontiers)
     }
 
+    #[hotpath::skip]
     pub async fn read_session_sync_journal(
         &self,
         key: &str,
@@ -87,6 +91,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| store_operation_error("decode session sync journal", error))
     }
 
+    #[hotpath::skip]
     pub async fn list_session_sync_journals(
         &self,
         key_prefix: &str,
@@ -124,6 +129,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// query returns keys only — a page of values could exceed the exact-SQL
     /// byte budget together even though each value fits alone — and every
     /// value then arrives through its own single-row read.
+    #[hotpath::skip]
     pub async fn list_incomplete_session_sync_journal_page(
         &self,
         key_prefix: &str,

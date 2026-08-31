@@ -42,6 +42,7 @@ pub struct SpanWindow {
 /// Classifies a commit at `committed_at` against one span: `Some(WithinSpan)`
 /// when strictly inside `[first_ts, last_ts]`, `Some(ExtendedWindow)` when
 /// inside the span widened by `gap_secs` on either edge, `None` otherwise.
+#[hotpath::measure]
 pub fn commit_overlap_kind(
     first_ts: i64,
     last_ts: i64,
@@ -62,6 +63,7 @@ pub fn commit_overlap_kind(
 /// Records that every matching span observed a commit. Time overlap is
 /// candidate evidence only: concurrent sessions must never be labelled as
 /// producers without a direct tool/host event.
+#[hotpath::measure]
 pub fn match_commit_to_spans(
     commit_sha: &str,
     branch: Option<&str>,
@@ -102,6 +104,7 @@ pub fn match_commit_to_spans(
     records
 }
 
+#[hotpath::measure]
 fn scan_targets(spans: &[SessionGitSpan]) -> Vec<SpanScanTarget> {
     let mut targets = std::collections::BTreeMap::new();
     for span in spans {
@@ -122,6 +125,7 @@ fn scan_targets(spans: &[SessionGitSpan]) -> Vec<SpanScanTarget> {
     targets.into_values().collect()
 }
 
+#[hotpath::measure]
 fn span_windows_for(
     spans: &[SessionGitSpan],
     branch: Option<&str>,
@@ -161,6 +165,7 @@ pub enum TargetScan {
     Unavailable,
 }
 
+#[hotpath::measure]
 pub fn stable_backfill_span(
     provider: &str,
     session_id: &str,
@@ -191,6 +196,7 @@ pub fn stable_backfill_span(
     }
 }
 
+#[hotpath::measure]
 pub fn publish_graph_evidence<S: GitCorrelationSessionStore>(
     session_store: &S,
     publication_prefix: &str,
@@ -206,6 +212,7 @@ pub fn publish_graph_evidence<S: GitCorrelationSessionStore>(
     )
 }
 
+#[hotpath::measure]
 pub(crate) fn publish_graph_evidence_controlled<S: GitCorrelationSessionStore>(
     session_store: &S,
     publication_prefix: &str,
@@ -231,6 +238,7 @@ pub(crate) fn publish_graph_evidence_controlled<S: GitCorrelationSessionStore>(
 
 /// Shapes raw transcript observations and publishes them while holding the
 /// same projection lock across recovery, merge, and verified-head CAS.
+#[hotpath::measure]
 pub fn publish_transcript_graph_evidence<S: GitCorrelationSessionStore>(
     session_store: &S,
     publication_prefix: &str,
@@ -276,6 +284,7 @@ pub fn publish_transcript_graph_evidence<S: GitCorrelationSessionStore>(
     )
 }
 
+#[hotpath::measure]
 fn publish_graph_evidence_locked<S: GitCorrelationSessionStore>(
     session_store: &S,
     publication_prefix: &str,
@@ -314,6 +323,7 @@ fn publish_graph_evidence_locked<S: GitCorrelationSessionStore>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn publish_merged_graph_evidence(
     runtime: &dyn VerifiedGraphRuntimePortV1,
     identity: tracedecay_graph_db::GraphProjectionIdentity,
@@ -344,6 +354,7 @@ fn publish_merged_graph_evidence(
     Ok((spans_changed, commits_changed))
 }
 
+#[hotpath::measure]
 fn transcript_spans_from_observations(
     current: &[SessionGitSpan],
     observations: &[SpanObservation],
@@ -405,6 +416,7 @@ fn transcript_spans_from_observations(
     candidates
 }
 
+#[hotpath::measure]
 fn transcript_span_id(observation: &SpanObservation, worktree: &str) -> String {
     let thread_id = observation.thread_id.as_deref().unwrap_or_default();
     let branch = observation.branch.as_deref().unwrap_or_default();
@@ -418,6 +430,7 @@ fn transcript_span_id(observation: &SpanObservation, worktree: &str) -> String {
     )
 }
 
+#[hotpath::measure]
 pub fn graph_evidence_publication_key(
     prefix: &str,
     spans: &[SessionGitSpan],
@@ -427,6 +440,7 @@ pub fn graph_evidence_publication_key(
     Ok(format!("{prefix}:{}", hex::encode(Sha256::digest(bytes))))
 }
 
+#[hotpath::measure]
 fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitSpan) -> bool {
     if spans.iter().any(|span| span == incoming) {
         return false;
@@ -455,6 +469,7 @@ fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitSpan) -> boo
     true
 }
 
+#[hotpath::measure]
 fn merge_commit(commits: &mut Vec<CommitSessionRecord>, incoming: &CommitSessionRecord) -> bool {
     let Some(existing) = commits.iter_mut().find(|record| {
         record.commit_sha == incoming.commit_sha && record.session_id == incoming.session_id

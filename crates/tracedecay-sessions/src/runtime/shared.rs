@@ -32,6 +32,7 @@ pub struct SqliteReadConn {
     inner: Arc<ProfiledMutex<rusqlite::Connection>>,
 }
 
+#[hotpath::measure_all]
 impl SqliteReadConn {
     pub fn new(conn: rusqlite::Connection) -> Self {
         Self {
@@ -159,6 +160,7 @@ fn read_new_rows_sync<T>(
 /// symlinks/`..`/trailing differences do not cause false mismatches. Falls back
 /// to a literal comparison when canonicalization fails (e.g. a path that no
 /// longer exists).
+#[hotpath::measure]
 pub fn paths_equal(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => normalized_paths_equal(&a, &b),
@@ -166,6 +168,7 @@ pub fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+#[hotpath::measure]
 pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
     ProjectRootMatcher::new(project_root).contains(path)
 }
@@ -182,6 +185,7 @@ pub enum ProjectMembership {
     Unknown,
 }
 
+#[hotpath::measure_all]
 impl ProjectMembership {
     fn from_bool(value: bool) -> Self {
         if value { Self::Match } else { Self::NoMatch }
@@ -229,6 +233,7 @@ pub struct ProjectRootMatcher {
     path_membership: Mutex<HashMap<PathBuf, bool>>,
 }
 
+#[hotpath::measure_all]
 impl ProjectRootMatcher {
     /// Resolve the fixed project-side git identity once.
     pub fn new(project_root: &Path) -> Self {
@@ -354,6 +359,7 @@ impl Default for ProjectRootMatcherCache {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectRootMatcherCache {
     #[cfg(test)]
     pub(crate) fn with_identity_resolver(identity_resolver: GitIdentityResolver) -> Self {
@@ -527,6 +533,7 @@ pub enum TranscriptScopeMatcher {
     Profile(Vec<Arc<ProjectRootMatcher>>),
 }
 
+#[hotpath::measure_all]
 impl TranscriptScopeMatcher {
     pub fn project(project_root: &Path) -> Self {
         Self::Project(Arc::new(ProjectRootMatcher::new(project_root)))
@@ -618,6 +625,7 @@ impl TranscriptScopeMatcher {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
     fn normalize(path: &Path) -> String {
         let path = path.to_string_lossy().replace('/', "\\");
@@ -630,6 +638,7 @@ fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
     a == b
 }
@@ -639,6 +648,7 @@ fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
 /// Shared by the workflow surfaces (run/agent summaries, result summaries,
 /// unfinished-run evidence) so a multi-line blob never smears a table, bullet,
 /// or stored column.
+#[hotpath::measure]
 pub fn one_line_truncated(text: &str, max: usize) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= max {
@@ -651,6 +661,7 @@ pub fn one_line_truncated(text: &str, max: usize) -> String {
 /// Clip `text` to at most `max_bytes` on a UTF-8 boundary, appending a single
 /// `…` only when truncation occurred. Unlike [`one_line_truncated`] this keeps
 /// internal newlines, so multi-line derived-row previews retain their structure.
+#[hotpath::measure]
 pub fn preview_truncated(text: &str, max_bytes: usize) -> String {
     let prefix = tracedecay_runtime_core::text::utf8_prefix_at_or_before(text, max_bytes);
     if prefix.len() == text.len() {
@@ -661,6 +672,7 @@ pub fn preview_truncated(text: &str, max_bytes: usize) -> String {
 }
 
 /// Collapse whitespace and clip to a short preview suitable for a session title.
+#[hotpath::measure]
 pub fn preview_title(text: &str) -> String {
     const MAX_TITLE_CHARS: usize = 80;
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -688,6 +700,7 @@ pub fn content_storage_text_and_tools(
     (message_storage_text(content), tools)
 }
 
+#[hotpath::measure]
 pub fn append_tool_calls_metadata(map: &mut serde_json::Map<String, Value>, message: &Value) {
     if let Some(tool_calls) = message.get("tool_calls") {
         map.insert("tool_calls".to_string(), tool_calls.clone());
@@ -695,6 +708,7 @@ pub fn append_tool_calls_metadata(map: &mut serde_json::Map<String, Value>, mess
 }
 
 /// Byte length of `serde_json::to_string(value)`, or 0 when `value` is absent.
+#[hotpath::measure]
 fn json_byte_len(value: Option<&Value>) -> u64 {
     let Some(value) = value else {
         return 0;
@@ -780,6 +794,7 @@ pub struct TranscriptLocation<'a> {
     pub provenance: &'a str,
 }
 
+#[hotpath::measure_all]
 impl<'a> TranscriptLocation<'a> {
     pub fn new(cwd: Option<&'a Path>, provenance: &'a str) -> Self {
         Self { cwd, provenance }
@@ -793,7 +808,9 @@ pub struct TranscriptLocationMetadataKeys {
     pub provenance: &'static str,
 }
 
+#[hotpath::measure_all]
 impl TranscriptLocationMetadataKeys {
+    #[hotpath::skip]
     pub const fn new(cwd: &'static str, worktree: &'static str, provenance: &'static str) -> Self {
         Self {
             cwd,
@@ -803,6 +820,7 @@ impl TranscriptLocationMetadataKeys {
     }
 }
 
+#[hotpath::measure]
 pub fn append_location_metadata(
     map: &mut serde_json::Map<String, Value>,
     keys: TranscriptLocationMetadataKeys,
@@ -821,6 +839,7 @@ pub fn append_location_metadata(
 /// [`append_location_metadata`] with the cwd's worktree resolved through a
 /// source-lifetime cache, so one transcript's repeated cwd does not re-run git
 /// discovery for every message row.
+#[hotpath::measure]
 pub fn append_location_metadata_cached(
     map: &mut serde_json::Map<String, Value>,
     keys: TranscriptLocationMetadataKeys,
@@ -835,6 +854,7 @@ pub fn append_location_metadata_cached(
     );
 }
 
+#[hotpath::measure]
 fn append_location_metadata_with_worktree(
     map: &mut serde_json::Map<String, Value>,
     keys: TranscriptLocationMetadataKeys,
@@ -881,6 +901,7 @@ const USAGE_COUNTER_KEYS: [&str; 9] = [
 /// keeping only recognized numeric token counters (so arbitrarily large or
 /// provider-private payloads never bloat `metadata_json`). Returns `None`
 /// when the value has no `usage` object or it carries no recognized counters.
+#[hotpath::measure]
 pub fn usage_counters_from(value: &Value) -> Option<Value> {
     let usage = value.get("usage")?.as_object()?;
     let mut counters = serde_json::Map::new();
@@ -909,6 +930,7 @@ pub fn usage_counters_from(value: &Value) -> Option<Value> {
 /// Inserts transcript-recorded token usage into message metadata under the
 /// `usage` key the savings dashboard reads. Probes each candidate value in
 /// order and keeps the first recognized counters object.
+#[hotpath::measure]
 pub fn append_usage_metadata(map: &mut serde_json::Map<String, Value>, candidates: &[&Value]) {
     if map.contains_key("usage") {
         return;
@@ -921,6 +943,7 @@ pub fn append_usage_metadata(map: &mut serde_json::Map<String, Value>, candidate
     }
 }
 
+#[hotpath::measure]
 fn collect_tool_names(value: &Value, tools: &mut Vec<String>) {
     match value {
         Value::Array(items) => {
@@ -954,6 +977,7 @@ fn collect_tool_names(value: &Value, tools: &mut Vec<String>) {
     }
 }
 
+#[hotpath::measure]
 fn title_text_from_stored_content(text: &str) -> String {
     serde_json::from_str::<Value>(text)
         .ok()
@@ -961,6 +985,7 @@ fn title_text_from_stored_content(text: &str) -> String {
         .unwrap_or_else(|| text.to_string())
 }
 
+#[hotpath::measure]
 fn visible_text_from_content(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
@@ -985,6 +1010,7 @@ fn visible_text_from_content(value: &Value) -> Option<String> {
 }
 
 /// Build a session title from the first user message, if any.
+#[hotpath::measure]
 pub fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<String> {
     messages
         .iter()

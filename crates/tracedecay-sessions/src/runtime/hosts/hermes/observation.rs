@@ -40,6 +40,7 @@ pub struct HermesProjectionMetadata {
     pub location_provenance: Option<&'static str>,
 }
 
+#[hotpath::measure]
 pub(super) fn project_projection_metadata(
     row: &HermesRow,
     source: &HermesProfileSource,
@@ -73,6 +74,7 @@ pub(super) struct HermesAdmission {
     pub action: HermesAdmissionAction,
 }
 
+#[hotpath::measure]
 pub fn observation_source(row: &HermesRow) -> Result<ObservationSourceIdentityV1, String> {
     let provider = ProviderId::new(PROVIDER).map_err(|_| "invalid Hermes provider".to_string())?;
     let session_id =
@@ -117,6 +119,7 @@ struct HermesNativeUsage {
     reasoning: Option<i64>,
 }
 
+#[hotpath::measure]
 pub fn native_observation_record(
     row: &HermesRow,
     projection: &HermesProjectionMetadata,
@@ -178,6 +181,7 @@ pub fn native_observation_record(
     })
 }
 
+#[hotpath::measure]
 fn immutable_message_evidence(native: &Value) -> Value {
     json!({
         "session_id": native.get("session_id"),
@@ -193,11 +197,13 @@ fn immutable_message_evidence(native: &Value) -> Value {
     })
 }
 
+#[hotpath::measure]
 pub(super) fn stable_native_id(prefix: &str, evidence: &Value) -> Result<ObservationId, ()> {
     let digest = PayloadReferenceV1::for_payload(evidence).map_err(|_| ())?;
     ObservationId::new(format!("{prefix}.{}", digest.digest().as_str())).map_err(|_| ())
 }
 
+#[hotpath::measure]
 pub fn normalize_native_observation(
     native: Value,
     range: ObservationSourceRangeV1,
@@ -342,6 +348,7 @@ pub fn normalize_native_observation(
     .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)
 }
 
+#[hotpath::measure]
 fn canonical_message_role(
     role: &str,
 ) -> Result<CanonicalMessageRoleV1, ObservationRecordParseErrorV1> {
@@ -354,6 +361,7 @@ fn canonical_message_role(
     }
 }
 
+#[hotpath::measure]
 fn append_tool_invocations(
     facts: &mut Vec<CanonicalObservationFactV1>,
     tool_calls: Option<&Value>,
@@ -409,6 +417,7 @@ type CanonicalUsage = (
     Option<u64>,
 );
 
+#[hotpath::measure]
 fn canonical_usage(
     usage: &HermesNativeUsage,
 ) -> Result<Option<CanonicalUsage>, ObservationRecordParseErrorV1> {
@@ -427,6 +436,7 @@ fn canonical_usage(
     .then_some(usage))
 }
 
+#[hotpath::measure]
 fn nonnegative_token_count(
     value: Option<i64>,
 ) -> Result<Option<u64>, ObservationRecordParseErrorV1> {
@@ -460,6 +470,7 @@ pub(super) fn prepare_observation_row(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn prepare_observation_row_with_cancellation(
     row: &HermesRow,
     projection: Option<&HermesProjectionMetadata>,

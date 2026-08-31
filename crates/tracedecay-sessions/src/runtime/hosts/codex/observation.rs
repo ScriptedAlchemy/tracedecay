@@ -216,6 +216,7 @@ pub(super) enum CodexObservationAdmission<'a> {
     },
 }
 
+#[hotpath::measure_all]
 impl CodexObservationAdmission<'_> {
     pub(super) fn scope(&self) -> ObservationScopeV1 {
         match self {

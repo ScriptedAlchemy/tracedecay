@@ -25,6 +25,7 @@ use super::observation::{
 use super::rows::HermesRow;
 use super::{MAX_HERMES_PROJECTIONS_PER_DRAIN, PROVIDER};
 
+#[hotpath::measure]
 pub(super) fn sqlite_incarnation(
     path: &Path,
 ) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
@@ -89,6 +90,7 @@ async fn advance_coverage(
         .map_err(host_admission_error)
 }
 
+#[hotpath::measure]
 fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
     crate::runtime::snapshot_observation::host_admission_status_message("Hermes", outcome.status)
 }
@@ -274,6 +276,7 @@ pub(super) async fn admit_rows_with_admission_and_cancellation(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn file_mtime_secs(path: &Path) -> u64 {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
@@ -283,6 +286,7 @@ fn file_mtime_secs(path: &Path) -> u64 {
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn sqlite_resume_fingerprint(path: &Path, file_identity: u64) -> Result<u64, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|_| "could not inspect Hermes SQLite authority".to_string())?;
@@ -297,6 +301,7 @@ fn sqlite_resume_fingerprint(path: &Path, file_identity: u64) -> Result<u64, Str
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn sqlite_resume_fingerprint(path: &Path, file_identity: u64) -> Result<u64, String> {
     use std::os::windows::fs::MetadataExt;
 
@@ -313,6 +318,7 @@ fn sqlite_resume_fingerprint(path: &Path, file_identity: u64) -> Result<u64, Str
 }
 
 #[cfg(not(any(unix, windows)))]
+#[hotpath::measure]
 fn sqlite_resume_fingerprint(path: &Path, _file_identity: u64) -> Result<u64, String> {
     let _ = path;
     Err("Hermes SQLite physical identity is unavailable".to_string())

@@ -25,6 +25,7 @@ use super::user_provider::UserProviderUnit;
 
 pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
+#[hotpath::measure]
 pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_SESSIONS_DB_FILENAME)
 }
@@ -258,6 +259,7 @@ pub(super) struct BoundedProviderOutcome {
     pub(super) deferred_by_byte_cap: bool,
 }
 
+#[hotpath::measure_all]
 impl BoundedProviderOutcome {
     fn from_composer(outcome: &cursor_composer::CursorComposerSweepOutcome) -> Self {
         Self {
@@ -276,6 +278,7 @@ pub(super) struct BoundedProviderFailure {
     pub(super) error: source::TranscriptIngestError,
 }
 
+#[hotpath::measure]
 fn merge_user_cursor_sweep(
     composer: &cursor_composer::CursorComposerSweepOutcome,
     mut session_ids: BTreeSet<String>,
@@ -372,6 +375,7 @@ async fn drain_observation_projections(
     Ok(stats.transcript)
 }
 
+#[hotpath::measure]
 pub(super) fn provider_selected(
     scope: Option<SessionProvider>,
     candidate: SessionProvider,

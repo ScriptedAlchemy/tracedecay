@@ -26,6 +26,7 @@ pub struct TranscriptDiscoveryBounds {
     pub max_discovery_bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl TranscriptDiscoveryBounds {
     /// Derive walk bounds from an ingest discovery unit cap.
     ///
@@ -76,6 +77,7 @@ pub struct FileDiscoveryReport {
     pub files_considered: u64,
 }
 
+#[hotpath::measure_all]
 impl FileDiscoveryReport {
     pub fn is_truncated(&self) -> bool {
         self.truncated.is_some()
@@ -87,6 +89,7 @@ pub fn path_byte_len(path: &Path) -> usize {
     os_str_byte_len(path.as_os_str())
 }
 
+#[hotpath::measure]
 pub fn os_str_byte_len(value: &std::ffi::OsStr) -> usize {
     #[cfg(unix)]
     {
@@ -210,6 +213,7 @@ struct WalkState<'a> {
     files_considered: u64,
 }
 
+#[hotpath::measure_all]
 impl WalkState<'_> {
     fn walk(&mut self, dir: &Path, depth: u8) {
         if self.truncated.is_some() {

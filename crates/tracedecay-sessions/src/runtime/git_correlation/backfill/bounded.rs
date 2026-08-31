@@ -33,6 +33,7 @@ pub struct BoundedGitControl {
     deadline: Option<Instant>,
 }
 
+#[hotpath::measure_all]
 impl BoundedGitControl {
     pub fn new(cancellation: ObservationCancellation, command_timeout: Duration) -> Self {
         Self {
@@ -88,6 +89,7 @@ struct GraphPageBudget {
     examined_bytes: usize,
 }
 
+#[hotpath::measure_all]
 impl GraphPageBudget {
     fn remaining(&self) -> Result<(usize, usize), BoundedBackfillInterruption> {
         let nodes = MAX_GRAPH_PAGE_EXAMINED_NODES.saturating_sub(self.examined_nodes);
@@ -382,6 +384,7 @@ async fn resume_active_progress_page<S: GitCorrelationSessionStore>(
     }
 }
 
+#[hotpath::measure]
 fn interrupted_outcome(
     stats: BackfillStats,
     committed: bool,

@@ -80,6 +80,7 @@ pub struct ClaudeSourceFrame {
     payload: ClaudeFramePayload,
 }
 
+#[hotpath::measure_all]
 impl ClaudeSourceFrame {
     pub fn take_parsed_record(&mut self) -> Option<ParsedClaudeRecordV1> {
         match std::mem::replace(&mut self.payload, ClaudeFramePayload::Consumed) {
@@ -106,6 +107,7 @@ impl ClaudeSourceFrame {
         }
     }
 
+    #[hotpath::skip]
     pub(super) const fn scope_value(&self) -> &Value {
         &self.scope_record
     }
@@ -150,6 +152,7 @@ pub struct ClaudeSourceFrameScan {
 /// identifiers are preserved byte-for-byte; credential-shaped stems become
 /// stable `privacy.structural-id.v1.*` digests. The observation source ID is
 /// already an opaque path digest and remains unchanged.
+#[hotpath::measure]
 pub fn identify_claude_source(path: &Path) -> Option<ClaudeSourceScanIdentity> {
     let session_id = protect_sensitive_structural_id(&claude_source_id(path)?).ok()?;
     Some(ClaudeSourceScanIdentity {
@@ -177,6 +180,7 @@ pub fn scan_claude_source_frames(
     }
 }
 
+#[hotpath::measure]
 pub fn try_scan_claude_source_frames(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,

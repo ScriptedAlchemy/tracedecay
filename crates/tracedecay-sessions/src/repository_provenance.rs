@@ -77,12 +77,14 @@ pub struct CapturedRepositoryProvenanceV1 {
     availability: EvidenceAvailabilityV1<RepositoryProvenanceV1>,
 }
 
+#[hotpath::measure_all]
 impl CapturedRepositoryProvenanceV1 {
     pub fn availability(&self) -> &EvidenceAvailabilityV1<RepositoryProvenanceV1> {
         &self.availability
     }
 }
 
+#[hotpath::measure_all]
 impl RepositoryProvenanceAdmissionContext {
     #[cfg(test)]
     pub fn new(
@@ -291,6 +293,7 @@ enum ObservationProjectId<'a> {
     Unavailable,
 }
 
+#[hotpath::measure_all]
 impl<'a> ObservationProjectId<'a> {
     fn from_observation(observation: &'a DurableObservationV1) -> Self {
         match observation.scope() {
@@ -309,7 +312,9 @@ pub struct PreparedRepositoryProvenanceV1 {
     anchor: Option<RetrievalAnchorRecordV2>,
 }
 
+#[hotpath::measure_all]
 impl PreparedRepositoryProvenanceV1 {
+    #[hotpath::skip]
     pub const fn unavailable() -> Self {
         Self {
             availability: EvidenceAvailabilityV1::Unavailable,
@@ -337,6 +342,7 @@ pub struct RepositoryProvenanceProbeRequest<'a> {
     captured_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl<'a> RepositoryProvenanceProbeRequest<'a> {
     pub fn new(
         project_root: &'a Path,
@@ -369,6 +375,7 @@ impl<'a> RepositoryProvenanceProbeRequest<'a> {
 #[derive(Default)]
 pub struct NativeRepositoryProvenanceProbe;
 
+#[hotpath::measure_all]
 impl NativeRepositoryProvenanceProbe {
     #[hotpath::measure(label = "sessions.provenance.capture")]
     pub fn capture(
@@ -461,6 +468,7 @@ impl NativeRepositoryProvenanceProbe {
     }
 }
 
+#[hotpath::measure]
 pub fn capture_repository_provenance(
     request: &RepositoryProvenanceProbeRequest<'_>,
 ) -> EvidenceAvailabilityV1<RepositoryProvenanceV1> {
@@ -531,6 +539,7 @@ fn prepare_generation_binding(
     }
 }
 
+#[hotpath::measure]
 fn bind_capture(
     capture: RepositoryProvenanceV1,
     observation: &DurableObservationV1,
@@ -557,6 +566,7 @@ struct HeadObservation {
     commit: EvidenceAvailabilityV1<CommitId>,
 }
 
+#[hotpath::measure]
 fn observe_head(repo: &gix::Repository) -> HeadObservation {
     let Ok(head) = repo.head() else {
         return HeadObservation {
@@ -595,11 +605,13 @@ fn observe_head(repo: &gix::Repository) -> HeadObservation {
     }
 }
 
+#[hotpath::measure]
 fn canonical_path(path: &Path) -> (PathBuf, bool) {
     path.canonicalize()
         .map_or_else(|_| (path.to_path_buf(), true), |path| (path, false))
 }
 
+#[hotpath::measure]
 fn repository_provenance_watermark(project_root: &Path) -> Option<RepositoryProvenanceWatermark> {
     let repo = gix::open(project_root).ok()?;
     let workdir = repo.workdir()?;
@@ -621,6 +633,7 @@ fn repository_provenance_watermark(project_root: &Path) -> Option<RepositoryProv
     })
 }
 
+#[hotpath::measure]
 fn persisted_index_watermark(path: &Path) -> PersistedFileWatermark {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -652,6 +665,7 @@ fn persisted_index_watermark(path: &Path) -> PersistedFileWatermark {
     }
 }
 
+#[hotpath::measure]
 fn discover_canonical_common_dir(project_root: &Path) -> Option<PathBuf> {
     let repository = gix::discover(project_root).ok()?;
     let (common_dir, partial) = canonical_path(repository.common_dir());
@@ -663,6 +677,7 @@ struct RemoteIdentityObservation {
     path_frame: Vec<u8>,
 }
 
+#[hotpath::measure]
 fn observe_remote_identity(
     repo: &gix::Repository,
     privacy_domain_salt: &[u8; 32],
@@ -692,6 +707,7 @@ fn observe_remote_identity(
     remote_identity_observation(RepositoryRemoteIdentityV1::Known(digest))
 }
 
+#[hotpath::measure]
 fn remote_identity_observation(identity: RepositoryRemoteIdentityV1) -> RemoteIdentityObservation {
     let path_frame = match &identity {
         RepositoryRemoteIdentityV1::Known(digest) => {
@@ -716,6 +732,7 @@ struct IndexObservation {
     dirty_state: EvidenceAvailabilityV1<RepositoryDirtyStateV1>,
 }
 
+#[hotpath::measure]
 fn observe_index(repo: &gix::Repository) -> IndexObservation {
     let index_path = repo.index_path();
     let metadata = match std::fs::metadata(index_path) {
@@ -764,6 +781,7 @@ fn observe_index(repo: &gix::Repository) -> IndexObservation {
     IndexObservation { tree, dirty_state }
 }
 
+#[hotpath::measure]
 fn unavailable_index_observation() -> IndexObservation {
     IndexObservation {
         tree: EvidenceAvailabilityV1::Unavailable,
@@ -771,6 +789,7 @@ fn unavailable_index_observation() -> IndexObservation {
     }
 }
 
+#[hotpath::measure]
 fn head_tree_id(repo: &gix::Repository) -> Option<TreeId> {
     let tree = repo.head_commit().ok()?.tree_id().ok()?;
     TreeId::new(tree.to_hex().to_string()).ok()
@@ -785,6 +804,7 @@ const REMOTE_NORMALIZATION_MEMO_CAPACITY: usize = 8;
 /// Recently normalized `(raw remote, normalization)` entries, most recent last.
 type RemoteNormalizationMemo = Mutex<VecDeque<(String, Option<String>)>>;
 
+#[hotpath::measure]
 fn remote_normalization_memo() -> &'static RemoteNormalizationMemo {
     static MEMO: OnceLock<RemoteNormalizationMemo> = OnceLock::new();
     MEMO.get_or_init(|| Mutex::new(VecDeque::with_capacity(REMOTE_NORMALIZATION_MEMO_CAPACITY)))
@@ -799,6 +819,7 @@ fn remote_normalization_memo() -> &'static RemoteNormalizationMemo {
 /// Git config on every capture; only the pure normalization of that string is
 /// reused. A changed remote is a different key and recomputes, so a memo hit is
 /// by construction the same value a fresh parse would produce.
+#[hotpath::measure]
 fn normalize_remote_without_credentials(remote: &str) -> Option<String> {
     if let Ok(memo) = remote_normalization_memo().lock()
         && let Some((_, normalized)) = memo.iter().find(|(key, _)| key == remote)
@@ -818,6 +839,7 @@ fn normalize_remote_without_credentials(remote: &str) -> Option<String> {
     normalized
 }
 
+#[hotpath::measure]
 fn normalize_remote_uncached(remote: &str) -> Option<String> {
     let remote = remote.trim();
     if remote.is_empty() {
@@ -852,6 +874,7 @@ fn normalize_remote_uncached(remote: &str) -> Option<String> {
     Some(format!("local:{remote}"))
 }
 
+#[hotpath::measure]
 fn privacy_bound_digest(
     privacy_domain_salt: &[u8; 32],
     domain: &[u8],
@@ -868,6 +891,7 @@ fn privacy_bound_digest(
         .ok()
 }
 
+#[hotpath::measure]
 fn derive_project_privacy_domain_salt(project_id: &ProjectId) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(PROJECT_PRIVACY_DOMAIN_SALT_NAMESPACE);
@@ -875,6 +899,7 @@ fn derive_project_privacy_domain_salt(project_id: &ProjectId) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+#[hotpath::measure]
 fn opaque_admission_identifier(
     privacy_domain_salt: &[u8; 32],
     namespace: &[u8],
@@ -889,6 +914,7 @@ fn opaque_admission_identifier(
     encode_lowercase_hex(&hasher.finalize())
 }
 
+#[hotpath::measure]
 fn hash_frame(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bytes);

@@ -26,6 +26,7 @@ pub(super) struct SessionAccumulator {
     edited_files: Vec<Value>,
 }
 
+#[hotpath::measure_all]
 impl SessionAccumulator {
     fn push_pr_link(&mut self, link: Value) {
         let key = (
@@ -67,6 +68,7 @@ impl SessionAccumulator {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn accumulate_session_facts(record: &Value, accumulator: &mut SessionAccumulator) {
     append_edited_file_metadata(&mut Map::new(), record, accumulator);
     if let Ok(envelope) =
@@ -113,6 +115,7 @@ pub(super) fn accumulate_session_facts(record: &Value, accumulator: &mut Session
 }
 
 /// Read a record's optional wall-clock timestamp.
+#[hotpath::measure]
 pub(super) fn record_timestamp(record: &Value) -> Option<i64> {
     record
         .get("timestamp")
@@ -124,6 +127,7 @@ pub(super) fn record_timestamp(record: &Value) -> Option<i64> {
 /// Build a marker row for a `type=="pr-link"` record and fold the PR into the
 /// session accumulator. Emits both so the git-correlation join has a per-turn
 /// anchor (`message_search`) *and* a session-level `pr_links[]` summary.
+#[hotpath::measure]
 pub(super) fn pr_link_row(
     record: &Value,
     session_id: &str,
@@ -204,6 +208,7 @@ pub(super) fn pr_link_row(
 /// Build a `compact_boundary` marker row from a `system` record that carries
 /// `compactMetadata` (a context-compaction boundary). LCM uses this to tell a
 /// post-compaction summary apart from an original turn.
+#[hotpath::measure]
 pub(super) fn compact_boundary_row(
     record: &Value,
     session_id: &str,
@@ -285,6 +290,7 @@ pub(super) fn compact_boundary_row(
 
 /// Build a `model_fallback` marker row from a `system` model-refusal-fallback
 /// record (Claude routed a refused request to a fallback model).
+#[hotpath::measure]
 pub(super) fn model_fallback_row(
     record: &Value,
     session_id: &str,
@@ -377,6 +383,7 @@ pub(super) fn model_fallback_row(
 
 /// Stable marker identity: prefer a usable record `uuid`, otherwise use the
 /// source generation and offset shared by every sanitized Claude row.
+#[hotpath::measure]
 fn marker_message_id(
     record: &Value,
     session_id: &str,
@@ -394,6 +401,7 @@ fn marker_message_id(
         )
 }
 
+#[hotpath::measure]
 pub(super) fn source_position_message_id(
     session_id: &str,
     file_generation: u64,
@@ -402,11 +410,13 @@ pub(super) fn source_position_message_id(
     format!("{session_id}:{file_generation}:{offset}")
 }
 
+#[hotpath::measure]
 pub(super) fn is_redaction_marker(value: &str) -> bool {
     value.starts_with("[TraceDecay redacted:")
 }
 
 /// Render a JSON scalar (number/string/bool) as plain text for a marker preview.
+#[hotpath::measure]
 fn render_scalar(value: &Value) -> String {
     value
         .as_str()
@@ -416,6 +426,7 @@ fn render_scalar(value: &Value) -> String {
 /// Dispatch location metadata through the source-lifetime worktree cache when
 /// the caller has one (batch transcript parses), falling back to the uncached
 /// per-call resolution for single-record paths (observation projection).
+#[hotpath::measure]
 pub(super) fn append_claude_location_metadata(
     map: &mut Map<String, Value>,
     keys: TranscriptLocationMetadataKeys,
@@ -428,6 +439,7 @@ pub(super) fn append_claude_location_metadata(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn session_metadata(
     sanitized_session_cwd: Option<&Path>,
     subagent: Option<&ClaudeSubagentInfo>,
@@ -488,6 +500,7 @@ pub(super) fn session_metadata(
     Value::Object(metadata)
 }
 
+#[hotpath::measure]
 pub(super) fn message_metadata(
     kind: &str,
     record: &Value,
@@ -546,6 +559,7 @@ pub(super) fn message_metadata(
 /// Preserve Claude's structured git-operation event as direct commit evidence.
 /// The abbreviated id is resolved against the repository before persistence;
 /// raw stdout/stderr stays in the lossless transcript rather than metadata.
+#[hotpath::measure]
 pub(super) fn append_git_operation_metadata(metadata: &mut Map<String, Value>, record: &Value) {
     let Some(commit) = record
         .pointer("/toolUseResult/gitOperation/commit")
@@ -586,6 +600,7 @@ pub(super) fn append_git_operation_metadata(metadata: &mut Map<String, Value>, r
 }
 
 /// Copy Claude's top-level attribution fields onto an assistant row's metadata.
+#[hotpath::measure]
 fn append_attribution_metadata(metadata: &mut Map<String, Value>, record: &Value) {
     for (source_key, dest_key) in [
         ("attributionMcpServer", "attribution_mcp_server"),
@@ -615,6 +630,7 @@ fn append_attribution_metadata(metadata: &mut Map<String, Value>, record: &Value
 /// `toolUseResult` (Edit/Write payloads), and fold the file into the session
 /// accumulator. Stores only the path, change type, and hunk count — never the
 /// patch bodies.
+#[hotpath::measure]
 fn append_edited_file_metadata(
     metadata: &mut Map<String, Value>,
     record: &Value,

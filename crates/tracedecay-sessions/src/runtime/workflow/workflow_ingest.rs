@@ -35,6 +35,7 @@ pub struct WorkflowIngestStats {
     pub agents_ingested: u64,
 }
 
+#[hotpath::measure_all]
 impl WorkflowIngestStats {
     #[must_use]
     pub fn merge(self, other: Self) -> Self {
@@ -206,6 +207,7 @@ fn discover_runs(projects_dir: &Path) -> Vec<DiscoveredRun> {
 
 /// Newest mtime (unix seconds) across a run's meta json and its agent-transcript
 /// directory, for the incremental watermark. `0` when neither can be stat'd.
+#[hotpath::measure]
 fn newest_mtime(run: &DiscoveredRun) -> i64 {
     let mut newest = 0;
     if let Some(meta) = run.meta_path.as_ref() {
@@ -215,6 +217,7 @@ fn newest_mtime(run: &DiscoveredRun) -> i64 {
     newest
 }
 
+#[hotpath::measure]
 fn file_mtime(path: &Path) -> i64 {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
@@ -226,6 +229,7 @@ fn file_mtime(path: &Path) -> i64 {
 /// Decide whether a run's owning session began inside the project described by
 /// `project_matcher`, from the `cwd` recorded in the parent transcript
 /// (preferred) or any agent transcript.
+#[hotpath::measure]
 fn run_belongs_to_project(run: &DiscoveredRun, project_matcher: &ProjectRootMatcher) -> bool {
     let Some(cwd) = run_cwd(run) else {
         // No resolvable cwd: refuse rather than mis-attribute a run to a
@@ -436,6 +440,7 @@ fn parse_run_from_dir(
 /// Extract the agent roster from a run meta's `workflowProgress[]`, keeping only
 /// `type == "workflow_agent"` entries (the array also holds `workflow_phase`
 /// rows). `default_model` backfills an agent that recorded no `model`.
+#[hotpath::measure]
 fn parse_roster(run_id: &str, meta: &Value, default_model: Option<&str>) -> Vec<WorkflowAgent> {
     let Some(progress) = meta.get("workflowProgress").and_then(Value::as_array) else {
         return Vec::new();
@@ -477,6 +482,7 @@ fn parse_roster(run_id: &str, meta: &Value, default_model: Option<&str>) -> Vec<
 
 /// Run start time in unix seconds: `startTime` is a millisecond epoch; fall back
 /// to the ISO-8601 `timestamp`.
+#[hotpath::measure]
 fn run_start_ts(meta: &Value) -> Option<i64> {
     ms_field_to_secs(meta, "startTime").or_else(|| {
         meta.get("timestamp")
@@ -488,6 +494,7 @@ fn run_start_ts(meta: &Value) -> Option<i64> {
 
 /// Run end time in unix seconds: `started_ts + durationMs/1000` when a duration
 /// is recorded, else unknown.
+#[hotpath::measure]
 fn run_end_ts(meta: &Value, started_ts: Option<i64>) -> Option<i64> {
     let started = started_ts?;
     let duration_ms = meta.get("durationMs").and_then(Value::as_i64)?;
@@ -496,6 +503,7 @@ fn run_end_ts(meta: &Value, started_ts: Option<i64>) -> Option<i64> {
 
 /// Prefer the run's dedicated `summary` string; otherwise render `result` (a
 /// string or a JSON blob) to a truncated one-line slice, never the whole thing.
+#[hotpath::measure]
 fn run_result_summary(meta: &Value) -> Option<String> {
     if let Some(summary) = string_field(meta, "summary") {
         return Some(crate::runtime::shared::one_line_truncated(
@@ -519,6 +527,7 @@ fn run_result_summary(meta: &Value) -> Option<String> {
     ))
 }
 
+#[hotpath::measure]
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -528,6 +537,7 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
 }
 
 /// Read a millisecond-epoch numeric field and convert it to unix seconds.
+#[hotpath::measure]
 fn ms_field_to_secs(value: &Value, key: &str) -> Option<i64> {
     value.get(key).and_then(Value::as_i64).map(|ms| ms / 1000)
 }
@@ -540,6 +550,7 @@ fn ms_field_to_secs(value: &Value, key: &str) -> Option<i64> {
 /// `agent-<agentId>.jsonl` when that file exists: absolute `transcript_path`,
 /// summed `tokens`, `agent_session_id`, and start/end timestamps. A missing or
 /// unreadable transcript leaves the roster-derived values untouched.
+#[hotpath::measure]
 fn enrich_agent_from_transcript(agent: &mut WorkflowAgent, agents_dir: &Path) {
     if agent.agent_id.is_empty() {
         return;
@@ -596,6 +607,7 @@ fn summarize_transcript_file(path: &Path) -> TranscriptSummary {
     summary
 }
 
+#[hotpath::measure]
 fn update_transcript_summary(summary: &mut TranscriptSummary, value: &Value) {
     if summary.session_id.is_none() {
         summary.session_id = string_field(value, "sessionId");
@@ -616,6 +628,7 @@ fn update_transcript_summary(summary: &mut TranscriptSummary, value: &Value) {
 
 /// Input+output tokens from a transcript line's `message.usage`, or `0` when the
 /// line carries no usage (user turns, tool results, meta lines).
+#[hotpath::measure]
 fn line_usage_tokens(value: &Value) -> i64 {
     let usage = value
         .get("message")
@@ -669,6 +682,7 @@ fn read_journal(agents_dir: &Path) -> Vec<JournalEvent> {
     events
 }
 
+#[hotpath::measure]
 fn journal_event(value: &Value) -> Option<JournalEvent> {
     let event_type = value.get("type").and_then(Value::as_str)?.to_string();
     let agent_id = value.get("agentId").and_then(Value::as_str)?.to_string();
@@ -684,6 +698,7 @@ fn journal_event(value: &Value) -> Option<JournalEvent> {
 /// The set of agent ids for a dir-only run: the union of journal-`started`
 /// agents and `agent-<id>.jsonl` files present, so an agent that appears in
 /// either source is captured.
+#[hotpath::measure]
 fn roster_agent_ids(agents_dir: &Path, journal: &[JournalEvent]) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -710,6 +725,7 @@ fn roster_agent_ids(agents_dir: &Path, journal: &[JournalEvent]) -> Vec<String> 
 
 /// Status of one agent in a dir-only run, inferred from its journal events: a
 /// terminal `result` reads as Completed, otherwise Running.
+#[hotpath::measure]
 fn journal_agent_status(journal: &[JournalEvent], agent_id: &str) -> WorkflowStatus {
     let mut seen = false;
     for event in journal.iter().filter(|event| event.agent_id == agent_id) {

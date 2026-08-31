@@ -64,6 +64,7 @@ pub(super) struct CodexSessionSummary {
     rate_limits: Option<Value>,
 }
 
+#[hotpath::measure_all]
 impl CodexSessionSummary {
     /// Insert the collected summary fields into a session `metadata_json` map.
     pub(super) fn apply(&self, map: &mut Map<String, Value>) {
@@ -107,6 +108,7 @@ pub(super) struct CodexStructuredState {
     pub(super) summary: CodexSessionSummary,
 }
 
+#[hotpath::measure_all]
 impl CodexStructuredState {
     pub(super) fn new() -> Self {
         Self::default()
@@ -382,12 +384,14 @@ impl CodexStructuredState {
     }
 }
 
+#[hotpath::measure]
 fn timestamp_of(record: &Value) -> Option<i64> {
     super::timestamp_from_record(record)
 }
 
 /// Reduce a `rate_limits` object to the compact snapshot we keep (item 9):
 /// primary/secondary `used_percent` + `resets_at`, and `plan_type`.
+#[hotpath::measure]
 fn rate_limits_snapshot(rate_limits: Option<&Value>) -> Option<Value> {
     let rate_limits = rate_limits?.as_object()?;
     let mut snapshot = Map::new();
@@ -417,6 +421,7 @@ fn rate_limits_snapshot(rate_limits: Option<&Value>) -> Option<Value> {
 
 /// Parse the JSON `arguments` blob carried on a `function_call` (Codex encodes
 /// it as a JSON *string*, occasionally as an inline object).
+#[hotpath::measure]
 pub(super) fn parse_arguments(arguments: Option<&Value>) -> Option<Value> {
     match arguments {
         Some(Value::String(raw)) => serde_json::from_str::<Value>(raw).ok(),
@@ -490,6 +495,7 @@ fn extract_exec_command_args(input: &str) -> Option<ExecInvocation> {
 /// Find an executed `tools.exec_command(` marker outside JS strings and
 /// comments. Plain substring search misclassifies examples or comments that
 /// merely mention the call shape as real shell execution.
+#[hotpath::measure]
 fn find_exec_marker(input: &str, mut i: usize) -> Option<usize> {
     let bytes = input.as_bytes();
     while i < input.len() {
@@ -523,6 +529,7 @@ fn find_exec_marker(input: &str, mut i: usize) -> Option<usize> {
     None
 }
 
+#[hotpath::measure]
 fn is_js_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
@@ -530,6 +537,7 @@ fn is_js_identifier_byte(byte: u8) -> bool {
 /// Walk the JS object literal beginning at `brace_idx` (`{`), returning the
 /// object. Nested objects/arrays and string contents (single/double/backtick)
 /// are skipped so only genuine top-level keys are matched.
+#[hotpath::measure]
 fn scan_js_exec_object(s: &str, brace_idx: usize) -> (Option<String>, Option<String>, usize) {
     let bytes = s.as_bytes();
     let mut cmd = None;
@@ -565,6 +573,7 @@ fn scan_js_exec_object(s: &str, brace_idx: usize) -> (Option<String>, Option<Str
 
 /// Read an object key at `i`: a quoted string, or a bare identifier up to the
 /// next whitespace or `:`.
+#[hotpath::measure]
 fn read_js_object_key(s: &str, i: usize) -> (String, usize) {
     let bytes = s.as_bytes();
     if i < s.len()
@@ -583,6 +592,7 @@ fn read_js_object_key(s: &str, i: usize) -> (String, usize) {
 /// Read a JS string literal whose opening quote (`"`, `'`, or `` ` ``) is at
 /// `open_idx`, honoring backslash escapes. Returns the decoded content and the
 /// byte index just past the closing quote; `None` if the string is unterminated.
+#[hotpath::measure]
 fn read_js_string(s: &str, open_idx: usize) -> Option<(String, usize)> {
     let quote = s[open_idx..].chars().next()?;
     let content_start = open_idx + quote.len_utf8();
@@ -609,6 +619,7 @@ fn read_js_string(s: &str, open_idx: usize) -> Option<(String, usize)> {
 
 /// Skip a non-string JS value (number, identifier, or a balanced object/array)
 /// starting at `i`, returning the byte index just past it.
+#[hotpath::measure]
 fn skip_js_value(s: &str, mut i: usize) -> usize {
     let bytes = s.as_bytes();
     if i >= s.len() {
@@ -646,6 +657,7 @@ fn skip_js_value(s: &str, mut i: usize) -> usize {
     i
 }
 
+#[hotpath::measure]
 fn skip_ws(s: &str, mut i: usize) -> usize {
     let bytes = s.as_bytes();
     while i < s.len() && bytes[i].is_ascii_whitespace() {
@@ -654,6 +666,7 @@ fn skip_ws(s: &str, mut i: usize) -> usize {
     i
 }
 
+#[hotpath::measure]
 fn skip_ws_and_commas(s: &str, mut i: usize) -> usize {
     let bytes = s.as_bytes();
     while i < s.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
@@ -665,6 +678,7 @@ fn skip_ws_and_commas(s: &str, mut i: usize) -> usize {
 /// Flatten a `custom_tool_call_output` `output` into one string for exit/wall
 /// parsing. Codex emits it either as a JSON string or as an array of
 /// `{ "type": "input_text", "text": … }` chunks; concatenate the chunk text.
+#[hotpath::measure]
 fn custom_tool_output_text(output: Option<&Value>) -> Option<String> {
     match output? {
         Value::String(text) => Some(text.clone()),
@@ -681,6 +695,7 @@ fn custom_tool_output_text(output: Option<&Value>) -> Option<String> {
 
 /// A shell command is usually a string but can be an argv array; join arrays
 /// with spaces so the searchable text is a single command line.
+#[hotpath::measure]
 fn command_string(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(cmd) => Some(cmd.clone()),
@@ -706,6 +721,7 @@ fn command_string(value: Option<&Value>) -> Option<String> {
 /// classic `exec_command` output ("Process exited with code N", "Wall time: X
 /// seconds") and the newer custom `exec` harness ("Script completed\nWall time
 /// X seconds", which carries no exit code — so it stays null).
+#[hotpath::measure]
 pub(super) fn parse_exec_output(output: &str) -> (Option<i64>, Option<f64>) {
     const EXIT_MARKER: &str = "Process exited with code ";
     const WALL_MARKER: &str = "Wall time";
@@ -724,6 +740,7 @@ pub(super) fn parse_exec_output(output: &str) -> (Option<i64>, Option<f64>) {
     (exit_code, wall_time_s)
 }
 
+#[hotpath::measure]
 fn parse_leading_int(text: &str) -> Option<i64> {
     let text = text.trim_start();
     let mut chars = text.chars();
@@ -748,6 +765,7 @@ fn parse_leading_int(text: &str) -> Option<i64> {
     }
 }
 
+#[hotpath::measure]
 fn parse_leading_float(text: &str) -> Option<f64> {
     let digits: String = text
         .chars()
@@ -773,6 +791,7 @@ struct BuildRowRequest<'a> {
     metadata: &'a Value,
 }
 
+#[hotpath::measure]
 fn build_row(request: BuildRowRequest<'_>) -> SessionMessageRecord {
     SessionMessageRecord {
         provider: PROVIDER.to_string(),
@@ -791,6 +810,7 @@ fn build_row(request: BuildRowRequest<'_>) -> SessionMessageRecord {
     }
 }
 
+#[hotpath::measure]
 fn base_metadata(source: &str, source_event: &str) -> Map<String, Value> {
     let mut metadata = Map::new();
     metadata.insert("source".to_string(), Value::String(source.to_string()));
@@ -801,6 +821,7 @@ fn base_metadata(source: &str, source_event: &str) -> Map<String, Value> {
     metadata
 }
 
+#[hotpath::measure]
 fn exec_command_row(
     exec: &PendingExec,
     meta: &CodexMeta,
@@ -926,6 +947,7 @@ fn commit_candidates(command: &str, wrapped_output: &str) -> CommitCandidates {
     candidates
 }
 
+#[hotpath::measure]
 fn push_commit_candidate(candidates: &mut Vec<String>, candidate: &str) {
     if candidate.len() >= 7
         && candidate.chars().all(|ch| ch.is_ascii_hexdigit())
@@ -935,6 +957,7 @@ fn push_commit_candidate(candidates: &mut Vec<String>, candidate: &str) {
     }
 }
 
+#[hotpath::measure]
 fn segment_reports_head(segment: &str) -> bool {
     let tokens: Vec<_> = segment.split_whitespace().collect();
     tokens
@@ -942,6 +965,7 @@ fn segment_reports_head(segment: &str) -> bool {
         .any(|tokens| tokens == ["git", "rev-parse", "HEAD"])
 }
 
+#[hotpath::measure]
 fn segment_creates_commit(segment: &str) -> bool {
     let mut tokens = segment.split_whitespace();
     let Some(git) = tokens.next() else {
@@ -961,6 +985,7 @@ fn segment_creates_commit(segment: &str) -> bool {
     ) || subcommand == Some("rebase") && tokens.any(|token| token == "--continue")
 }
 
+#[hotpath::measure]
 fn patch_apply_row(
     record: &Value,
     payload: &Value,
@@ -1034,6 +1059,7 @@ fn patch_apply_row(
 }
 
 /// Count unified-diff hunks (`@@ … @@` headers) without keeping the diff body.
+#[hotpath::measure]
 fn hunk_count(unified_diff: &str) -> usize {
     unified_diff
         .lines()
@@ -1041,6 +1067,7 @@ fn hunk_count(unified_diff: &str) -> usize {
         .count()
 }
 
+#[hotpath::measure]
 fn turn_boundary_row(
     record: &Value,
     payload: &Value,
@@ -1099,6 +1126,7 @@ fn turn_boundary_row(
     }))
 }
 
+#[hotpath::measure]
 fn mcp_tool_call_row(
     record: &Value,
     payload: &Value,
@@ -1172,6 +1200,7 @@ fn mcp_tool_call_row(
 }
 
 /// Codex encodes MCP call durations as `{ "secs": s, "nanos": n }`.
+#[hotpath::measure]
 fn duration_ms(duration: Option<&Value>) -> Option<i64> {
     let duration = duration?.as_object()?;
     let secs = duration.get("secs").and_then(Value::as_i64).unwrap_or(0);
@@ -1182,6 +1211,7 @@ fn duration_ms(duration: Option<&Value>) -> Option<i64> {
     Some(secs.saturating_mul(1000) + nanos / 1_000_000)
 }
 
+#[hotpath::measure]
 fn web_search_row(
     record: &Value,
     payload: &Value,
@@ -1227,6 +1257,7 @@ fn web_search_row(
     }))
 }
 
+#[hotpath::measure]
 fn sub_agent_activity_row(
     record: &Value,
     payload: &Value,
@@ -1274,6 +1305,7 @@ fn sub_agent_activity_row(
     })
 }
 
+#[hotpath::measure]
 fn inter_agent_row(
     record: &Value,
     payload: &Value,
@@ -1324,6 +1356,7 @@ fn inter_agent_row(
     }))
 }
 
+#[hotpath::measure]
 fn update_plan_row(
     payload: &Value,
     meta: &CodexMeta,
@@ -1374,12 +1407,14 @@ fn update_plan_row(
     }))
 }
 
+#[hotpath::measure]
 fn insert_str(metadata: &mut Map<String, Value>, key: &str, value: Option<&Value>) {
     if let Some(text) = value.and_then(Value::as_str).filter(|s| !s.is_empty()) {
         metadata.insert(key.to_string(), Value::String(text.to_string()));
     }
 }
 
+#[hotpath::measure]
 fn insert_i64(metadata: &mut Map<String, Value>, key: &str, value: Option<&Value>) {
     if let Some(number) = value.and_then(Value::as_i64) {
         metadata.insert(key.to_string(), Value::from(number));

@@ -21,6 +21,7 @@ pub enum HostAdmissionStatus {
     ExactDuplicate,
 }
 
+#[hotpath::measure_all]
 impl HostAdmissionStatus {
     pub fn from_wire(value: &str) -> Option<Self> {
         serde_json::from_value(Value::String(value.to_owned())).ok()
@@ -32,6 +33,7 @@ impl HostAdmissionStatus {
     /// (the runtime kernel's hook-runtime error context) and be reconstituted
     /// with [`Self::from_wire`] without anyone re-deriving it from a reason
     /// code.
+    #[hotpath::skip]
     pub const fn as_wire(self) -> &'static str {
         match self {
             Self::Supported => "supported",
@@ -56,6 +58,7 @@ pub enum HostAdmissionDispositionClass {
     Unknown,
 }
 
+#[hotpath::measure_all]
 impl HostAdmissionDispositionClass {
     fn from_wire(value: &str) -> Option<Self> {
         serde_json::from_value(Value::String(value.to_owned())).ok()
@@ -74,6 +77,7 @@ pub struct HostAdmissionTelemetryDisposition {
     pub class: HostAdmissionDispositionClass,
 }
 
+#[hotpath::measure_all]
 impl HostAdmissionTelemetryDisposition {
     pub fn from_daemon_wire(value: &Value) -> Option<Self> {
         let status = value
@@ -176,6 +180,7 @@ impl HostAdmissionTelemetryDisposition {
     }
 }
 
+#[hotpath::measure]
 fn classify_disposition(
     status: HostAdmissionStatus,
     reason_code: Option<&str>,
@@ -195,6 +200,7 @@ fn classify_disposition(
     HostAdmissionDispositionClass::Application
 }
 
+#[hotpath::measure]
 fn is_timeout_reason_code(reason_code: &str) -> bool {
     matches!(
         reason_code,
@@ -202,6 +208,7 @@ fn is_timeout_reason_code(reason_code: &str) -> bool {
     )
 }
 
+#[hotpath::measure]
 fn is_transport_reason_code(reason_code: &str) -> bool {
     matches!(
         reason_code,
@@ -213,6 +220,7 @@ fn is_transport_reason_code(reason_code: &str) -> bool {
     )
 }
 
+#[hotpath::measure]
 fn is_cancellation_reason_code(reason_code: &str) -> bool {
     matches!(
         reason_code,
@@ -220,6 +228,7 @@ fn is_cancellation_reason_code(reason_code: &str) -> bool {
     )
 }
 
+#[hotpath::measure]
 pub fn is_bounded_reason_code(value: &str) -> bool {
     const MAX_REASON_CODE_BYTES: usize = 64;
     !value.is_empty()
@@ -229,6 +238,7 @@ pub fn is_bounded_reason_code(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+#[hotpath::measure]
 fn bounded_reason_code(value: &str) -> String {
     if is_bounded_reason_code(value) {
         value.to_owned()
@@ -237,7 +247,9 @@ fn bounded_reason_code(value: &str) -> String {
     }
 }
 
+#[hotpath::measure_all]
 impl HostAdmissionStatus {
+    #[hotpath::skip]
     pub const fn is_replay_progress(self) -> bool {
         matches!(
             self,
