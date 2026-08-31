@@ -928,6 +928,7 @@ impl RetainedCodeGraphRuntimeV1 {
 
     /// Drops aborted catalog/manifest staging files for this sealed digest.
     /// A retry must not inherit another attempt's `.read-bundle-*.tmp` scratch.
+    #[hotpath::measure(label = "daemon.session_registry.sweep_read_bundle_temporaries")]
     pub(crate) fn sweep_aborted_read_bundle_temporaries(
         &self,
     ) -> std::result::Result<(), GraphDbError> {
@@ -1139,6 +1140,7 @@ impl RetainedCodeGraphRuntimeV1 {
     /// provider, then read the journaled replay and verified head to decide
     /// the publication arm. No journal write and no corpus-sized work happens
     /// here.
+    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.classify")]
     fn classify_sealed_publication(
         &self,
         prepared: &PreparedSealedPublicationV1,
@@ -1236,17 +1238,20 @@ impl RetainedCodeGraphRuntimeV1 {
                     None => Ok(()),
                 },
             )?;
-            super::code_graph_manifest::verify_sealed_generation_source_from_roots(
-                &self.generations_root,
-                &self.replay_root,
-                &self.sealed_state_digest,
-                &|| match probe.interruption() {
-                    Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                    Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                        Err(GraphDbError::DeadlineExceeded)
-                    }
-                    None => Ok(()),
-                },
+            hotpath::measure_block!(
+                "daemon.session_registry.publish_snapshot.verify_source",
+                super::code_graph_manifest::verify_sealed_generation_source_from_roots(
+                    &self.generations_root,
+                    &self.replay_root,
+                    &self.sealed_state_digest,
+                    &|| match probe.interruption() {
+                        Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                        Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                            Err(GraphDbError::DeadlineExceeded)
+                        }
+                        None => Ok(()),
+                    },
+                )
             )?;
             Ok::<_, GraphDbError>(replay_pool_lock)
         };
@@ -1874,6 +1879,10 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// to a concurrent attacher (or any other failure here) is swallowed:
     /// the ordinary lease path still runs and surfaces its own, more precise
     /// error if the shard is genuinely unavailable.
+    #[hotpath::measure(
+        label = "daemon.session_registry.ensure_graph_shard_attached",
+        future = true
+    )]
     async fn ensure_code_graph_shard_attached(&self, project_shard: &StoreShardIdV1) {
         match self.graph_registry.shard_is_registered(project_shard) {
             Ok(true) => return,
@@ -1918,6 +1927,10 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(
+        label = "daemon.session_registry.retain_code_graph_runtime",
+        future = true
+    )]
     pub(crate) async fn retain_code_graph_runtime(
         &self,
         project_id: ProjectId,
@@ -2031,6 +2044,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         })
     }
 
+    #[hotpath::measure(
+        label = "daemon.session_registry.reconcile_graph_replays",
+        future = true
+    )]
     pub(crate) async fn reconcile_deleted_code_generation_graph_replays(
         &self,
         project_id: ProjectId,

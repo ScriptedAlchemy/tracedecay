@@ -1,10 +1,10 @@
 [package]
-name = "tracedecay-daemon-identity"
+name = "tracedecay-daemon-control"
 version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "Daemon authority records, profile identity, and credential discovery for TraceDecay"
+description = "OS service lifecycle, readiness probing, and daemon control for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [lib]
@@ -15,7 +15,7 @@ doctest = false
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
     "hotpath/hotpath",
-    "tracedecay-application/hotpath",
+    "tracedecay-daemon-identity/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-domain/hotpath",
     "tracedecay-runtime-core/hotpath",
@@ -23,7 +23,7 @@ hotpath = [
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-daemon-identity/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
@@ -31,23 +31,24 @@ hotpath-alloc = [
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-daemon-identity/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
 ]
 
 [dependencies]
-fs2 = "0.4"
-getrandom = "0.2"
+dirs = "6"
 hex = "0.4"
 hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+sha2 = "0.11"
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3"
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

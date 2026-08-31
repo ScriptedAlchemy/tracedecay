@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::upgrade::UpgradeOutcome;
+use tracedecay_daemon_control as daemon_control;
 use tracedecay_session_memory::user_config::UserConfig;
 
 // Exceeds the daemon's sequential 15s client drain, 2s task abort, and 45s
@@ -132,7 +133,7 @@ fn refresh_generated_plugins_at(
 /// Rewrites and restarts the installed daemon service, returning the service
 /// path and its socket, or `None` when no service is installed.
 fn refresh_daemon_service(
-    previous_state: tracedecay::daemon::DaemonServiceState,
+    previous_state: daemon_control::DaemonServiceState,
 ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>> {
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(None);
@@ -142,19 +143,23 @@ fn refresh_daemon_service(
             message: "tracedecay not found on PATH".to_string(),
         }
     })?;
-    let spec = tracedecay::daemon::service_spec(tracedecay_bin, None)?;
+    let spec = daemon_control::service_spec(tracedecay_bin, None)?;
     refresh_daemon_service_with_spec(previous_state, &spec)
 }
 
 fn refresh_daemon_service_with_spec(
-    previous_state: tracedecay::daemon::DaemonServiceState,
-    spec: &tracedecay::daemon::DaemonServiceSpec,
+    previous_state: daemon_control::DaemonServiceState,
+    spec: &daemon_control::DaemonServiceSpec,
 ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>> {
-    let socket_path = tracedecay::daemon::installed_service_socket_path()?
+    let socket_path = daemon_control::installed_service_socket_path()?
         .unwrap_or_else(|| spec.socket_path.clone());
     Ok(
-        tracedecay::daemon::refresh_installed_service_under_lease_with_state(spec, previous_state)?
-            .map(|service_path| (service_path, socket_path)),
+        daemon_control::refresh_installed_service_under_lease_with_state(
+            spec,
+            previous_state,
+            tracedecay::version::build_version(),
+        )?
+        .map(|service_path| (service_path, socket_path)),
     )
 }
 
@@ -170,7 +175,7 @@ fn print_daemon_transport_location(socket_path: &Path) {
 }
 
 fn refresh_daemon_service_after_update(
-    previous_state: tracedecay::daemon::DaemonServiceState,
+    previous_state: daemon_control::DaemonServiceState,
 ) -> tracedecay_domain::errors::Result<()> {
     match refresh_daemon_service(previous_state)? {
         Some((service_path, socket_path)) => {
@@ -180,7 +185,7 @@ fn refresh_daemon_service_after_update(
             );
             print_daemon_transport_location(&socket_path);
         }
-        None if tracedecay::daemon::daemon_reachable() => {
+        None if daemon_control::daemon_reachable() => {
             eprintln!(
                 "  \x1b[33mwarning:\x1b[0m a TraceDecay daemon is running without an installed service; \
                  it keeps serving the previous version until its `tracedecay daemon run` process is restarted."
@@ -201,15 +206,13 @@ fn restart_daemon_service_with<Lease, Quiesce, Acquire, Refresh, Restore>(
     restore: Restore,
 ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>>
 where
-    Quiesce:
-        FnOnce() -> tracedecay_domain::errors::Result<tracedecay::daemon::DaemonServiceState>,
+    Quiesce: FnOnce() -> tracedecay_domain::errors::Result<daemon_control::DaemonServiceState>,
     Acquire: FnOnce() -> tracedecay_domain::errors::Result<Lease>,
     Refresh: FnOnce(
-        tracedecay::daemon::DaemonServiceState,
+        daemon_control::DaemonServiceState,
     ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>>,
-    Restore: FnOnce(
-        tracedecay::daemon::DaemonServiceState,
-    ) -> tracedecay_domain::errors::Result<()>,
+    Restore:
+        FnOnce(daemon_control::DaemonServiceState) -> tracedecay_domain::errors::Result<()>,
 {
     let previous_state = quiesce()?;
     let _lifecycle_lease = match acquire() {
@@ -217,8 +220,8 @@ where
         Err(acquire_error) => {
             if matches!(
                 previous_state,
-                tracedecay::daemon::DaemonServiceState::RunningEnabled
-                    | tracedecay::daemon::DaemonServiceState::RunningDisabled
+                daemon_control::DaemonServiceState::RunningEnabled
+                    | daemon_control::DaemonServiceState::RunningDisabled
             ) && let Err(restore_error) = restore(previous_state)
             {
                 return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -230,31 +233,32 @@ where
             return Err(acquire_error);
         }
     };
-    refresh(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+    refresh(daemon_control::DaemonServiceState::RunningEnabled)
 }
 
 pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> {
-    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire_with_timeout(
+    let guard = daemon_control::QuiescedDaemonLifecycle::acquire_with_timeout(
         "daemon restart",
         DAEMON_RESTART_LEASE_TIMEOUT,
+        tracedecay::version::build_version(),
     )?;
     let (stopped_state, desired_state) = match guard.previous_state() {
-        tracedecay::daemon::DaemonServiceState::RunningEnabled
-        | tracedecay::daemon::DaemonServiceState::StoppedEnabled => (
-            tracedecay::daemon::DaemonServiceState::StoppedEnabled,
-            tracedecay::daemon::DaemonServiceState::RunningEnabled,
+        daemon_control::DaemonServiceState::RunningEnabled
+        | daemon_control::DaemonServiceState::StoppedEnabled => (
+            daemon_control::DaemonServiceState::StoppedEnabled,
+            daemon_control::DaemonServiceState::RunningEnabled,
         ),
-        tracedecay::daemon::DaemonServiceState::RunningDisabled
-        | tracedecay::daemon::DaemonServiceState::StoppedDisabled => (
-            tracedecay::daemon::DaemonServiceState::StoppedDisabled,
-            tracedecay::daemon::DaemonServiceState::RunningDisabled,
+        daemon_control::DaemonServiceState::RunningDisabled
+        | daemon_control::DaemonServiceState::StoppedDisabled => (
+            daemon_control::DaemonServiceState::StoppedDisabled,
+            daemon_control::DaemonServiceState::RunningDisabled,
         ),
-        tracedecay::daemon::DaemonServiceState::Missing => {
+        daemon_control::DaemonServiceState::Missing => {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "no TraceDecay daemon service is installed — restart your `tracedecay daemon run` process manually, or run `tracedecay daemon install-service` to manage it as a service".to_string(),
             });
         }
-        tracedecay::daemon::DaemonServiceState::Masked => {
+        daemon_control::DaemonServiceState::Masked => {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "TraceDecay daemon service is masked; unmask it before restarting"
                     .to_string(),
@@ -392,11 +396,15 @@ fn run_update_flow(
     refresh_policy: RefreshPolicy,
     no_reinstall: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    tracedecay::daemon::with_exclusive_maintenance_window(operation, |lease_token| {
-        run_install_then_refresh(refresh_policy, crate::upgrade::run_upgrade, |binary| {
-            run_post_update_subcommand(no_reinstall, binary, lease_token)
-        })
-    })
+    daemon_control::with_exclusive_maintenance_window(
+        operation,
+        tracedecay::version::build_version(),
+        |lease_token| {
+            run_install_then_refresh(refresh_policy, crate::upgrade::run_upgrade, |binary| {
+                run_post_update_subcommand(no_reinstall, binary, lease_token)
+            })
+        },
+    )
 }
 
 fn combine_operation_and_restore<T>(
@@ -432,7 +440,10 @@ pub(crate) async fn run_post_update_command(
         return run_post_update_tasks(no_reinstall, &lifecycle_lease).await;
     }
 
-    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire("post-update")?;
+    let guard = daemon_control::QuiescedDaemonLifecycle::acquire(
+        "post-update",
+        tracedecay::version::build_version(),
+    )?;
     let operation_result = match guard.lifecycle_lease() {
         Ok(lifecycle_lease) => run_post_update_tasks(no_reinstall, lifecycle_lease).await,
         Err(error) => Err(error),
@@ -618,7 +629,7 @@ pub(crate) async fn run_post_update_tasks(
     eprintln!("\nPreparing safe post-update maintenance.");
     eprintln!("  Waiting for TraceDecay writers to shut down cleanly — do not interrupt.");
     let previous_daemon_state =
-        tracedecay::daemon::verify_installed_service_quiesced_under_lease()?;
+        daemon_control::verify_installed_service_quiesced_under_lease()?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
     let mutation_result = run_post_update_mutations(no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
@@ -736,7 +747,7 @@ mod tests {
         let result = restart_daemon_service_with(
             || {
                 order.borrow_mut().push("quiesce");
-                Ok(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+                Ok(daemon_control::DaemonServiceState::RunningEnabled)
             },
             || {
                 assert_eq!(order.borrow().as_slice(), ["quiesce"]);
@@ -746,7 +757,7 @@ mod tests {
             |state| {
                 assert_eq!(
                     state,
-                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                    daemon_control::DaemonServiceState::RunningEnabled
                 );
                 order.borrow_mut().push("refresh");
                 Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
@@ -765,12 +776,12 @@ mod tests {
     #[test]
     fn daemon_restart_forces_stopped_service_running() {
         let result = restart_daemon_service_with(
-            || Ok(tracedecay::daemon::DaemonServiceState::StoppedEnabled),
+            || Ok(daemon_control::DaemonServiceState::StoppedEnabled),
             || Ok(()),
             |state| {
                 assert_eq!(
                     state,
-                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                    daemon_control::DaemonServiceState::RunningEnabled
                 );
                 Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
             },
@@ -787,7 +798,7 @@ mod tests {
         let result = restart_daemon_service_with(
             || {
                 order.borrow_mut().push("quiesce");
-                Ok(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+                Ok(daemon_control::DaemonServiceState::RunningEnabled)
             },
             || -> tracedecay_domain::errors::Result<()> {
                 order.borrow_mut().push("acquire");
@@ -800,7 +811,7 @@ mod tests {
             |state| {
                 assert_eq!(
                     state,
-                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                    daemon_control::DaemonServiceState::RunningEnabled
                 );
                 order.borrow_mut().push("restore");
                 Ok(())

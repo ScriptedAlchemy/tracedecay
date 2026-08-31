@@ -26,6 +26,7 @@ use tracedecay_domain::{
     WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1, WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_lsp::LspSessionRegistry;
+use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 fn id<T>(value: &str) -> T
@@ -305,9 +306,17 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
 
     let retrieval_root =
         tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::project_identity_for_test(
+            ProfileId::new(database.binding().shard_id.profile_id.as_str().to_owned())
+                .expect("profile identity"),
+            SessionStoreId::new("store.project.work-evidence-journey")
+                .expect("session store identity"),
+            SessionRootId::new("root.project.work-evidence-journey")
+                .expect("session root identity"),
+            database.binding().shard_id.clone(),
             project_id.clone(),
             repository_id.clone(),
             worktree_id.clone(),
+            BranchId::new("branch.work-evidence-journey").expect("branch identity"),
             project.display().to_string(),
         );
     let scope = retrieval_root

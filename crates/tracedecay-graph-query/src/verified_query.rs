@@ -88,6 +88,7 @@ pub struct VerifiedGraphQuery {
     request_context: RequestContext,
     source: Option<AdmittedSourceAuthority>,
     live_cancellation: CancellationSignal,
+    freshness: super::CodeGraphReadFreshnessV1,
 }
 
 impl VerifiedGraphQuery {
@@ -104,6 +105,7 @@ impl VerifiedGraphQuery {
             None,
             CancellationSignal::active("cancel.verified-graph-query.fixture")
                 .expect("fixture cancellation"),
+            super::CodeGraphReadFreshnessV1::Current,
         )
     }
 
@@ -124,6 +126,7 @@ impl VerifiedGraphQuery {
         request_context: RequestContext,
         source: Option<AdmittedSourceAuthority>,
         live_cancellation: CancellationSignal,
+        freshness: super::CodeGraphReadFreshnessV1,
     ) -> Self {
         Self {
             reader,
@@ -131,11 +134,19 @@ impl VerifiedGraphQuery {
             request_context,
             source,
             live_cancellation,
+            freshness,
         }
     }
 
     pub fn request_context(&self) -> &RequestContext {
         &self.request_context
+    }
+
+    /// Freshness of the generation this query answers from, as proven by the
+    /// projection open: current, or the last complete seated generation
+    /// served while the scheduler rebuilds.
+    pub fn freshness(&self) -> super::CodeGraphReadFreshnessV1 {
+        self.freshness
     }
 
     pub(crate) fn manager(&self) -> GraphQueryManager<'_> {
@@ -698,6 +709,7 @@ pub async fn open_verified_graph_query(
         context,
         source,
         request.cancellation.clone(),
+        verified.freshness(),
     ))
 }
 

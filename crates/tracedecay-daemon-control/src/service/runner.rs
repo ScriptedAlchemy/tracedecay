@@ -34,6 +34,7 @@ impl ServiceRunner {
         service_path: &Path,
         start: bool,
         socket_path: &Path,
+        expected_version: &str,
     ) -> Result<()> {
         match self {
             Self::Systemd => {
@@ -42,16 +43,19 @@ impl ServiceRunner {
                 // operator can inspect it before the first enable.
                 if start {
                     run_systemctl(&["daemon-reload"])?;
-                    run_systemctl(&["enable", "--now", super::super::SERVICE_NAME])?;
+                    run_systemctl(&["enable", "--now", crate::SERVICE_NAME])?;
                 }
                 Ok(())
             }
             Self::Launchd => launchd_install(service_path, start, socket_path),
-            Self::WindowsTask => windows_task::apply_state(if start {
-                DaemonServiceState::RunningEnabled
-            } else {
-                DaemonServiceState::StoppedDisabled
-            }),
+            Self::WindowsTask => windows_task::apply_state(
+                if start {
+                    DaemonServiceState::RunningEnabled
+                } else {
+                    DaemonServiceState::StoppedDisabled
+                },
+                expected_version,
+            ),
         }
     }
 
@@ -61,15 +65,16 @@ impl ServiceRunner {
         service_path: &Path,
         socket_path: &Path,
         previous_state: DaemonServiceState,
+        expected_version: &str,
     ) -> Result<()> {
         match self {
             Self::Systemd => {
                 run_systemctl(&["daemon-reload"])?;
                 if previous_state.is_enabled() {
-                    run_systemctl(&["enable", super::super::SERVICE_NAME])?;
+                    run_systemctl(&["enable", crate::SERVICE_NAME])?;
                 }
                 if previous_state.is_running() {
-                    run_systemctl(&["restart", super::super::SERVICE_NAME])?;
+                    run_systemctl(&["restart", crate::SERVICE_NAME])?;
                 }
                 Ok(())
             }
@@ -81,7 +86,7 @@ impl ServiceRunner {
                 Ok(())
             }
             Self::Launchd => Ok(()),
-            Self::WindowsTask => windows_task::apply_state(previous_state),
+            Self::WindowsTask => windows_task::apply_state(previous_state, expected_version),
         }
     }
 
@@ -89,11 +94,11 @@ impl ServiceRunner {
         match self {
             Self::Systemd => {
                 let running = Command::new("systemctl")
-                    .args(["--user", "is-active", "--quiet", super::super::SERVICE_NAME])
+                    .args(["--user", "is-active", "--quiet", crate::SERVICE_NAME])
                     .status()
                     .is_ok_and(|status| status.success());
                 let enablement = Command::new("systemctl")
-                    .args(["--user", "is-enabled", super::super::SERVICE_NAME])
+                    .args(["--user", "is-enabled", crate::SERVICE_NAME])
                     .output()
                     .ok()
                     .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -128,43 +133,48 @@ impl ServiceRunner {
     }
 
     #[hotpath::measure(label = "daemon.service.runner.before_uninstall")]
-    pub(super) fn before_uninstall(&self, stop: bool) -> Result<()> {
+    pub(super) fn before_uninstall(&self, stop: bool, expected_version: &str) -> Result<()> {
         match self {
             Self::Systemd => {
                 if stop {
-                    let _ = run_systemctl(&["disable", "--now", super::super::SERVICE_NAME]);
+                    let _ = run_systemctl(&["disable", "--now", crate::SERVICE_NAME]);
                 }
                 Ok(())
             }
             Self::Launchd => launchd_before_uninstall(stop),
-            Self::WindowsTask if stop => windows_task::deactivate(),
+            Self::WindowsTask if stop => windows_task::deactivate(expected_version),
             Self::WindowsTask => Ok(()),
         }
     }
 
     #[hotpath::measure(label = "daemon.service.runner.start")]
-    pub(super) fn start(&self, service_path: &Path, socket_path: &Path) -> Result<()> {
+    pub(super) fn start(
+        &self,
+        service_path: &Path,
+        socket_path: &Path,
+        expected_version: &str,
+    ) -> Result<()> {
         match self {
-            Self::Systemd => run_systemctl(&["start", super::super::SERVICE_NAME]),
+            Self::Systemd => run_systemctl(&["start", crate::SERVICE_NAME]),
             Self::Launchd => {
                 let target = launchd_service_target()?;
                 launchd_start_preserving_enablement(&target, service_path, socket_path)
             }
-            Self::WindowsTask => windows_task::start(),
+            Self::WindowsTask => windows_task::start(expected_version),
         }
     }
 
     #[hotpath::measure(label = "daemon.service.runner.stop")]
-    pub(super) fn stop(&self) -> Result<()> {
+    pub(super) fn stop(&self, expected_version: &str) -> Result<()> {
         match self {
-            Self::Systemd => run_systemctl(&["stop", super::super::SERVICE_NAME]),
+            Self::Systemd => run_systemctl(&["stop", crate::SERVICE_NAME]),
             Self::Launchd => launchd_stop(),
-            Self::WindowsTask => windows_task::stop(),
+            Self::WindowsTask => windows_task::stop(expected_version),
         }
     }
 
-    pub(super) fn stop_for_update(&self) -> Result<()> {
-        self.stop()
+    pub(super) fn stop_for_update(&self, expected_version: &str) -> Result<()> {
+        self.stop(expected_version)
     }
 
     pub(super) fn restore_after_update(
@@ -172,6 +182,7 @@ impl ServiceRunner {
         service_path: &Path,
         socket_path: &Path,
         previous_state: DaemonServiceState,
+        expected_version: &str,
     ) -> Result<()> {
         if !previous_state.is_running() {
             return Ok(());
@@ -180,11 +191,11 @@ impl ServiceRunner {
             Self::Systemd => {
                 run_systemctl(&["daemon-reload"])?;
                 if previous_state.is_enabled() {
-                    run_systemctl(&["enable", super::super::SERVICE_NAME])?;
+                    run_systemctl(&["enable", crate::SERVICE_NAME])?;
                 } else {
-                    run_systemctl(&["disable", super::super::SERVICE_NAME])?;
+                    run_systemctl(&["disable", crate::SERVICE_NAME])?;
                 }
-                run_systemctl(&["start", super::super::SERVICE_NAME])
+                run_systemctl(&["start", crate::SERVICE_NAME])
             }
             Self::Launchd => {
                 launchd_refresh(service_path, socket_path)?;
@@ -193,7 +204,7 @@ impl ServiceRunner {
                 }
                 Ok(())
             }
-            Self::WindowsTask => windows_task::apply_state(previous_state),
+            Self::WindowsTask => windows_task::apply_state(previous_state, expected_version),
         }
     }
 
@@ -211,7 +222,7 @@ impl ServiceRunner {
 
     pub(super) fn log_hint(&self) -> String {
         match self {
-            Self::Systemd => format!("journalctl --user -u {} -f", super::super::SERVICE_NAME),
+            Self::Systemd => format!("journalctl --user -u {} -f", crate::SERVICE_NAME),
             Self::Launchd => tracedecay_runtime_core::config::user_data_dir().map_or_else(
                 || "tail -f <tracedecay-data-dir>/daemon.err.log".to_string(),
                 |dir| format!("tail -f \"{}\"", dir.join("daemon.err.log").display()),

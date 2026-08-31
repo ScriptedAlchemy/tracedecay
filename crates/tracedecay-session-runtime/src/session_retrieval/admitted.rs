@@ -10,8 +10,6 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
-use tracedecay_store::StoreShardScopeV1;
 use tracedecay_session_memory::context::{
     CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets, ResolvedSessionIdentity,
 };
@@ -19,6 +17,8 @@ use tracedecay_session_memory::session::{
     SessionRequestBinding, SessionRetrievalConfiguration, SessionTemporalQuery,
     TaskSessionRetrievalOutcomeV1,
 };
+use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
+use tracedecay_store::StoreShardScopeV1;
 
 use super::contract::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
@@ -53,6 +53,7 @@ impl DaemonSessionRetrievalService {
         {
             return None;
         }
+        let expected_runtime_shard = database.binding().shard_id.clone();
         Self::new(
             database,
             DaemonSessionRetrievalRoot {
@@ -60,7 +61,7 @@ impl DaemonSessionRetrievalService {
                 identity,
                 project_id: None,
                 authorized_root: None,
-                expected_runtime_shard: None,
+                expected_runtime_shard: Some(expected_runtime_shard),
             },
             None,
         )
@@ -594,13 +595,15 @@ mod tests {
         RequestContext, RequestId,
     };
     use tracedecay_domain::{
-        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+        ActorId, BrainId, ManifestDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros,
+        WorktreeId,
     };
-    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
     use tracedecay_session_memory::context::{
         BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
         SessionStoreId,
     };
+    use tracedecay_store::StoreShardIdV1;
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
 
@@ -625,6 +628,7 @@ mod tests {
     #[test]
     fn admitted_binding_preserves_outer_grant_scope_and_cancellation_identity() {
         let project_id = ProjectId::new("project.session-retrieval").expect("project identity");
+        let expected_runtime_shard = test_project_shard(project_id.clone());
         let identity = ResolvedSessionIdentity::for_project(
             ProfileId::new("profile.session-retrieval").expect("profile identity"),
             project_id.clone(),
@@ -641,7 +645,7 @@ mod tests {
             identity,
             project_id: Some(project_id.as_str().to_owned()),
             authorized_root: None,
-            expected_runtime_shard: None,
+            expected_runtime_shard: Some(expected_runtime_shard),
         };
         let actor = ActorId::new("actor.work-evidence").expect("actor");
         let scope = root
@@ -695,6 +699,7 @@ mod tests {
 
     fn retrieval_root(branch: &str) -> DaemonSessionRetrievalRoot {
         let project_id = ProjectId::new("project.session-retrieval").expect("project identity");
+        let expected_runtime_shard = test_project_shard(project_id.clone());
         DaemonSessionRetrievalRoot {
             store_scope: SessionRetrievalStoreScope::Project,
             identity: ResolvedSessionIdentity::for_project(
@@ -710,8 +715,16 @@ mod tests {
             ),
             project_id: Some(project_id.as_str().to_owned()),
             authorized_root: None,
-            expected_runtime_shard: None,
+            expected_runtime_shard: Some(expected_runtime_shard),
         }
+    }
+
+    fn test_project_shard(project_id: ProjectId) -> StoreShardIdV1 {
+        StoreShardIdV1::project_sessions(
+            BrainId::new("brain.session-retrieval").expect("brain identity"),
+            UserProfileId::new("profile.session-retrieval").expect("profile identity"),
+            project_id,
+        )
     }
 
     fn request_context_for(scope: tracedecay_application::ResolvedScope) -> RequestContext {
