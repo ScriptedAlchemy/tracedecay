@@ -118,15 +118,21 @@ tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tree-sitter = "0.26"
 
+# Profiling benches: built only under the opt-in `hotpath` feature so a
+# default `cargo bench` / `cargo test --all-targets` never compiles hotpath
+# instrumentation. Run with `cargo bench -p tracedecay-code-index
+# --features hotpath --bench <name>`.
 [[bench]]
 name = "code_index_chunks"
 harness = false
 test = false
+required-features = ["hotpath"]
 
 [[bench]]
 name = "retained_parse"
 harness = false
 test = false
+required-features = ["hotpath"]
 
 [[bench]]
 name = "source_search"

@@ -411,10 +411,36 @@ impl CodeChunkProjectionSink for CountingSink {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    configure_hotpath();
+    // Declared before the workload and dropped on return (never skipped by
+    // `process::exit`), so a requested profile observes every measured span.
+    let _hotpath = hotpath::HotpathGuardBuilder::new("code-index-chunks-bench").build();
     if let Err(error) = run_cli() {
         eprintln!("query code-index benchmark: {error}");
-        std::process::exit(1);
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+/// Mirrors `tracedecay-index-bench`'s guard defaults: stdout here carries the
+/// machine-read benchmark output, so the hotpath report goes to
+/// `HOTPATH_OUTPUT_PATH` when one is named and nowhere otherwise, and the
+/// localhost metrics server stays off. This runs as the first statement of
+/// `main`, before any other thread exists, which makes `set_var` sound.
+fn configure_hotpath() {
+    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
+        unsafe {
+            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
+        }
+    }
+    let has_output_path = std::env::var_os("HOTPATH_OUTPUT_PATH")
+        .is_some_and(|path| path.to_str().is_some_and(|path| !path.is_empty()));
+    if !has_output_path {
+        unsafe {
+            std::env::set_var("HOTPATH_OUTPUT_FORMAT", "none");
+            std::env::remove_var("HOTPATH_OUTPUT_PATH");
+        }
     }
 }
 
