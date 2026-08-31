@@ -18,6 +18,7 @@ use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailur
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
 };
+use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_store::{ProjectId, StoreShardIdV1};
 use tracedecay_store_runtime::{
     DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
@@ -1271,6 +1272,7 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
         .expect("synthetic sealed digest"),
     };
     let primary = registry
+        .code_graph_seat_port()
         .retain_code_graph_runtime(
             project_id.clone(),
             repository_id.clone(),
@@ -1285,6 +1287,7 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
         .await
         .expect("primary graph runtime");
     let linked = registry
+        .code_graph_seat_port()
         .retain_code_graph_runtime(
             project_id,
             repository_id,

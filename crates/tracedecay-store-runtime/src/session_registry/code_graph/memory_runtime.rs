@@ -11,6 +11,7 @@ use tracedecay_graph_db::{
 use tracedecay_runtime_core::store::memory::{
     ProjectMemoryGraphReconciliationScheduleV1, schedule_project_memory_graph_reconciliation,
 };
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
     FactReadControl, GraphPublicationInputDigestV1, GraphPublicationKeyV1, StoreShardIdV1,
     StoreShardScopeV1,
@@ -116,7 +117,7 @@ impl tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1
 
 impl DaemonSessionRuntimeRegistryV1 {
     #[cfg(test)]
-    pub async fn retain_memory_graph_runtime(
+    pub(crate) async fn retain_memory_graph_runtime(
         &self,
         shard_id: StoreShardIdV1,
         database: tracedecay_runtime_core::db::DatabaseOwnerV1,
@@ -129,13 +130,13 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.incarnation,
             shard_id,
             database,
-            tracedecay_usecases::observation::ObservationCancellation::default(),
+            ObservationCancellation::default(),
         )
         .await
         .map_err(|failure| failure.error)
     }
 
-    pub async fn retain_memory_graph_runtime_for_task(
+    pub(crate) async fn retain_memory_graph_runtime_for_task(
         identity: super::super::LocalProfileIdentityAuthorityV1,
         registry: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistry,
         graph_registry: tracedecay_graph_db::GraphDbRegistry,
@@ -143,7 +144,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         incarnation: tracedecay_store::StoreIncarnationV1,
         shard_id: StoreShardIdV1,
         database: tracedecay_runtime_core::db::DatabaseOwnerV1,
-        cancellation: tracedecay_usecases::observation::ObservationCancellation,
+        cancellation: ObservationCancellation,
     ) -> std::result::Result<RetainedVerifiedGraphRuntimeV1, MemoryGraphRuntimeOpenFailureV1> {
         if !matches!(
             &shard_id.scope,

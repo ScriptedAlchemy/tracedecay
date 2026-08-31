@@ -8,6 +8,7 @@ use tracedecay_graph_db::{
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey, StoreRuntimeRegistry,
 };
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
     RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1, StoreIncarnationV1,
     StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1,
@@ -45,7 +46,7 @@ pub async fn open_session_relation_owner_for_task(
     registry: &StoreRuntimeRegistry,
     graph_registry: &tracedecay_graph_db::GraphDbRegistry,
     lifecycle_cancelled: &Arc<AtomicBool>,
-    cancellation: tracedecay_usecases::observation::ObservationCancellation,
+    cancellation: ObservationCancellation,
     incarnation: StoreIncarnationV1,
     shard_id: StoreShardIdV1,
 ) -> Result<(
@@ -171,7 +172,7 @@ fn registration(
 
 struct GraphOpenTaskCancellationV1 {
     lifecycle: Arc<AtomicBool>,
-    operation: tracedecay_usecases::observation::ObservationCancellation,
+    operation: ObservationCancellation,
 }
 
 impl GraphCancellation for GraphOpenTaskCancellationV1 {

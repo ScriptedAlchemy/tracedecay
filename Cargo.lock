@@ -7035,6 +7035,7 @@ dependencies = [
  "hex",
  "hotpath",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",

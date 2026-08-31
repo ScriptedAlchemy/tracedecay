@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracedecay_automation_runtime::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_domain::BrainNodeId;
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
     AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
 };
@@ -3103,7 +3104,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         operation: F,
     ) -> bool
     where
-        F: FnOnce(tracedecay_usecases::observation::ObservationCancellation) -> Fut
+        F: FnOnce(ObservationCancellation) -> Fut
             + Send
             + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,

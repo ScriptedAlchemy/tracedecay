@@ -6,6 +6,12 @@
 //! worker. The composition root (`tracedecay`) wires these against daemon
 //! engine state; this crate never depends on the root aggregate.
 //!
+//! The `tracedecay-usecases` dependency is only for that store-runtime port
+//! and for implementing [`tracedecay_code_index_runtime::CodeGraphSeatLeaseV1`]
+//! / verified semantic-vector adapters, whose signatures already name
+//! usecases semantic-runtime types. Observation cancellation comes from
+//! `tracedecay_sessions::observation`.
+//!
 //! `RemoteRecoveryProjectLifecycleV1` stays in the root crate: it holds
 //! daemon invocation, project-open, and retirement state that cannot be
 //! severed through an existing recovery port.

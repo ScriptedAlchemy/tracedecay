@@ -33,6 +33,9 @@ use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
 use tracedecay_code_index_runtime::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
+use tracedecay_usecases::semantic_runtime::{
+    SemanticVectorGraphScopeV1, VerifiedSemanticVectorGraphRuntimeV1,
+};
 
 mod memory_runtime;
 pub(super) use memory_runtime::{
@@ -1878,7 +1881,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         label = "daemon.session_registry.retain_code_graph_runtime",
         future = true
     )]
-    pub async fn retain_code_graph_runtime(
+    pub(crate) async fn retain_code_graph_runtime(
         &self,
         project_id: ProjectId,
         repository_id: RepositoryId,
@@ -2292,8 +2295,8 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
 
     fn into_semantic_vector_runtime(
         self: Box<Self>,
-        scope: tracedecay_usecases::semantic_runtime::SemanticVectorGraphScopeV1,
-    ) -> Arc<dyn tracedecay_usecases::semantic_runtime::VerifiedSemanticVectorGraphRuntimeV1> {
+        scope: SemanticVectorGraphScopeV1,
+    ) -> Arc<dyn VerifiedSemanticVectorGraphRuntimeV1> {
         let (source_scope, binding) = {
             let (scope, binding) =
                 RetainedCodeGraphRuntimeV1::semantic_vector_staging_binding(self.as_ref());

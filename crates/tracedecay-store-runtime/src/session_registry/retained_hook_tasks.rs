@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
 
-use tracedecay_usecases::observation::ObservationCancellation;
+use tracedecay_sessions::observation::ObservationCancellation;
 
 struct RetainedHookTask {
     generation: u64,

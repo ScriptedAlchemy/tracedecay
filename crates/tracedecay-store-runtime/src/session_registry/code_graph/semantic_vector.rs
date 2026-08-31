@@ -1,4 +1,5 @@
 use super::*;
+use tracedecay_usecases::semantic_runtime::SemanticVectorRetentionAuthorizationV1;
 
 impl RetainedCodeGraphRuntimeV1 {
     pub fn reserve_one_semantic_vector_generation(
@@ -34,7 +35,7 @@ impl RetainedCodeGraphRuntimeV1 {
     pub fn finalize_reserved_semantic_vector_generation(
         &self,
         reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
-        authorization: &tracedecay_usecases::semantic_runtime::SemanticVectorRetentionAuthorizationV1,
+        authorization: &SemanticVectorRetentionAuthorizationV1,
         cancellation: Arc<dyn GraphCancellation>,
         deadline: Instant,
     ) -> std::result::Result<tracedecay_graph_db::SemanticVectorRetentionAction, GraphDbError> {
