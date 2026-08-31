@@ -383,6 +383,29 @@ fn lcm_non_json_credential_bearing_keys_are_key_quarantine_not_parse_ambiguity()
 }
 
 #[test]
+fn prose_opening_with_a_bracketed_annotation_line_is_not_toml_quarantine() {
+    // LCM compaction emits scaffold messages such as
+    // `[Current user objective preserved from compacted history]` followed by
+    // prose. The bracketed line is not a TOML table header (bare TOML keys
+    // cannot contain unquoted spaces), so the document must take the raw scan
+    // instead of quarantining as a malformed structured document.
+    let raw = "[Current user objective preserved from compacted history]\nShip OAuth login now\n";
+
+    let sanitized = sanitize_lcm_payload_text(raw).expect("prose scaffold survives");
+    assert_eq!(sanitized.sanitized_text(), raw);
+}
+
+#[test]
+fn invalid_toml_under_a_real_table_header_stays_a_structured_quarantine() {
+    // A genuine table header followed by unparseable content keeps the
+    // fail-closed parse-ambiguity quarantine.
+    let raw = "[section]\nnot toml at all\n";
+
+    let error = sanitize_lcm_payload_text(raw).expect_err("parse ambiguity quarantine");
+    assert_eq!(error, DetectionError::StructuredQuarantine);
+}
+
+#[test]
 fn lcm_non_json_parse_ambiguity_stays_a_structured_quarantine() {
     // The routing split must not widen: a document that declared a structured
     // format but failed to parse is still the parse-ambiguity quarantine.

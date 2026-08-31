@@ -724,7 +724,14 @@ fn parse_toml_document(
     let table_candidate = first
         .split_once('#')
         .map_or(first, |(header, _)| header.trim_end());
-    let table_header = table_candidate.starts_with('[') && table_candidate.ends_with(']');
+    // Only a header TOML itself accepts commits the document to the TOML
+    // lane. Prose that opens with a bracketed annotation line (LCM's own
+    // compacted-history scaffold emits `[Current user objective …]`) is not a
+    // table header — bare TOML keys cannot contain unquoted spaces — and must
+    // fall through to the raw scan instead of quarantining as malformed TOML.
+    let table_header = table_candidate.starts_with('[')
+        && table_candidate.ends_with(']')
+        && toml::from_str::<toml::Table>(table_candidate).is_ok();
     if first.starts_with('[') && !table_header {
         if has_assignment_intent(text) {
             return Err(StructuredTextParseFailureV1::Malformed);
