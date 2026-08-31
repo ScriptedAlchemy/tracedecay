@@ -20,7 +20,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_session_memory::context::RegisteredScopeResolver;
-use tracedecay_usecases::graph::{
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
@@ -52,7 +52,7 @@ impl CodeGraphProjectionReadPort for DashboardTestCodeGraphProjectionV1 {
                     VerifiedCodeGraphRead::new(
                         self.scope.clone(),
                         Arc::clone(&self.store),
-                        tracedecay_usecases::graph::CodeGraphReadFreshnessV1::Current,
+                        tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
                     )
                 }
                 RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),

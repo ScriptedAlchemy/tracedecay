@@ -51,7 +51,7 @@ impl DoctorTestRuntime {
             std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700))
                 .expect("secure Doctor test profile root");
         }
-        let identity = crate::daemon::profile_identity::load_or_create(profile_root)
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
             .expect("load Doctor test profile identity");
         let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
         let scope =
@@ -658,7 +658,7 @@ async fn configured_upload_enabled(
         false,
         false,
     )?;
-    let client = crate::daemon::invocation_client_for_current(handshake)?;
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     let dispatched = resolve_application_surface_dispatch(
         BindingSurface::Cli,
         operation,

@@ -103,7 +103,7 @@ fn verified_graph_context(cancellation: &CancellationSignal) -> RequestContext {
 
 fn verified_graph(
     fixture_symbols: &[FixtureSymbol<'_>],
-) -> tracedecay_usecases::graph::VerifiedGraphQuery {
+) -> tracedecay_graph_query::VerifiedGraphQuery {
     let generation = fixture_id::<CodeGenerationId>("generation.affected-tests.1");
     let mut files = Vec::new();
     let mut chunks = Vec::new();
@@ -187,12 +187,12 @@ fn verified_graph(
         .verified_store(&generation)
         .expect("open verified fixture generation");
     let graph_cancellation =
-        tracedecay_usecases::graph::application_graph_cancellation(&cancellation);
+        tracedecay_graph_query::application_graph_cancellation(&cancellation);
     let reader = store
         .interactive_reader_with_cancellation(&generation, Arc::clone(&graph_cancellation))
         .expect("open generation-pinned fixture reader");
     let context = verified_graph_context(&cancellation);
-    tracedecay_usecases::graph::VerifiedGraphQuery::from_fixture_reader(
+    tracedecay_graph_query::VerifiedGraphQuery::from_fixture_reader(
         reader,
         graph_cancellation,
         context,
@@ -930,7 +930,7 @@ fn tail_handles_short_input() {
 /// the per-file index cutover, both scoped reads hydrated the whole corpus
 /// stream and refused this exact shape with a budget error — a 13-file PR
 /// paid (and could not even complete) a full-corpus sweep.
-fn scoped_read_fixture() -> tracedecay_usecases::graph::VerifiedGraphQuery {
+fn scoped_read_fixture() -> tracedecay_graph_query::VerifiedGraphQuery {
     let mut fixture_symbols = vec![
         FixtureSymbol {
             path: "src/hot.rs",

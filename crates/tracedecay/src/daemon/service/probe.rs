@@ -5,6 +5,10 @@ use std::net::TcpStream as StdTcpStream;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
 
+#[cfg(not(unix))]
+use tracedecay_daemon_identity::authority;
+#[cfg(unix)]
+use tracedecay_daemon_identity::client_connection;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[cfg(unix)]
@@ -126,7 +130,7 @@ fn query_daemon_identity(
     // The first initialize after a restart can sit behind startup recovery
     // on the daemon side; a sub-second read deadline misclassifies a busy,
     // healthy daemon as unresponsive.
-    let connection = super::super::client_connection(socket_path)?;
+    let connection = client_connection(socket_path)?;
     let stream = StdUnixStream::connect(socket_path)?;
     query_daemon_identity_stream(stream, connection.auth_token.as_deref(), deadline)
 }
@@ -383,8 +387,8 @@ fn current_loopback_authority(
         .ok_or_else(|| TraceDecayError::Config {
             message: "could not determine TraceDecay user data directory".to_string(),
         })?;
-    let profile_root = super::super::authority::canonical_identity_path(&profile_root)?;
-    let Some(record) = super::super::authority::current_record(&profile_root)? else {
+    let profile_root = authority::canonical_identity_path(&profile_root)?;
+    let Some(record) = authority::current_record(&profile_root)? else {
         return Ok(None);
     };
     if record.profile_root != profile_root {

@@ -234,7 +234,7 @@ impl TraceDecay {
                         .to_owned(),
             });
         }
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let runtime_registry = join_standalone_session_registry(identity).await?;
         let profile_database = runtime_registry.port().profile_database().await?;
         let store_layout = Self::resolve_first_touch_configuration_layout(
@@ -501,7 +501,7 @@ impl TraceDecay {
                     .to_owned(),
             });
         }
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let runtime_registry = join_standalone_session_registry(identity).await?;
         let profile_database = runtime_registry.port().profile_database().await?;
         let store_layout = Self::resolve_registered_configuration_layout(
@@ -710,7 +710,7 @@ impl TraceDecay {
                         .to_owned(),
             });
         }
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let runtime_registry = join_standalone_session_registry(identity).await?;
         let profile_database = runtime_registry.port().profile_database().await?;
         let store_layout = Self::resolve_registered_configuration_layout(

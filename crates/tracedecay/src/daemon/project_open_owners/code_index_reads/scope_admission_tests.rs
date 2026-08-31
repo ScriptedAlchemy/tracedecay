@@ -19,7 +19,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RefId, UtcMicros, WorktreeId};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::graph::{CodeGraphReadError, CodeGraphReadRequest};
+use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest};
 
 use super::project_code_graph_projection_read_port;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;

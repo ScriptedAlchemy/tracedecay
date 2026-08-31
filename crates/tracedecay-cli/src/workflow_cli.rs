@@ -213,7 +213,7 @@ pub async fn invoke_workflow_cli(
     );
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
-    let response = match tracedecay::daemon::invocation_client_for_current(handshake)?
+    let response = match tracedecay_daemon_identity::invocation_client_for_current(handshake)?
         .invoke_controlled(
             request,
             deadline,

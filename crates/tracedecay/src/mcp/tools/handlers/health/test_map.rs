@@ -10,7 +10,7 @@ const MAX_TEST_MAP_RELATIONS_PER_HOP: usize = 20_000;
 #[hotpath::measure(label = "mcp.health.test_risk.total")]
 pub(crate) async fn handle_test_risk(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -47,7 +47,7 @@ pub(crate) async fn handle_test_risk(
 #[hotpath::measure(label = "mcp.health.test_map.total")]
 pub(crate) async fn handle_test_map(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     _scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {

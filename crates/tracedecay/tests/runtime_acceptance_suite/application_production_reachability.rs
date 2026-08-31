@@ -96,8 +96,8 @@ async fn production_fixture() -> ProductionFixture {
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
             .expect("daemon handshake");
-    let client =
-        tracedecay::daemon::invocation_client_for_current(handshake).expect("daemon client");
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)
+        .expect("daemon client");
     // `run_affected_tests` needs the verified code graph; honour the same
     // published pre-admission retry contract as the later surface reads.
     for name in [
@@ -686,7 +686,7 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
             false,
         )
         .expect("daemon handshake");
-        tracedecay::daemon::invocation_client_for_current(handshake).expect("daemon client")
+        tracedecay_daemon_identity::invocation_client_for_current(handshake).expect("daemon client")
     };
     let client_a = fresh_client();
     let client_b = fresh_client();

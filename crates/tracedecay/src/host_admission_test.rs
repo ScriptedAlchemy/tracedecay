@@ -111,7 +111,8 @@ fn host_capture_request(scope: ObservationScopeV1, record_id: &str) -> CaptureOb
 async fn projectless_profile_capture_uses_the_daemon_profile_worker_plan() {
     let root = TempDir::new().unwrap();
     let profile_root = root.path().join("profile");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+    let identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root).unwrap();
     let _daemon_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,
@@ -164,7 +165,8 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     initialize_repository(&repository_root);
     let project_id = ProjectId::new("project.host-provenance").unwrap();
     let identity =
-        crate::daemon::profile_identity::load_or_create(&root.path().join("profile")).unwrap();
+        tracedecay_daemon_identity::profile_identity::load_or_create(&root.path().join("profile"))
+            .unwrap();
     let _daemon_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,
@@ -354,7 +356,8 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
 async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() {
     let temporary = TempDir::new().unwrap();
     let profile_root = temporary.path().join("profile");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+    let identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root).unwrap();
     let daemon_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,
@@ -472,7 +475,8 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     let profile_root = temporary.path().join("profile");
     let project_root = temporary.path().join("project");
     initialize_repository(&project_root);
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+    let identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root).unwrap();
     let daemon_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,

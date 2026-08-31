@@ -31,7 +31,7 @@ use super::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
     CanonicalProximityEvidenceV1,
 };
-use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
+use tracedecay_graph_query::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 use tracedecay_sessions::runtime::git_correlation::{
     GitEvidenceProjectionStore, GitRefFilter, SessionsForQuery, git_evidence_projection_identity,

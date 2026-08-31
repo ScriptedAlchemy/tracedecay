@@ -1,7 +1,7 @@
 use serde_json::Value;
 use tracedecay_application::{ApplicationProblem, ResultContractRef};
 use tracedecay_tool_catalog::BindingSurface;
-use tracedecay_usecases::graph::VerifiedGraphQueryRequest;
+use tracedecay_graph_query::VerifiedGraphQueryRequest;
 
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::tracedecay::TraceDecay;
@@ -40,7 +40,7 @@ async fn admitted_graph_query(
     _cg: &TraceDecay,
     options: &ToolCallRegistryOptions<'_>,
     operation_name: &str,
-) -> Result<tracedecay_usecases::graph::VerifiedGraphQuery> {
+) -> Result<tracedecay_graph_query::VerifiedGraphQuery> {
     let Some(port) = options.verified_graph_query_port.as_deref() else {
         return Err(graph_read_unavailable(
             "the exact project verified graph query is not mounted",

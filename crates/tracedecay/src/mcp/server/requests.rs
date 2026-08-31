@@ -896,7 +896,7 @@ impl McpServer {
                             false,
                             false,
                         )?;
-                        crate::daemon::invocation_client_for_current(handshake)
+                        tracedecay_daemon_identity::invocation_client_for_current(handshake)
                     })
                     .await
                     .ok()

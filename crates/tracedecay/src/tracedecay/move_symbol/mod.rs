@@ -19,7 +19,7 @@ use tracedecay_code_extraction::source_mask::{MaskOptions, masked_rust_source_wi
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::Visibility;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::graph::{map_code_graph_read_runtime_error, map_projection_error};
+use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
 use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
 use super::TraceDecay;

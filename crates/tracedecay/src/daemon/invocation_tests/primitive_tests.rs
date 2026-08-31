@@ -25,8 +25,8 @@ async fn expire_all_releases_session_holder_graph_lease_before_registry_shutdown
         "invocation session-holder shutdown",
     )
     .expect("daemon database scope");
-    let identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
     let registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity,

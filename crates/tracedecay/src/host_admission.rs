@@ -252,7 +252,7 @@ impl HostAdmissionTestRuntimeV1 {
             prepare_host_admission_test_project_root(project_root, project_id)?;
         }
 
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             identity.profile_root(),
             1,
@@ -542,9 +542,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) fn into_session_temporal_refresh_test_authority(
         self,
         scope: HostAdmissionScope,
-    ) -> Result<
-        crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshTestAuthority,
-    > {
+    ) -> Result<crate::daemon::session_runtime_tests::SessionTemporalRefreshTestAuthority> {
         let database =
             self.registered_database_arc(scope)
                 .ok_or_else(|| TraceDecayError::Database {
@@ -552,7 +550,7 @@ impl HostAdmissionTestRuntimeV1 {
                     message: "registered session database mount is unavailable".to_owned(),
                 })?;
         Ok(
-            crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshTestAuthority::new(
+            crate::daemon::session_runtime_tests::SessionTemporalRefreshTestAuthority::new(
                 self, database,
             ),
         )
@@ -922,7 +920,8 @@ impl HostAdmissionTestRuntimeV1 {
                 })?;
         let profile_database = self.profile_database.clone();
         let profile_sessions = self.profile_registered.clone();
-        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let profile_identity =
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let mut context =
             crate::mcp::server::McpServerConstructionContext::direct(cg, scope_prefix)
                 .with_direct_databases(

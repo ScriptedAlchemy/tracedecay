@@ -277,7 +277,7 @@ async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
     });
 
     super::super::connect_with_restart_grace(
-        &super::super::connection_for_socket_path(&socket),
+        &tracedecay_daemon_identity::connection_for_socket_path(&socket),
         std::time::Duration::from_secs(8),
         std::time::Duration::from_millis(50),
     )
@@ -296,7 +296,7 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     let started = tokio::time::Instant::now();
 
     let err = super::super::connect_with_restart_grace(
-        &super::super::connection_for_socket_path(&socket),
+        &tracedecay_daemon_identity::connection_for_socket_path(&socket),
         grace,
         poll,
     )
@@ -414,9 +414,10 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
     let socket = profile.join("daemon.sock");
     let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.clone());
     let first_listener = tokio::net::UnixListener::bind(&socket).expect("bind first socket");
-    let first_authority =
-        super::super::authority::DaemonAuthority::acquire(&profile, &endpoint, "first")
-            .expect("first daemon authority");
+    let first_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile, &endpoint, "first",
+    )
+    .expect("first daemon authority");
     let first_token = first_authority.auth_token().to_string();
     let rebound_socket = socket.clone();
     let rebound_profile = profile.clone();
@@ -431,7 +432,7 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
 
         let second_listener =
             tokio::net::UnixListener::bind(&rebound_socket).expect("bind second socket");
-        let second_authority = super::super::authority::DaemonAuthority::acquire(
+        let second_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
             &rebound_profile,
             &rebound_endpoint,
             "second",

@@ -606,7 +606,7 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
     let project_a = tempfile::tempdir().expect("project A");
     let project_b = tempfile::tempdir().expect("project B");
     let project_id = ProjectId::new("project.shared-observability").unwrap();
-    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_a)
+    let profile_identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_a)
         .expect("persist production profile identity");
     let runtime_identity = tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1::new(
         profile_identity.brain_id().clone(),

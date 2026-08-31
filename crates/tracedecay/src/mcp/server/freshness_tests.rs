@@ -19,7 +19,7 @@ impl FreshnessRuntime {
         std::fs::create_dir_all(profile_root).expect("freshness profile root");
         tracedecay_runtime_core::storage::set_private_dir_permissions(profile_root)
             .expect("restrict freshness profile root");
-        let identity = crate::daemon::profile_identity::load_or_create(profile_root)
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
             .expect("freshness profile identity");
         let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             identity.profile_root(),

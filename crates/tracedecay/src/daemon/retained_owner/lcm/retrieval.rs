@@ -33,7 +33,7 @@ use super::{
     cursor, message_type, optional_provider, optional_usize, relationship_scope, required,
     role_name, session_id, specific_provider, temporal_mode, time_filter, trimmed, unsigned_i64,
 };
-use crate::daemon::session_retrieval::{
+use tracedecay_session_runtime::session_retrieval::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, LcmExpandServiceCommand,
     LcmExpandServiceOutcome, SessionApplicationRetrievalPortV1, SessionRetrievalCommand,
     SessionRetrievalFilters, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
@@ -47,7 +47,7 @@ const EXPAND_QUERY_CONCURRENCY: usize = 8;
 // fail within_request_budgets as a persistent structural budget refusal, so
 // every query built here is sized against the one shared constant.
 const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize =
-    crate::daemon::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES as usize;
+    tracedecay_session_runtime::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES as usize;
 const DEFAULT_CONTENT_LIMIT: usize = 4_096;
 const MAX_CONTENT_LIMIT: usize = 8_192;
 const MAX_LOAD_CONTENT_LIMIT: usize = 20_000;
@@ -587,7 +587,7 @@ fn retrieval_query(
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
     .with_retrieval_scope(retrieval_scope)
-    .with_execution_limits(crate::daemon::session_retrieval::admitted_execution_limits(
+    .with_execution_limits(tracedecay_session_runtime::session_retrieval::admitted_execution_limits(
         limit,
     ));
     Ok(SessionRetrievalCommand::new(

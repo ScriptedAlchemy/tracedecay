@@ -32,8 +32,8 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         .expect("mount code index");
     let cursor_store = TempDir::new().expect("cursor store");
     let profile_root = cursor_store.path().join("profile");
-    let identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
     let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         2,
@@ -545,8 +545,8 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
         .expect("mount code index");
     let cursor_store = TempDir::new().expect("cursor store");
     let profile_root = cursor_store.path().join("profile");
-    let identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
     let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         2,
@@ -785,8 +785,8 @@ fn empty_restart_lanes() -> Vec<tracedecay_query::retrieval::fusion::Composition
 async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     let directory = TempDir::new().expect("temporary profile");
     let profile_root = directory.path().join("profile");
-    let identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
     let project_root = directory.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
     let project_id = ProjectId::new("project.query-restart").expect("project id");

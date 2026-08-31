@@ -207,7 +207,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         )
         .map_err(|error| error.to_string())?;
         let executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor> = Arc::new(
-            crate::daemon::invocation_client_for_current(handshake)
+            tracedecay_daemon_identity::invocation_client_for_current(handshake)
                 .map_err(|error| error.to_string())?,
         );
         Self::new(executor, self.user_profile_id.clone())
@@ -656,7 +656,7 @@ pub(super) async fn handle_dashboard(
     daemon_user_profile_id: Option<UserProfileId>,
     daemon_profile_root: Option<PathBuf>,
     session_retrieval: Option<
-        Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>,
+        Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>,
     >,
     session_identity: Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
     registered_savings_db: Option<RegisteredGlobalDbLeaseV1>,

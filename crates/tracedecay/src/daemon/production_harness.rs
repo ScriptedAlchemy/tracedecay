@@ -23,6 +23,8 @@ use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
+#[cfg(any(test, feature = "test-transport"))]
+use tracedecay_daemon_identity::profile_identity;
 
 /// Captures the daemon's exact native Git transaction precondition for
 /// transport-parity tests. This is not compiled into production builds.

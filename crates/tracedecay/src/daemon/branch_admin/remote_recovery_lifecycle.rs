@@ -9,6 +9,7 @@ use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
 use crate::daemon::store_writer_gate::WriterAdmissionGuard;
+use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -23,13 +24,13 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     lsp_session_registry: Arc<tokio::sync::Mutex<tracedecay_lsp::LspSessionRegistry>>,
     project_open_gates: Arc<tokio::sync::Mutex<super::super::ProjectOpenGates>>,
     session_temporal_refresh_schedulers: Arc<
-        super::super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
+        tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
     >,
     git_index_transaction_services: Arc<
         tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry,
     >,
     native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
-    session_sync_service: Arc<super::super::session_sync::DaemonSessionSyncService>,
+    session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<super::project_retirement::ProjectServerRetirement>>>,
     #[cfg(unix)]
@@ -98,7 +99,7 @@ fn ensure_profile_lifecycle(
     administration: &StoreAdministration,
     lifecycles: &mut RemoteRecoveryProjectLifecyclesV1,
 ) -> Result<Arc<RemoteRecoveryProjectLifecycleV1>> {
-    let profile_root = super::authority::canonical_identity_path(
+    let profile_root = authority::canonical_identity_path(
         administration.profile_identity()?.profile_root(),
     )?;
     if let Some(lifecycle) = lifecycles.profiles.get(&profile_root) {
@@ -136,7 +137,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
         Ok(Self {
             brain_id: identity.brain_id().clone(),
             profile_id: identity.profile_id().clone(),
-            profile_root: super::authority::canonical_identity_path(identity.profile_root())?,
+            profile_root: authority::canonical_identity_path(identity.profile_root())?,
             gate: Arc::clone(&administration.gate),
             project_servers: Arc::clone(&administration.project_servers),
             session_runtime_registries: Arc::clone(&administration.session_runtime_registries),
@@ -380,7 +381,7 @@ pub(super) async fn project_roots(
 
 pub(super) async fn retire_runtime_work(
     project_servers: &tokio::sync::Mutex<DatabaseOwnerRegistry>,
-    temporal: &super::super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
+    temporal: &tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
     #[cfg(unix)] automation: &tokio::sync::Mutex<
         std::collections::HashMap<
             super::super::ProjectServerKey,
@@ -516,7 +517,7 @@ mod tests {
 
     fn profile_identity(
         root: &Path,
-    ) -> crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1 {
+    ) -> tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1 {
         std::fs::create_dir_all(root).expect("create profile root");
         #[cfg(unix)]
         {
@@ -524,7 +525,8 @@ mod tests {
             std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
                 .expect("secure profile root");
         }
-        crate::daemon::profile_identity::load_or_create(root).expect("profile identity")
+        tracedecay_daemon_identity::profile_identity::load_or_create(root)
+            .expect("profile identity")
     }
 
     #[test]

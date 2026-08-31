@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
+use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_usecases::tracedecay::ProjectStoreRuntimeV1;
 
-use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 
 /// One standalone session runtime registry per profile, process-wide.

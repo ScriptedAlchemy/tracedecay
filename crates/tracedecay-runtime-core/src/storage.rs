@@ -11,6 +11,15 @@ use crate::config;
 pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
 pub const PROFILE_IDENTITY_FILENAME: &str = "profile-identity.json";
+/// File name of the profile-scoped exclusive daemon-authority lock. Single
+/// definition: `tracedecay-daemon-identity` elects and holds the lock, and
+/// this crate's ambient-Test access probe checks whether a foreign daemon
+/// holds it.
+pub const DAEMON_AUTHORITY_LOCK_FILE: &str = "daemon-authority.lock";
+/// Windows-only private state directory that holds the daemon-authority lock
+/// and record beneath the profile root. On other platforms the authority
+/// state lives directly in the profile root.
+pub const DAEMON_AUTHORITY_DIRECTORY: &str = "daemon-authority";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
 pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";

@@ -5,6 +5,7 @@
 //! and the portable owner reconciler.
 
 use super::*;
+use tracedecay_daemon_identity::{authority, profile_identity};
 
 pub(super) fn project_server_capacity_error() -> TraceDecayError {
     TraceDecayError::Config {
@@ -171,7 +172,7 @@ pub(super) async fn resolved_project_server_key(
         return Ok(None);
     }
     Ok(Some(ProjectServerKey {
-        owner: StoreOwnerKey::from_paths(
+        owner: store_owner_key_from_paths(
             &handshake.client_identity.profile_root,
             &handshake.client_identity.global_db_path,
             layout.identity.project_id,

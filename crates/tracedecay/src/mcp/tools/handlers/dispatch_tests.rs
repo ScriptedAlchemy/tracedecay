@@ -1157,13 +1157,13 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
     let merge_base = git_stdout_in(&project, &["merge-base", "main", "HEAD"]);
     for (error, expected_reason) in [
         (
-            tracedecay_usecases::graph::CodeGraphReadError::Unavailable {
+            tracedecay_graph_query::CodeGraphReadError::Unavailable {
                 detail: "the exact generation is still warming".to_owned(),
             },
             "code-graph-unavailable",
         ),
         (
-            tracedecay_usecases::graph::CodeGraphReadError::Stale {
+            tracedecay_graph_query::CodeGraphReadError::Stale {
                 detail: "the exact generation advanced".to_owned(),
             },
             "code-graph-stale",
@@ -1236,24 +1236,24 @@ async fn pr_context_propagates_terminal_graph_failures_without_a_cursor() {
     .await
     .unwrap();
     let terminal_errors = [
-        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
-            tracedecay_usecases::graph::CodeGraphReadError::Cancelled,
+        tracedecay_graph_query::map_code_graph_read_runtime_error(
+            tracedecay_graph_query::CodeGraphReadError::Cancelled,
         ),
-        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
-            tracedecay_usecases::graph::CodeGraphReadError::Denied,
+        tracedecay_graph_query::map_code_graph_read_runtime_error(
+            tracedecay_graph_query::CodeGraphReadError::Denied,
         ),
-        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
-            tracedecay_usecases::graph::CodeGraphReadError::Corrupt {
+        tracedecay_graph_query::map_code_graph_read_runtime_error(
+            tracedecay_graph_query::CodeGraphReadError::Corrupt {
                 detail: "corrupt projection".to_owned(),
             },
         ),
-        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
-            tracedecay_usecases::graph::CodeGraphReadError::ResetRequired {
+        tracedecay_graph_query::map_code_graph_read_runtime_error(
+            tracedecay_graph_query::CodeGraphReadError::ResetRequired {
                 detail: "generation reset required".to_owned(),
             },
         ),
-        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
-            tracedecay_usecases::graph::CodeGraphReadError::InvalidRequest {
+        tracedecay_graph_query::map_code_graph_read_runtime_error(
+            tracedecay_graph_query::CodeGraphReadError::InvalidRequest {
                 detail: "invalid graph request".to_owned(),
             },
         ),
@@ -1266,7 +1266,7 @@ async fn pr_context_propagates_terminal_graph_failures_without_a_cursor() {
         let detail = error.to_string();
         let result = git::handle_pr_context(
             &cg,
-            async move { Err::<tracedecay_usecases::graph::VerifiedGraphQuery, _>(error) },
+            async move { Err::<tracedecay_graph_query::VerifiedGraphQuery, _>(error) },
             json!({"base_ref": "main", "head_ref": "HEAD", "format": "json"}),
             None,
             None,

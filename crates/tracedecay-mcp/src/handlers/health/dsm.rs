@@ -4,7 +4,7 @@ use super::*;
 
 #[hotpath::measure(label = "mcp.health.dsm.total")]
 pub async fn handle_dsm(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {

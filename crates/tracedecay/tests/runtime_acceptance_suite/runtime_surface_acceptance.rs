@@ -93,7 +93,7 @@ async fn runtime_fixture() -> RuntimeFixture {
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
             .expect("daemon handshake");
-    let client = tracedecay::daemon::invocation_client_for_current(handshake.clone())
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
         .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
@@ -151,7 +151,7 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
             .expect("daemon handshake");
-    let client = tracedecay::daemon::invocation_client_for_current(handshake.clone())
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
         .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
@@ -212,7 +212,7 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
             .expect("daemon handshake");
-    let client = tracedecay::daemon::invocation_client_for_current(handshake.clone())
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
         .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
@@ -2585,7 +2585,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         false,
     )
     .expect("cross-scope daemon handshake");
-    let other_client = tracedecay::daemon::invocation_client_for_current(other_handshake)
+    let other_client = tracedecay_daemon_identity::invocation_client_for_current(other_handshake)
         .expect("cross-scope daemon client");
     let (deadline, cancellation) = lsp_control();
     let mut cross_scope = DaemonLspSessionClient::open(

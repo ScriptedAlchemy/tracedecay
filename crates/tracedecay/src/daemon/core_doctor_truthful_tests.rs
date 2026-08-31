@@ -82,7 +82,7 @@ async fn live_runtime_snapshot_does_not_fabricate_store_metadata_after_observati
         profile.join("registry.db"),
     );
     let store_administration = StoreAdministration::default().with_profile_identity(
-        crate::daemon::profile_identity::load_or_create(&profile)
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
             .expect("load fixture profile identity"),
     );
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(

@@ -29,7 +29,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::lsp_support::analyzer_runtime_config_error;
 
-use crate::graph::{
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
     CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
 };
@@ -547,7 +547,7 @@ fn indexed_files(
     let mut files = reader
         .files(500_000, cancellation)
         .map_err(|error| {
-            crate::graph::map_code_graph_read_runtime_error(crate::graph::map_projection_error(
+            tracedecay_graph_query::map_code_graph_read_runtime_error(tracedecay_graph_query::map_projection_error(
                 error,
             ))
         })?

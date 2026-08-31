@@ -41,7 +41,7 @@ use tracedecay_session_memory::session::{
 
 use super::receipts::{evidence_outcome, session_refresh_effect_outcome};
 use super::session_refresh::{RetainedSessionRefreshPortV1, admitted_session_refresh_command};
-use crate::daemon::session_retrieval::{
+use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1, SessionRetrievalPageView,
     SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionTemporalMetadataView,
 };
@@ -58,7 +58,7 @@ const MESSAGE_SEARCH_ROOT_SESSION_ID: &str = "session.message-search.root";
 /// The admitted retrieval ceiling; a larger context budget is refused rather
 /// than trimmed.
 const MESSAGE_SEARCH_CONTEXT_BYTES: u64 =
-    crate::daemon::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES;
+    tracedecay_session_runtime::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES;
 
 pub(super) struct ProjectRetainedSessionAuthoritiesV1 {
     pub(super) project_root: PathBuf,
@@ -516,7 +516,7 @@ impl MessageSearchInput {
                 // `ExecutionLimits::default()`, which the admitted binding
                 // refuses terminally — every message search would answer
                 // a structural budget refusal instead of searching.
-                .with_execution_limits(crate::daemon::session_retrieval::admitted_execution_limits(
+                .with_execution_limits(tracedecay_session_runtime::session_retrieval::admitted_execution_limits(
                     self.limit,
                 ))
         })

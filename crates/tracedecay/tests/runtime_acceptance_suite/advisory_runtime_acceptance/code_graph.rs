@@ -24,7 +24,7 @@ use tracedecay_domain::{
     SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_usecases::graph::{
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
@@ -58,7 +58,7 @@ impl CodeGraphProjectionReadPort for HermeticAdvisoryCodeGraphV1 {
             VerifiedCodeGraphRead::new(
                 self.scope.clone(),
                 Arc::clone(&self.store),
-                tracedecay_usecases::graph::CodeGraphReadFreshnessV1::Current,
+                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
             )
         })
     }

@@ -52,7 +52,7 @@ impl CodeGraphProjectionReadPort for CountingProjection {
             VerifiedCodeGraphRead::new(
                 self.scope.clone(),
                 Arc::clone(&self.store),
-                crate::graph::CodeGraphReadFreshnessV1::Current,
+                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
             )
         })
     }

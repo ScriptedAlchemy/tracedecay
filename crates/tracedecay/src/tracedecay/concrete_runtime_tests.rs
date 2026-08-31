@@ -19,7 +19,7 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
-use tracedecay_usecases::graph::{
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
@@ -52,7 +52,7 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
             VerifiedCodeGraphRead::new(
                 self.scope.clone(),
                 Arc::clone(&self.store),
-                tracedecay_usecases::graph::CodeGraphReadFreshnessV1::Current,
+                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
             )
         })
     }

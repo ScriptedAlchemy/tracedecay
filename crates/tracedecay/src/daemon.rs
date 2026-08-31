@@ -146,7 +146,6 @@ pub fn error_is_read_deadline(error: &TraceDecayError) -> bool {
     ) || error_message_is_read_deadline(&error.to_string())
 }
 
-mod authority;
 pub(crate) mod automation_effect;
 mod bootstrap;
 mod bootstrap_route;
@@ -265,7 +264,6 @@ use invocation_executor::{
 };
 mod invocation_state;
 pub(crate) use invocation_state::DaemonInvocationState;
-pub(crate) mod lcm_authority;
 mod lsp_sessions;
 use lsp_sessions::{
     admitted_lsp_root_for_project_path, admitted_lsp_workspace_for_request,
@@ -291,7 +289,6 @@ use projectless::projectless_tools_call_response;
 use projectless::{
     projectless_tool_call, projectless_user_session_request, serve_projectless_client,
 };
-pub(crate) mod profile_identity;
 mod project_composition;
 mod project_delivery_mount;
 #[cfg(test)]
@@ -308,8 +305,10 @@ use project_open_admission::{
 use project_open_admission::{
     ProjectOpenFailure, ProjectOpenGate, ProjectOpenGates, ProjectOpenTaskClaim,
     ProjectOpenTaskState, ProjectOpenTasks, ProjectRouteKey, ProjectServerKey,
-    ProjectServerPublication, ProjectServerRequirement, StoreOwnerKey, project_server_requirement,
+    ProjectServerPublication, ProjectServerRequirement, project_server_requirement,
+    store_owner_key_from_paths,
 };
+pub(crate) use tracedecay_session_runtime::StoreOwnerKey;
 mod project_open_handshake;
 #[cfg(test)]
 use project_open_handshake::is_missing_index_error;
@@ -352,15 +351,12 @@ use project_server_lifecycle::{
     schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
     shutdown_project_servers,
 };
-pub(crate) mod lcm_effects;
-mod lcm_summarization;
 mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
 mod service;
-pub(crate) mod session_retrieval;
-pub(crate) mod session_sync;
-pub(crate) mod session_temporal_refresh_scheduler;
+#[cfg(test)]
+pub(crate) mod session_runtime_tests;
 
 pub(crate) mod store_runtime;
 mod store_writer_gate;

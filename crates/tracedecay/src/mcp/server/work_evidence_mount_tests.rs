@@ -11,15 +11,15 @@ use super::MountedProjectApplicationRetrievalV1;
 
 struct DeniedSessionRetrieval;
 
-impl crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1
+impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1
     for DeniedSessionRetrieval
 {
     fn retrieve_admitted<'a>(
         &'a self,
         _context: &'a RequestContext,
         _query: SessionTemporalQuery,
-    ) -> crate::daemon::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
-        Box::pin(async { crate::daemon::session_retrieval::SessionRetrievalServiceOutcome::Denied })
+    ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
+        Box::pin(async { tracedecay_session_runtime::session_retrieval::SessionRetrievalServiceOutcome::Denied })
     }
 }
 

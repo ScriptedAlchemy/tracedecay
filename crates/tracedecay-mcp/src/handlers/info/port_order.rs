@@ -12,7 +12,7 @@ use tracedecay_application::retrieval::{
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::graph::VerifiedGraphQuery;
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::PORT_DEFAULT_KINDS;
 use super::verified::{INFO_RELATION_LIMIT, required_symbol_parts, symbols_in_dir};
@@ -241,11 +241,11 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
                     .collect();
                 cycle_adj.insert(node_id, kept);
             }
-            let sccs = tracedecay_usecases::graph::scc::tarjan_scc(&cycle_adj);
+            let sccs = tracedecay_graph_query::scc::tarjan_scc(&cycle_adj);
 
             let mut cycles = Vec::<PortCycleV1>::new();
             for scc in sccs {
-                if !tracedecay_usecases::graph::scc::is_cyclic_scc(&scc, &cycle_adj) {
+                if !tracedecay_graph_query::scc::is_cyclic_scc(&scc, &cycle_adj) {
                     continue;
                 }
                 let scc_set: HashSet<&str> = scc.iter().copied().collect();

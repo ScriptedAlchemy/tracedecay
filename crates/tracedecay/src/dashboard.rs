@@ -16,6 +16,10 @@ use tracedecay_dashboard_api::{
     DashboardGitCorrelationReadPortV1, DashboardLcmReadPortV1,
     DashboardProfileCodeIndexWorkerSettingsPort, standalone_dashboard_automation_writer,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_session_runtime::session_retrieval::{
+    DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionRetrievalServingIdentityV1,
+};
 
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
@@ -194,7 +198,7 @@ impl DashboardGraphTestRuntimeV1 {
         static NEXT_ELECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
         let profile_root = profile_root.as_ref().to_path_buf();
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let epoch = NEXT_ELECTION_EPOCH.fetch_add(1, Ordering::Relaxed);
         let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             identity.profile_root(),
@@ -375,21 +379,28 @@ pub async fn dashboard_lcm_read_authority_for_test(
     registry: &tracedecay_global_db::RegisteredGlobalDb,
     project_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> Option<std::sync::Arc<dyn DashboardLcmReadPortV1>> {
+    let serving_db = cg.db_path();
     let root = match hotpath::future!(
-        crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project(cg, registry),
+        DaemonSessionRetrievalRoot::project(
+            SessionRetrievalServingIdentityV1 {
+                project_id: cg.store_layout().identity.project_id.as_deref(),
+                serving_db: &serving_db,
+                project_root: cg.project_root(),
+            },
+            registry,
+        ),
         label = "dashboard.lcm.root"
     )
     .await
     {
         Some(root) => root,
-        None => crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_for_test(cg),
+        None => DaemonSessionRetrievalRoot::project_for_test(
+            cg.project_root(),
+            cg.store_layout().identity.project_id.clone(),
+        ),
     };
     let identity = root.identity().clone();
-    let service = crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
-        project_database.clone(),
-        root,
-        None,
-    )?;
+    let service = DaemonSessionRetrievalService::new(project_database.clone(), root, None)?;
     let adapter = crate::mcp::tools::handlers::DashboardLcmReadAdapter::new(
         std::sync::Arc::new(service),
         identity,

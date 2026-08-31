@@ -2,12 +2,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use tracedecay_application::CancellationSignal;
 use tracedecay_daemon_protocol::{
-    DaemonClientIdentity, DaemonConnection, DaemonEndpoint, DaemonHandshake,
-    DaemonInvocationClient, MovedStoreAdoption,
+    DaemonClientIdentity, DaemonHandshake, DaemonInvocationClient, MovedStoreAdoption,
     SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
 };
 use tracedecay_domain::errors::{Result as RuntimeResult, TraceDecayError};
@@ -372,67 +371,11 @@ fn handshake_for_eval_client(project_root: PathBuf) -> RuntimeResult<DaemonHands
     })
 }
 
-/// Consume the composition-root daemon authority record. Discovery stays
-/// owned by that record; this binary does not mint a second endpoint.
+/// Consume the composition-root daemon authority record through the typed
+/// discovery authority. Discovery stays owned by that record; this binary
+/// does not mint a second endpoint or parse the record itself.
 fn invocation_client_for_eval(handshake: DaemonHandshake) -> RuntimeResult<DaemonInvocationClient> {
-    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
-        TraceDecayError::Config {
-            message: "could not determine TraceDecay user data directory".to_string(),
-        }
-    })?;
-    let record =
-        read_daemon_authority_record(&profile_root)?.ok_or_else(|| TraceDecayError::Config {
-            message:
-                "TraceDecay daemon authority record is not available. Start or restart the daemon."
-                    .to_string(),
-        })?;
-    Ok(DaemonInvocationClient::new(
-        DaemonConnection::new(record.endpoint, Some(record.auth_token))
-            .with_daemon_version(record.version),
-        handshake,
-    ))
-}
-
-#[derive(Debug, Deserialize)]
-struct DaemonAuthorityRecordView {
-    #[serde(alias = "socket_path")]
-    endpoint: DaemonEndpoint,
-    auth_token: String,
-    version: String,
-}
-
-fn read_daemon_authority_record(
-    profile_root: &std::path::Path,
-) -> RuntimeResult<Option<DaemonAuthorityRecordView>> {
-    let path = {
-        #[cfg(windows)]
-        {
-            profile_root
-                .join("daemon-authority")
-                .join("daemon-authority.json")
-        }
-        #[cfg(not(windows))]
-        {
-            profile_root.join("daemon-authority.json")
-        }
-    };
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!("read daemon authority record '{}': {error}", path.display()),
-            });
-        }
-    };
-    serde_json::from_str(&contents)
-        .map(Some)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "invalid daemon authority record '{}': {error}",
-                path.display()
-            ),
-        })
+    tracedecay_daemon_identity::invocation_client_for_current(handshake)
 }
 
 #[cfg(test)]

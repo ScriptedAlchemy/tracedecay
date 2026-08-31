@@ -236,7 +236,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) registered_savings_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) dashboard_session_retrieval_service:
-        Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
+        Option<Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>>,
     pub(crate) dashboard_session_retrieval_identity:
         Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
     /// The canonical profile identity bound by the daemon handshake. A
@@ -292,7 +292,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_graph_read_admission_port:
         Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     pub(crate) verified_graph_query_port:
-        Option<std::sync::Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>>,
+        Option<std::sync::Arc<dyn tracedecay_graph_query::VerifiedGraphQueryPort + 'static>>,
     pub(crate) code_index_ignored_dependency_admission:
         Option<crate::mcp::server::CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority for runtime telemetry.
