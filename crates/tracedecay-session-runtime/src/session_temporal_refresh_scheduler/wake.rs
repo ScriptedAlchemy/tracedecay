@@ -114,24 +114,33 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
     }
 }
 
-pub struct SessionTemporalRefreshWakeState {
-    pub dirty: AtomicBool,
-    historical_dirty: AtomicBool,
-    pub requests: std::sync::Mutex<VecDeque<SessionRefreshBeginOrJoinRequestV1>>,
-    projection_discovery_after: std::sync::Mutex<Option<SessionId>>,
-    projection_discovery_active_turn: AtomicBool,
-    pub terminal_attempts: std::sync::Mutex<HashSet<String>>,
-    pub recovery_cycle_pending: std::sync::Mutex<VecDeque<String>>,
-    pub busy: AtomicBool,
-    history_retry_pending: AtomicBool,
-    pub pass_count: std::sync::atomic::AtomicUsize,
-    pub wake: tokio::sync::Notify,
-    pub idle: tokio::sync::Notify,
-    pub cancelled: AtomicBool,
-    pub cancellation: tokio::sync::Notify,
-    completion_control: ExecutionControl,
-    telemetry: std::sync::Mutex<SessionTemporalRefreshWorkerTelemetry>,
+macro_rules! define_wake_state {
+    ($visibility:vis) => {
+        $visibility struct SessionTemporalRefreshWakeState {
+            pub(super) dirty: AtomicBool,
+            pub(super) historical_dirty: AtomicBool,
+            pub(super) requests: std::sync::Mutex<VecDeque<SessionRefreshBeginOrJoinRequestV1>>,
+            pub(super) projection_discovery_after: std::sync::Mutex<Option<SessionId>>,
+            pub(super) projection_discovery_active_turn: AtomicBool,
+            pub(super) terminal_attempts: std::sync::Mutex<HashSet<String>>,
+            pub(super) recovery_cycle_pending: std::sync::Mutex<VecDeque<String>>,
+            pub(super) busy: AtomicBool,
+            pub(super) history_retry_pending: AtomicBool,
+            pub(super) pass_count: std::sync::atomic::AtomicUsize,
+            pub(super) wake: tokio::sync::Notify,
+            pub(super) idle: tokio::sync::Notify,
+            pub(super) cancelled: AtomicBool,
+            pub(super) cancellation: tokio::sync::Notify,
+            completion_control: ExecutionControl,
+            telemetry: std::sync::Mutex<SessionTemporalRefreshWorkerTelemetry>,
+        }
+    };
 }
+
+#[cfg(any(test, feature = "test-helpers"))]
+define_wake_state!(pub);
+#[cfg(not(any(test, feature = "test-helpers")))]
+define_wake_state!(pub(crate));
 
 impl Default for SessionTemporalRefreshWakeState {
     fn default() -> Self {
@@ -157,6 +166,29 @@ impl Default for SessionTemporalRefreshWakeState {
 }
 
 impl SessionTemporalRefreshWakeState {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn queued_request_count(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn pending_recovery_operations(&self) -> Vec<String> {
+        self.recovery_cycle_pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
     pub fn handle(self: &Arc<Self>) -> SessionTemporalRefreshWake {
         let route = Arc::new(SessionTemporalRefreshWakeRoute {
             target: std::sync::RwLock::new(Arc::downgrade(self)),
@@ -636,14 +668,14 @@ fn bounded_depth(depth: usize) -> f64 {
     depth.min(u32::MAX as usize) as f64
 }
 
-pub struct TerminalAttemptGuard<'a> {
+pub(crate) struct TerminalAttemptGuard<'a> {
     state: &'a SessionTemporalRefreshWakeState,
     recovery: &'a SessionRefreshRecoveryV1,
     retain: bool,
 }
 
 impl<'a> TerminalAttemptGuard<'a> {
-    pub fn new(
+    pub(crate) fn new(
         state: &'a SessionTemporalRefreshWakeState,
         recovery: &'a SessionRefreshRecoveryV1,
     ) -> Self {
@@ -654,7 +686,7 @@ impl<'a> TerminalAttemptGuard<'a> {
         }
     }
 
-    pub fn retain(&mut self) {
+    pub(crate) fn retain(&mut self) {
         self.retain = true;
     }
 }
@@ -667,13 +699,13 @@ impl Drop for TerminalAttemptGuard<'_> {
     }
 }
 
-pub struct PendingBeginRequestGuard<'a> {
+pub(crate) struct PendingBeginRequestGuard<'a> {
     state: &'a SessionTemporalRefreshWakeState,
     request: Option<SessionRefreshBeginOrJoinRequestV1>,
 }
 
 impl<'a> PendingBeginRequestGuard<'a> {
-    pub fn new(
+    pub(crate) fn new(
         state: &'a SessionTemporalRefreshWakeState,
         request: SessionRefreshBeginOrJoinRequestV1,
     ) -> Self {
@@ -685,11 +717,11 @@ impl<'a> PendingBeginRequestGuard<'a> {
 
     // Armed guards always hold a request; request() is only called before disarm().
     #[allow(clippy::expect_used)]
-    pub fn request(&self) -> &SessionRefreshBeginOrJoinRequestV1 {
+    pub(crate) fn request(&self) -> &SessionRefreshBeginOrJoinRequestV1 {
         self.request.as_ref().expect("pending request disarmed")
     }
 
-    pub fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.request = None;
     }
 }
@@ -702,20 +734,20 @@ impl Drop for PendingBeginRequestGuard<'_> {
     }
 }
 
-pub struct RecoverySelectionGuard<'a> {
+pub(crate) struct RecoverySelectionGuard<'a> {
     state: &'a SessionTemporalRefreshWakeState,
     pending: VecDeque<String>,
 }
 
 impl<'a> RecoverySelectionGuard<'a> {
-    pub fn new(state: &'a SessionTemporalRefreshWakeState, pending: Vec<String>) -> Self {
+    pub(crate) fn new(state: &'a SessionTemporalRefreshWakeState, pending: Vec<String>) -> Self {
         Self {
             state,
             pending: pending.into(),
         }
     }
 
-    pub fn complete(&mut self, operation: &str) {
+    pub(crate) fn complete(&mut self, operation: &str) {
         // Resolve by identity so skipped/missing recoveries cannot desync the
         // local queue from the operations actually projected this pass.
         if let Some(index) = self.pending.iter().position(|item| item == operation) {
@@ -765,7 +797,7 @@ impl SessionTemporalRefreshWake {
         }
     }
 
-    pub fn target(&self) -> Option<Arc<SessionTemporalRefreshWakeState>> {
+    pub(crate) fn target(&self) -> Option<Arc<SessionTemporalRefreshWakeState>> {
         self.route
             .target
             .read()
@@ -773,7 +805,7 @@ impl SessionTemporalRefreshWake {
             .upgrade()
     }
 
-    pub fn bind(&self, state: &Arc<SessionTemporalRefreshWakeState>) {
+    pub(crate) fn bind(&self, state: &Arc<SessionTemporalRefreshWakeState>) {
         *self
             .route
             .target

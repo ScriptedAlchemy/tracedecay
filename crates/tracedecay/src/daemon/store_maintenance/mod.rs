@@ -466,6 +466,10 @@ pub(super) async fn run_code_generation_retention(
 
 /// The offline protection pin: the generation the mounted scheduler is
 /// currently serving, when one is mounted at all.
+#[hotpath::measure(
+    label = "daemon.git.maintenance.serving_generation_pins",
+    future = true
+)]
 async fn serving_generation_pins(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -483,6 +487,10 @@ async fn serving_generation_pins(
 /// inventory. Emitting `retention_degraded` is decided exclusively by
 /// [`VectorRetentionInventoryV1::degraded_reason`], so quiet states cannot be
 /// reintroduced into the degraded log by a divergent match arm.
+#[hotpath::measure(
+    label = "daemon.git.maintenance.code_generation_retention_apply",
+    future = true
+)]
 async fn apply_code_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,

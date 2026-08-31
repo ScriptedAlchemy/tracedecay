@@ -282,6 +282,7 @@ impl RmcpConnectionAdapter {
         self.selected_project_responses.clone()
     }
 
+    #[hotpath::measure(label = "mcp.server.rmcp.dispatch_total", future = true)]
     async fn dispatch(
         &self,
         context: RequestContext<RoleServer>,
@@ -367,6 +368,7 @@ impl RmcpConnectionAdapter {
         Ok(response)
     }
 
+    #[hotpath::measure(label = "mcp.server.rmcp.notification", future = true)]
     async fn dispatch_notification(&self, method: String, params: Option<Value>) {
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_owned(),

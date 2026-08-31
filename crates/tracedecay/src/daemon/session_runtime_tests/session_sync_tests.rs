@@ -35,13 +35,16 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_session_runtime::session_sync::git_topology::{
     GitTopologySyncFailure, publish_native_topology,
 };
+use tracedecay_session_runtime::session_sync::test_harness::{
+    completed_profile_sweep_covers, completion_termination, decode_matching_journal, journal_key,
+    scan_slots, wait_for_interruption,
+};
 use tracedecay_session_runtime::session_sync::work::{
     SessionSyncInterruption, coalesced_alias_local_interruption, git_history_frontier_from_meta,
     git_history_source_frontier, git_sync_with_topology_result, git_sync_work_result,
 };
 use tracedecay_session_runtime::session_sync::{
     DaemonSessionSyncConfig, DaemonSessionSyncService, SessionSyncWorkResult,
-    completed_profile_sweep_covers, completion_termination, decode_matching_journal, journal_key,
 };
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 
@@ -69,9 +72,12 @@ async fn session_sync_interruption_wait_wakes_on_request_cancellation() {
     let waiter_service = service.clone();
     let waiter_cancellation = cancellation.clone();
     let waiter = tokio::spawn(async move {
-        waiter_service
-            .wait_for_interruption_parts(&waiter_cancellation, &active_session_sync_deadline())
-            .await
+        wait_for_interruption(
+            &waiter_service,
+            &waiter_cancellation,
+            &active_session_sync_deadline(),
+        )
+        .await
     });
     tokio::task::yield_now().await;
 
@@ -90,9 +96,12 @@ async fn session_sync_interruption_wait_wakes_on_daemon_shutdown() {
     let cancellation = CancellationSignal::active("session-sync.event-shutdown").unwrap();
     let waiter_service = service.clone();
     let waiter = tokio::spawn(async move {
-        waiter_service
-            .wait_for_interruption_parts(&cancellation, &active_session_sync_deadline())
-            .await
+        wait_for_interruption(
+            &waiter_service,
+            &cancellation,
+            &active_session_sync_deadline(),
+        )
+        .await
     });
     tokio::task::yield_now().await;
 
@@ -118,7 +127,7 @@ async fn session_sync_interruption_wait_uses_the_request_deadline() {
 
     let interruption = tokio::time::timeout(
         Duration::from_secs(1),
-        service.wait_for_interruption_parts(&cancellation, &deadline),
+        wait_for_interruption(&service, &cancellation, &deadline),
     )
     .await
     .expect("request deadline must wake the session-sync waiter");
@@ -966,8 +975,9 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
 #[tokio::test]
 async fn daemon_wide_scan_slot_serializes_concurrent_acquisition() {
     let service = DaemonSessionSyncService::default();
-    let first = service.scan_slots.clone().acquire_owned().await.unwrap();
-    let second_slots = Arc::clone(&service.scan_slots);
+    let slots = scan_slots(&service);
+    let first = Arc::clone(&slots).acquire_owned().await.unwrap();
+    let second_slots = slots;
     let mut second = tokio::spawn(async move { second_slots.acquire_owned().await.unwrap() });
 
     assert!(

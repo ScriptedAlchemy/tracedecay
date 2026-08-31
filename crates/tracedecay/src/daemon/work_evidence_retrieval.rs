@@ -651,6 +651,7 @@ pub(crate) mod tests {
         WorkProductSourceWatermarkV1, WorktreeId,
     };
     use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+    use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
@@ -932,9 +933,17 @@ pub(crate) mod tests {
 
         let root =
             tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::project_identity_for_test(
+                ProfileId::new(database.binding().shard_id.profile_id.as_str().to_owned())
+                    .expect("profile identity"),
+                SessionStoreId::new("store.project.work-task-session")
+                    .expect("session store identity"),
+                SessionRootId::new("root.project.work-task-session")
+                    .expect("session root identity"),
+                database.binding().shard_id.clone(),
                 project_id,
                 repository_id,
                 worktree_id,
+                BranchId::new("branch.work-task-session").expect("branch identity"),
                 project.display().to_string(),
             );
         let scope = root
