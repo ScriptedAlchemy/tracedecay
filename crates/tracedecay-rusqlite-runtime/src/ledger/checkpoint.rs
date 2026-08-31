@@ -127,6 +127,7 @@ pub(super) fn persist(
     Ok(())
 }
 
+#[hotpath::measure]
 fn load(
     transaction: &impl LedgerTransaction,
     binding_key: &BindingKey,
@@ -149,6 +150,7 @@ fn load(
     Ok(Some(checkpoint))
 }
 
+#[hotpath::measure]
 fn decode_row(row: &Row<'_>, binding_key: &BindingKey) -> Result<Checkpoint, LedgerError> {
     let authority_epoch = decode_authority_epoch(row.get(0)?, "authority_epoch")?;
     let sequence = decode_sequence(row.get(1)?, "commit_sequence")?;
@@ -198,6 +200,7 @@ fn decode_row(row: &Row<'_>, binding_key: &BindingKey) -> Result<Checkpoint, Led
     Ok(Checkpoint { watermark })
 }
 
+#[hotpath::measure]
 fn decode_authority_epoch(
     raw: i64,
     field: &'static str,
@@ -212,6 +215,7 @@ fn decode_authority_epoch(
     })
 }
 
+#[hotpath::measure]
 fn decode_sequence(raw: i64, field: &'static str) -> Result<CommitSequenceV1, LedgerError> {
     let raw = u64::try_from(raw).map_err(|_| LedgerError::Corrupt {
         table: CHECKPOINT_TABLE,

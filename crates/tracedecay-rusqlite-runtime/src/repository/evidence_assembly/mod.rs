@@ -24,6 +24,7 @@ use writes::{
 #[derive(Clone, Default)]
 pub struct EvidenceAssemblyExecutor;
 
+#[hotpath::measure_all]
 impl EvidenceAssemblyExecutor {
     pub fn execute_write(
         &mut self,

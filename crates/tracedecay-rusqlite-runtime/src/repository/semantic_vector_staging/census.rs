@@ -18,6 +18,7 @@ use super::support::{
 
 const READ_WAIT: Duration = Duration::from_millis(10);
 
+#[hotpath::measure]
 pub(super) fn stage_census(
     storage: &SemanticVectorStagingExactSqlStorage,
     request: &SemanticVectorStageCensusRequest,

@@ -3,14 +3,17 @@ use std::fmt::Display;
 use rusqlite::types::{ToSqlOutput, Type, Value, ValueRef};
 use rusqlite::{OptionalExtension, ToSql};
 use serde::{Serialize, de::DeserializeOwned};
+#[hotpath::measure]
 pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
     serde_json::to_string(value).map_err(|error| conversion(error.to_string()))
 }
 
+#[hotpath::measure]
 pub(super) fn decode<T: DeserializeOwned>(value: String) -> rusqlite::Result<T> {
     serde_json::from_str(&value).map_err(|error| conversion(error.to_string()))
 }
 
+#[hotpath::measure]
 pub(super) fn canonical_digest<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
     let value = serde_json::to_value(value).map_err(|error| conversion(error.to_string()))?;
     tracedecay_domain::canonical_sha256(&value)
@@ -18,18 +21,22 @@ pub(super) fn canonical_digest<T: Serialize + ?Sized>(value: &T) -> rusqlite::Re
         .map_err(|error| conversion(error.to_string()))
 }
 
+#[hotpath::measure]
 pub(super) fn conversion(error: impl Display) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, Type::Text, error.to_string().into())
 }
 
+#[hotpath::measure]
 pub(super) fn invalid(error: impl Display) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(error.to_string())
 }
 
+#[hotpath::measure]
 pub(super) fn usize_to_i64(value: usize, field: &'static str) -> rusqlite::Result<i64> {
     i64::try_from(value).map_err(|_| invalid(format!("{field} exceeds SQLite integer range")))
 }
 
+#[hotpath::measure]
 pub(super) fn u64_to_i64(value: u64, field: &'static str) -> rusqlite::Result<i64> {
     i64::try_from(value).map_err(|_| invalid(format!("{field} exceeds SQLite integer range")))
 }
@@ -45,6 +52,7 @@ pub(super) enum ColumnValue {
     Null,
 }
 
+#[hotpath::measure_all]
 impl ColumnValue {
     /// The text a faithfully stored copy of this value projects back as.
     fn expected(&self) -> Option<String> {
@@ -93,14 +101,17 @@ impl ToSql for ColumnValue {
 /// A named column plus the value a caller wrote or expects to find.
 pub(super) type Column<'a> = (&'a str, ColumnValue);
 
+#[hotpath::measure]
 fn column_names<'a>(columns: &'a [Column<'a>]) -> Vec<&'a str> {
     columns.iter().map(|(name, _)| *name).collect()
 }
 
+#[hotpath::measure]
 fn bindings<'a>(columns: &'a [Column<'a>]) -> impl Iterator<Item = &'a ColumnValue> {
     columns.iter().map(|(_, value)| value)
 }
 
+#[hotpath::measure]
 fn insert(
     connection: &rusqlite::Connection,
     conflict_clause: &str,
@@ -125,6 +136,7 @@ fn insert(
 ///
 /// A constraint violation here is a real defect and surfaces as the driver's
 /// error rather than being swallowed.
+#[hotpath::measure]
 pub(super) fn insert_row(
     connection: &rusqlite::Connection,
     table: &str,
@@ -140,6 +152,7 @@ pub(super) fn insert_row(
 /// `CAST(... AS TEXT)` so a value that SQLite converted on the way in — a text
 /// binding landing in an `INTEGER` column, say — still compares equal to what
 /// the caller wrote, and so one comparison covers every storage class.
+#[hotpath::measure]
 pub(super) fn stored_row_matches(
     connection: &rusqlite::Connection,
     table: &str,
@@ -191,6 +204,7 @@ pub(super) fn stored_row_matches(
 /// caller here keys on the primary key, satisfies its `CHECK`s by construction,
 /// and foreign-key violations are not swallowed by `OR IGNORE` at all — the
 /// missing row surfaces as [`rusqlite::Error::QueryReturnedNoRows`].
+#[hotpath::measure]
 pub(super) fn idempotent_insert(
     connection: &rusqlite::Connection,
     table: &str,

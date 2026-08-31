@@ -28,6 +28,7 @@ pub enum RemoteCredentialInventoryErrorV1 {
     Lookup(#[from] RemoteCredentialLookupErrorV1),
 }
 
+#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     /// Reads only credential routing identities from one already-registered
     /// node store. The extra row detects overflow without materializing or
@@ -120,6 +121,7 @@ impl RemoteCredentialLookupPortV1 for RemoteSqliteStorageV1 {
     }
 }
 
+#[hotpath::measure]
 fn decode_registration(
     row: crate::exact_sql::ExactSqlRow,
 ) -> Result<RemoteCredentialRegistrationV1, RemoteCredentialInventoryErrorV1> {
@@ -169,6 +171,7 @@ fn decode_registration(
     })
 }
 
+#[hotpath::measure]
 fn credential_one_row(
     rows: ExactSqlRows,
 ) -> Result<crate::exact_sql::ExactSqlRow, RemoteCredentialLookupErrorV1> {
@@ -180,6 +183,7 @@ fn credential_one_row(
     }
 }
 
+#[hotpath::measure]
 fn credential_text(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -190,6 +194,7 @@ fn credential_text(
     }
 }
 
+#[hotpath::measure]
 fn map_lookup_error(error: RemoteSqliteStorageErrorV1) -> RemoteCredentialLookupErrorV1 {
     match error {
         RemoteSqliteStorageErrorV1::ResetRequired => RemoteCredentialLookupErrorV1::ResetRequired,

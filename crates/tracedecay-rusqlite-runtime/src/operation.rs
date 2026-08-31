@@ -81,6 +81,7 @@ impl Error for StorageOperationError {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn execute<E: StorageOperationExecutor>(
     savepoint: &Savepoint<'_>,
     request: &RuntimeSubmitRequestV1,

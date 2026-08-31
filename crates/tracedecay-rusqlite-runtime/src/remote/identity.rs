@@ -13,6 +13,7 @@ use super::{
 
 /// Loads one text column from an identity row; any shape mismatch means the
 /// singleton table does not have the exact final persisted layout.
+#[hotpath::measure]
 fn identity_text(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -20,6 +21,7 @@ fn identity_text(
     row_text(row, index).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
+#[hotpath::measure]
 pub(super) fn bind_node_identity(
     handle: &ExactSqlHandle,
     binding: &StoreRuntimeBindingV1,
@@ -50,6 +52,7 @@ pub(super) fn bind_node_identity(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn provision_node_identity(
     handle: &ExactSqlHandle,
     binding: &StoreRuntimeBindingV1,
@@ -84,6 +87,7 @@ pub(super) fn provision_node_identity(
     bind_node_identity(handle, binding)
 }
 
+#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     /// Reads the typed singleton used by daemon startup to remount only stores
     /// owned by the active profile. Exact final schema admission still occurs

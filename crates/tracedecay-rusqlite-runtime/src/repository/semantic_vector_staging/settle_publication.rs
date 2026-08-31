@@ -10,6 +10,7 @@ use super::exact::SemanticVectorStagingExactSqlStorage;
 use super::published::{published_stage_evidence, published_stage_for};
 use super::support::*;
 
+#[hotpath::measure]
 pub(super) fn settle_published(
     storage: &SemanticVectorStagingExactSqlStorage,
     settlement: &SemanticVectorStagePublishSettlement,

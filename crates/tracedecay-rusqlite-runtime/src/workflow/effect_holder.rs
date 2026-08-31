@@ -11,6 +11,7 @@ use super::{
     decode_json, sql_text, workflow_effect_codec_unavailable, workflow_effect_unavailable,
 };
 
+#[hotpath::measure]
 pub(super) fn has_pending_effects(
     storage: &ExactSqlHandle,
     worktree_id: &WorktreeId,

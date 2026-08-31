@@ -22,10 +22,12 @@ use super::{
     execute_tx, query_tx, sql_text,
 };
 
+#[hotpath::measure]
 fn run_journal_unavailable<E>(_: E) -> WorkflowRunStorageError {
     WorkflowRunStorageError::Unavailable
 }
 
+#[hotpath::measure]
 fn decode_event(
     payload: &str,
     stored_digest: &str,
@@ -39,6 +41,7 @@ fn decode_event(
     Ok(event)
 }
 
+#[hotpath::measure]
 fn history_tx(
     transaction: &ExactSqlTransaction,
     run_id: &RunId,
@@ -61,6 +64,7 @@ fn history_tx(
         .collect()
 }
 
+#[hotpath::measure]
 fn rebuild(history: &[WorkflowRunEvent]) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
     WorkflowRunProjection::rebuild(history).map_err(|_| WorkflowRunStorageError::InvalidHistory)
 }
@@ -290,10 +294,12 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
     }
 }
 
+#[hotpath::measure]
 fn artifact_store_unavailable<E>(_: E) -> WorkflowArtifactStoreError {
     WorkflowArtifactStoreError::Unavailable
 }
 
+#[hotpath::measure]
 fn stored_payload_tx(
     transaction: &ExactSqlTransaction,
     digest: &str,

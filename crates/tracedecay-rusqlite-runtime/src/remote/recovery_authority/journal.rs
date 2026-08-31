@@ -6,6 +6,7 @@ pub(super) enum BeginOperationV1<T> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn begin_operation<T>(
     handle: &ExactSqlHandle,
     kind: &str,
@@ -98,6 +99,7 @@ where
     Ok(BeginOperationV1::Execute { pre_state_digest })
 }
 
+#[hotpath::measure]
 pub(super) fn publish_promoted_authorities(
     handle: &ExactSqlHandle,
     authority_key: &str,
@@ -161,6 +163,7 @@ pub(super) fn publish_promoted_authorities(
         .map_err(|_| RemoteRecoveryOperationErrorV1::Unavailable)
 }
 
+#[hotpath::measure]
 fn promote_primary_writer_in(
     transaction: &ExactSqlTransaction,
     expected: &RecoveryAuthorityExpectationV1,
@@ -248,6 +251,7 @@ struct LoadedOperationV1<T> {
     committed: Option<RemoteRecoveryCommittedV1<T>>,
 }
 
+#[hotpath::measure]
 fn load_operation<T>(
     transaction: &ExactSqlTransaction,
     operation_id: &str,
@@ -311,6 +315,7 @@ where
     }))
 }
 
+#[hotpath::measure]
 pub(super) fn finish_operation<T: Serialize>(
     handle: &ExactSqlHandle,
     operation_id: &str,
@@ -350,6 +355,7 @@ pub(super) fn finish_operation<T: Serialize>(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn record_interruption(
     handle: &ExactSqlHandle,
     operation_id: &str,
@@ -364,6 +370,7 @@ pub(super) fn record_interruption(
     update_operation_state(handle, operation_id, input_digest, state, observed_at)
 }
 
+#[hotpath::measure]
 pub(super) fn record_physical_failure(
     handle: &ExactSqlHandle,
     operation_id: &str,
@@ -382,6 +389,7 @@ pub(super) fn record_physical_failure(
     update_operation_state(handle, operation_id, input_digest, state, observed_at)
 }
 
+#[hotpath::measure]
 fn update_operation_state(
     handle: &ExactSqlHandle,
     operation_id: &str,
@@ -413,6 +421,7 @@ fn update_operation_state(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn load_authority_in(
     transaction: &ExactSqlTransaction,
     authority_key: &str,
@@ -436,6 +445,7 @@ pub(super) fn load_authority_in(
     Ok(Some((authority, frontier)))
 }
 
+#[hotpath::measure]
 pub(super) fn map_store_error(error: RemoteSqliteStorageErrorV1) -> RemoteRecoveryOperationErrorV1 {
     match error {
         RemoteSqliteStorageErrorV1::Corruption => RemoteRecoveryOperationErrorV1::Corruption,

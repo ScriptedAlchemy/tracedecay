@@ -165,6 +165,7 @@ pub struct ConcreteRepositoryReadExecutor {
     project: ProjectExecutor,
 }
 
+#[hotpath::measure_all]
 impl ConcreteRepositoryReadExecutor {
     #[hotpath::measure(label = "rusqlite.repository.execute_read")]
     pub fn execute(

@@ -14,10 +14,12 @@ use super::{
     execute_tx, execute_tx_changed, query_tx, sql_text,
 };
 
+#[hotpath::measure]
 fn unavailable<E>(_: E) -> WorkflowFanOutCensusError {
     WorkflowFanOutCensusError::Unavailable
 }
 
+#[hotpath::measure]
 fn decode_census(
     payload: &str,
     stored_digest: &str,
@@ -35,6 +37,7 @@ fn decode_census(
     Ok(census)
 }
 
+#[hotpath::measure]
 fn latest_tx(
     transaction: &ExactSqlTransaction,
     run_id: &RunId,
@@ -60,6 +63,7 @@ fn latest_tx(
         .transpose()
 }
 
+#[hotpath::measure]
 fn before_tx(
     transaction: &ExactSqlTransaction,
     run_id: &RunId,
@@ -91,6 +95,7 @@ fn before_tx(
         .transpose()
 }
 
+#[hotpath::measure]
 fn projection_through_tx(
     transaction: &ExactSqlTransaction,
     run_id: &RunId,

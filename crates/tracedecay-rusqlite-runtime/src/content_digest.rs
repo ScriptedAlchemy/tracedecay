@@ -26,6 +26,7 @@ pub struct CanonicalContentDigestError {
     pub message: String,
 }
 
+#[hotpath::measure_all]
 impl CanonicalContentDigestError {
     fn new(operation: &'static str, error: rusqlite::Error) -> Self {
         Self {
@@ -79,6 +80,7 @@ pub fn canonical_session_domain_content_sha256(
     Ok(digest.finalize().into())
 }
 
+#[hotpath::measure]
 fn digest_table(
     connection: &Connection,
     digest: &mut Sha256,
@@ -111,6 +113,7 @@ fn digest_table(
     )
 }
 
+#[hotpath::measure]
 fn unique_declaration_prefix_len(
     connection: &Connection,
     escaped: &str,
@@ -154,6 +157,7 @@ fn unique_declaration_prefix_len(
     }
 }
 
+#[hotpath::measure]
 fn unique_index_declaration_prefix_len(
     connection: &Connection,
     escaped: &str,
@@ -211,6 +215,7 @@ fn unique_index_declaration_prefix_len(
     Ok(best)
 }
 
+#[hotpath::measure]
 fn digest_ordered_sql(
     connection: &Connection,
     digest: &mut Sha256,
@@ -224,6 +229,7 @@ fn digest_ordered_sql(
     Ok(())
 }
 
+#[hotpath::measure]
 fn digest_query_rows(
     digest: &mut Sha256,
     statement: &mut rusqlite::Statement<'_>,
@@ -249,6 +255,7 @@ fn digest_query_rows(
     Ok(())
 }
 
+#[hotpath::measure]
 fn digest_value_ref(digest: &mut Sha256, value: ValueRef<'_>) {
     match value {
         ValueRef::Null => digest.update([0]),
@@ -271,6 +278,7 @@ fn digest_value_ref(digest: &mut Sha256, value: ValueRef<'_>) {
     }
 }
 
+#[hotpath::measure]
 fn digest_len_prefixed(digest: &mut Sha256, value: &[u8]) {
     digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     digest.update(value);

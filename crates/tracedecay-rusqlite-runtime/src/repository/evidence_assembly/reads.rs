@@ -13,6 +13,7 @@ use tracedecay_store::{
 use super::super::support::{canonical_digest, decode, invalid, u64_to_i64, usize_to_i64};
 use super::anchor_state::{self, evidence_anchor_is_current};
 
+#[hotpath::measure]
 pub(super) fn publication_by_idempotency(
     snapshot: &Transaction<'_>,
     owner: &EvidenceAssemblyOwnerV1,
@@ -79,6 +80,7 @@ pub(super) fn publication_by_idempotency(
     Ok(EvidenceAssemblyReadResultV1::Publication(receipt))
 }
 
+#[hotpath::measure]
 pub(super) fn contribution_page(
     snapshot: &Transaction<'_>,
     owner: &EvidenceAssemblyOwnerV1,
@@ -258,6 +260,7 @@ pub(super) fn contribution_page(
     )))
 }
 
+#[hotpath::measure]
 fn validate_occurrence_set(
     connection: &rusqlite::Connection,
     owner: &tracedecay_store::EvidenceAssemblyOwnerV1,
@@ -310,6 +313,7 @@ fn validate_occurrence_set(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_span_members(
     connection: &rusqlite::Connection,
     span: &tracedecay_store::EvidenceSpanRecordV1,

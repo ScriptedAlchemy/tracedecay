@@ -34,6 +34,7 @@ use rows::{
 #[derive(Clone, Default)]
 pub struct ObservationExecutor;
 
+#[hotpath::measure_all]
 impl ObservationExecutor {
     pub fn execute_write(
         &mut self,

@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure]
 pub(crate) fn authority_params(authority: &WorkAuthority) -> [&str; 5] {
     [
         authority.project_id().as_str(),
@@ -12,6 +13,7 @@ pub(crate) fn authority_params(authority: &WorkAuthority) -> [&str; 5] {
     ]
 }
 
+#[hotpath::measure]
 pub(crate) fn authority_params_owned(authority: &WorkAuthority) -> Vec<ExactSqlValue> {
     authority_params(authority)
         .into_iter()
@@ -19,6 +21,7 @@ pub(crate) fn authority_params_owned(authority: &WorkAuthority) -> Vec<ExactSqlV
         .collect()
 }
 
+#[hotpath::measure]
 pub(crate) fn exact_sql_statement(
     sql: &str,
     params: Vec<ExactSqlValue>,
@@ -51,6 +54,7 @@ impl RegisteredWorkQuery for ExactSqlTransaction {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn registered_work_query(
     source: &impl RegisteredWorkQuery,
     sql: &str,
@@ -59,6 +63,7 @@ pub(crate) fn registered_work_query(
     source.work_query(exact_sql_statement(sql, params)?)
 }
 
+#[hotpath::measure]
 pub(crate) fn exact_sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
     match values.get(index)? {
         ExactSqlValue::Text(value) => Some(value),
@@ -66,6 +71,7 @@ pub(crate) fn exact_sql_text(values: &[ExactSqlValue], index: usize) -> Option<&
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn exact_sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
     match values.get(index)? {
         ExactSqlValue::Integer(value) => Some(*value),
@@ -73,6 +79,7 @@ pub(crate) fn exact_sql_integer(values: &[ExactSqlValue], index: usize) -> Optio
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn invalid_storage(message: &str) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.to_owned())
 }

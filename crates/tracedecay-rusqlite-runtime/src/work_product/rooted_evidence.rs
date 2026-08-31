@@ -59,6 +59,7 @@ impl WorkEvidenceRootReadPortV1 for WorkSqliteStorage {
 /// Resolve the exact published graph identity named by a rooted retrieval.
 /// The helper lives with the single mounted reader so no legacy evidence port
 /// remains an authority over the same journal.
+#[hotpath::measure]
 fn verified_graph(
     storage: &WorkSqliteStorage,
     context: &WorkProductPortContextV1,
@@ -103,6 +104,7 @@ fn verified_graph(
     Ok((verified, graph))
 }
 
+#[hotpath::measure]
 fn relation_touches_task(relation: &WorkProductRelationV1, task_id: &TaskId) -> bool {
     match relation {
         WorkProductRelationV1::MilestoneContainsTask { task_id: task, .. }

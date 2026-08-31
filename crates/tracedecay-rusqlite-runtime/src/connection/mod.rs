@@ -68,6 +68,7 @@ pub(crate) struct OpenedDatabaseFile {
     identity: u64,
 }
 
+#[hotpath::measure_all]
 impl OpenedDatabaseFile {
     pub(crate) fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
         let file = open_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Open)?;
@@ -111,6 +112,7 @@ impl OpenedDatabaseFile {
         Ok(Self { file, identity })
     }
 
+    #[hotpath::skip]
     pub(crate) const fn identity(&self) -> u64 {
         self.identity
     }
@@ -302,11 +304,13 @@ impl fmt::Display for OpenedDatabaseFileError {
 impl std::error::Error for OpenedDatabaseFileError {}
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn open_pinned_database(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn open_pinned_database(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
@@ -317,6 +321,7 @@ fn open_pinned_database(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn create_pinned_database(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
@@ -326,6 +331,7 @@ fn create_pinned_database(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn create_pinned_database(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
@@ -342,6 +348,7 @@ const FILE_SHARE_READ: u32 = 0x0000_0001;
 #[cfg(windows)]
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 
+#[hotpath::measure]
 fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
@@ -349,6 +356,7 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
     use std::os::unix::fs::MetadataExt;
 
@@ -365,6 +373,7 @@ fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn sqlite_connection_has_moved(connection: &Connection) -> Result<bool, OpenedDatabaseFileError> {
     let database_name = CString::new("main").expect("static SQLite database name");
     let mut moved = 0_i32;
@@ -389,6 +398,7 @@ fn sqlite_connection_has_moved(connection: &Connection) -> Result<bool, OpenedDa
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
     use std::mem::MaybeUninit;
     use std::os::windows::io::AsRawHandle;
@@ -445,6 +455,7 @@ unsafe extern "system" {
 }
 
 #[cfg(not(any(unix, windows)))]
+#[hotpath::measure]
 fn opened_file_identity(_file: &File) -> Result<u64, OpenedDatabaseFileError> {
     Err(OpenedDatabaseFileError::Unsupported)
 }
@@ -468,6 +479,7 @@ pub struct ConnectionPolicyError {
     source: rusqlite::Error,
 }
 
+#[hotpath::measure_all]
 impl ConnectionPolicyError {
     pub fn is_open_failure(&self) -> bool {
         self.stage == "open"
@@ -490,11 +502,13 @@ impl std::error::Error for ConnectionPolicyError {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
     let (connection, fresh_writer) = open_raw(path, mode)?;
     finish_open(connection, mode, fresh_writer)
 }
 
+#[hotpath::measure]
 pub(crate) fn open_writer(
     path: &Path,
     opened_database: Option<&OpenedDatabaseFile>,
@@ -517,6 +531,7 @@ pub(crate) fn open_writer(
     Ok(connection)
 }
 
+#[hotpath::measure]
 fn open_raw(
     path: &Path,
     mode: ConnectionMode,
@@ -542,6 +557,7 @@ fn open_raw(
 /// and the verification pragmas read and can write the database, so under a
 /// held write lock this phase — not the file open — is where a slow
 /// startup's time goes.
+#[hotpath::measure]
 fn finish_open(
     connection: Connection,
     mode: ConnectionMode,
@@ -564,6 +580,7 @@ fn finish_open(
 /// policy for a non-empty WAL: reject it when a complete current snapshot is
 /// mandatory, or accept eventual main-file visibility for best-effort foreign
 /// ingestion.
+#[hotpath::measure]
 pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicyError> {
     hotpath::measure_block!("rusqlite.connection.open_immutable", {
         let uri = immutable_health_uri(path)?;
@@ -582,6 +599,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
     })
 }
 
+#[hotpath::measure]
 fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
     #[cfg(unix)]
     let raw = {
@@ -614,6 +632,7 @@ fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
     Ok(format!("file:{encoded}?immutable=1&mode=ro"))
 }
 
+#[hotpath::measure]
 fn apply_pragmas(
     connection: &Connection,
     mode: ConnectionMode,
@@ -693,6 +712,7 @@ fn apply_pragmas(
     Ok(())
 }
 
+#[hotpath::measure]
 fn verify_pragma_i64(
     connection: &Connection,
     name: &'static str,
@@ -710,6 +730,7 @@ fn verify_pragma_i64(
     Ok(())
 }
 
+#[hotpath::measure]
 fn verify_pragma_text(
     connection: &Connection,
     name: &'static str,
@@ -727,6 +748,7 @@ fn verify_pragma_text(
     Ok(())
 }
 
+#[hotpath::measure]
 fn assert_compile_options(connection: &Connection) -> Result<(), ConnectionPolicyError> {
     let mut statement = connection
         .prepare("PRAGMA compile_options")
@@ -753,6 +775,7 @@ fn assert_compile_options(connection: &Connection) -> Result<(), ConnectionPolic
     Ok(())
 }
 
+#[hotpath::measure]
 fn apply_limits(
     connection: &Connection,
     mode: ConnectionMode,
@@ -783,6 +806,7 @@ fn apply_limits(
     Ok(())
 }
 
+#[hotpath::measure]
 fn install_authorizer(
     connection: &Connection,
     mode: ConnectionMode,
@@ -795,14 +819,17 @@ fn install_authorizer(
     result.map_err(|source| policy("authorizer", source))
 }
 
+#[hotpath::measure]
 pub(crate) fn authorize_writer(context: AuthContext<'_>) -> Authorization {
     authorize(ConnectionMode::Writer, context)
 }
 
+#[hotpath::measure]
 pub(crate) fn authorize_reader(context: AuthContext<'_>) -> Authorization {
     authorize(ConnectionMode::Reader, context)
 }
 
+#[hotpath::measure]
 fn authorize_maintenance(_: AuthContext<'_>) -> Authorization {
     Authorization::Allow
 }
@@ -811,6 +838,7 @@ fn authorize_maintenance(_: AuthContext<'_>) -> Authorization {
 /// database, file, or connection configuration. These stay available even to
 /// read-only lanes (for example the immutable Doctor health reader) so health
 /// and shape audits work without opening a writable connection.
+#[hotpath::measure]
 fn is_read_only_introspection_pragma(pragma_name: &str) -> bool {
     const READ_ONLY_INTROSPECTION_PRAGMAS: &[&str] = &[
         "collation_list",
@@ -834,6 +862,7 @@ fn is_read_only_introspection_pragma(pragma_name: &str) -> bool {
         .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate))
 }
 
+#[hotpath::measure]
 fn is_safe_writer_pragma(pragma_name: &str, pragma_value: &str) -> bool {
     pragma_name.eq_ignore_ascii_case("busy_timeout")
         || pragma_name.eq_ignore_ascii_case("incremental_vacuum")
@@ -843,6 +872,7 @@ fn is_safe_writer_pragma(pragma_name: &str, pragma_value: &str) -> bool {
             && (pragma_value.eq_ignore_ascii_case("incremental") || pragma_value == "2"))
 }
 
+#[hotpath::measure]
 fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
     if mode == ConnectionMode::Maintenance {
         return Authorization::Allow;
@@ -918,6 +948,7 @@ where
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn with_transaction_progress_cancellation<'connection, T, C, F>(
     transaction: &mut Transaction<'connection>,
     should_cancel: C,
@@ -939,6 +970,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn policy(stage: &'static str, source: rusqlite::Error) -> ConnectionPolicyError {
     ConnectionPolicyError { stage, source }
 }

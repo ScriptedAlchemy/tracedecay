@@ -71,6 +71,7 @@ pub struct CheckpointHandle {
     pressure: watch::Receiver<CheckpointPressure>,
 }
 
+#[hotpath::measure_all]
 impl CheckpointHandle {
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
@@ -168,6 +169,7 @@ pub struct CheckpointRequest {
     probe: Arc<dyn RuntimeRequestProbeV1>,
 }
 
+#[hotpath::measure_all]
 impl CheckpointRequest {
     pub fn new(blockers: CheckpointBlockers, probe: Arc<dyn RuntimeRequestProbeV1>) -> Self {
         Self { blockers, probe }
@@ -184,6 +186,7 @@ pub struct MaintenanceCheckpointRequest {
     blockers: CheckpointBlockers,
 }
 
+#[hotpath::measure_all]
 impl MaintenanceCheckpointRequest {
     pub fn new(
         mode: MaintenanceCheckpointMode,
@@ -197,6 +200,7 @@ impl MaintenanceCheckpointRequest {
         }
     }
 
+    #[hotpath::skip]
     pub const fn mode(&self) -> MaintenanceCheckpointMode {
         self.mode
     }
@@ -214,6 +218,7 @@ pub struct CheckpointTicket {
     response: oneshot::Receiver<Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>>>,
 }
 
+#[hotpath::measure_all]
 impl CheckpointTicket {
     pub async fn wait(self) -> Result<CheckpointOutcome, CheckpointControlError> {
         let result = self
@@ -260,6 +265,7 @@ impl fmt::Display for CheckpointControlError {
 
 impl Error for CheckpointControlError {}
 
+#[hotpath::measure]
 fn checkpoint_control_error(
     error: CheckpointError<RusqliteCheckpointError>,
 ) -> CheckpointControlError {
@@ -283,6 +289,7 @@ pub struct ExistingWriterLocator {
     opened_database: Option<Arc<OpenedDatabaseFile>>,
 }
 
+#[hotpath::measure_all]
 impl ExistingWriterLocator {
     pub fn new(
         binding: StoreRuntimeBindingV1,
@@ -494,6 +501,7 @@ pub enum WriterState {
     Faulted = 4,
 }
 
+#[hotpath::measure_all]
 impl WriterState {
     fn load(state: &AtomicU8) -> Self {
         match state.load(Ordering::Acquire) {
@@ -535,6 +543,7 @@ pub struct PersistentWriter {
     opened_file_identity: Option<u64>,
 }
 
+#[hotpath::measure_all]
 impl PersistentWriter {
     pub fn start<E>(
         locator: ExistingWriterLocator,
@@ -697,6 +706,7 @@ impl PersistentWriter {
         }
     }
 
+    #[hotpath::skip]
     pub async fn submit(
         &self,
         request: RuntimeSubmitRequestV1,
@@ -795,6 +805,7 @@ impl PersistentWriter {
         Ok(outcome)
     }
 
+    #[hotpath::skip]
     pub async fn bounded_incremental_vacuum(
         &self,
         max_pages: u32,
@@ -836,6 +847,7 @@ impl PersistentWriter {
         response.await.map_err(|_| WriterActorError::ReplyDropped)?
     }
 
+    #[hotpath::skip]
     pub async fn snapshot_to(
         &self,
         destination: PathBuf,
@@ -845,6 +857,7 @@ impl PersistentWriter {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn snapshot_to_interruptible(
         &self,
         destination: PathBuf,
@@ -855,6 +868,7 @@ impl PersistentWriter {
             .await
     }
 
+    #[hotpath::skip]
     async fn enqueue_online_backup(
         &self,
         destination: PathBuf,
@@ -973,6 +987,7 @@ impl Drop for PersistentWriter {
     }
 }
 
+#[hotpath::measure]
 fn admission_limits(config: &AdmissionConfigV1) -> Result<Limits, WriterStartError> {
     Limits::new(
         Capacity {

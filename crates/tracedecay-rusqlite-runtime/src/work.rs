@@ -43,6 +43,7 @@ pub struct WorkSqliteStorage {
     retained: RetainedExactSqlCapability,
 }
 
+#[hotpath::measure_all]
 impl WorkSqliteStorage {
     #[must_use]
     pub fn from_retained_exact_sql(retained: RetainedExactSqlCapability) -> Self {

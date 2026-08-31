@@ -82,6 +82,7 @@ struct BatchCoalescingWindow {
     bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl BatchCoalescingWindow {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -154,6 +155,7 @@ struct PendingBatchDwell {
     probes: Vec<Arc<dyn RuntimeRequestProbeV1>>,
 }
 
+#[hotpath::measure_all]
 impl PendingBatchDwell {
     fn from_selected(
         selected: &[AcceptedRequest],
@@ -327,6 +329,7 @@ pub(super) struct Worker {
     pub(super) started: SyncSender<Result<Option<u64>, WriterStartError>>,
 }
 
+#[hotpath::measure_all]
 impl Worker {
     pub(super) fn run(self) {
         #[cfg(any(unix, windows))]
@@ -846,10 +849,12 @@ impl Worker {
 /// The operator's WAL budget arrives on `AdmissionConfigV1` and is validated
 /// against the contract ceilings before the writer starts, so it — not a
 /// crate-local default — is what governs when the controller checkpoints.
+#[hotpath::measure]
 pub(super) fn checkpoint_config(config: &AdmissionConfigV1) -> CheckpointConfig {
     CheckpointConfig::from(&config.wal)
 }
 
+#[hotpath::measure]
 pub(super) fn checkpoint_pressure_signal(result: &CheckpointResult) -> Option<CheckpointPressure> {
     match result {
         CheckpointResult::Decision {
@@ -869,6 +874,7 @@ pub(super) fn checkpoint_pressure_signal(result: &CheckpointResult) -> Option<Ch
     }
 }
 
+#[hotpath::measure]
 fn checkpoint_sample(result: &CheckpointResult) -> WalCheckpointSample {
     match result {
         CheckpointResult::Decision { sample, decision } => match decision {
@@ -958,6 +964,7 @@ pub(super) fn process_execution_batch(
     );
 }
 
+#[hotpath::measure]
 fn queue_wait_micros(enqueued_at: impl IntoIterator<Item = Instant>, dequeued_at: Instant) -> u64 {
     enqueued_at.into_iter().fold(0, |longest, enqueued_at| {
         longest.max(duration_micros(
@@ -966,6 +973,7 @@ fn queue_wait_micros(enqueued_at: impl IntoIterator<Item = Instant>, dequeued_at
     })
 }
 
+#[hotpath::measure]
 fn run_incremental_vacuum(
     connection: &mut rusqlite::Connection,
     command: IncrementalVacuumCommand,
@@ -1021,6 +1029,7 @@ fn run_incremental_vacuum(
     command.settle(result);
 }
 
+#[hotpath::measure]
 fn build_batches(
     selected: Vec<AcceptedRequest>,
     config: &AdmissionConfigV1,

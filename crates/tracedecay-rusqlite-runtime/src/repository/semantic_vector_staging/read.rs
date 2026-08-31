@@ -21,6 +21,7 @@ use super::support::{
 
 const READ_WAIT: Duration = Duration::from_millis(10);
 
+#[hotpath::measure]
 pub(super) fn stage(
     storage: &SemanticVectorStagingExactSqlStorage,
     key: &SemanticVectorStageKey,
@@ -34,6 +35,7 @@ pub(super) fn stage(
     Ok(result)
 }
 
+#[hotpath::measure]
 pub(super) fn pending_stage(
     storage: &SemanticVectorStagingExactSqlStorage,
     projection: &GraphProjectionIdentityV1,
@@ -47,6 +49,7 @@ pub(super) fn pending_stage(
     Ok(result)
 }
 
+#[hotpath::measure]
 pub(super) fn batch_receipt(
     storage: &SemanticVectorStagingExactSqlStorage,
     key: &SemanticVectorStageBatchKey,
@@ -67,6 +70,7 @@ pub(super) fn batch_receipt(
     Ok(result)
 }
 
+#[hotpath::measure]
 pub(super) fn batch_page(
     storage: &SemanticVectorStagingExactSqlStorage,
     request: &SemanticVectorStageBatchPageRequest,
@@ -128,6 +132,7 @@ pub(super) fn batch_page(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn pending_effects(
     storage: &SemanticVectorStagingExactSqlStorage,
     request: &SemanticVectorStagePendingEffectPageRequest,

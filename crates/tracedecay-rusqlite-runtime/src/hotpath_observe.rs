@@ -15,6 +15,7 @@
 //! Counts and durations only; never table contents, paths, or SQL text.
 
 #[inline(always)]
+#[hotpath::measure]
 fn add(name: &'static str, delta: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -28,6 +29,7 @@ fn add(name: &'static str, delta: u64) {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn subtract(name: &'static str, delta: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -48,6 +50,7 @@ pub(crate) enum CheckpointAttribution {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn add_checkpoint_mode(
     mode: CheckpointAttribution,
     passive: &'static str,
@@ -72,6 +75,7 @@ fn add_checkpoint_mode(
 /// this against the writer's immediate-begin timings: if they track each
 /// other, the writer tail is checkpointing, not write throughput.
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_checkpoint(
     mode: CheckpointAttribution,
     elapsed: std::time::Duration,
@@ -107,6 +111,7 @@ pub(crate) fn record_checkpoint(
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_checkpoint_error(mode: CheckpointAttribution, elapsed: std::time::Duration) {
     record_checkpoint_attempt(mode, elapsed);
     add("rusqlite.checkpoint.errors", 1);
@@ -120,6 +125,7 @@ pub(crate) fn record_checkpoint_error(mode: CheckpointAttribution, elapsed: std:
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_checkpoint_attempt(mode: CheckpointAttribution, elapsed: std::time::Duration) {
     let elapsed_micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
     add("rusqlite.checkpoint.runs", 1);
@@ -141,11 +147,13 @@ fn record_checkpoint_attempt(mode: CheckpointAttribution, elapsed: std::time::Du
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_scheduled_checkpoint_dispatch() {
     add("rusqlite.checkpoint.dispatch.scheduled", 1);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_requested_checkpoint_dispatch() {
     add("rusqlite.checkpoint.dispatch.requested", 1);
 }
@@ -158,6 +166,7 @@ pub(crate) fn record_requested_checkpoint_dispatch() {
 /// Priority is already on the operation metadata, so splitting on it costs
 /// nothing and needs no new field threaded through the contract.
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_writer_offered(priority: tracedecay_store::OperationPriorityV1) {
     add(
         match priority {
@@ -174,6 +183,7 @@ pub(crate) fn record_writer_offered(priority: tracedecay_store::OperationPriorit
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_writer_admitted(priority: tracedecay_store::OperationPriorityV1) {
     add(
         match priority {
@@ -190,6 +200,7 @@ pub(crate) fn record_writer_admitted(priority: tracedecay_store::OperationPriori
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_writer_shed(priority: tracedecay_store::OperationPriorityV1) {
     add(
         match priority {
@@ -202,18 +213,21 @@ pub(crate) fn record_writer_shed(priority: tracedecay_store::OperationPriorityV1
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_writer_queue_admitted(bytes: u64) {
     add("rusqlite.writer.queue.operations", 1);
     add("rusqlite.writer.queue.bytes", bytes);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_writer_queue_released(operations: u32, bytes: u64) {
     subtract("rusqlite.writer.queue.operations", u64::from(operations));
     subtract("rusqlite.writer.queue.bytes", bytes);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_writer_batch(
     priority: tracedecay_store::OperationPriorityV1,
     operations: u64,
@@ -239,6 +253,7 @@ pub(crate) fn record_writer_batch(
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_writer_transaction(rows: u64, lock_held_micros: u64) {
     add("rusqlite.writer.transaction.rows", rows);
     add(
@@ -255,11 +270,13 @@ pub(crate) fn record_writer_transaction(rows: u64, lock_held_micros: u64) {
 /// are recorded at the sole admission authority so any future caller of
 /// [`crate::admission::Admission::reserve`] is counted the same way.
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_admission_refused_operations() {
     add("rusqlite.admission.refused.operations", 1);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_admission_refused_bytes() {
     add("rusqlite.admission.refused.bytes", 1);
 }
@@ -272,6 +289,7 @@ pub(crate) fn record_admission_refused_bytes() {
 /// `rusqlite.ledger.prune_superseded` span means backlog convergence; a flat
 /// zero means the scan itself is the cost.
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_ledger_pruned_rows(rows: u64) {
     add("rusqlite.ledger.pruned_rows", rows);
 }
@@ -293,6 +311,7 @@ pub(crate) enum ExactSqlTransactionOutcome {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_exact_sql_transaction_outcome(outcome: ExactSqlTransactionOutcome) {
     add(
         match outcome {
@@ -319,21 +338,25 @@ pub(crate) fn record_exact_sql_transaction_outcome(outcome: ExactSqlTransactionO
 /// loop, so a stuck drain shows up as this number climbing while
 /// `rusqlite.checkpoint.frames.*` stays flat.
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_checkpoint_hard_retry_wake() {
     add("rusqlite.checkpoint.dispatch.hard_retry", 1);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_exact_sql_dispatch() {
     add("rusqlite.writer.dispatch.exact_sql", 1);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_incremental_vacuum_dispatch() {
     add("rusqlite.writer.dispatch.incremental_vacuum", 1);
 }
 
 #[inline(always)]
+#[hotpath::measure]
 pub(crate) fn record_online_backup_dispatch() {
     add("rusqlite.writer.dispatch.online_backup", 1);
 }

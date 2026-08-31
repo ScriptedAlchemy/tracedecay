@@ -108,6 +108,7 @@ impl WorkHistoryReadPortV1 for WorkSqliteStorage {
 ///
 /// This mirrors the set the application re-derives when it checks the answer,
 /// so an event that would fail that check is never returned in the first place.
+#[hotpath::measure]
 fn selected_relation_scopes(selection: &WorkProductSelectionScopeV1) -> Vec<WorkRelationScopeV1> {
     selection
         .relation_scopes()
@@ -116,6 +117,7 @@ fn selected_relation_scopes(selection: &WorkProductSelectionScopeV1) -> Vec<Work
 
 /// The durable sequence a continuation resumes after. A cursor this authority
 /// did not mint is refused rather than treated as "start from the beginning".
+#[hotpath::measure]
 fn resume_from(continuation: Option<&OpaqueCursor>) -> Result<u64, HistoryError> {
     match continuation {
         None => Ok(0),

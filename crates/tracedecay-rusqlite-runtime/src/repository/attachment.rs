@@ -40,6 +40,7 @@ const ATTACHMENT_DRAIN_POLL: Duration = Duration::from_millis(5);
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RepositoryPhysicalAttachmentFactory;
 
+#[hotpath::measure_all]
 impl RepositoryPhysicalAttachmentFactory {
     #[hotpath::measure(label = "rusqlite.attachment.attach_read_only")]
     pub fn attach_read_only(
@@ -293,6 +294,7 @@ enum AttachmentWorkerStartStage {
     AfterReaders,
 }
 
+#[hotpath::measure]
 fn repository_start_failure(
     opened_database: OpenedDatabaseFile,
     database_path: &std::path::Path,
@@ -349,6 +351,7 @@ struct RepositoryRuntimePhysicalState {
     close_failure: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl RepositoryRuntimePhysicalAttachment {
     pub fn binding(&self) -> StoreRuntimeBindingV1 {
         self.lock_state().binding.clone()
@@ -447,6 +450,7 @@ impl RepositoryRuntimePhysicalAttachment {
         }
     }
 
+    #[hotpath::skip]
     pub async fn dispatch_submit(
         &self,
         request: RuntimeSubmitRequestV1,
@@ -469,6 +473,7 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
+    #[hotpath::skip]
     pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u32,
@@ -490,6 +495,7 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
+    #[hotpath::skip]
     pub async fn run_checkpoint(
         &self,
         request: CheckpointRequest,
@@ -607,6 +613,7 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(RepositoryDispatchError::Checkpoint)
     }
 
+    #[hotpath::skip]
     pub async fn snapshot_to(
         &self,
         destination: PathBuf,
@@ -628,6 +635,7 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
+    #[hotpath::skip]
     pub async fn snapshot_to_interruptible(
         &self,
         destination: PathBuf,
@@ -886,6 +894,7 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
     }
 }
 
+#[hotpath::measure]
 fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
     StorageRuntimeErrorV1::Infrastructure {
         operation: operation.into(),

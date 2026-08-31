@@ -251,6 +251,7 @@ pub(super) fn process_batch(
     );
 }
 
+#[hotpath::measure]
 fn publish_committed(
     prepared: &[PreparedRequest],
     publisher: &CommittedWatermarkPublisher,
@@ -258,6 +259,7 @@ fn publish_committed(
     publish_results(prepared.iter().map(|prepared| &prepared.result), publisher)
 }
 
+#[hotpath::measure]
 fn publish_results<'a>(
     results: impl IntoIterator<Item = &'a PreparedResult>,
     publisher: &CommittedWatermarkPublisher,
@@ -270,6 +272,7 @@ fn publish_results<'a>(
     Ok(())
 }
 
+#[hotpath::measure]
 fn process_request(
     transaction: &mut Transaction<'_>,
     binding: &StoreRuntimeBindingV1,
@@ -314,6 +317,7 @@ fn process_request(
     apply_new(transaction, binding, item, persistence)
 }
 
+#[hotpath::measure]
 fn apply_new(
     transaction: &mut Transaction<'_>,
     binding: &StoreRuntimeBindingV1,
@@ -402,6 +406,7 @@ fn apply_new(
 
 /// The transaction path has one operation+ledger boundary. The persistence
 /// implementation must return the receipt produced by this same savepoint.
+#[hotpath::measure]
 fn apply_and_record(
     persistence: &mut dyn WriterPersistence,
     savepoint: &mut Savepoint<'_>,
@@ -411,6 +416,7 @@ fn apply_and_record(
     persistence.apply_and_record(savepoint, binding, request)
 }
 
+#[hotpath::measure]
 fn processed(item: AcceptedRequest, result: RequestResult, fatal: bool) -> Processed {
     let fatal_error = fatal.then(|| {
         result
@@ -427,6 +433,7 @@ fn processed(item: AcceptedRequest, result: RequestResult, fatal: bool) -> Proce
     }
 }
 
+#[hotpath::measure]
 fn rollback_or(
     mut savepoint: Savepoint<'_>,
     fallback: StorageRuntimeErrorV1,
@@ -439,6 +446,7 @@ fn rollback_or(
         .unwrap_or(fallback)
 }
 
+#[hotpath::measure]
 fn settle_batch_failure(
     items: Vec<AcceptedRequest>,
     failure: DriverFailure,
@@ -455,6 +463,7 @@ fn settle_batch_failure(
     }
 }
 
+#[hotpath::measure]
 fn settle_prepared(
     prepared: Vec<PreparedRequest>,
     commit_failure: Option<DriverFailure>,
@@ -493,6 +502,7 @@ fn settle_prepared(
 /// non-retryable outcome. They get `Faulted` instead — the same "rolled back,
 /// safe to resubmit" shape the fatal path above uses — and a member that had
 /// already reached a `Final` outcome keeps it.
+#[hotpath::measure]
 fn settle_authority_denied(
     prepared: Vec<PreparedRequest>,
     authority_denied: Vec<bool>,
@@ -518,6 +528,7 @@ fn settle_authority_denied(
     }
 }
 
+#[hotpath::measure]
 fn settle_commit_denied(
     prepared: Vec<PreparedRequest>,
     commit_denied: Vec<bool>,
@@ -553,6 +564,7 @@ fn settle_commit_denied(
     }
 }
 
+#[hotpath::measure]
 fn record_commit(
     prepared: &[PreparedRequest],
     started: Instant,
@@ -595,6 +607,7 @@ fn record_commit(
     );
 }
 
+#[hotpath::measure]
 fn record_transaction(
     telemetry: &WriterTelemetry,
     outcome: WriterTransactionOutcome,
@@ -615,6 +628,7 @@ fn record_transaction(
     });
 }
 
+#[hotpath::measure]
 fn transaction_outcome(failure: &DriverFailure) -> WriterTransactionOutcome {
     match failure {
         DriverFailure::Busy => WriterTransactionOutcome::Busy,

@@ -33,6 +33,7 @@ use writes::{current_last_event, ensure_fact, insert_anchor, publish_projection}
 #[derive(Clone, Default)]
 pub struct FactExecutor;
 
+#[hotpath::measure_all]
 impl FactExecutor {
     pub fn execute_write(
         &mut self,
@@ -95,6 +96,7 @@ impl FactExecutor {
 /// This runs before any mutation. In particular, self-evidence is available
 /// only for an existing target fact; a new fact cannot make its own evidence
 /// true by being inserted later in the same write.
+#[hotpath::measure]
 fn require_normalized_tag_evidence_available(
     connection: &rusqlite::Connection,
     owner: &OwnerColumns,
@@ -153,6 +155,7 @@ fn require_normalized_tag_evidence_available(
 /// `anchor_id IN (...)` load per chunk: the referenced set is proven available
 /// exactly when every id comes back present, which is the same "all must exist"
 /// contract the per-anchor loop enforced, down to the error it raises.
+#[hotpath::measure]
 fn require_referenced_anchors_available(
     connection: &rusqlite::Connection,
     owner: &OwnerColumns,
@@ -195,6 +198,7 @@ pub(super) struct OwnerColumns {
     pub(super) json: String,
 }
 
+#[hotpath::measure_all]
 impl OwnerColumns {
     pub(super) fn new(owner: &FactOwnerV1) -> rusqlite::Result<Self> {
         let (kind, project_id) = match owner {

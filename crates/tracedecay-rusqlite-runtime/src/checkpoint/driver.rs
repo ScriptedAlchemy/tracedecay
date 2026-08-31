@@ -52,6 +52,7 @@ pub(crate) struct RusqliteCheckpointDriver {
     connection: Connection,
 }
 
+#[hotpath::measure_all]
 impl RusqliteCheckpointDriver {
     pub(crate) fn new(connection: Connection) -> Self {
         Self { connection }
@@ -114,6 +115,7 @@ impl CheckpointDriver for RusqliteCheckpointDriver {
     }
 }
 
+#[hotpath::measure_all]
 impl RusqliteCheckpointDriver {
     fn checkpoint_row(&self, sql: &str) -> Result<(i64, u64, u64), RusqliteCheckpointError> {
         let row = self
@@ -137,6 +139,7 @@ impl RusqliteCheckpointDriver {
     }
 }
 
+#[hotpath::measure]
 fn nonnegative_integer(value: i64, column: usize) -> Result<u64, rusqlite::Error> {
     u64::try_from(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(column, Type::Integer, Box::new(error))

@@ -12,6 +12,7 @@ thread_local! {
 
 pub(crate) struct LockWorkScope;
 
+#[hotpath::measure_all]
 impl LockWorkScope {
     pub(crate) fn enter() -> Self {
         ACTIVE.with(|cell| cell.set(true));
@@ -33,18 +34,21 @@ impl Drop for LockWorkScope {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn record_encoded_bytes(bytes: u64) {
     if ACTIVE.with(Cell::get) {
         ENCODED.with(|cell| cell.set(cell.get().saturating_add(bytes)));
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn record_decoded_bytes(bytes: u64) {
     if ACTIVE.with(Cell::get) {
         DECODED.with(|cell| cell.set(cell.get().saturating_add(bytes)));
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn take_lock_work() -> WriterLockWorkSnapshot {
     WriterLockWorkSnapshot {
         bytes_encoded: ENCODED.with(|cell| cell.replace(0)),

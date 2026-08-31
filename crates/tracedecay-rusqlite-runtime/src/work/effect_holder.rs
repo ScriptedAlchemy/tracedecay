@@ -101,6 +101,7 @@ impl WorkAttemptEffectStoragePortV1 for WorkSqliteStorage {
     }
 }
 
+#[hotpath::measure]
 fn require_open_attempt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -147,6 +148,7 @@ struct StoredWorkAttemptV1 {
     _synthesis: Option<serde_json::Value>,
 }
 
+#[hotpath::measure]
 fn load_holder<T>(
     query: &T,
     authority: &WorkAuthority,
@@ -195,6 +197,7 @@ where
         .transpose()
 }
 
+#[hotpath::measure]
 fn same_dispatch(
     existing: &WorkAttemptEffectHolderV1,
     proposed: &WorkAttemptEffectHolderV1,
@@ -205,6 +208,7 @@ fn same_dispatch(
         && existing.deadline() == proposed.deadline()
 }
 
+#[hotpath::measure]
 fn insert_holder(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -241,6 +245,7 @@ fn insert_holder(
     Ok(())
 }
 
+#[hotpath::measure]
 fn update_holder(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -276,6 +281,7 @@ fn update_holder(
     }
 }
 
+#[hotpath::measure]
 fn attempt_params(attempt: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {
     [
         ExactSqlValue::Text(attempt.task_id().as_str().to_owned()),
@@ -284,6 +290,7 @@ fn attempt_params(attempt: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {
     ]
 }
 
+#[hotpath::measure]
 fn effect_state(holder: &WorkAttemptEffectHolderV1) -> &'static str {
     match holder.effect_state() {
         tracedecay_domain::WorkEffectStateV1::Observational => "observational",
@@ -292,6 +299,7 @@ fn effect_state(holder: &WorkAttemptEffectHolderV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn resolution(holder: &WorkAttemptEffectHolderV1) -> &'static str {
     match holder.resolution() {
         None => "pending",
@@ -300,6 +308,7 @@ fn resolution(holder: &WorkAttemptEffectHolderV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn optional_micros(value: Option<UtcMicros>) -> ExactSqlValue {
     match value {
         Some(value) => ExactSqlValue::Integer(value.0),

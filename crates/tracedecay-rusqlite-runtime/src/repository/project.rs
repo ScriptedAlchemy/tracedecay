@@ -25,6 +25,7 @@ pub struct ProjectExecutor {
     retrieval_anchor: RetrievalAnchorExecutor,
 }
 
+#[hotpath::measure_all]
 impl ProjectExecutor {
     pub fn execute_fact_write(
         &mut self,

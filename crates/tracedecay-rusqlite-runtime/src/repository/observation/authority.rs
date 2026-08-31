@@ -15,6 +15,7 @@ use super::cursor_authority::{
     READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL, cursor_advance_ledger_row_matches,
 };
 
+#[hotpath::measure]
 pub(super) fn persist_sanitization_receipt(
     connection: &rusqlite::Connection,
     receipt: &tracedecay_domain::SanitizationReceiptV1,
@@ -46,6 +47,7 @@ pub(super) fn persist_sanitization_receipt(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn cursor_advance_receipt_matches(
     connection: &rusqlite::Connection,
     source_json: &str,
@@ -84,6 +86,7 @@ pub(super) fn cursor_advance_receipt_matches(
     Ok(true)
 }
 
+#[hotpath::measure]
 pub(super) fn persist_retrieval_anchor(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorRecordV2,
@@ -127,6 +130,7 @@ pub(super) fn persist_retrieval_anchor(
     verify_retrieval_anchor(connection, anchor)
 }
 
+#[hotpath::measure]
 fn verify_retrieval_anchor(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorRecordV2,
@@ -185,6 +189,7 @@ fn verify_retrieval_anchor(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn persist_repository_provenance(
     connection: &rusqlite::Connection,
     observation_id: &str,
@@ -213,6 +218,7 @@ pub(super) fn persist_repository_provenance(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn verify_observation_authority(
     connection: &rusqlite::Connection,
     write: &AnchoredObservationWrite,
@@ -266,6 +272,7 @@ pub(super) fn verify_observation_authority(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn read_cursor(
     connection: &rusqlite::Connection,
     source_json: &str,

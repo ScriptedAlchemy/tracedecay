@@ -67,6 +67,7 @@ pub(super) struct LaneAdmission {
     background: bool,
 }
 
+#[hotpath::measure_all]
 impl LaneAdmission {
     fn for_priority(priority: OperationPriorityV1) -> Self {
         match priority {
@@ -85,6 +86,7 @@ impl LaneAdmission {
         }
     }
 
+    #[hotpath::skip]
     const fn interactive(lane: ReaderLane) -> Self {
         Self {
             lane,
@@ -136,6 +138,7 @@ pub(super) struct PoolState {
     snapshot_admissions: u64,
 }
 
+#[hotpath::measure_all]
 impl PoolState {
     fn workers(&self, lane: ReaderLane) -> u16 {
         self.records
@@ -151,6 +154,7 @@ impl PoolState {
         self.workers(lane).saturating_sub(self.limbo(lane))
     }
 
+    #[hotpath::skip]
     pub(super) const fn limbo(&self, lane: ReaderLane) -> u16 {
         match lane {
             ReaderLane::General => self.limbo_general,
@@ -158,6 +162,7 @@ impl PoolState {
         }
     }
 
+    #[hotpath::skip]
     pub(super) const fn limbo_mut(&mut self, lane: ReaderLane) -> &mut u16 {
         match lane {
             ReaderLane::General => &mut self.limbo_general,
@@ -165,6 +170,7 @@ impl PoolState {
         }
     }
 
+    #[hotpath::skip]
     const fn waiting(&self, lane: ReaderLane) -> u16 {
         match lane {
             ReaderLane::General => self.waiting_general,
@@ -172,6 +178,7 @@ impl PoolState {
         }
     }
 
+    #[hotpath::skip]
     const fn waiting_mut(&mut self, lane: ReaderLane) -> &mut u16 {
         match lane {
             ReaderLane::General => &mut self.waiting_general,
@@ -220,7 +227,9 @@ struct WaitingGuard<'pool, E: ReaderQueryExecutor> {
     counted: bool,
 }
 
+#[hotpath::measure_all]
 impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
+    #[hotpath::skip]
     const fn new(inner: &'pool PoolInner<E>, lane: ReaderLane) -> Self {
         Self {
             inner,
@@ -229,6 +238,7 @@ impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
         }
     }
 
+    #[hotpath::skip]
     const fn was_counted(&self) -> bool {
         self.counted
     }
@@ -310,6 +320,7 @@ impl<E: ReaderQueryExecutor> Clone for WeakReaderPool<E> {
     }
 }
 
+#[hotpath::measure_all]
 impl<E: ReaderQueryExecutor> WeakReaderPool<E> {
     pub(crate) fn upgrade(&self) -> Option<ReaderPool<E>> {
         self.inner.upgrade().map(|inner| ReaderPool { inner })
@@ -324,6 +335,7 @@ impl<E: ReaderQueryExecutor> Clone for ReaderPool<E> {
     }
 }
 
+#[hotpath::measure_all]
 impl<E: ReaderQueryExecutor> ReaderPool<E> {
     pub fn start(
         locator: ExistingReaderLocator,
@@ -1000,6 +1012,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
 /// fires instead of the failure vanishing into a "pool closed" no-op. Workers
 /// that were skipped (terminated, or busy inside a retained snapshot) are not
 /// failures: the release reports only the connections it actually shrank.
+#[hotpath::measure]
 fn aggregate_worker_memory_releases(
     results: impl Iterator<Item = Result<worker::WorkerMemoryRelease, worker::ReaderWorkerError>>,
     total: usize,

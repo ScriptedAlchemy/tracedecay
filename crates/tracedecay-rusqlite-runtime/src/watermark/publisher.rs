@@ -81,6 +81,7 @@ pub struct CommittedWatermarkPublisher {
     channels: Arc<Channels>,
 }
 
+#[hotpath::measure_all]
 impl CommittedWatermarkPublisher {
     pub fn new(binding: StoreRuntimeBindingV1) -> Self {
         Self::from_bindings([binding]).expect("one binding cannot contain a duplicate shard")

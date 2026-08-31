@@ -1,5 +1,6 @@
 use super::*;
 
+#[hotpath::measure]
 pub(super) fn query(
     handle: &ExactSqlHandle,
     sql: &str,
@@ -9,6 +10,7 @@ pub(super) fn query(
     Ok(handle.query(statement, READ_WAIT)?)
 }
 
+#[hotpath::measure]
 pub(super) fn statement(
     sql: &str,
     params: Vec<ExactSqlValue>,
@@ -16,14 +18,17 @@ pub(super) fn statement(
     ExactSqlStatement::new(sql.to_owned(), params).map_err(map_persistence_error)
 }
 
+#[hotpath::measure]
 pub(super) fn text(value: &str) -> ExactSqlValue {
     ExactSqlValue::Text(value.to_owned())
 }
 
+#[hotpath::measure]
 pub(super) fn optional_text(value: Option<&str>) -> ExactSqlValue {
     value.map_or(ExactSqlValue::Null, text)
 }
 
+#[hotpath::measure]
 pub(super) fn one_row(
     rows: ExactSqlRows,
 ) -> Result<crate::exact_sql::ExactSqlRow, RemoteSqliteStorageErrorV1> {
@@ -34,6 +39,7 @@ pub(super) fn one_row(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn row_text(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -44,6 +50,7 @@ pub(super) fn row_text(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn row_blob(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -54,6 +61,7 @@ pub(super) fn row_blob(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn row_u64(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -66,6 +74,7 @@ pub(super) fn row_u64(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn persistence_one_row(
     rows: ExactSqlRows,
 ) -> Result<crate::exact_sql::ExactSqlRow, RemoteCapturePersistenceErrorV1> {
@@ -76,6 +85,7 @@ pub(super) fn persistence_one_row(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn decode_spool_state(
     row: crate::exact_sql::ExactSqlRow,
 ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
@@ -106,6 +116,7 @@ pub(super) const fn replay_state_name(state: RemoteReplayStateV1) -> &'static st
     }
 }
 
+#[hotpath::measure]
 fn parse_replay_state(state: &str) -> Result<RemoteReplayStateV1, RemoteCapturePersistenceErrorV1> {
     match state {
         "pending" => Ok(RemoteReplayStateV1::Pending),
@@ -119,6 +130,7 @@ fn parse_replay_state(state: &str) -> Result<RemoteReplayStateV1, RemoteCaptureP
     }
 }
 
+#[hotpath::measure]
 pub(super) fn map_encryption_error(
     error: RemoteSqliteStorageErrorV1,
 ) -> RemoteCapturePersistenceErrorV1 {
@@ -132,6 +144,7 @@ pub(super) fn map_encryption_error(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn map_persistence_error(
     error: impl std::fmt::Display,
 ) -> RemoteCapturePersistenceErrorV1 {

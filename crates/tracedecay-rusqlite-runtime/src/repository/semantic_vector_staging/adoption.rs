@@ -16,6 +16,7 @@ use super::support::{
 
 const READ_WAIT: Duration = Duration::from_millis(10);
 
+#[hotpath::measure]
 pub(super) fn adoptable_stage_page(
     storage: &SemanticVectorStagingExactSqlStorage,
     request: &SemanticVectorStageAdoptionPageRequest,

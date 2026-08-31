@@ -23,6 +23,7 @@ enum Lane {
     Health,
 }
 
+#[hotpath::measure_all]
 impl Lane {
     fn for_priority(priority: OperationPriorityV1) -> Self {
         match priority {
@@ -46,6 +47,7 @@ pub(crate) struct Limits {
     pub(crate) background_request_bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl Limits {
     pub(crate) fn new(
         general: Capacity,
@@ -88,6 +90,7 @@ struct State {
     health: Usage,
 }
 
+#[hotpath::measure_all]
 impl State {
     fn usage(&self, lane: Lane) -> Usage {
         match lane {
@@ -111,6 +114,7 @@ pub(crate) struct Admission {
     state: Arc<ProfiledMutex<State>>,
 }
 
+#[hotpath::measure_all]
 impl Admission {
     pub(crate) fn new(limits: Limits) -> Self {
         Self {

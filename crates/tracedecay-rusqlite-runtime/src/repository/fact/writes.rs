@@ -14,6 +14,7 @@ use tracedecay_store::FactWriteBatch;
 use super::super::support::{decode, encode, invalid};
 use super::OwnerColumns;
 
+#[hotpath::measure]
 pub(super) fn current_last_event(
     connection: &rusqlite::Connection,
     owner: &OwnerColumns,
@@ -32,6 +33,7 @@ pub(super) fn current_last_event(
         .map_err(invalid)
 }
 
+#[hotpath::measure]
 pub(super) fn ensure_fact(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
@@ -84,6 +86,7 @@ pub(super) fn ensure_fact(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn insert_anchor(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
@@ -131,6 +134,7 @@ pub(super) fn insert_anchor(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn publish_projection(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,

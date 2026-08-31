@@ -89,6 +89,7 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn append_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     context: &WorkProductPortContextV1,
@@ -132,6 +133,7 @@ pub(super) fn append_in_transaction(
         .map_err(|_| PortError::Unavailable)
 }
 
+#[hotpath::measure]
 fn replay_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     context: &WorkProductPortContextV1,
@@ -166,6 +168,7 @@ fn replay_in_transaction(
 /// command id, so the same draft at the same journal position always yields the
 /// same event id — an identity that is reproducible from the journal rather
 /// than drawn from a clock or a counter the caller cannot see.
+#[hotpath::measure]
 fn mint_event(
     draft: &WorkProductEventDraftV1,
     sequence: WorkProductEventSequenceV1,
@@ -201,6 +204,7 @@ fn mint_event(
     .ok()
 }
 
+#[hotpath::measure]
 fn insert_event(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     context: &WorkProductPortContextV1,

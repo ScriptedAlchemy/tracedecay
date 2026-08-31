@@ -29,6 +29,7 @@ struct StoredWorkAttemptV1 {
     synthesis: Option<WorkSynthesisAdmissionRecordV1>,
 }
 
+#[hotpath::measure]
 fn insert_attempt(
     storage: &WorkSqliteStorage,
     authority: &WorkAuthority,
@@ -65,6 +66,7 @@ fn insert_attempt(
 }
 
 /// Persist one ordinary attempt without settling the caller-owned transaction.
+#[hotpath::measure]
 pub(crate) fn insert_attempt_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -443,6 +445,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
     }
 }
 
+#[hotpath::measure]
 fn insert_synthesis_record(
     storage: &WorkSqliteStorage,
     authority: &WorkAuthority,
@@ -479,6 +482,7 @@ fn insert_synthesis_record(
 }
 
 /// Persist one synthesis attempt without settling the caller-owned transaction.
+#[hotpath::measure]
 pub(crate) fn insert_synthesis_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -657,6 +661,7 @@ impl WorkAttemptEvidenceReadPort for WorkSqliteStorage {
     }
 }
 
+#[hotpath::measure]
 fn load_payload_from_handle(
     handle: &crate::exact_sql::ExactSqlHandle,
     authority: &WorkAuthority,
@@ -680,6 +685,7 @@ fn load_payload_from_handle(
         .and_then(|row| exact_sql_text(&row.values, 0).map(str::to_owned)))
 }
 
+#[hotpath::measure]
 fn load_payload(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -708,6 +714,7 @@ fn load_payload(
 /// inserted in the same immediate transaction only when it carries the first
 /// attempt's immutable deadline and topology, so a caller cannot replace the
 /// run authority through a lexically earlier attempt ID.
+#[hotpath::measure]
 fn require_first_run_admission(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -748,6 +755,7 @@ fn require_first_run_admission(
     Err(WorkAttemptStorageError::RunAdmissionConflict)
 }
 
+#[hotpath::measure]
 fn require_run_reservation_admitted(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -779,6 +787,7 @@ fn require_run_reservation_admitted(
     }
 }
 
+#[hotpath::measure]
 fn identity_params(identity: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {
     [
         ExactSqlValue::Text(identity.task_id().as_str().to_owned()),
@@ -787,6 +796,7 @@ fn identity_params(identity: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {
     ]
 }
 
+#[hotpath::measure]
 fn state_text(state: WorkAttemptStateV1) -> String {
     match state {
         WorkAttemptStateV1::Leased => "leased",

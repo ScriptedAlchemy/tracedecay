@@ -37,7 +37,9 @@ pub struct RepositoryRuntimePhysicalSnapshot {
     pub reader_execution_micros: u64,
 }
 
+#[hotpath::measure_all]
 impl RepositoryRuntimePhysicalSnapshot {
+    #[hotpath::skip]
     pub const fn is_drained(self) -> bool {
         !self.writer_present
             && self.reader_handles == 0
@@ -46,6 +48,7 @@ impl RepositoryRuntimePhysicalSnapshot {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn wal_bytes(database_path: &Path) -> Option<u64> {
     let mut name = database_path.as_os_str().to_os_string();
     name.push("-wal");

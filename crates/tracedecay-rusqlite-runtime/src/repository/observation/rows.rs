@@ -14,6 +14,7 @@ use tracedecay_store::{
 
 use super::super::support::{decode, encode, invalid};
 
+#[hotpath::measure]
 pub(super) fn decode_nonnegative(value: i64, message: &'static str) -> rusqlite::Result<u64> {
     u64::try_from(value).map_err(|_| invalid(message))
 }
@@ -60,6 +61,7 @@ pub(super) const OBSERVATION_ROW_PROJECTION: &str =
        ON repository_anchor.anchor_id = repository.retrieval_anchor_id";
 
 /// Reads one [`OBSERVATION_ROW_PROJECTION`] row in column order.
+#[hotpath::measure]
 pub(super) fn encoded_observation_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<EncodedObservationRow> {
@@ -77,6 +79,7 @@ pub(super) fn encoded_observation_row(
     ))
 }
 
+#[hotpath::measure]
 pub(super) fn decode_observation_row(
     (
         sequence,

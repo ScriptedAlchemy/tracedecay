@@ -25,6 +25,7 @@ impl WorkStoragePort for WorkSqliteStorage {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn load_registered_history(
     handle: &ExactSqlHandle,
     authority: &WorkAuthority,
@@ -45,6 +46,7 @@ pub(crate) fn load_registered_history(
     decode_registered_events(rows, true)
 }
 
+#[hotpath::measure]
 pub(crate) fn load_registered_authority_events(
     handle: &ExactSqlHandle,
     authority: &WorkAuthority,
@@ -61,6 +63,7 @@ pub(crate) fn load_registered_authority_events(
     decode_registered_events(rows, false)
 }
 
+#[hotpath::measure]
 pub(crate) fn load_registered_history_in_transaction(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -81,6 +84,7 @@ pub(crate) fn load_registered_history_in_transaction(
     decode_registered_events(rows, true)
 }
 
+#[hotpath::measure]
 pub(crate) fn decode_registered_events(
     rows: ExactSqlRows,
     empty_is_not_found: bool,
@@ -97,6 +101,7 @@ pub(crate) fn decode_registered_events(
         .collect()
 }
 
+#[hotpath::measure]
 pub(crate) fn append_registered(
     handle: &ExactSqlHandle,
     request: &WorkAppendRequest,
@@ -163,6 +168,7 @@ pub(crate) fn append_registered(
     Ok(WorkAppendOutcome::Appended(next))
 }
 
+#[hotpath::measure]
 pub(crate) fn advance_registered_owner_cursor(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -196,6 +202,7 @@ pub(crate) fn advance_registered_owner_cursor(
         .ok_or(WorkStorageError::Unavailable)
 }
 
+#[hotpath::measure]
 pub(crate) fn registered_insert_event(
     transaction: &ExactSqlTransaction,
     event: &WorkEvent,

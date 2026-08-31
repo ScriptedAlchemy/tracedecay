@@ -90,6 +90,7 @@ pub(super) async fn wait_for_work(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn apply_wake(
     wake: WorkerWake,
     queue: &mut FairQueue<AcceptedRequest>,
@@ -137,6 +138,7 @@ pub(super) fn apply_wake(
 /// `input_closed` once the sender is gone — so they share this one loop. The
 /// product-write channel does not: it settles duplicates through
 /// [`drain_ingress`] instead of parking them.
+#[hotpath::measure]
 pub(super) fn drain_command_ingress<T>(
     receiver: &mut mpsc::Receiver<T>,
     queue: &mut VecDeque<T>,
@@ -161,6 +163,7 @@ pub(super) enum AuxiliaryWork {
     OnlineBackup,
 }
 
+#[hotpath::measure]
 pub(super) fn select_auxiliary_work(
     exact_sql_waiting: bool,
     incremental_vacuum_waiting: bool,
@@ -197,6 +200,7 @@ pub(super) fn select_auxiliary_work(
     order.into_iter().find(|work| waiting(*work))
 }
 
+#[hotpath::measure]
 pub(super) fn drain_ingress(
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     queue: &mut FairQueue<AcceptedRequest>,
@@ -217,6 +221,7 @@ pub(super) fn drain_ingress(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn enqueue(
     queue: &mut FairQueue<AcceptedRequest>,
     item: AcceptedRequest,

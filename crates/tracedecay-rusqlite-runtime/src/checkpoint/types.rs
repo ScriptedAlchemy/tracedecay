@@ -43,6 +43,7 @@ impl From<&WalBudgetV1> for CheckpointConfig {
     }
 }
 
+#[hotpath::measure_all]
 impl CheckpointConfig {
     pub(crate) fn validate(self) -> Result<Self, CheckpointConfigError> {
         if self.soft_wal_bytes == 0 {
@@ -84,7 +85,9 @@ pub struct CheckpointBlockers {
     pub omitted: usize,
 }
 
+#[hotpath::measure_all]
 impl CheckpointBlockers {
+    #[hotpath::skip]
     pub const fn is_clear(&self) -> bool {
         self.blockers.is_empty() && self.omitted == 0
     }
@@ -127,7 +130,9 @@ pub(crate) struct CheckpointReport {
     pub(crate) checkpointed_frames: u64,
 }
 
+#[hotpath::measure_all]
 impl CheckpointReport {
+    #[hotpath::skip]
     pub(crate) const fn complete(self) -> bool {
         !self.busy && self.checkpointed_frames >= self.log_frames
     }
@@ -152,6 +157,7 @@ pub enum CheckpointKind {
     Truncate,
 }
 
+#[hotpath::measure_all]
 impl CheckpointKind {
     fn from_internal(mode: CheckpointMode) -> Self {
         match mode {
@@ -181,6 +187,7 @@ pub struct CheckpointWal {
     pub bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl CheckpointWal {
     pub(crate) fn from_sample(sample: WalSample) -> Self {
         Self {
@@ -197,6 +204,7 @@ pub struct CheckpointFrameReport {
     pub checkpointed_frames: u64,
 }
 
+#[hotpath::measure_all]
 impl CheckpointFrameReport {
     fn from_internal(report: CheckpointReport) -> Self {
         Self {
@@ -233,6 +241,7 @@ pub enum CheckpointOutcome {
     },
 }
 
+#[hotpath::measure_all]
 impl CheckpointOutcome {
     pub(crate) fn from_internal(result: CheckpointResult) -> Self {
         match result {

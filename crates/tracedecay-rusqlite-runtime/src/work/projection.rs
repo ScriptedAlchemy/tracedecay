@@ -150,6 +150,7 @@ struct TaskPage {
     to: u64,
 }
 
+#[hotpath::measure_all]
 impl TaskPage {
     /// The journal prefix the page's projections are rebuilt from.
     fn events<'a>(
@@ -168,6 +169,7 @@ impl TaskPage {
 /// The cut is on the event that introduces the overflowing task, so the page
 /// boundary is a sequence a later read can resume from without either
 /// re-deriving the task order or losing the tasks past the cap.
+#[hotpath::measure]
 fn page_tasks(
     events: &[WorkEvent],
     from: u64,
@@ -185,6 +187,7 @@ fn page_tasks(
     Ok(TaskPage { selected, to })
 }
 
+#[hotpath::measure]
 fn rebuild_selected(
     events: &[WorkEvent],
     selected: &BTreeSet<TaskId>,
@@ -202,6 +205,7 @@ fn rebuild_selected(
         .collect()
 }
 
+#[hotpath::measure]
 fn projection_generation(
     authority: &WorkAuthority,
 ) -> Result<ProjectionGenerationId, WorkProjectionPortError> {
@@ -214,6 +218,7 @@ fn projection_generation(
     .map_err(|_| WorkProjectionPortError::Unavailable)
 }
 
+#[hotpath::measure]
 pub(super) fn projection_cursor(
     generation_id: ProjectionGenerationId,
     sequence: WorkProjectionSequenceV1,
@@ -225,6 +230,7 @@ pub(super) fn projection_cursor(
     .map_err(|_| WorkProjectionPortError::Unavailable)
 }
 
+#[hotpath::measure]
 fn parse_projection_cursor(
     cursor: &WorkProjectionResumeCursorV1,
 ) -> Result<u64, WorkProjectionPortError> {
@@ -235,12 +241,14 @@ fn parse_projection_cursor(
         .ok_or(WorkProjectionPortError::StaleCursor)
 }
 
+#[hotpath::measure]
 fn sequence(value: usize) -> Result<WorkProjectionSequenceV1, WorkProjectionPortError> {
     u64::try_from(value)
         .map(WorkProjectionSequenceV1::new)
         .map_err(|_| WorkProjectionPortError::Unavailable)
 }
 
+#[hotpath::measure]
 fn unavailable(_: tracedecay_application::WorkStorageError) -> WorkProjectionPortError {
     WorkProjectionPortError::Unavailable
 }

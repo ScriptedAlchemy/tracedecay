@@ -60,6 +60,7 @@ impl<E: fmt::Display> fmt::Display for SqliteBackupError<E> {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn backup_sqlite<F, P>(
     source: &Connection,
     filesystem: &mut F,
@@ -153,6 +154,7 @@ impl Error for SnapshotVerificationError {
 
 /// Verifies a completed SQLite backup through the runtime's immutable,
 /// read-only `PRAGMA quick_check` authority.
+#[hotpath::measure]
 pub fn verify_sqlite_snapshot(path: &Path) -> Result<(), SnapshotVerificationError> {
     let connection = crate::connection::open_immutable_reader(path)
         .map_err(|error| SnapshotVerificationError::Open(io::Error::other(error.to_string())))?;

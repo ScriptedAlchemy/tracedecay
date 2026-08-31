@@ -149,6 +149,7 @@ impl WorkGraphReadPortV1 for WorkSqliteStorage {
 
 /// Build one entry per published version, each carrying the graph folded to
 /// that version and every projection derived from that same graph.
+#[hotpath::measure]
 fn build_entries(
     journal: &[WorkProductJournalEntryV1],
     published: &[WorkProductPublishedVersionV1],
@@ -195,6 +196,7 @@ fn build_entries(
 ///
 /// See the module documentation for why an unobserved runtime is reported as
 /// `Unavailable` instead of as zero attempts.
+#[hotpath::measure]
 fn runtime_projection(
     graph: &WorkProductGraphV1,
     version: &WorkProductPublishedVersionV1,
@@ -234,6 +236,7 @@ fn runtime_projection(
 /// The cursor names the graph version the previous page ended on, so resuming
 /// is exact rather than offset-based: a version published between two pages
 /// cannot shift a caller past an entry it never saw.
+#[hotpath::measure]
 fn page(
     entries: Vec<WorkGraphVersionEntryV1>,
     continuation: Option<&OpaqueCursor>,

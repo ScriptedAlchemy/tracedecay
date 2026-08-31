@@ -4,6 +4,7 @@ use crate::exact_sql::ExactSqlTransaction;
 
 use super::{RemoteSpoolLimitsV1, persistence_one_row, row_u64, statement};
 
+#[hotpath::measure]
 pub(super) fn enforce(
     transaction: &ExactSqlTransaction,
     limits: RemoteSpoolLimitsV1,

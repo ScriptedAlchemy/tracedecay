@@ -98,6 +98,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_inbox_effect_v1
 ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
 "#;
 
+#[hotpath::measure]
 pub(crate) fn initialize_schema(transaction: &impl LedgerTransaction) -> Result<(), LedgerError> {
     transaction.execute_batch(LEDGER_SCHEMA)?;
     Ok(())

@@ -523,6 +523,7 @@ pub const WORKFLOW_TABLE_CONTRACTS_V1: &[WorkflowTableContractV1] = &[
     },
 ];
 
+#[hotpath::measure]
 pub fn install_workflow_schema(connection: &Connection) -> rusqlite::Result<()> {
     let mut sql = String::new();
     for table in WORKFLOW_TABLE_CONTRACTS_V1 {

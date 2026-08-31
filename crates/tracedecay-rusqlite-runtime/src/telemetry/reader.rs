@@ -21,6 +21,7 @@ pub(crate) struct ReaderAdmissionRecorder {
     vm_steps: AtomicU64,
 }
 
+#[hotpath::measure_all]
 impl ReaderAdmissionRecorder {
     pub(crate) fn acquired(&self, waited: Duration, waited_for_capacity: bool) {
         self.acquire_events.fetch_add(1, Ordering::Relaxed);

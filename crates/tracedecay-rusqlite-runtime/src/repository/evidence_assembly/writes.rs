@@ -9,6 +9,7 @@ use tracedecay_store::EvidenceAssemblyWriteV1;
 
 use super::super::support::{encode, idempotent_insert, invalid, usize_to_i64};
 
+#[hotpath::measure]
 pub(super) fn insert_anchor(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorRecordV3,
@@ -33,6 +34,7 @@ pub(super) fn insert_anchor(
 /// Writes one row of an immutable record table, which is any table keyed by a
 /// single id and carrying the canonical `record_digest`/`record_json` pair plus
 /// whatever columns it denormalizes out of that record for indexing.
+#[hotpath::measure]
 pub(super) fn insert_immutable(
     connection: &rusqlite::Connection,
     table: &'static str,
@@ -60,6 +62,7 @@ pub(super) fn insert_immutable(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn insert_membership(
     connection: &rusqlite::Connection,
     table: &'static str,
@@ -84,6 +87,7 @@ pub(super) fn insert_membership(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn insert_span_membership(
     connection: &rusqlite::Connection,
     span_id: &str,
@@ -123,6 +127,7 @@ pub(super) fn insert_span_membership(
 /// read under in `execute_write` (via `require_source_anchor_current`), parallel
 /// to `write.occurrences`, so this pass reuses those values instead of reading
 /// each `retrieval_anchors` row a second time.
+#[hotpath::measure]
 pub(super) fn publish_reverse_lineage(
     connection: &rusqlite::Connection,
     write: &EvidenceAssemblyWriteV1,
@@ -153,6 +158,7 @@ pub(super) fn publish_reverse_lineage(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn insert_derived_anchor(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorRecordV3,
@@ -173,6 +179,7 @@ pub(super) fn insert_derived_anchor(
     )
 }
 
+#[hotpath::measure]
 fn evidence_target(anchor: &RetrievalAnchorRecordV3) -> rusqlite::Result<(&'static str, &str)> {
     match anchor.target() {
         RetrievalAnchorTargetV3::ExactSourceOccurrence(id) => {
