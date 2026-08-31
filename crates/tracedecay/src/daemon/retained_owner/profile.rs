@@ -32,7 +32,7 @@ use tracedecay_domain::errors::TraceDecayError;
 #[derive(Clone)]
 pub(crate) struct ProfileRetainedAuthoritiesV1<'a> {
     pub(crate) runtime_registry:
-        Option<&'a crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+        Option<&'a tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     pub(crate) session_identity: ResolvedSessionIdentity,
     pub(crate) configuration_digest: ManifestDigest,
     pub(crate) lcm_authority:
@@ -684,7 +684,7 @@ mod tests {
         )
         .expect("daemon database scope");
         let runtime_registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                 profile_identity.clone(),
             )
             .await
@@ -789,7 +789,7 @@ mod tests {
         )
         .expect("daemon database scope");
         let runtime_registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                 profile_identity.clone(),
             )
             .await
@@ -847,7 +847,7 @@ mod tests {
         )
         .expect("daemon database scope");
         let runtime_registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                 profile_identity.clone(),
             )
             .await

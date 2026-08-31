@@ -13,12 +13,12 @@ use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalRuntimeCompatibilityV1,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-use tracedecay_search_eval::semantic_native::SemanticNativeStageResultV1;
-use tracedecay_search_eval::{
+use tracedecay_query::search_quality::semantic_native::SemanticNativeStageResultV1;
+use tracedecay_query::search_quality::{
     CandidateWorkloadV1, DirectEvaluationReportV1, direct_evaluated_profile_material,
     validate_packaged_native_activation_report,
 };
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 const ACTIVATION_WORKLOAD_JSON: &str = include_str!(
     "../../../../tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
@@ -695,7 +695,7 @@ fn validate_runtime_evidence(
 mod tests {
     use super::*;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
-    use tracedecay_search_eval::{
+    use tracedecay_query::search_quality::{
         PackagedNativeQualificationV1, packaged_native_qualification_bytes,
     };
 

@@ -27,10 +27,6 @@ use super::read_model::{
     DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
     DashboardLegalActionRefV1, scope_from_state,
 };
-use crate::application::configuration::{
-    DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
-    parse_duration_millis, plan_user_settings_mutation,
-};
 use crate::application::settings_control::{
     ProjectSettingsPatchV1, ProjectSettingsPreviewErrorV1, SyncSettingsPatchV1,
     TelemetrySettingsPatchV1, context_scout_settings_are_enabled, effective_context_scout_settings,
@@ -39,6 +35,10 @@ use crate::application::settings_control::{
 use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
+use tracedecay_configuration::{
+    DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
+    parse_duration_millis, plan_user_settings_mutation,
+};
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1, ConfigurationIdempotencyKey,
     ConfigurationRevisionId,

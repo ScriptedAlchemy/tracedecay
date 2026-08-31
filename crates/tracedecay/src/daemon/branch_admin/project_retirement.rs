@@ -467,15 +467,81 @@ mod tests {
     use crate::daemon::store_writer_gate::{StoreWriterClass, WriterScope};
 
     fn owner(project_id: &str) -> StoreOwnerKey {
+        isolated_owner(std::path::Path::new("/profile"), project_id)
+    }
+
+    fn isolated_owner(profile_root: &std::path::Path, project_id: &str) -> StoreOwnerKey {
         StoreOwnerKey {
-            profile_root: std::path::PathBuf::from("/profile"),
-            global_db_path: std::path::PathBuf::from("/profile/profile.db"),
+            profile_root: profile_root.to_path_buf(),
+            global_db_path: profile_root.join("profile.db"),
             project_id: Some(project_id.to_owned()),
-            store_root: std::path::PathBuf::from(format!("/profile/projects/{project_id}")),
-            graph_db_path: std::path::PathBuf::from(format!(
-                "/profile/projects/{project_id}/graph.db"
-            )),
+            store_root: profile_root.join("projects").join(project_id),
+            graph_db_path: profile_root
+                .join("projects")
+                .join(project_id)
+                .join("graph.db"),
         }
+    }
+
+    async fn isolated_registered_graph(
+        profile_root: &std::path::Path,
+        project_root: &std::path::Path,
+        project_id: &str,
+    ) -> (
+        crate::tracedecay::TraceDecay,
+        crate::host_admission::HostAdmissionTestRuntimeV1,
+    ) {
+        std::fs::create_dir_all(profile_root).expect("isolated profile root");
+        std::fs::create_dir_all(project_root).expect("isolated project root");
+        let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
+            .expect("typed project identity");
+        let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+            profile_root,
+            project_root,
+            project_id,
+        )
+        .await
+        .expect("isolated host-admission runtime");
+        let graph = runtime
+            .initialize_project_graph_for_test(
+                project_root,
+                crate::tracedecay::TraceDecayOpenOptions {
+                    profile_root: Some(profile_root.to_path_buf()),
+                    global_db_path: None,
+                },
+            )
+            .await
+            .expect("isolated registered graph");
+        (graph, runtime)
+    }
+
+    async fn isolated_sibling_graph(
+        runtime: &crate::host_admission::HostAdmissionTestRuntimeV1,
+        profile_root: &std::path::Path,
+        project_root: &std::path::Path,
+        project_id: &str,
+    ) -> (
+        crate::tracedecay::TraceDecay,
+        crate::host_admission::HostAdmissionTestRuntimeV1,
+    ) {
+        std::fs::create_dir_all(project_root).expect("isolated sibling project root");
+        let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
+            .expect("typed project identity");
+        let sibling = runtime
+            .sibling_project(project_root, project_id)
+            .await
+            .expect("isolated sibling host-admission runtime");
+        let graph = sibling
+            .initialize_project_graph_for_test(
+                project_root,
+                crate::tracedecay::TraceDecayOpenOptions {
+                    profile_root: Some(profile_root.to_path_buf()),
+                    global_db_path: None,
+                },
+            )
+            .await
+            .expect("isolated sibling registered graph");
+        (graph, sibling)
     }
 
     #[tokio::test]
@@ -777,33 +843,27 @@ mod tests {
     #[tokio::test]
     async fn cancellation_before_eviction_admission_preserves_owner_then_shutdown_joins_retirement()
     {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let homes = tempfile::tempdir().expect("isolated profile home");
+        let profile = homes.path().join("shared-profile");
         let projects = tempfile::tempdir().expect("project roots");
         let idle_project = projects.path().join("idle");
         let replacement_project = projects.path().join("replacement");
-        std::fs::create_dir_all(&idle_project).expect("idle project root");
-        std::fs::create_dir_all(&replacement_project).expect("replacement project root");
-        let (idle_graph, _idle_runtime) =
-            crate::tracedecay::TraceDecay::init_test_fixture_with_registered_runtime(
-                &idle_project,
-                "project.retirement-idle",
-            )
-            .await
-            .expect("registered idle graph");
+        let (idle_graph, idle_runtime) =
+            isolated_registered_graph(&profile, &idle_project, "project.retirement-idle").await;
         let idle_server = crate::mcp::McpServer::new(idle_graph, None).await;
         let idle_lifecycle = idle_server.project_server_response_lifecycle();
         let idle_witness = Arc::downgrade(&idle_server);
-        let (replacement_graph, _replacement_runtime) =
-            crate::tracedecay::TraceDecay::init_test_fixture_with_registered_runtime(
-                &replacement_project,
-                "project.retirement-replacement",
-            )
-            .await
-            .expect("registered replacement graph");
+        let (replacement_graph, _replacement_runtime) = isolated_sibling_graph(
+            &idle_runtime,
+            &profile,
+            &replacement_project,
+            "project.retirement-replacement",
+        )
+        .await;
         let replacement_server = crate::mcp::McpServer::new(replacement_graph, None).await;
         let administration = StoreAdministration::default();
         let idle_key = crate::daemon::ProjectServerKey {
-            owner: owner("project-idle"),
+            owner: isolated_owner(&profile, "project-idle"),
             project_root: idle_project.clone(),
             scope_prefix: None,
         };
@@ -815,24 +875,28 @@ mod tests {
         };
         {
             let mut servers = administration.project_servers().lock().await;
-            servers.insert_pending_route(idle_route.clone(), idle_key.clone(), idle_server);
-            assert!(servers.mark_ready(&idle_key));
+            // Bounded replacement evicts only RegisteredHostIngest owners in
+            // this route set. insert_route publishes that exact idle state.
+            servers.insert_route(idle_route.clone(), idle_key.clone(), idle_server);
         }
 
         let admission_blocker = administration
             .acquire_project_server_retirement_admission()
             .await;
         let attempted_admission = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
         let cancelled_administration = administration.clone();
         let cancelled_attempt = Arc::clone(&attempted_admission);
+        let cancelled_started = Arc::clone(&started);
         let cancelled = tokio::spawn(async move {
             cancelled_attempt.store(true, Ordering::Release);
+            cancelled_started.notify_one();
             let _admission = cancelled_administration
                 .acquire_project_server_retirement_admission()
                 .await;
             panic!("cancelled open reached owner mutation without admission contention");
         });
-        tokio::task::yield_now().await;
+        started.notified().await;
         assert!(
             attempted_admission.load(Ordering::Acquire),
             "the cancelled caller must contend on retirement admission before mutation"
@@ -861,7 +925,7 @@ mod tests {
         drop(admission_blocker);
 
         let replacement_key = crate::daemon::ProjectServerKey {
-            owner: owner("project-replacement"),
+            owner: isolated_owner(&profile, "project-replacement"),
             project_root: replacement_project.clone(),
             scope_prefix: None,
         };
@@ -916,6 +980,17 @@ mod tests {
         drop(request);
         let receipt = shutdown.await;
         assert!(receipt.is_clean());
+        let retirement_owners: Vec<&str> = receipt
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.owner.starts_with("project_server_retirement["))
+            .map(|outcome| outcome.owner.as_str())
+            .collect();
+        assert_eq!(
+            retirement_owners,
+            ["project_server_retirement[project-idle]"],
+            "shutdown must join only this isolated eviction, not a leaked foreign retirement"
+        );
         assert!(
             receipt.outcomes.iter().any(|outcome| {
                 outcome.owner == "project_server_retirement[project-idle]"

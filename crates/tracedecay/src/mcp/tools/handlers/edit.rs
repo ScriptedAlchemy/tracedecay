@@ -677,7 +677,7 @@ mod tests {
         )
         .unwrap();
         let runtime_registry = Arc::new(
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                 identity,
             )
             .await

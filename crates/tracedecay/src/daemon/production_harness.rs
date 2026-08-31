@@ -457,6 +457,11 @@ impl ProductionProjectCompositionHarnessV1 {
         scope_prefix: Option<String>,
         long_lived_session_maintenance_for_test: bool,
     ) -> ProductionHarnessOpenFuture {
+        // Embedded test compositions never pass through the binary's
+        // product-runtime registration, so the canonical fixture is this
+        // composition's provider; without it daemon bootstrap and version
+        // reporting answer the typed missing-provider state.
+        crate::product_runtime::register_fixture_product_runtime();
         Box::pin(async move {
             let isolated = isolate_production_composition_roots(
                 isolation_root,

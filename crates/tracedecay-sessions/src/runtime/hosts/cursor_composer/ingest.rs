@@ -104,6 +104,7 @@ struct ComposerIngestContext<'facade, 'root> {
     matchers: &'root ProjectRootMatcherCache,
 }
 
+#[hotpath::measure_all]
 impl ComposerIngestContext<'_, '_> {
     /// Resolve this sweep's scope boundary once, rather than per composer
     /// envelope and per workspace directory.
@@ -366,7 +367,14 @@ impl CursorComposerSource {
             }
         };
         let conn = &ro.conn;
-        let scope_matcher = context.scope_matcher();
+        let state_generation = hotpath::measure_block!(
+            "sessions.hosts.cursor_composer.state_generation_blocking",
+            run_blocking_transcript_section(|| snapshot_generation(&self.state_db_path))
+        );
+        let scope_matcher = hotpath::measure_block!(
+            "sessions.hosts.cursor_composer.state_scope_blocking",
+            run_blocking_transcript_section(|| context.scope_matcher())
+        );
         // Indexed prefix scan of keys + byte lengths only — never SELECT full
         // envelope text here. Point-fetch materializes only when the UTF-8 byte
         // length fits both ceilings. Keyset pagination over the `cursorDiskKV`
@@ -479,9 +487,14 @@ impl CursorComposerSource {
                 // `Unknown` (bounded git timeout) skips the envelope without
                 // advancing its watermark, so the next sweep re-resolves the
                 // membership instead of misfiling the session.
-                if scope_matcher.membership(Some(Path::new(&project.path)))
-                    != ProjectMembership::Match
-                {
+                let project_matches = hotpath::measure_block!(
+                    "sessions.hosts.cursor_composer.envelope_scope_blocking",
+                    run_blocking_transcript_section(|| {
+                        scope_matcher.membership(Some(Path::new(&project.path)))
+                            == ProjectMembership::Match
+                    })
+                );
+                if !project_matches {
                     continue;
                 }
                 let selected_project = ComposerProject {
@@ -506,7 +519,7 @@ impl CursorComposerSource {
                     byte_budget.defer();
                     continue;
                 }
-                let Some(generation) = snapshot_generation(&self.state_db_path) else {
+                let Some(generation) = state_generation.clone() else {
                     continue;
                 };
                 let mut session_accepted = false;
@@ -866,7 +879,10 @@ impl CursorComposerSource {
             return;
         }
 
-        let Some(generation) = snapshot_generation(store_path) else {
+        let Some(generation) = hotpath::measure_block!(
+            "sessions.hosts.cursor_composer.store_generation_blocking",
+            run_blocking_transcript_section(|| snapshot_generation(store_path))
+        ) else {
             return;
         };
         let Ok(source) = cursor_composer_source(&session_id) else {

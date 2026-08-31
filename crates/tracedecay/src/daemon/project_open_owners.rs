@@ -47,6 +47,7 @@ use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
+use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
 mod advisory_runtime;
@@ -87,7 +88,7 @@ pub(super) use tracedecay_daemon_service::{
 struct ProjectOpenSourceEditAuthorizationV1 {
     project_root: std::path::PathBuf,
     scope: ResolvedScope,
-    configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
+    configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 }
 
 struct CurrentSourceEditAuthorityV1 {
@@ -660,7 +661,7 @@ pub(super) async fn register_project_open_production_owners(
         elapsed_ms = owner_registration_started.elapsed().as_millis(),
     );
     owner_phase_started = Instant::now();
-    let scout_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+    let scout_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
         revision_id: configuration.revision_id.clone(),
         snapshot: configuration.snapshot.clone(),
     };
@@ -851,7 +852,7 @@ pub(super) async fn register_project_open_production_owners(
         message: format!("project-open Work authority is invalid: {error}"),
     })?;
     let work_topology_policy =
-        tracedecay_usecases::config::topology::resolved_work_topology_policy(
+        tracedecay_configuration::config::topology::resolved_work_topology_policy(
             &configuration.snapshot,
         )
         .map_err(|error| TraceDecayError::Config {
@@ -1212,7 +1213,7 @@ async fn register_semantic_activation_owner(
     graph: &Arc<crate::tracedecay::TraceDecay>,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
-    configuration: &tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
+    configuration: &tracedecay_configuration::ConfigurationCurrentStateV1,
 ) -> Result<()> {
     let configuration_pin =
         tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
@@ -1547,7 +1548,7 @@ fn github_repository_from_remote(remote: &str) -> Option<(String, String)> {
 pub(super) fn daemon_owned_project_source_access_at(
     scope: &ResolvedScope,
     project_root: &Path,
-    configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+    configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
     observed_at: UtcMicros,
 ) -> std::result::Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
     let locator = locator_digest_for_project(project_root)?;
@@ -1688,7 +1689,7 @@ impl tracedecay_usecases::ProjectSourceAccessSnapshotPort for DaemonOwnedProject
         &self,
         scope: &ResolvedScope,
         project_root: &Path,
-        configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+        configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
         observed_at: UtcMicros,
     ) -> std::result::Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
         daemon_owned_project_source_access_at(scope, project_root, configuration, observed_at)
