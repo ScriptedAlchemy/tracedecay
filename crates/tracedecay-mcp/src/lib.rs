@@ -86,32 +86,9 @@ pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,
     map_transcript_ingest_error,
 };
-<<<<<<< HEAD
-pub use workflow::{
-    MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile, TestRunControl,
-    TestRunFailure, TestRunOutput, TestRunStream, cargo_test_args, libtest_identity,
-    libtest_module_prefix, parse_libtest_output, run_cargo_tests,
-};
-pub use context_headings::{
-    CODE_CONTEXT_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
-    CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
-    CONTEXT_MEMORY_FEEDBACK_HINT, CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_PRIORITY_HEADINGS,
-    CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
-};
 pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport};
 pub use lifecycle::{McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity};
 pub use project_access::registered_project_reader_tool_names;
-=======
-pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport};
-pub use lifecycle::{McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity};
-pub use project_access::registered_project_reader_tool_names;
-pub use session_refresh::{
-    SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
-    SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
-    SessionRefreshServiceFuture, SessionRefreshServiceOutcome, SessionRefreshServicePort,
-    utc_micros_value,
-};
->>>>>>> origin/codex/tracedecay-total-redesign-plan-reopened
 pub use tool_call_deadline::{
     TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, tool_call_deadline_meta,
 };
