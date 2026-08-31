@@ -578,7 +578,7 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
         INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, UtcMicros};
-    use tracedecay_usecases::configuration::{
+    use tracedecay_configuration::{
         ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
     };
 

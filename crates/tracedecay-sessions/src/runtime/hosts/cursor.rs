@@ -42,7 +42,7 @@ use crate::runtime::source::{
     HostProviderCoverage, MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame,
     RawJsonlFrameReader, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
     TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded,
-    persist_host_provider_coverage, stream_new_jsonl,
+    persist_host_provider_coverage, run_blocking_transcript_section, stream_new_jsonl,
 };
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
@@ -103,6 +103,7 @@ struct DispatchModelCache {
     models: Mutex<HashMap<(PathBuf, String), String>>,
 }
 
+#[hotpath::measure_all]
 impl DispatchModelCache {
     fn parent_dispatch_model(
         &self,
@@ -141,6 +142,7 @@ struct CursorEventSource {
     dispatch_models: DispatchModelCache,
 }
 
+#[hotpath::measure_all]
 impl TranscriptSource for CursorEventSource {
     fn provider(&self) -> &'static str {
         "cursor"
@@ -232,9 +234,14 @@ fn admit_cursor_jsonl_observations<'a>(
         )
         .with_max_new_bytes(max_new_bytes)
         .with_cancellation(cancellation.clone());
-        let subagent_model = subagent.as_ref().and_then(|(_, agent_id)| {
-            parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
-        });
+        let subagent_model = hotpath::measure_block!(
+            "sessions.hosts.cursor.dispatch_model_blocking",
+            run_blocking_transcript_section(|| {
+                subagent.as_ref().and_then(|(_, agent_id)| {
+                    parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
+                })
+            })
+        );
         let progress = admit_jsonl_observations(
             request,
             |scan| CursorJsonlAdmitState {
@@ -570,7 +577,11 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
-    for path in source.transcript_paths(&project_root) {
+    let paths = hotpath::measure_block!(
+        "sessions.hosts.cursor.discover_blocking",
+        run_blocking_transcript_section(|| source.transcript_paths(&project_root))
+    );
+    for path in paths {
         let context = cursor_observation_context(&source.event, &path, false);
         let progress = admit_cursor_jsonl_observations(
             &parent_session_id,
@@ -711,7 +722,11 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
-    for path in source.transcript_paths(&placeholder) {
+    let paths = hotpath::measure_block!(
+        "sessions.hosts.cursor.discover_blocking",
+        run_blocking_transcript_section(|| source.transcript_paths(&placeholder))
+    );
+    for path in paths {
         let context = cursor_observation_context(&source.event, &path, true);
         let progress = admit_cursor_jsonl_observations(
             &parent_session_id,
@@ -807,7 +822,11 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
-    for path in source.transcript_paths(project_root) {
+    let paths = hotpath::measure_block!(
+        "sessions.hosts.cursor.discover_blocking",
+        run_blocking_transcript_section(|| source.transcript_paths(project_root))
+    );
+    for path in paths {
         if cancellation.is_cancelled() {
             return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
         }
@@ -931,6 +950,7 @@ pub struct CursorSweepSource {
     dispatch_models: DispatchModelCache,
 }
 
+#[hotpath::measure_all]
 impl CursorSweepSource {
     /// Source rooted at the real `~/.cursor/projects`. Returns `None` when the
     /// home directory cannot be resolved.
@@ -969,6 +989,7 @@ impl CursorSweepSource {
     }
 }
 
+#[hotpath::measure_all]
 impl TranscriptSource for CursorSweepSource {
     fn provider(&self) -> &'static str {
         "cursor"

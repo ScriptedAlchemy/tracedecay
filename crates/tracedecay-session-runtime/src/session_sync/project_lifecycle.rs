@@ -35,8 +35,7 @@ pub struct SessionSyncProjectContext {
     pub registry: RegisteredGlobalDbLeaseV1,
     pub(super) project_refresh:
         crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
-    pub(super) user_refresh:
-        crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+    pub(super) user_refresh: crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
 }
 
 pub struct SessionSyncTaskV1 {

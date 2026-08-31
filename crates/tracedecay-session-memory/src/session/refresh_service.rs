@@ -7,7 +7,9 @@ use std::pin::Pin;
 use serde::Serialize;
 use tracedecay_application::RequestContext;
 use tracedecay_domain::{SessionSourceCoverageV1, UtcMicros};
-use tracedecay_session_memory::session::{SessionRefreshTarget, SessionRequestBinding};
+
+use super::refresh::SessionRefreshTarget;
+use super::types::SessionRequestBinding;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

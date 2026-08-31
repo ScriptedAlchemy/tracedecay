@@ -1,10 +1,17 @@
 //! `tracedecay_config` — dotted-path lookups into TOML and JSON config files.
 
-use super::*;
+use std::path::Path;
+
+use serde_json::{Value, json};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::storage::ProjectPath;
+
+use crate::ToolResult;
+use crate::generic_tool_result;
 
 /// Structured TOML / JSON queries by dotted key path.
 #[hotpath::measure(label = "mcp.info.config.total")]
-pub(crate) async fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
+pub async fn handle_config(project_root: &Path, args: &Value) -> Result<ToolResult> {
     let key = args
         .get("key")
         .and_then(|v| v.as_str())
@@ -26,21 +33,21 @@ pub(crate) async fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolR
         });
     }
 
-    let project_root = cg.project_root().to_path_buf();
+    let scan_root = project_root.to_path_buf();
     let (payload, touched) = hotpath::future!(
         tokio::task::spawn_blocking(move || -> Result<_> {
         let mut files: Vec<String> = Vec::new();
         if let Some(p) = path {
-            let project_path = ProjectPath::resolve(&project_root, Path::new(&p))?;
+            let project_path = ProjectPath::resolve(&scan_root, Path::new(&p))?;
             files.push(project_path.relative_path_string());
         } else if let Some(pat) = glob_pat {
-            let combined = project_root.join(&pat);
+            let combined = scan_root.join(&pat);
             let walker =
                 glob::glob(&combined.to_string_lossy()).map_err(|e| TraceDecayError::Config {
                     message: format!("invalid glob '{pat}': {e}"),
                 })?;
             for entry in walker.flatten() {
-                if let Ok(project_path) = ProjectPath::resolve(&project_root, &entry) {
+                if let Ok(project_path) = ProjectPath::resolve(&scan_root, &entry) {
                     files.push(project_path.relative_path_string());
                 }
             }
@@ -50,7 +57,7 @@ pub(crate) async fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolR
         let mut matches: Vec<Value> = Vec::new();
         let mut touched: Vec<String> = Vec::new();
         for rel in &files {
-            let project_path = ProjectPath::resolve(&project_root, Path::new(rel))?;
+            let project_path = ProjectPath::resolve(&scan_root, Path::new(rel))?;
             let abs = project_path.absolute_path();
             let rel = project_path.relative_path_string();
             let Ok(contents) = std::fs::read_to_string(&abs) else {
@@ -90,12 +97,7 @@ pub(crate) async fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolR
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("tracedecay_config scan failed to join: {join_error}"),
     })??;
-    Ok(generic_tool_result(
-        Some(cg.project_root()),
-        args,
-        &payload,
-        touched,
-    ))
+    Ok(generic_tool_result(Some(project_root), args, &payload, touched))
 }
 
 #[derive(Debug, Clone, Copy)]

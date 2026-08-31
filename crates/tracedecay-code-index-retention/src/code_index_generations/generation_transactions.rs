@@ -8,6 +8,7 @@ use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::CodeGenerationId;
@@ -17,15 +18,16 @@ use super::graph_replay_release;
 use super::journal::{
     BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
 };
-use super::locking::{CodeGenerationStoreLockV1, acquire_code_generation_store_lock};
+use super::locking::{CodeGenerationStoreLockV1, try_acquire_code_generation_store_lock};
 use super::receipt_store;
 use super::receipt_store::ReceiptStoreSpec;
 use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionGenerationV1,
     CodeGenerationRetentionReceiptV1, CodeGenerationRetentionTransactionV1, GENERATIONS_DIRECTORY,
-    MAX_TRANSACTION_BYTES, QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY,
-    TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel, read_optional_active_pointer, storage,
-    sync_directory, total_bytes, validate_generation_file,
+    GRAPH_REPLAY_POOL_ACQUIRE_BUDGET, GRAPH_REPLAY_POOL_ACQUIRE_POLL, MAX_TRANSACTION_BYTES,
+    QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY, TRANSACTION_FILE, TRANSACTION_SCHEMA,
+    observe_cancel, read_optional_active_pointer, storage, sync_directory, total_bytes,
+    validate_generation_file,
 };
 
 const GENERATION_TRANSACTION_JOURNAL: BoundedJournalSpec<CodeGenerationRetentionTransactionV1> =
@@ -223,18 +225,86 @@ pub(super) fn stage_collectable_generations(
 /// lock.
 pub(super) struct GraphReplayPoolLockV1 {
     root: PathBuf,
-    _guard: CodeGenerationStoreLockV1,
+    guard: Option<CodeGenerationStoreLockV1>,
 }
 
+impl Drop for GraphReplayPoolLockV1 {
+    fn drop(&mut self) {
+        self.release_exclusive();
+    }
+}
+
+/// Convenience acquire for tests and recovery helpers that have no caller
+/// deadline of their own. Production collection must call
+/// [`acquire_graph_replay_pool_lock_checked`] with the carried deadline
+/// and cancellation so a publisher that wins the probe-to-execute window
+/// cannot park the executor on a blocking flock.
 pub(super) fn acquire_graph_replay_pool_lock(
     pool_root: &Path,
 ) -> Result<GraphReplayPoolLockV1, CodeGenerationRetentionErrorV1> {
-    ensure_private_graph_replay_pool_root(pool_root)?;
-    let guard = acquire_code_generation_store_lock(pool_root)?;
-    Ok(GraphReplayPoolLockV1 {
-        root: guard.generation_store_root()?.to_path_buf(),
-        _guard: guard,
-    })
+    acquire_graph_replay_pool_lock_checked(
+        pool_root,
+        Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+        &|| false,
+    )
+}
+
+pub(super) fn acquire_graph_replay_pool_lock_checked(
+    pool_root: &Path,
+    deadline: Instant,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<GraphReplayPoolLockV1, CodeGenerationRetentionErrorV1> {
+    GraphReplayPoolLockV1::acquire_exclusive(pool_root, deadline, is_cancelled)
+}
+
+#[hotpath::measure_all]
+impl GraphReplayPoolLockV1 {
+    fn acquire_exclusive(
+        pool_root: &Path,
+        deadline: Instant,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, CodeGenerationRetentionErrorV1> {
+        ensure_private_graph_replay_pool_root(pool_root)?;
+        // Honor a sooner caller deadline, but never wait longer than the
+        // executor budget. A 30s graph-operation deadline would still pin
+        // the daemon writer gate for the whole seal-hash.
+        let deadline = deadline.min(Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET);
+        loop {
+            if observe_cancel(is_cancelled) {
+                crate::hotpath_observe::retention_replay_pool_acquire_cancelled();
+                return Err(CodeGenerationRetentionErrorV1::Cancelled);
+            }
+            match try_acquire_code_generation_store_lock(pool_root)? {
+                Some(guard) => {
+                    crate::hotpath_observe::retention_replay_pool_acquired();
+                    return Ok(Self {
+                        root: guard.generation_store_root()?.to_path_buf(),
+                        guard: Some(guard),
+                    });
+                }
+                None if Instant::now() >= deadline => {
+                    crate::hotpath_observe::retention_replay_pool_busy();
+                    return Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy);
+                }
+                None => Self::wait_for_exclusive(deadline),
+            }
+        }
+    }
+
+    fn wait_for_exclusive(deadline: Instant) {
+        crate::hotpath_observe::retention_replay_pool_acquire_wait();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        std::thread::park_timeout(remaining.min(GRAPH_REPLAY_POOL_ACQUIRE_POLL));
+    }
+
+    fn release_exclusive(&mut self) {
+        if self.guard.take().is_some() {
+            crate::hotpath_observe::retention_replay_pool_released();
+        }
+    }
 }
 
 /// Expose every quarantined generation to the graph replay pool by hard link
@@ -622,7 +692,7 @@ pub(super) fn withdraw_generations_from_graph_replay_pool(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(storage(error)),
     }
-    let _pool_lock = acquire_code_generation_store_lock(pool_root)?;
+    let _pool_lock = acquire_graph_replay_pool_lock(pool_root)?;
     let generations_root = store_root.join(GENERATIONS_DIRECTORY);
     let mut removed = false;
     for generation in &transaction.receipt.deleted_generations {
@@ -697,10 +767,16 @@ pub(super) fn cleanup_committed_transaction(
     transaction: &CodeGenerationRetentionTransactionV1,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     graph_replay_pool_root: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let graph_replay_pool_lock = graph_replay_pool_root
-        .map(acquire_graph_replay_pool_lock)
-        .transpose()?;
+    let graph_replay_pool_lock = match graph_replay_pool_root {
+        Some(pool_root) => Some(acquire_graph_replay_pool_lock_checked(
+            pool_root,
+            Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+            is_cancelled,
+        )?),
+        None => None,
+    };
     cleanup_committed_transaction_under_graph_replay_pool_lock(
         store_root,
         transaction,

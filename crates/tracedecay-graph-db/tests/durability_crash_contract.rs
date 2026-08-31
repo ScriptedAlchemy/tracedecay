@@ -22,10 +22,9 @@ use tempfile::TempDir;
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
-    GraphGenerationDependency,
-    GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey,
-    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
-    GraphWatermark, SourceGeneration, VerifiedGraphSnapshot,
+    GraphGenerationDependency, GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation,
+    GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
+    GraphPropertyName, GraphWatermark, SourceGeneration, VerifiedGraphSnapshot,
 };
 use tracedecay_store::{
     GraphProjectionIdentityV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
@@ -193,6 +192,14 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
         _context: &GraphPublicationOperationContextV1,
     ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
         unreachable!("durability crash contract never retires a replay")
+    }
+
+    fn discard_pending_replay(
+        &mut self,
+        _request: &tracedecay_store::GraphPendingReplayDiscardV1,
+        _context: &GraphPublicationOperationContextV1,
+    ) -> GraphPublicationStoreResultV1<tracedecay_store::GraphPendingReplayDiscardOutcomeV1> {
+        unreachable!("durability crash contract never discards a pending replay")
     }
 
     fn replay_page(
@@ -560,7 +567,10 @@ fn torn_durable_store_is_quarantined_and_rebuilt_from_the_replay_journal() {
     // The rebuilt store serves through the ordinary verified surface.
     let served = registered
         .registry
-        .verified_snapshot(registration(registered.binding.clone(), temp.path()), &identity)
+        .verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &identity,
+        )
         .unwrap();
     assert_eq!(served.generation(), &GraphGenerationId::new("g1").unwrap());
     assert_eq!(marker_of(&served, &identity), "g1");
@@ -648,8 +658,8 @@ fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
     let crashed = RegisteredGraph::new(crash.path()).unwrap();
     crashed.mount().unwrap();
 
-    let quarantine = quarantine_directory(crash.path())
-        .expect("a CRC-faulted container must be quarantined");
+    let quarantine =
+        quarantine_directory(crash.path()).expect("a CRC-faulted container must be quarantined");
     assert_eq!(
         std::fs::read(quarantine.join("graph.grafeo")).unwrap(),
         corrupted,
@@ -776,7 +786,10 @@ fn held_quarantine_decision_defers_the_mount_and_the_next_attempt_recovers() {
     registered.mount().unwrap();
     let quarantine = quarantine_directory(temp.path())
         .expect("the released decision lock lets the next mount quarantine");
-    assert_eq!(std::fs::read(quarantine.join("graph.grafeo")).unwrap(), torn);
+    assert_eq!(
+        std::fs::read(quarantine.join("graph.grafeo")).unwrap(),
+        torn
+    );
 }
 
 #[test]

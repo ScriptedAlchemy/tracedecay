@@ -43,7 +43,9 @@ pub enum ProductRuntimeError {
         "no product runtime provider is registered; the generating binary must register one at process start"
     )]
     MissingProvider,
-    #[error("a product runtime provider is already registered; registration is set-once per process")]
+    #[error(
+        "a product runtime provider is already registered; registration is set-once per process"
+    )]
     ConflictingProvider,
     #[error("product runtime provider rejected: {reason}")]
     InvalidProvider { reason: String },
@@ -331,7 +333,10 @@ mod tests {
         );
         // The first registration survives the rejected second attempt.
         assert_eq!(
-            runtime_in(&slot).expect("first registration retained").source().full_sha,
+            runtime_in(&slot)
+                .expect("first registration retained")
+                .source()
+                .full_sha,
             VALID_SHA
         );
     }

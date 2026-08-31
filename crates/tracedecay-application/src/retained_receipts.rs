@@ -1,21 +1,25 @@
-//! Typed retained-memory receipt assembly.
+//! Typed retained receipt and effect assembly.
+//!
+//! Wire shapes stay in [`crate::retained_surfaces`]. This module is the single
+//! authority for evidence packets, effect receipts, and measured budgets.
 
 use serde::Serialize;
-use tracedecay_application::retained_surfaces::{
-    RetainedSurfaceEvidenceTerminalV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
-    SessionCoverageModeV1,
-};
-use tracedecay_application::{
-    ApplicationOutcome, AuthorityReceipt, CancellationStage, Deadline, EffectId, EffectReceipt,
-    EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceIdentity,
-    EvidencePacket, IdempotencyKey, Omission, OperationBudgetUsage, OperationReceipt, PageState,
-    PolicyDecisionRef, ReconciliationState, RetainedSurfaceExecutionContextV1,
-    RetainedSurfaceExecutionErrorV1, TemporalState, now_micros,
-};
 use tracedecay_domain::{ComponentVersion, ManifestDigest, TemporalModeV1, canonical_sha256};
 use tracedecay_tool_catalog::{EffectClass, SortContractId};
 
-pub(super) fn evidence_outcome(
+use crate::retained_surfaces::{
+    RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1, RetainedSurfaceOperation,
+    RetainedSurfaceResultV1, RetainedSurfaceTemporalRequestV1, SessionCoverageModeV1,
+};
+use crate::{
+    ApplicationOutcome, AuthorityReceipt, CancellationStage, CoverageDomainState, Deadline,
+    EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
+    EvidenceIdentity, EvidencePacket, IdempotencyKey, Omission, OperationBudgetUsage,
+    OperationReceipt, PageState, PolicyDecisionRef, ReconciliationState,
+    RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1, TemporalState, now_micros,
+};
+
+pub fn evidence_outcome(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
     result: RetainedSurfaceResultV1,
@@ -45,7 +49,7 @@ pub(super) fn evidence_outcome(
         eligible: facts.eligible,
         returned: facts.returned,
         completeness: facts.completeness,
-        domains: vec![tracedecay_application::CoverageDomainState {
+        domains: vec![CoverageDomainState {
             domain,
             completeness: facts.completeness,
         }],
@@ -125,7 +129,7 @@ pub(super) fn evidence_outcome(
     Ok(outcome)
 }
 
-pub(super) fn effective_memory_deadline(
+pub fn effective_memory_deadline(
     context: &RetainedSurfaceExecutionContextV1<'_>,
 ) -> Deadline {
     Deadline {
@@ -137,7 +141,7 @@ pub(super) fn effective_memory_deadline(
     }
 }
 
-pub(crate) struct PreparedRetainedEffect {
+pub struct PreparedRetainedEffect {
     operation: RetainedSurfaceOperation,
     durable_operation_id: String,
     effect_id: EffectId,
@@ -147,7 +151,7 @@ pub(crate) struct PreparedRetainedEffect {
     receipt_template: EffectReceipt,
 }
 
-pub(crate) fn prepare_retained_effect<T: Serialize>(
+pub fn prepare_retained_effect<T: Serialize>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
     configuration_digest: &ManifestDigest,
@@ -281,7 +285,7 @@ pub(crate) fn prepare_retained_effect<T: Serialize>(
 }
 
 impl PreparedRetainedEffect {
-    pub(crate) fn material_committed_state_digest<C: Serialize + ?Sized>(
+    pub fn material_committed_state_digest<C: Serialize + ?Sized>(
         &self,
         committed_state_material: &C,
     ) -> Result<ManifestDigest, RetainedSurfaceExecutionErrorV1> {
@@ -304,7 +308,7 @@ impl PreparedRetainedEffect {
         receipt
     }
 
-    pub(super) fn partial_with_digest(
+    pub fn partial_with_digest(
         &self,
         committed_state: &ManifestDigest,
         reason_code: &str,
@@ -313,7 +317,7 @@ impl PreparedRetainedEffect {
         Err(self.partial_error_with_digest(committed_state, reason_code, detail))
     }
 
-    pub(crate) fn partial_error_with_digest(
+    pub fn partial_error_with_digest(
         &self,
         committed_state: &ManifestDigest,
         reason_code: &str,
@@ -326,7 +330,7 @@ impl PreparedRetainedEffect {
         }
     }
 
-    pub(super) fn memory_projection_failed(
+    pub fn memory_projection_failed(
         &self,
         committed_state: &ManifestDigest,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
@@ -337,7 +341,7 @@ impl PreparedRetainedEffect {
         )
     }
 
-    pub(super) fn memory_expiry_failed(
+    pub fn memory_expiry_failed(
         &self,
         committed_state: &ManifestDigest,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
@@ -345,7 +349,7 @@ impl PreparedRetainedEffect {
         self.partial_with_digest(committed_state, reason_code, detail)
     }
 
-    pub(super) fn complete<C: Serialize + ?Sized>(
+    pub fn complete<C: Serialize + ?Sized>(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
         committed_state_material: &C,
@@ -357,7 +361,7 @@ impl PreparedRetainedEffect {
         self.complete_with_digest(context, &committed_state, reconciliation, result, partial)
     }
 
-    pub(crate) fn complete_with_digest(
+    pub fn complete_with_digest(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
         committed_state: &ManifestDigest,
@@ -473,7 +477,7 @@ impl PreparedRetainedEffect {
     }
 }
 
-pub(super) fn memory_expiry_partial(
+pub fn memory_expiry_partial(
     settled_after_expiry: bool,
 ) -> Option<(&'static str, &'static str)> {
     settled_after_expiry.then_some(memory_expiry_detail())
@@ -486,7 +490,7 @@ fn memory_expiry_detail() -> (&'static str, &'static str) {
     )
 }
 
-pub(super) fn retained_effect_outcome<T: Serialize, C: Serialize + ?Sized>(
+pub fn retained_effect_outcome<T: Serialize, C: Serialize + ?Sized>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
     configuration_digest: &ManifestDigest,
@@ -518,7 +522,7 @@ pub(super) fn retained_effect_outcome<T: Serialize, C: Serialize + ?Sized>(
     )
 }
 
-pub(super) fn session_refresh_effect_outcome<T: Serialize>(
+pub fn session_refresh_effect_outcome<T: Serialize>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
     configuration_digest: &ManifestDigest,
@@ -580,7 +584,7 @@ fn map_evidence_terminal(
 }
 
 fn evidence_temporal_state(
-    facts: &tracedecay_application::retained_surfaces::RetainedSurfaceEvidenceFactsV1,
+    facts: &RetainedSurfaceEvidenceFactsV1,
     requested_at: tracedecay_domain::UtcMicros,
     resolved_at: tracedecay_domain::UtcMicros,
 ) -> Result<TemporalState, RetainedSurfaceExecutionErrorV1> {
@@ -611,7 +615,7 @@ fn evidence_temporal_state(
 }
 
 fn temporal_request_mode(
-    requests: &[tracedecay_application::retained_surfaces::RetainedSurfaceTemporalRequestV1],
+    requests: &[RetainedSurfaceTemporalRequestV1],
 ) -> Result<TemporalModeV1, RetainedSurfaceExecutionErrorV1> {
     let Some(first) = requests.first() else {
         return Ok(TemporalModeV1::Current);
@@ -656,7 +660,7 @@ fn count_serialized_bytes<T: Serialize>(value: &T) -> Result<u64, RetainedSurfac
     Ok(output.written)
 }
 
-pub(super) fn measured_budget<T: Serialize>(
+pub fn measured_budget<T: Serialize>(
     started_at: tracedecay_domain::UtcMicros,
     finished_at: tracedecay_domain::UtcMicros,
     result: &T,
@@ -678,7 +682,7 @@ pub(super) fn measured_budget<T: Serialize>(
     })
 }
 
-pub(super) fn authority_receipt(
+pub fn authority_receipt(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     observed_at: tracedecay_domain::UtcMicros,
 ) -> Result<AuthorityReceipt, RetainedSurfaceExecutionErrorV1> {
@@ -708,23 +712,22 @@ pub(super) fn authority_receipt(
 mod tests {
     use std::collections::BTreeSet;
 
-    use tracedecay_application::retained_surfaces::{
-        RetainedOutcomeStatusV1, SessionRefreshBeginResultV1,
-    };
-    use tracedecay_application::{
-        ApplicationOutcome, CancellationContext, CancellationSignal, CapabilityGrantId,
-        CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId,
-        RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
-        retained_surface_application_operation,
-    };
     use tracedecay_domain::{
         ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
     };
 
-    use super::{
-        EffectTermination, RetainedSurfaceOperation, RetainedSurfaceResultV1,
-        session_refresh_effect_outcome,
+    use crate::retained_surfaces::{
+        RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+        SessionRefreshBeginResultV1,
     };
+    use crate::{
+        ApplicationOutcome, CancellationContext, CancellationSignal, CapabilityGrantId,
+        CapabilityGrantSnapshot, Deadline, DisclosureClass, EffectTermination, RequestContext,
+        RequestId, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+        retained_surface_application_operation,
+    };
+
+    use super::session_refresh_effect_outcome;
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
@@ -741,7 +744,7 @@ mod tests {
         let operation =
             retained_surface_application_operation(RetainedSurfaceOperation::SessionRefreshBegin)
                 .expect("begin operation");
-        let scope = tracedecay_application::ResolvedScope::new(
+        let scope = crate::ResolvedScope::new(
             ProjectId::new("project.retained.refresh").expect("project"),
             RepositoryId::new("repository.retained.refresh").expect("repository"),
             WorktreeId::new("worktree.retained.refresh").expect("worktree"),

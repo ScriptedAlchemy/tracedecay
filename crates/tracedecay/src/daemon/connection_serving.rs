@@ -630,7 +630,7 @@ where
             // selects below it drops an in-flight read every time `open` wins the
             // race — and the same transport is then handed to the routed server.
             // That is only safe because the transport's read half keeps its
-            // partial-frame accumulator (`tracedecay_daemon_protocol::wire::BoundedLineReader`), so a
+            // partial-frame accumulator (`tracedecay_framing::BoundedLineReader`), so a
             // dropped read resumes mid-frame instead of losing the bytes it already
             // consumed and desynchronizing JSON-RPC framing for the connection.
             tokio::select! {
@@ -1425,8 +1425,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         Ok(handshake) => handshake,
         Err(_) => {
             drop(setup_activity);
-            refuse_unparseable_handshake(&mut transport, &handshake_line, binary_version()?)
-                .await;
+            refuse_unparseable_handshake(&mut transport, &handshake_line, binary_version()?).await;
             return Ok(());
         }
     };

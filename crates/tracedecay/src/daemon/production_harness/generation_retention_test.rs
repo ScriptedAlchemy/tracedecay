@@ -25,7 +25,9 @@ use super::*;
 use tracedecay_code_index_retention::code_index_generations::{
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, prepare_next_code_generation_retention_cancellable,
 };
-use tracedecay_usecases::semantic_runtime::project_semantic_retained_vector_generations;
+use tracedecay_usecases::semantic_runtime::{
+    ProjectSemanticActivationExt, project_semantic_retained_vector_generations,
+};
 use tracedecay_usecases::store::vector_generations::{
     GraphVectorGenerationStoreV1, SemanticVectorStageDescriptorV1, VectorGenerationPlanV1,
 };

@@ -22,6 +22,7 @@ struct StatusQueryWork {
     payload_health_scans: usize,
 }
 
+#[hotpath::measure_all]
 impl StatusQueryWork {
     fn record_query(&mut self) {
         self.status_query_calls += 1;
@@ -100,10 +101,11 @@ async fn status_for_provider_with_work(
     work.record_query();
     // The counts statement above already produced this scope's exact message
     // count from the covering index; re-counting here would repeat that whole
-    // index scan once more per status call.
-    let store =
-        store_status_with_message_count(conn, provider, session_id, counts.raw_message_count)
-            .await?;
+    // index scan once more per status call. Shallow status keeps that count
+    // and reports tokens as a typed unscanned partial instead of reading up
+    // to 20_000 message bodies on every health probe (#767).
+    let store = store_status_for_depth(deep, counts.raw_message_count, conn, provider, session_id)
+        .await?;
     work.record_query();
     let dag = dag_status(conn, provider, session_id).await?;
 
@@ -158,7 +160,7 @@ async fn aggregate_provider_status_with_work(
     };
     work.record_query();
     let store =
-        store_status_with_message_count(conn, "all", session_id, counts.raw_message_count).await?;
+        store_status_for_depth(deep, counts.raw_message_count, conn, "all", session_id).await?;
     work.record_query();
     let dag = dag_status(conn, "all", session_id).await?;
     let status = status_from_parts(
@@ -558,6 +560,35 @@ async fn store_status_with_message_count(
         STORE_STATUS_TOKEN_SCAN_BUDGET,
     )
     .await
+}
+
+/// Shallow probes keep the indexed message count and refuse the body scan;
+/// deep status still pays the budgeted token estimate.
+async fn store_status_for_depth(
+    deep: bool,
+    messages: i64,
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<LcmStoreStatus, LcmError> {
+    if deep {
+        store_status_with_message_count(conn, provider, session_id, messages).await
+    } else {
+        Ok(store_status_without_token_scan(messages))
+    }
+}
+
+#[hotpath::measure(label = "sessions.lcm.status.store_count_only")]
+fn store_status_without_token_scan(messages: i64) -> LcmStoreStatus {
+    LcmStoreStatus {
+        messages,
+        estimated_tokens: 0,
+        token_estimate: if messages == 0 {
+            LcmStoreTokenCoverage::complete(0)
+        } else {
+            LcmStoreTokenCoverage::unscanned()
+        },
+    }
 }
 
 /// Exact message count plus a token estimate over at most `token_scan_budget`
@@ -1257,6 +1288,49 @@ mod tests {
             status.token_estimate
         );
         assert_eq!(status.messages, 600);
+    }
+
+    /// The default health probe must not read message bodies. Token coverage
+    /// is a typed unscanned partial; deep status still pays the budgeted scan.
+    #[tokio::test]
+    async fn shallow_status_reports_unscanned_tokens_instead_of_reading_bodies() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        seed_raw_messages(&conn, "session-shallow-unscanned", 600).await;
+
+        let (status, _work) = aggregate_provider_status_with_work(
+            &*conn,
+            storage.path(),
+            None,
+            false,
+            &LcmGcConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status.store.messages, 600);
+        assert_eq!(status.store.estimated_tokens, 0);
+        assert_eq!(
+            status.store.token_estimate,
+            LcmStoreTokenCoverage::unscanned()
+        );
+
+        let deep = status_for_provider(
+            &*conn,
+            storage.path(),
+            "cursor",
+            None,
+            true,
+            &LcmGcConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deep.store.messages, 600);
+        assert_eq!(deep.store.estimated_tokens, 1200);
+        assert_eq!(
+            deep.store.token_estimate,
+            LcmStoreTokenCoverage::complete(600)
+        );
     }
 
     #[tokio::test]

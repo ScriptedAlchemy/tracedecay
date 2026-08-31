@@ -12,9 +12,9 @@ use tracedecay_application::{
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphProjectionStore,
 };
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{CodeGenerationId, UtcMicros};
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_domain::errors::TraceDecayError;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum CodeGraphReadError {
@@ -312,7 +312,7 @@ pub fn map_projection_error(error: CodeGraphProjectionError) -> CodeGraphReadErr
                 detail: budget.to_string(),
             }
         }
-        unavailable @ (CodeGraphProjectionError::Conflict
+        unavailable @ (CodeGraphProjectionError::Conflict { .. }
         | CodeGraphProjectionError::DurabilityUncertain(_)
         | CodeGraphProjectionError::Closed) => CodeGraphReadError::Unavailable {
             detail: unavailable.to_string(),

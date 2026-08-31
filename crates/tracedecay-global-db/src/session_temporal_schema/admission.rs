@@ -397,10 +397,7 @@ fn belongs_to_temporal_namespace(name: &str) -> bool {
 pub(super) fn session_temporal_reset_required(
     reason: impl Into<String>,
 ) -> tracedecay_domain::errors::TraceDecayError {
-    tracedecay_domain::errors::TraceDecayError::reset_required(
-        SESSION_TEMPORAL_AUTHORITY,
-        reason,
-    )
+    tracedecay_domain::errors::TraceDecayError::reset_required(SESSION_TEMPORAL_AUTHORITY, reason)
 }
 
 pub(super) async fn validate_temporal_fts_contracts(

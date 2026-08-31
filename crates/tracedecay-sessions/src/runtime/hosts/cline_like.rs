@@ -108,6 +108,7 @@ pub struct ClineLikeSource {
     task_metadata: TaskMetadataCache,
 }
 
+#[hotpath::measure_all]
 impl ClineLikeSource {
     /// Cline VS Code extension storage:
     /// `Code/User/globalStorage/saoudrizwan.claude-dev/tasks`.
@@ -177,12 +178,12 @@ impl ClineLikeSource {
     }
 }
 
+#[hotpath::measure_all]
 impl TranscriptSource for ClineLikeSource {
     fn provider(&self) -> &'static str {
         self.provider
     }
 
-    #[hotpath::measure(label = "sessions.hosts.cline_like.transcript_paths")]
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for root in &self.storage_roots {
@@ -223,13 +224,13 @@ impl TranscriptSource for ClineLikeSource {
     }
 }
 
+#[hotpath::measure_all]
 impl ClineLikeSource {
     fn snapshot_location(&self, path: &Path, project_root: &Path) -> Option<PathBuf> {
         let metadata = self.task_metadata.get(self.provider, path.parent()?)?;
         self.snapshot_location_from_metadata(&metadata, project_root)
     }
 
-    #[hotpath::measure(label = "sessions.hosts.cline_like.snapshot_location")]
     fn snapshot_location_from_metadata(
         &self,
         metadata: &Value,
@@ -268,7 +269,6 @@ impl ClineLikeSource {
         }
     }
 
-    #[hotpath::measure(label = "sessions.hosts.cline_like.parse_snapshot")]
     fn parse_snapshot(
         &self,
         path: &Path,

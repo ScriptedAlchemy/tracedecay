@@ -461,7 +461,7 @@ async fn doctor_runtime_value_inner(
         .ok()
         .and_then(|pinned| {
             SemanticConfigurationPinV1::from_current(
-                &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+                &tracedecay_configuration::ConfigurationCurrentStateV1 {
                     revision_id: pinned.revision_id,
                     snapshot: pinned.snapshot,
                 },
@@ -935,7 +935,7 @@ mod doctor_runtime_route_tests {
         use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
 
         SemanticConfigurationPinV1::from_current(
-            &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+            &tracedecay_configuration::ConfigurationCurrentStateV1 {
                 revision_id: ConfigurationRevisionId::try_from(
                     "configuration.revision.doctor".to_owned(),
                 )
