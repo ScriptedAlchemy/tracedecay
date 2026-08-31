@@ -300,7 +300,7 @@ impl CodeIndexSchedulerRegistryV1 {
         bounds: Option<BranchGenerationCardinalityBoundsV1>,
         control: BranchGenerationReadControlV1,
     ) -> Result<BranchGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
-        let (scheduler, historical_generation_owner) = {
+        let (scheduler, build_publication_lock, historical_generation_owner) = {
             let mounted = self.mounted.lock().await;
             let worktree = unique_mounted_for_scope(&mounted, scope)
                 .unique()
@@ -308,8 +308,20 @@ impl CodeIndexSchedulerRegistryV1 {
                 .1;
             (
                 Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.build_publication_lock),
                 worktree.historical_generation_owner.clone(),
             )
+        };
+        let mut build_publication = std::pin::pin!(build_publication_lock.lock_owned());
+        let _build_publication = loop {
+            tokio::select! {
+                guard = &mut build_publication => break guard,
+                () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
+                    if let Some(reason) = control.termination() {
+                        return Err(reason);
+                    }
+                }
+            }
         };
         let base_reference = base_reference.clone();
         let base_revision = base_revision.clone();
