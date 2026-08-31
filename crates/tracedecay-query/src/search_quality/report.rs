@@ -5,13 +5,15 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_sha256;
 
-use crate::candidate_output::{
+use super::candidate_output::{
     CandidateWorkloadV1, EvaluationExecutionContractV1, GenerateCandidateOutputsResultV1,
     OptionalStageMeasurementsV1, ProductionCandidateOutputV1, compute_corpus_digest,
     compute_workload_digest,
 };
-use crate::semantic_native::{SemanticNativeStageResultV1, native_profile_requirements};
-use crate::{DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs_against_corpus};
+use super::evaluate::{
+    DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs_against_corpus,
+};
+use super::semantic_native::{SemanticNativeStageResultV1, native_profile_requirements};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -486,7 +488,7 @@ impl DirectEvaluationReportV1 {
                 profile.quality.duplicate_rate.denominator,
             );
         }
-        let diagnostic = crate::pairwise_candidate_failure_diagnostic(&self.profiles)
+        let diagnostic = super::evaluate::pairwise_candidate_failure_diagnostic(&self.profiles)
             .unwrap_or_else(|| "pairwise candidate quality failed".to_owned());
         self.pairwise_query_diagnostic()
             .map_or(diagnostic.clone(), |queries| {
@@ -496,11 +498,11 @@ impl DirectEvaluationReportV1 {
 
     fn pairwise_query_diagnostic(&self) -> Option<String> {
         for candidate in self.profiles.iter().filter(|profile| {
-            profile.profile_id == crate::SEMANTIC_PROFILE
-                || profile.profile_id == crate::RERANK_PROFILE
+            profile.profile_id == super::evaluate::SEMANTIC_PROFILE
+                || profile.profile_id == super::evaluate::RERANK_PROFILE
         }) {
             let baseline = self.profiles.iter().find(|profile| {
-                profile.profile_id == crate::QUERY_BASELINE_PROFILE
+                profile.profile_id == super::evaluate::QUERY_BASELINE_PROFILE
                     && profile.partition == candidate.partition
             })?;
             let baseline_natural = baseline
@@ -516,7 +518,7 @@ impl DirectEvaluationReportV1 {
             if candidate_natural
                 .ndcg_at_10_ppm
                 .saturating_sub(baseline_natural.ndcg_at_10_ppm)
-                >= crate::REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
+                >= super::evaluate::REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
             {
                 continue;
             }
@@ -601,8 +603,8 @@ impl DirectEvaluationReportV1 {
     pub fn semantic_activation_resource_pins(
         &self,
         evaluated_profile_id: &str,
-    ) -> Result<crate::semantic_native::SemanticActivationResourcePinsV1, SearchEvalError> {
-        use crate::semantic_native::{
+    ) -> Result<super::semantic_native::SemanticActivationResourcePinsV1, SearchEvalError> {
+        use super::semantic_native::{
             SemanticActivationResourcePinsV1, SemanticNativeStageResultV1,
         };
 
@@ -756,6 +758,86 @@ mod activation_resource_tests {
         assert_eq!(
             semantic_activation_resident_bytes(Some(u64::MAX), Some(1), Some(1), Some(0), Some(0),),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod pairwise_and_native_method_tests {
+    use super::{
+        DirectEvaluationStatusV1, DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1,
+        pairwise_query_pairs, semantic_distance_summary, validate_native_measurement_method,
+    };
+
+    fn diagnostic_query(query_id: &str, first_useful_rank: u32) -> DirectQueryEvaluationV1 {
+        let zero = DirectRatioMetricV1 {
+            numerator: 0,
+            denominator: 0,
+            ppm: 0,
+        };
+        DirectQueryEvaluationV1 {
+            query_id: query_id.to_owned(),
+            strata: vec!["natural_language".to_owned()],
+            protected: false,
+            first_useful_rank: Some(first_useful_rank),
+            returned_candidates: 2,
+            wrong_scope_hits: 0,
+            forbidden_hits: 0,
+            expected_no_result: false,
+            quality: DirectQueryQualityV1 {
+                recall_at_10: zero.clone(),
+                precision_at_10: zero.clone(),
+                reciprocal_rank_ppm: 0,
+                ndcg_at_10_ppm: 0,
+                duplicate_rate: zero,
+            },
+            status: DirectEvaluationStatusV1::Pass,
+        }
+    }
+
+    #[test]
+    fn pairwise_diagnostic_prioritizes_queries_with_improvement_headroom() {
+        let candidate = vec![
+            diagnostic_query("already-perfect", 1),
+            diagnostic_query("can-improve", 2),
+        ];
+        let baseline = candidate.clone();
+
+        let ordered = pairwise_query_pairs(&candidate, &baseline);
+
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(ordered[0].0.query_id, "can-improve");
+        assert_eq!(ordered[1].0.query_id, "already-perfect");
+    }
+
+    #[test]
+    fn semantic_distance_summary_exposes_absolute_confidence_and_ambiguity() {
+        assert_eq!(
+            semantic_distance_summary([325_542_266, 325_542_266, 400_000_000]),
+            "semantic_candidates=3,top_distance=325542266,second_distance=325542266,top_margin=0"
+        );
+        assert_eq!(
+            semantic_distance_summary(std::iter::empty()),
+            "semantic_candidates=0,top_distance=none,second_distance=none,top_margin=none"
+        );
+    }
+
+    #[test]
+    fn native_activation_rejects_sqlite_vector_measurement_provenance() {
+        let stale = "linux-procfs-v1;projection=DatabaseVectorEvaluationStoreV1(SQLite-CAS)";
+        assert!(validate_native_measurement_method(stale).is_err());
+        assert!(
+            validate_native_measurement_method(
+                "linux-procfs-v1;projection=canonical-graph-prepared-generation-v1"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_native_measurement_method(
+                "linux-procfs-v1;projection-cases=prepare_semantic_evaluation_projection\
+                 +GraphVectorGenerationStoreV1(isolated-in-memory-graph,watermark-CAS)"
+            )
+            .is_ok()
         );
     }
 }

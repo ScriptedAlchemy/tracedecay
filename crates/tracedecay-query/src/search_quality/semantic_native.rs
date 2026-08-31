@@ -19,17 +19,17 @@ use tracedecay_domain::{
 };
 
 use super::candidate_output::{ProfileSpecV1, ResourceSampleV1};
-use tracedecay_query::retrieval::fusion::{
+use crate::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, FusionStageError, FusionStageInput,
 };
 /// Deterministic local executor admitted from one verified artifact.
-pub use tracedecay_query::retrieval::rerank::AdmittedNativeRerankExecutorV1;
-use tracedecay_query::retrieval::rerank::{
+pub use crate::retrieval::rerank::AdmittedNativeRerankExecutorV1;
+use crate::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1,
     LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
     RerankViewOutcomeV1, RerankViewPermitV1,
 };
-use tracedecay_query::retrieval::semantic::{
+use crate::retrieval::semantic::{
     CodeSemanticEvidenceV1, SemanticLaneRetriever, SemanticRetrievalRequestV1, SemanticSearchKindV1,
 };
 
@@ -1241,15 +1241,12 @@ impl SemanticNativeResourceEvidenceV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CandidateWorkloadV1, load_candidate_workload};
+    use crate::search_quality::packaged::load_workload;
+    use crate::search_quality::CandidateWorkloadV1;
     use tracedecay_domain::canonical_sha256;
 
     fn checked_in_workload() -> CandidateWorkloadV1 {
-        load_candidate_workload(
-            &crate::checked_in_fixture_root()
-                .join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
-        )
-        .expect("checked-in search-quality workload")
+        load_workload().expect("checked-in search-quality workload")
     }
 
     #[test]

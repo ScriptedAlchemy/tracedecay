@@ -514,9 +514,16 @@ impl CodeLexicalArtifactReaderV1 {
         }
     }
 
+    /// Reader queries serialize on this one connection; the wait span makes
+    /// cross-query contention (concurrent searches, hydration reads during
+    /// staging) attributable instead of vanishing into lane wall time.
     fn lock_connection(&self) -> Result<StdMutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
-        self.connection.lock().map_err(|_| {
-            CodeLexicalArtifactErrorV1::Io("lexical artifact reader lock is poisoned".to_owned())
+        hotpath::measure_block!("query.artifact.reader.lock_wait", {
+            self.connection.lock().map_err(|_| {
+                CodeLexicalArtifactErrorV1::Io(
+                    "lexical artifact reader lock is poisoned".to_owned(),
+                )
+            })
         })
     }
 
@@ -1698,6 +1705,7 @@ impl<'a> ArtifactQueryV1<'a> {
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
+    #[hotpath::measure(label = "query.artifact.vocabulary.load")]
     fn load_vocabulary(&self) -> Result<Vec<String>, RetrievalPortError> {
         self.metrics.probe();
         let mut statement = self
@@ -1713,6 +1721,7 @@ impl<'a> ArtifactQueryV1<'a> {
         self.metrics.observe_statement(&statement)?;
         self.metrics
             .rows(u64::try_from(vocabulary.len()).map_err(contract_error)?);
+        hotpath::gauge!("query.lane.fuzzy.vocabulary_terms").set(vocabulary.len());
         Ok(vocabulary)
     }
 
@@ -1722,6 +1731,7 @@ impl<'a> ArtifactQueryV1<'a> {
     /// only on the artifact corpus and the query terms, so one upfront read
     /// replaces the two SQL probes each scored document would otherwise
     /// repeat per term.
+    #[hotpath::measure(label = "query.artifact.stats.read")]
     fn lexical_stats(
         &self,
         terms: &BTreeSet<String>,
@@ -2211,9 +2221,13 @@ fn bounded_edit_distance(left: &str, right: &str, limit: usize) -> Option<usize>
     (previous[right.len()] <= limit).then_some(previous[right.len()])
 }
 
+/// Decoded once per visited candidate row; sampled 1-in-16 like per-row
+/// scoring so the decode cost is attributable without per-row span overhead.
 fn decode_row(bytes: &[u8]) -> Result<ArtifactRowV1, CodeLexicalArtifactErrorV1> {
-    serde_json::from_slice(bytes)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
+    crate::hotpath_metrics::measure_frequent("query.artifact.row_decode", || {
+        serde_json::from_slice(bytes)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
+    })
 }
 
 fn decode_field(encoded: &str) -> Result<LexicalFieldV1, RetrievalPortError> {

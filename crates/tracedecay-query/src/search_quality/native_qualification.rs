@@ -26,12 +26,18 @@ use tracedecay_domain::{
 };
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
-use crate::{
-    DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
-    DirectEvaluationStatusV1, EvaluationExecutionContractV1, SearchEvalError,
-    activation_profile_chain, compute_profile_material_digest, compute_workload_digest,
-    direct_evaluated_profile_material,
+use super::candidate_output::{
+    DirectEvaluatedProfileMaterialV1, EvaluationExecutionContractV1,
+    compute_profile_material_digest, compute_workload_digest, direct_evaluated_profile_material,
 };
+use super::evaluate::{
+    DirectActivationEvaluationV1, DirectEvaluationStatusV1, SearchEvalError,
+    activation_profile_chain, load_authoritative_default_workload_metadata,
+    load_default_evaluated_profile_material,
+};
+use super::packaged;
+use super::report::{DirectEvaluationReportV1, PortableNativeQualificationValidationErrorV1, raw_output_digest};
+use super::semantic_native::SemanticNativeStageResultV1;
 
 const PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION: u32 = 1;
 const DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC: &[u8] = b"tracedecay.native-qualification.zlib.v1\0";
@@ -41,7 +47,7 @@ const MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 10
 // The decoded canonical JSON remains the validation authority; compression
 // keeps the package and shipped binary from carrying 7.6 MiB of repeated JSON.
 const PACKAGED_NATIVE_QUALIFICATION_GZIP: &[u8] =
-    include_bytes!("../assets/native-qualification-v1.json.gz");
+    include_bytes!("../../assets/native-qualification-v1.json.gz");
 const PACKAGED_NATIVE_QUALIFICATION_BYTES: usize = 7_659_749;
 const PACKAGED_NATIVE_QUALIFICATION_SHA256: &str =
     "sha256:72647e4ec74b3ac4e95a962a7265ca4274247e7f4a8872dc25472f2b8a7a0f3c";
@@ -261,7 +267,7 @@ impl NativeQualificationExpectationsV1 {
         runtime: NativeQualificationRuntimeKeyV1,
         platform: NativeQualificationPlatformV1,
     ) -> Result<Self, PackagedNativeQualificationErrorV1> {
-        let workload = crate::load_authoritative_default_workload_metadata()
+        let workload = load_authoritative_default_workload_metadata()
             .map_err(|_| PackagedNativeQualificationErrorV1::StaleWorkload)?;
         let profile_ids = activation_profile_chain(&workload, &evaluated_profile_id)
             .map_err(|_| PackagedNativeQualificationErrorV1::InvalidQualificationKey)?;
@@ -280,7 +286,7 @@ impl NativeQualificationExpectationsV1 {
             evaluated_profile_id,
             workload_digest: compute_workload_digest(&workload)
                 .map_err(|_| PackagedNativeQualificationErrorV1::StaleWorkload)?,
-            corpus_digest: crate::packaged_assets::current_corpus_digest(&workload)
+            corpus_digest: packaged::current_corpus_digest(&workload)
                 .map_err(|_| PackagedNativeQualificationErrorV1::StaleCorpus)?,
             fixture_source_repository_commit: workload.source_repository_commit,
             fixture_source_repository_tree: workload.source_repository_tree,
@@ -416,7 +422,7 @@ fn validate_evaluated_material_key(
     material: &DirectEvaluatedProfileMaterialV1,
     evaluated_profile_id: &str,
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
-    let workload = crate::load_authoritative_default_workload_metadata()
+    let workload = load_authoritative_default_workload_metadata()
         .map_err(|_| PackagedNativeQualificationErrorV1::StaleWorkload)?;
     let expected = direct_evaluated_profile_material(&workload, evaluated_profile_id)
         .map_err(|_| PackagedNativeQualificationErrorV1::InvalidQualificationKey)?;
@@ -435,7 +441,7 @@ fn redact_genuine_vector_generations(
             .as_mut()
             .ok_or(PackagedNativeQualificationErrorV1::IncompleteNativeEvidence)?;
         for sample in resources.samples.values_mut() {
-            let crate::semantic_native::SemanticNativeStageResultV1::Complete(sample) = sample
+            let SemanticNativeStageResultV1::Complete(sample) = sample
             else {
                 return Err(PackagedNativeQualificationErrorV1::IncompleteNativeEvidence);
             };
@@ -450,7 +456,7 @@ fn redact_genuine_vector_generations(
             sample.provenance.vector_generation_id = None;
         }
     }
-    report.raw_output_digest = crate::report::raw_output_digest(&report.raw_outputs)
+    report.raw_output_digest = raw_output_digest(&report.raw_outputs)
         .map_err(|_| PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence)?;
     Ok(PortableNativeQualificationEvidenceV1 {
         vector_generation_retention:
@@ -467,7 +473,7 @@ fn validate_redacted_vector_generation_shape(
             continue;
         };
         for sample in resources.samples.values() {
-            let crate::semantic_native::SemanticNativeStageResultV1::Complete(sample) = sample
+            let SemanticNativeStageResultV1::Complete(sample) = sample
             else {
                 continue;
             };
@@ -652,17 +658,17 @@ pub fn qualified_default_activation_candidate(
 pub fn validate_packaged_native_activation_report(
     report: &DirectEvaluationReportV1,
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
-    let workload = crate::load_authoritative_default_workload_metadata()
+    let workload = load_authoritative_default_workload_metadata()
         .map_err(|_| PackagedNativeQualificationErrorV1::StaleWorkload)?;
-    let corpus_digest = crate::packaged_assets::current_corpus_digest(&workload)
+    let corpus_digest = packaged::current_corpus_digest(&workload)
         .map_err(|_| PackagedNativeQualificationErrorV1::StaleCorpus)?;
     report
         .validate_portable_qualification_against_authoritative_corpus(&workload, &corpus_digest)
         .map_err(|error| match error {
-            crate::report::PortableNativeQualificationValidationErrorV1::Report => {
+            PortableNativeQualificationValidationErrorV1::Report => {
                 PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence
             }
-            crate::report::PortableNativeQualificationValidationErrorV1::NativeEvidence => {
+            PortableNativeQualificationValidationErrorV1::NativeEvidence => {
                 PackagedNativeQualificationErrorV1::IncompleteNativeEvidence
             }
         })
@@ -712,7 +718,7 @@ fn activation_candidate_from_qualification(
     qualification: PackagedNativeQualificationV1,
     expectations: &NativeQualificationExpectationsV1,
 ) -> Result<PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1> {
-    let workload = crate::load_authoritative_default_workload_metadata()
+    let workload = load_authoritative_default_workload_metadata()
         .map_err(|_| PackagedNativeQualificationErrorV1::StaleWorkload)?;
     let material = direct_evaluated_profile_material(&workload, &expectations.evaluated_profile_id)
         .map_err(|_| PackagedNativeQualificationErrorV1::InvalidQualificationKey)?;
@@ -731,7 +737,7 @@ fn validate_qualification(
     validate_expected_identities(qualification, expectations)?;
     validate_required_profile_matrix(qualification, expectations)?;
     validate_expected_profile_materials(qualification, expectations)?;
-    let workload = crate::load_authoritative_default_workload_metadata()
+    let workload = load_authoritative_default_workload_metadata()
         .map_err(|_| PackagedNativeQualificationErrorV1::StaleWorkload)?;
     qualification
         .portable_evidence
@@ -741,10 +747,10 @@ fn validate_qualification(
             &expectations.corpus_digest,
         )
         .map_err(|error| match error {
-            crate::report::PortableNativeQualificationValidationErrorV1::Report => {
+            PortableNativeQualificationValidationErrorV1::Report => {
                 PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence
             }
-            crate::report::PortableNativeQualificationValidationErrorV1::NativeEvidence => {
+            PortableNativeQualificationValidationErrorV1::NativeEvidence => {
                 PackagedNativeQualificationErrorV1::IncompleteNativeEvidence
             }
         })?;
@@ -785,7 +791,7 @@ fn validate_document_bindings(
     if report.profile_material_digests != evaluator.profile_material_digests {
         return Err(PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence);
     }
-    let raw_output_digest = crate::report::raw_output_digest(&report.raw_outputs)
+    let raw_output_digest = raw_output_digest(&report.raw_outputs)
         .map_err(|_| PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence)?;
     if report.raw_output_digest != raw_output_digest {
         return Err(PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence);
@@ -941,7 +947,7 @@ fn validate_required_profile_matrix(
     qualification: &PackagedNativeQualificationV1,
     expectations: &NativeQualificationExpectationsV1,
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
-    let workload = crate::load_authoritative_default_workload_metadata()
+    let workload = load_authoritative_default_workload_metadata()
         .map_err(|_| PackagedNativeQualificationErrorV1::StaleWorkload)?;
     let profiles = activation_profile_chain(&workload, &expectations.evaluated_profile_id)
         .map_err(|_| PackagedNativeQualificationErrorV1::InvalidQualificationKey)?;
@@ -992,7 +998,7 @@ fn validate_report_runtime_bindings(
                 .samples
                 .get(scale)
                 .ok_or(PackagedNativeQualificationErrorV1::IncompleteNativeEvidence)?;
-            let crate::semantic_native::SemanticNativeStageResultV1::Complete(sample) = sample
+            let SemanticNativeStageResultV1::Complete(sample) = sample
             else {
                 return Err(PackagedNativeQualificationErrorV1::IncompleteNativeEvidence);
             };
@@ -1057,7 +1063,7 @@ mod tests {
 
     #[test]
     fn workload_profile_alias_matches_its_canonical_evaluated_material() {
-        let material = crate::load_default_evaluated_profile_material("hybrid-conservative")
+        let material = load_default_evaluated_profile_material("hybrid-conservative")
             .expect("checked-in evaluated profile material");
 
         assert_eq!(

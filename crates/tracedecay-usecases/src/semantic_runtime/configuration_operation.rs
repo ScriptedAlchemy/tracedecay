@@ -24,7 +24,7 @@ use tracedecay_configuration::{
     ConfigurationCurrentStateV1, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
     DirectConfigurationMutation, ProjectConfigurationRuntime,
 };
-use tracedecay_search_eval::{
+use tracedecay_query::search_quality::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
     NativeQualificationExecutionResourceKeyV1, NativeQualificationExpectationsV1,
     NativeQualificationModelKeyV1, NativeQualificationPlatformV1, NativeQualificationRuntimeKeyV1,
@@ -826,7 +826,7 @@ fn prepare_query_fallback_publication(
     report: &DirectEvaluationReportV1,
     observed_runtime: &RetrievalRuntimeCompatibilityV1,
 ) -> Result<PreparedQueryFallbackPublicationV1, SemanticActivationCoordinationErrorV1> {
-    let material = tracedecay_search_eval::load_default_evaluated_profile_material(
+    let material = tracedecay_query::search_quality::load_default_evaluated_profile_material(
         "query-fallback",
     )
     .map_err(|error| {
@@ -1686,11 +1686,11 @@ mod tests {
 
     #[test]
     fn packaged_semantic_pass_prepares_the_exact_query_fallback() {
-        let qualification: tracedecay_search_eval::PackagedNativeQualificationV1 =
-            serde_json::from_slice(tracedecay_search_eval::packaged_native_qualification_bytes())
+        let qualification: tracedecay_query::search_quality::PackagedNativeQualificationV1 =
+            serde_json::from_slice(tracedecay_query::search_quality::packaged_native_qualification_bytes())
                 .expect("reviewed packaged qualification");
         let material =
-            tracedecay_search_eval::load_default_evaluated_profile_material(EVALUATED_PROFILE_ID)
+            tracedecay_query::search_quality::load_default_evaluated_profile_material(EVALUATED_PROFILE_ID)
                 .expect("checked-in query fallback material");
         let observed_runtime = RetrievalRuntimeCompatibilityV1 {
             retrieval_ceiling: material.profile.retrieval_budget,
@@ -1870,7 +1870,7 @@ mod tests {
             .parent()
             .and_then(Path::parent)
             .expect("workspace root above crates/tracedecay-usecases");
-        let material = tracedecay_search_eval::load_direct_evaluated_profile_material(
+        let material = tracedecay_query::search_quality::load_direct_evaluated_profile_material(
             workspace_root,
             None,
             "query-fallback",

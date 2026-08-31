@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::candidate_output::{CandidateWorkloadV1, ProfileSpecV1};
+use crate::search_quality::candidate_output::{CandidateWorkloadV1, ProfileSpecV1};
 
 use super::SemanticNativeEvaluationErrorV1;
 
