@@ -258,7 +258,7 @@ pub use project_registry::{
     ProjectRegistryListingFuture, ProjectRegistryListingOutcome, ProjectRegistryListingScope,
     ProjectRegistryListingView, ProjectRegistryReadPort, ProjectRegistrySelector,
     ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup, PublicCodeProject,
-    list_registered_projects, read_registered_project_context,
+    list_registered_projects, read_registered_project_context, render_project_registry_view,
 };
 pub use remote::status::RemoteOperationalStatusReadPort;
 pub use result::{
