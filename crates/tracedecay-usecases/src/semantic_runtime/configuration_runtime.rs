@@ -10,9 +10,8 @@ use tracedecay_application::{
     SemanticActivationCoordinationErrorV1, SemanticActivationCoordinationPort,
 };
 use tracedecay_configuration::{
-    ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationError,
-    ConfigurationMutationAuthority, ConfigurationOperationFuture, DirectConfigurationMutation,
-    ProductionConfigurationDaemonClient, ProjectConfigurationRuntime,
+    ConfigurationCurrentStateV1, ConfigurationError, ConfigurationMutationAuthority,
+    DirectConfigurationMutation, ProjectConfigurationRuntime,
 };
 use tracedecay_domain::configuration::{
     ConfigurationMutationEffectV1, ConfigurationMutationOperationV1, ConfigurationMutationSinkV1,
@@ -24,8 +23,7 @@ use tracedecay_global_db::configuration::store::ConfigurationDirectCommitOutcome
 
 use super::{
     ProductionSemanticActivationCoordinatorV1, ProductionSemanticRetrievalConfigurationStoreV1,
-    SemanticActivationReceiptV1, SemanticConfigurationPinV1, SemanticConfigurationSnapshotSourceV1,
-    SemanticRollbackReceiptV1,
+    SemanticActivationReceiptV1, SemanticConfigurationPinV1, SemanticRollbackReceiptV1,
 };
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileMutationCapabilityV1,
@@ -277,13 +275,4 @@ async fn retrieval_profile_mutation_capability(
         })?;
     RetrievalProfileMutationCapabilityV1::from_current_authorization(authority, current)
         .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)
-}
-
-impl SemanticConfigurationSnapshotSourceV1 for ProductionConfigurationDaemonClient {
-    fn current_configuration(
-        &self,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
-        let store = self.control_store();
-        Box::pin(async move { ConfigurationControlStore::current(&store).await })
-    }
 }

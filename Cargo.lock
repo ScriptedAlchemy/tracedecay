@@ -5916,6 +5916,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-code-index-retention",
  "tracedecay-code-index-runtime",
+ "tracedecay-configuration",
  "tracedecay-daemon-control",
  "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
@@ -6286,6 +6287,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-configuration"
+version = "0.1.0"
+dependencies = [
+ "hotpath",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-automation",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-policy",
+ "tracedecay-runtime-core",
+ "tracedecay-semantic-contracts",
+ "tracedecay-session-memory",
+]
+
+[[package]]
 name = "tracedecay-daemon-control"
 version = "0.1.0"
 dependencies = [
@@ -6359,6 +6379,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-code-index",
  "tracedecay-code-index-runtime",
+ "tracedecay-configuration",
  "tracedecay-daemon-protocol",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
@@ -6403,6 +6424,7 @@ dependencies = [
  "tracedecay-automation",
  "tracedecay-automation-runtime",
  "tracedecay-code-index",
+ "tracedecay-configuration",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
@@ -7085,6 +7107,7 @@ dependencies = [
  "tracedecay-automation",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-configuration",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",

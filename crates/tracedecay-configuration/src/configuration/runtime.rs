@@ -348,10 +348,6 @@ impl ProductionConfigurationDaemonClient {
             label = "usecases.configuration.current"
         ))
     }
-
-    pub fn control_store(&self) -> OwnedGlobalDbConfigurationControlStore {
-        self.store.clone()
-    }
 }
 
 struct RetainedConfigurationControlPlane {
