@@ -101,6 +101,7 @@ impl RegisteredGlobalDb {
         SessionTemporalAccess::new(self).git_scope_session_ids(filter)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.doctor_health")]
     pub async fn session_temporal_doctor_health(
         &self,
     ) -> tracedecay_session_temporal_store::SessionTemporalHealthReport {
@@ -109,6 +110,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.ensure_cursor_key")]
     pub async fn ensure_active_session_cursor_key_result(
         &self,
     ) -> tracedecay_store::SessionStoreResult<tracedecay_domain::SignedCursorKeyRefV1> {
@@ -117,6 +119,10 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.load_cursor_key_provider"
+    )]
     pub async fn load_session_cursor_key_provider_result(
         &self,
     ) -> Result<
@@ -128,6 +134,10 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.load_preprovisioned_cursor_key"
+    )]
     pub async fn load_preprovisioned_session_cursor_key_provider_result(
         &self,
     ) -> Result<
@@ -139,6 +149,10 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.pending_refresh_page"
+    )]
     pub async fn pending_session_temporal_refresh_page_result(
         &self,
         limit: usize,
@@ -152,6 +166,10 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.materialize_refresh_batch"
+    )]
     pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
         recovery: &tracedecay_session_temporal_store::SessionRefreshRecoveryV1,
@@ -166,6 +184,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.freeze_snapshot")]
     pub async fn freeze_session_temporal_snapshot_result(
         &self,
         request: tracedecay_store::SessionTemporalSnapshotRequestV1,
@@ -175,6 +194,10 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.summary_relations"
+    )]
     pub async fn active_session_summary_relations(
         &self,
         session_id: &tracedecay_domain::SessionId,
@@ -190,6 +213,10 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.apply_relation_projection"
+    )]
     pub async fn apply_active_session_relation_projection(
         &self,
         session_id: &tracedecay_domain::SessionId,
@@ -200,6 +227,10 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.recover_relation_projections"
+    )]
     pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,
@@ -210,6 +241,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.refresh_recovery")]
     pub async fn session_refresh_recovery_result(
         &self,
         session_id: &tracedecay_domain::SessionId,
@@ -221,6 +253,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.complete_refresh")]
     pub async fn complete_session_refresh_result(
         &self,
         request: tracedecay_store::SessionRefreshCompletionRequestV1,

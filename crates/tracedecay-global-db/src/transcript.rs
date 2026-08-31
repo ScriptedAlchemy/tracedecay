@@ -8,16 +8,19 @@ pub(super) use tracedecay_sessions::runtime::store_access::{
 };
 
 impl RegisteredGlobalDb {
+    #[hotpath::measure(future = true, label = "global_db.transcript.upsert_session")]
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
         SessionStoreAccess::new(self).upsert_session(session).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.transcript.get_session")]
     pub async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord> {
         SessionStoreAccess::new(self)
             .get_session(provider, session_id)
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.transcript.get_session_result")]
     pub async fn get_session_result(
         &self,
         provider: &str,
@@ -28,6 +31,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.transcript.upsert_batch")]
     pub async fn upsert_transcript_batch(
         &self,
         session: &SessionRecord,
@@ -40,6 +44,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.transcript.persist_batch")]
     pub async fn persist_transcript_batch_result(
         &self,
         session: &SessionRecord,
@@ -59,6 +64,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.transcript.persist_offset")]
     pub async fn persist_transcript_offset_result(
         &self,
         parse_offset_path: &str,
@@ -70,6 +76,10 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.transcript.upsert_projection_batches"
+    )]
     pub async fn upsert_transcript_projection_batches(
         &self,
         batches: &[TranscriptBatch],
@@ -81,10 +91,15 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.transcript.get_parse_offset")]
     pub async fn get_parse_offset(&self, path: &str) -> Option<ParseOffset> {
         SessionStoreAccess::new(self).get_parse_offset(path).await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.transcript.get_parse_offset_result"
+    )]
     pub async fn get_parse_offset_result(
         &self,
         path: &str,
@@ -94,12 +109,14 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.transcript.set_parse_offset")]
     pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) -> Result<(), String> {
         SessionStoreAccess::new(self)
             .set_parse_offset(path, offset)
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.transcript.advance_parse_offset")]
     pub async fn advance_parse_offset_result(
         &self,
         path: &str,
@@ -110,6 +127,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.transcript.replace_parse_offset")]
     pub async fn replace_parse_offset_result(
         &self,
         path: &str,
@@ -121,6 +139,10 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.transcript.replace_parse_offset_pair"
+    )]
     pub async fn replace_parse_offset_pair_result(
         &self,
         first: (&str, ParseOffset, ParseOffset),
