@@ -920,6 +920,7 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
     project_graphs: DashboardTestProjectGraphsV1,
     host: &str,
     port: u16,
+    build_version: &'static str,
     spa_routes: Router,
     shutdown: F,
 ) -> Result<()>
@@ -932,6 +933,7 @@ where
         DashboardRunRequest {
             host,
             port,
+            build_version,
             spa_routes,
             test_authority: Some(&authority),
             test_project_graph_resolver: Some(project_graph_resolver),
@@ -946,6 +948,9 @@ where
 struct DashboardRunRequest<'a> {
     host: &'a str,
     port: u16,
+    /// The owning composition's build version; served surfaces must report the
+    /// caller's product runtime, never a crate-local substitute.
+    build_version: &'static str,
     spa_routes: Router,
     test_authority: Option<&'a DashboardHostAdmissionTestAuthorityV1>,
     test_project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
@@ -964,6 +969,7 @@ where
     let DashboardRunRequest {
         host,
         port,
+        build_version,
         spa_routes,
         test_authority,
         test_project_graph_resolver,
@@ -987,7 +993,7 @@ where
         // token counts through its own composition.
         false,
         DashboardStateCompositionV1 {
-            build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            build_version,
             project_graph_resolver: test_project_graph_resolver,
             code_graph_read_admission: test_authority
                 .and_then(|authority| authority.code_graph_read_admission.clone()),

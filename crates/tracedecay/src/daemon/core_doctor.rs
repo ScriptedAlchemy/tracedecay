@@ -665,6 +665,9 @@ mod doctor_runtime_route_tests {
         profile_root: PathBuf,
         global_db_path: PathBuf,
     ) -> DaemonHandshake {
+        // The doctor route serves the daemon's version from the product
+        // runtime; route tests never pass through the binary's registration.
+        crate::product_runtime::register_fixture_product_runtime();
         DaemonHandshake {
             project_path: Some(project_path),
             scope_prefix: None,
