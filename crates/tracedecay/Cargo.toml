@@ -569,6 +569,14 @@ harness = false
 # The harness module is gated out of the shipped library, so the bench selects
 # it the same way the integration lanes do.
 required-features = ["test-helpers"]
+
+[[bench]]
+name = "transcript_ingest"
+path = "benches/transcript_ingest.rs"
+harness = false
+# Sandboxed per-item ingest throughput over the same fixture surface as the
+# transcript-ingest integration suite.
+required-features = ["test-helpers"]
 # The custom benchmark CLI is not a libtest harness and cannot answer the
 # `--list --format terse` probe used by `cargo test` and nextest.
 test = false
