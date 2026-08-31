@@ -126,6 +126,7 @@ impl ComposerIngestContext<'_, '_> {
     }
 }
 
+#[hotpath::measure(label = "sessions.hosts.cursor.composer_projection_drain", future = true)]
 async fn drain_composer_projection_queue(
     context: &ComposerIngestContext<'_, '_>,
 ) -> TranscriptIngestResult<crate::runtime::cursor::projection::CursorProjectionDrainStats> {
@@ -163,6 +164,7 @@ struct ComposerCoverageContext<'facade> {
     cancellation: &'facade ObservationCancellation,
 }
 
+#[hotpath::measure(label = "sessions.hosts.cursor.composer_coverage_advance", future = true)]
 async fn advance_composer_coverage(
     context: ComposerCoverageContext<'_>,
     source: ObservationSourceIdentityV1,
@@ -263,6 +265,7 @@ impl CursorComposerSource {
             .await
     }
 
+    #[hotpath::measure(label = "sessions.hosts.cursor.composer_sweep", future = true)]
     async fn ingest_with_context(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -337,6 +340,7 @@ impl CursorComposerSource {
         Ok(outcome.finished(byte_budget.consumed(), byte_budget.deferred()))
     }
 
+    #[hotpath::measure(label = "sessions.hosts.cursor.composer_state_vscdb", future = true)]
     async fn ingest_state_vscdb(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -783,6 +787,7 @@ impl CursorComposerSource {
         }
     }
 
+    #[hotpath::measure(label = "sessions.hosts.cursor.composer_chat_stores", future = true)]
     async fn ingest_chat_store_dbs(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -810,6 +815,7 @@ impl CursorComposerSource {
         }
     }
 
+    #[hotpath::measure(label = "sessions.hosts.cursor.composer_store_db", future = true)]
     async fn ingest_one_store_db(
         &self,
         context: &ComposerIngestContext<'_, '_>,

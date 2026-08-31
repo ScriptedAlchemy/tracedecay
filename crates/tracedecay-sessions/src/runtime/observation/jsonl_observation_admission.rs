@@ -839,6 +839,7 @@ struct SharedJsonlBuildOptions {
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
+#[hotpath::measure(label = "sessions.observation.jsonl_page_build")]
 fn build_shared_jsonl_page(
     path: PathBuf,
     previous: StoredCursor,
@@ -1043,6 +1044,7 @@ async fn prepare_shared_jsonl_window(
     .await
 }
 
+#[hotpath::measure(label = "sessions.observation.jsonl_window_prepare", future = true)]
 async fn prepare_shared_jsonl_window_with_background_cpu(
     page: &SharedJsonlPage,
     start: usize,
@@ -1223,6 +1225,7 @@ async fn shared_jsonl_page(
     .await
 }
 
+#[hotpath::measure(label = "sessions.observation.jsonl_page_lookup", future = true)]
 async fn shared_jsonl_page_with_cancellation(
     path: &Path,
     previous: StoredCursor,
@@ -1568,6 +1571,7 @@ impl ActiveAdmission<'_> {
         .with_resume_checkpoint(self.file_identity, resume_fingerprint))
     }
 
+    #[hotpath::measure(label = "sessions.observation.jsonl_coverage_advance", future = true)]
     async fn advance_coverage(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,
@@ -1760,6 +1764,7 @@ impl ActiveAdmission<'_> {
         }
     }
 
+    #[hotpath::measure(label = "sessions.observation.jsonl_capture", future = true)]
     async fn capture(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,
@@ -1778,6 +1783,7 @@ impl ActiveAdmission<'_> {
             .await
     }
 
+    #[hotpath::measure(label = "sessions.observation.jsonl_capture_window", future = true)]
     async fn capture_window(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,

@@ -101,6 +101,7 @@ impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowInde
 /// through the shared `session_schema_migrations` table exactly like
 /// [`crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction`],
 /// so both stores register under their own migration name in one table.
+#[hotpath::measure(label = "sessions.workflow_index.ensure_schema", future = true)]
 pub async fn ensure_workflow_index_schema(conn: &impl Executor) -> Result<(), WorkflowIndexError> {
     if schema_version(conn)
         .await
@@ -205,6 +206,7 @@ pub const INGEST_WATERMARK_KEY: &str = "ingest_watermark_mtime";
 /// Reads the ingest watermark (max processed run-file mtime, unix seconds), or
 /// `0` when unset / the schema predates this table. Never errors: a store
 /// without the meta table simply reports no watermark, forcing a full sweep.
+#[hotpath::measure(label = "sessions.workflow_index.watermark_read", future = true)]
 pub async fn read_ingest_watermark(conn: &impl QueryExecutor, key: &str) -> i64 {
     let Ok(mut rows) = conn
         .query(
@@ -225,6 +227,7 @@ pub async fn read_ingest_watermark(conn: &impl QueryExecutor, key: &str) -> i64 
 /// whose transcripts grew (e.g. a `running` run that later `completed`)
 /// overwrites the mutable columns and refreshes `updated_at`. `created_at` is
 /// preserved.
+#[hotpath::measure(label = "sessions.workflow_index.run_upsert", future = true)]
 pub async fn upsert_run(conn: &impl Executor, run: &WorkflowRun) -> Result<(), WorkflowIndexError> {
     if run.run_id.trim().is_empty() {
         return Err(WorkflowIndexError::InvalidArgument(
@@ -266,6 +269,7 @@ pub async fn upsert_run(conn: &impl Executor, run: &WorkflowRun) -> Result<(), W
 
 /// Inserts or updates one agent row (idempotent on `(run_id, agent_label,
 /// agent_id)`).
+#[hotpath::measure(label = "sessions.workflow_index.agent_upsert", future = true)]
 pub async fn upsert_agent(
     conn: &impl Executor,
     agent: &WorkflowAgent,
@@ -414,6 +418,7 @@ where
         self.has_tables(&["workflow_runs", "workflow_agents"]).await
     }
 
+    #[hotpath::measure(label = "sessions.workflow_index.runs_for_session", future = true)]
     pub async fn runs_for_session(
         &self,
         parent_session_id: &str,
@@ -443,6 +448,7 @@ where
         Ok(runs)
     }
 
+    #[hotpath::measure(label = "sessions.workflow_index.run_read", future = true)]
     pub async fn run_for_id(
         &self,
         run_id: &str,
@@ -458,6 +464,7 @@ where
         rows.next().await?.map(|row| row_to_run(&row)).transpose()
     }
 
+    #[hotpath::measure(label = "sessions.workflow_index.agents_for_run", future = true)]
     pub async fn agents_for_run(
         &self,
         run_id: &str,
@@ -532,6 +539,7 @@ where
         rows.next().await?.map(|row| row_to_agent(&row)).transpose()
     }
 
+    #[hotpath::measure(label = "sessions.workflow_index.runs_for_git_scope", future = true)]
     pub async fn runs_for_git_scope(
         &self,
         session_ids: Option<&[(String, String)]>,
