@@ -4508,6 +4508,20 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
         }
         latest
     }
+
+    /// Resolve the sealed replay binding for one already-published generation
+    /// through the retained publication clone. A sealed binding is an
+    /// immutable pointer-file read, so it stays answerable while a reconcile
+    /// owns the scheduler mutex for its whole pass.
+    #[hotpath::measure(label = "daemon.code_index.historical.replay_binding")]
+    pub(crate) fn sealed_replay_binding(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<CodeGraphReplayBindingV1, CodeIndexSchedulerErrorV1> {
+        self.publication
+            .sealed_replay_binding(generation_id)
+            .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
+    }
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
