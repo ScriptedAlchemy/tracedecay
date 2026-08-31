@@ -16,7 +16,9 @@ pub(super) async fn execute_retained_application(
             DaemonInvocationOutcome::ApplicationProblem {
                 problem: ApplicationProblem::unavailable(SafeDiagnostic {
                     code: "application.retained.authority-unavailable".to_owned(),
-                    message: "The retained application authority is unavailable.".to_owned(),
+                    message: "The retained application authority is unavailable: \
+                              no retained runtime is registered for this scope."
+                        .to_owned(),
                 }),
             },
         );

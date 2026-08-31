@@ -488,6 +488,7 @@ pub(crate) struct RegisteredDeliveryReadAuthorityV1 {
     scope: tracedecay_application::ResolvedScope,
     configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
     handle: tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1,
+    source_access: Arc<dyn tracedecay_usecases::ProjectSourceAccessSnapshotPort>,
 }
 
 impl RegisteredDeliveryReadAuthorityV1 {
@@ -496,12 +497,14 @@ impl RegisteredDeliveryReadAuthorityV1 {
         scope: tracedecay_application::ResolvedScope,
         configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
         handle: tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1,
+        source_access: Arc<dyn tracedecay_usecases::ProjectSourceAccessSnapshotPort>,
     ) -> Self {
         Self {
             project_root,
             scope,
             configuration,
             handle,
+            source_access,
         }
     }
 
@@ -522,13 +525,9 @@ impl RegisteredDeliveryReadAuthorityV1 {
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot> {
         let current = self.configuration.client().current().await.ok()?;
-        crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
-            &self.scope,
-            &self.project_root,
-            &current,
-            observed_at,
-        )
-        .ok()
+        self.source_access
+            .source_access_at(&self.scope, &self.project_root, &current, observed_at)
+            .ok()
     }
 }
 

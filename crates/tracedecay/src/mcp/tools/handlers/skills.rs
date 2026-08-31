@@ -24,7 +24,7 @@ use tracedecay_automation_runtime::automation::skill_usage::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::support::{tool_json, tool_json_with_md};
 use tracedecay_mcp::tools::renderers;

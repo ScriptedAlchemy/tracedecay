@@ -14,7 +14,7 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::json_result;
 use tracedecay_mcp::ToolResult;
@@ -488,7 +488,7 @@ async fn registry_list(
     query: Option<&str>,
 ) -> Result<Value> {
     use tracedecay_dashboard_api::project_registry::{
-        PublicCodeProject, build_project_registry_view,
+        build_project_registry_view, public_code_project_from_record,
     };
 
     let limit = limit.clamp(1, 100_000);
@@ -508,7 +508,7 @@ async fn registry_list(
     let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
     let public = projects
         .iter()
-        .map(|project| PublicCodeProject::from_record(project, active_id.as_deref()))
+        .map(|project| public_code_project_from_record(project, active_id.as_deref()))
         .collect::<Vec<_>>();
     Ok(json!({
         "status": "ok",

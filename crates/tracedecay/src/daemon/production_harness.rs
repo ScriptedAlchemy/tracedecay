@@ -35,7 +35,7 @@ pub fn capture_exact_git_snapshot_for_test(
     repository_id: tracedecay_domain::RepositoryId,
     worktree_id: tracedecay_domain::WorktreeId,
     captured_at: tracedecay_domain::UtcMicros,
-) -> tracedecay_runtime_core::errors::Result<tracedecay_domain::RepositoryStateSnapshotV1> {
+) -> tracedecay_domain::errors::Result<tracedecay_domain::RepositoryStateSnapshotV1> {
     git_transactions::capture_exact_snapshot_for_test(
         repository_root,
         project_id,
@@ -359,7 +359,7 @@ async fn mount_one_production_composition_project(
     let code_search_scope = {
         let graph = composition.server.cg().await;
         let target = graph.configuration_runtime().configuration_target();
-        project_open_owners::resolved_scope_for_project(graph.project_root(), &target.project_id)
+        tracedecay_code_index_runtime::resolved_scope_for_project(graph.project_root(), &target.project_id)
             .map_err(|error| TraceDecayError::Config {
                 message: format!("production-composition code-index scope is invalid: {error:?}"),
             })?

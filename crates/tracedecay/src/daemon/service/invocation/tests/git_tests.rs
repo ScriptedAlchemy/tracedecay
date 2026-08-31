@@ -40,8 +40,8 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         evaluated_at: UtcMicros(1),
     };
     let result = tracedecay_usecases::git_reads::GitReadResultV1::Status(
-        crate::git_query::GitQueryEnvelopeV1 {
-            value: crate::git_query::GitStatusSummaryV1 {
+        tracedecay_usecases::git_query::GitQueryEnvelopeV1 {
+            value: tracedecay_usecases::git_query::GitStatusSummaryV1 {
                 repository: scope.repository_id.clone(),
                 head: GitHeadStateV1::Unborn {
                     branch: "refs/heads/main".to_owned(),
@@ -53,7 +53,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
                 untracked: 0,
                 ignored: 0,
                 changed_paths: Vec::new(),
-                schema_version: crate::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
+                schema_version: tracedecay_usecases::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
             },
             coverage: tracedecay_domain::git::GitCoverageV1::complete(),
             truncated_by_bound: false,
@@ -89,8 +89,8 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         &request,
         &authority,
         tracedecay_usecases::git_reads::GitReadResultV1::Status(
-            crate::git_query::GitQueryEnvelopeV1 {
-                value: crate::git_query::GitStatusSummaryV1 {
+            tracedecay_usecases::git_query::GitQueryEnvelopeV1 {
+                value: tracedecay_usecases::git_query::GitStatusSummaryV1 {
                     repository: scope.repository_id,
                     head: GitHeadStateV1::Unborn {
                         branch: "refs/heads/main".to_owned(),
@@ -102,7 +102,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
                     untracked: 0,
                     ignored: 0,
                     changed_paths: Vec::new(),
-                    schema_version: crate::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
+                    schema_version: tracedecay_usecases::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
                 },
                 coverage: tracedecay_domain::git::GitCoverageV1::degraded(vec![
                     tracedecay_domain::git::GitDegradationV1::TruncatedOutput,

@@ -12,7 +12,7 @@ use tracedecay_dashboard_api::DashboardProjectRuntime;
 use tracedecay_domain::{FactOwnerV1, ProjectId, UserProfileId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_usecases::configuration::UserSettingsDaemonClient;
 use tracedecay_usecases::tracedecay::{

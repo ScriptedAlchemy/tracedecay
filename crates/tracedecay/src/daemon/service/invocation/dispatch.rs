@@ -1,6 +1,7 @@
 //! The daemon invocation dispatcher: `DaemonInvocationService::invoke`.
 
 use super::*;
+use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// Upper bound for the size of the `DaemonInvocationService::invoke` future.
@@ -180,7 +181,8 @@ impl DaemonInvocationService {
         let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
-            let Some(lease) = crate::daemon::request_cancellation::register(&request_id) else {
+            let Some(lease) = crate::daemon::service::request_cancellation::register(&request_id)
+            else {
                 observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
                 return DaemonInvocationResponse::problem(
                     request_id,
@@ -576,7 +578,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
-                    crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact,
+                    ApplicationSurfaceOperation::FeedbackImpact,
                     PrimitiveRequest::Impact(request),
                     observed_at,
                     deadline,
@@ -594,7 +596,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
-                    crate::application_surface::ApplicationSurfaceOperation::AffectedTests,
+                    ApplicationSurfaceOperation::AffectedTests,
                     PrimitiveRequest::AffectedFileTests(request),
                     observed_at,
                     deadline,
@@ -612,7 +614,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
-                    crate::application_surface::ApplicationSurfaceOperation::TestResults,
+                    ApplicationSurfaceOperation::TestResults,
                     PrimitiveRequest::RecentTestResults(page),
                     observed_at,
                     deadline,
@@ -647,7 +649,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                let request = match crate::application_surface::primitive_code_into_primitive(
+                let request = match tracedecay_application::primitive_code_into_primitive(
                     request,
                     tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(
                     ),

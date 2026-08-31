@@ -30,7 +30,7 @@ use tracedecay_mcp::transport::StdioTransport;
 use tracedecay_mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
 #[cfg(unix)]
 use tracedecay_mcp::{ErrorCode, JsonRpcResponse};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
 ///
@@ -397,7 +397,7 @@ pub(crate) fn reset_proxy_handshake_for_initialize(
 pub(crate) async fn resolve_daemon_initialize_route(
     params: Option<&serde_json::Value>,
     registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
-) -> tracedecay_runtime_core::errors::Result<Option<InitializeRouteMetadata>> {
+) -> tracedecay_domain::errors::Result<Option<InitializeRouteMetadata>> {
     let roots = crate::mcp::server::initialize_root_paths(params);
     if let Some(registry) = registry {
         for root in &roots {

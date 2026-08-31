@@ -46,7 +46,7 @@ pub(super) struct ActualIndex {
 pub(super) async fn read_columns(
     conn: &impl QueryExecutor,
     table: &str,
-) -> tracedecay_runtime_core::errors::Result<HashMap<String, ActualColumn>> {
+) -> tracedecay_domain::errors::Result<HashMap<String, ActualColumn>> {
     let mut rows = conn
         .query(
             "SELECT name, type, \"notnull\", dflt_value, pk, hidden
@@ -92,7 +92,7 @@ pub(super) async fn read_columns(
 pub(super) async fn read_foreign_keys(
     conn: &impl QueryExecutor,
     table: &str,
-) -> tracedecay_runtime_core::errors::Result<Vec<ActualForeignKey>> {
+) -> tracedecay_domain::errors::Result<Vec<ActualForeignKey>> {
     let mut rows = conn
         .query(
             "SELECT id, seq, \"from\", \"table\", \"to\", on_update, on_delete, \"match\"
@@ -140,7 +140,7 @@ pub(super) async fn read_foreign_keys(
 pub(super) async fn read_indexes(
     conn: &impl QueryExecutor,
     table: &str,
-) -> tracedecay_runtime_core::errors::Result<Vec<ActualIndex>> {
+) -> tracedecay_domain::errors::Result<Vec<ActualIndex>> {
     let mut rows = conn
         .query(
             "SELECT name, \"unique\", origin, partial

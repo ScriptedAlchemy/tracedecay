@@ -1237,7 +1237,7 @@ fn graph_error_response<T: Serialize>(
 
 fn graph_runtime_error_response<T: Serialize>(
     state: &DashboardState,
-    error: tracedecay_runtime_core::errors::TraceDecayError,
+    error: tracedecay_domain::errors::TraceDecayError,
 ) -> Response {
     if let Some((_authority, reason)) = error.reset_required_context() {
         return graph_error_response::<T>(

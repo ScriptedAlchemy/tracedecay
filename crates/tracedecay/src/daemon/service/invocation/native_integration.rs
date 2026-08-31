@@ -49,7 +49,8 @@ use tracedecay_usecases::observability::{
 };
 use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
-use crate::application_surface::NativeIntegrationSurfaceRequest;
+use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
+use tracedecay_application::NativeIntegrationSurfaceRequest;
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 use tracedecay_agent_hosts::native_integration::stack_signals::{
     signal_from_preflight, signal_from_receipt,
@@ -70,7 +71,7 @@ pub(super) async fn execute_native_integration(
     owner: Option<DaemonNativeIntegrationOwner>,
     observability_producer: Option<Arc<BoundedObservabilityProducerV1>>,
     status_broadcast: Option<Arc<NativeIntegrationStatusBroadcastV1>>,
-    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+    surface_operation: ApplicationSurfaceOperation,
     request: NativeIntegrationSurfaceRequest,
     observed_at: UtcMicros,
     deadline: Deadline,
@@ -868,7 +869,7 @@ fn invalid_native_integration_request() -> ApplicationProblem {
 fn native_integration_authority(
     request_id: &str,
     registered: &RegisteredConfigurationRuntime,
-    operation: crate::application_surface::ApplicationSurfaceOperation,
+    operation: ApplicationSurfaceOperation,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,

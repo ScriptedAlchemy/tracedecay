@@ -267,7 +267,7 @@ fn missing_index_classifier_covers_every_auto_init_store_miss() {
         "no TraceDecay database found at '/repo/store.db'",
     ];
     for message in missing_messages {
-        let error = tracedecay_runtime_core::errors::TraceDecayError::Config {
+        let error = tracedecay_domain::errors::TraceDecayError::Config {
             message: message.to_string(),
         };
         assert!(
@@ -276,7 +276,7 @@ fn missing_index_classifier_covers_every_auto_init_store_miss() {
         );
     }
 
-    let unrelated = tracedecay_runtime_core::errors::TraceDecayError::Config {
+    let unrelated = tracedecay_domain::errors::TraceDecayError::Config {
         message: "identity cutover conflict".to_string(),
     };
     assert!(!super::super::is_missing_index_error(&unrelated));
@@ -395,6 +395,91 @@ async fn non_json_handshake_reads_invalid_handshake_refusal() {
         .await
         .expect("server task should complete")
         .expect("a refused handshake is a served connection, not a serve error");
+}
+
+/// A client whose auth preface this daemon rejects must read one typed
+/// `authentication_rejected` refusal frame and a clean EOF — never a bare
+/// connection close its transport reports as "outcome unknown". The daemon
+/// serves the refusal and survives; it never echoes the supplied token.
+#[cfg(unix)]
+#[tokio::test]
+async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&client_identity.profile_root, "auth-refusal-test");
+
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(async move {
+        Box::pin(super::super::serve_authenticated_socket_client_with_class(
+            tracedecay_daemon_protocol::transport::BrokerStream::Unix(server),
+            engine,
+            "daemon-minted-token".to_string(),
+            super::super::core_admission::DaemonClientAdmissionClass::General,
+        ))
+        .await
+    });
+
+    let (reader, mut writer) = client.into_split();
+    // The real client pipeline: auth preface (here with a token the daemon
+    // did not mint), handshake, then the first request — all written before
+    // the client starts reading.
+    let preface = tracedecay_daemon_protocol::transport::DaemonAuthPreface::new("stale-token")
+        .to_line()
+        .expect("preface json");
+    writer
+        .write_all(format!("{preface}\n").as_bytes())
+        .await
+        .expect("write bad auth preface");
+    let handshake = test_handshake_defaults()
+        .to_line()
+        .expect("handshake json");
+    writer
+        .write_all(format!("{handshake}\n").as_bytes())
+        .await
+        .expect("write handshake");
+    writer
+        .write_all(
+            b"{\"protocol\":\"tracedecay.daemon.invocation\",\"revision\":1,\
+              \"request_id\":\"request.after-rejected-auth\",\
+              \"operation\":\"semantic_evaluate_and_publish\"}\n",
+        )
+        .await
+        .expect("write pipelined request");
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let refusal_line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("refusal must arrive before the read deadline")
+        .expect("the refusal read must not fail with a transport reset")
+        .expect("the daemon must answer a rejected auth preface with a refusal line");
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
+        .expect("the refusal line must parse as the typed refusal frame");
+    assert_eq!(
+        refusal.refusal,
+        tracedecay_daemon_protocol::DaemonHandshakeRefusalReason::AuthenticationRejected
+    );
+    assert!(
+        !refusal.daemon_version.is_empty(),
+        "the refusal must advertise the daemon version"
+    );
+    assert!(
+        !refusal_line.contains("stale-token") && !refusal_line.contains("daemon-minted-token"),
+        "the refusal must never echo a token: {refusal_line}"
+    );
+
+    let eof = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("connection close must arrive before the read deadline")
+        .expect("the close must be a clean EOF, not a connection reset");
+    assert_eq!(eof, None, "no frames follow the refusal");
+
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("a refused auth preface is a served connection, not a serve error");
 }
 
 #[cfg(unix)]

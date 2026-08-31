@@ -1,5 +1,5 @@
 use super::connection::Database;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 impl Database {
     /// Retains the issuing database client with one exact-SQL purpose adapter.

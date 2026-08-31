@@ -23,7 +23,7 @@
 use tracedecay_runtime_core::db::{
     Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
 };
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 #[tokio::test]
 async fn unregistered_installer_refuses_to_initialize_a_registered_shard() {

@@ -10,7 +10,7 @@ use crate::automation::runner::{SessionReflectorAutomationOptions, SkillWriterAu
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 
 use super::contract::contract_error;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 pub fn memory_curator_run_request(
     run_id: &str,

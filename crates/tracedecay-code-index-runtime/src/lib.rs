@@ -74,6 +74,7 @@ pub use code_graph_seat::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
 pub use code_index_scheduler::CodeIndexSchedulerRegistryV1;
+pub use code_index_scheduler::identity::resolved_scope_for_project;
 pub use ports::{
     AdmissionParkLeaseV1, ApplicationCatalogSnapshotErrorV1, ApplicationCatalogSnapshotFn,
     CONNECTION_ADMISSION, GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1,

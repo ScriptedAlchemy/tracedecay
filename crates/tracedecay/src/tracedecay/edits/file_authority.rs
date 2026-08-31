@@ -18,7 +18,7 @@ use same_file::Handle;
 pub(super) use tracedecay_runtime_core::path_safety::normalize_source_edit_relative_path;
 use tracedecay_runtime_core::path_safety::{source_edit_path_error, source_edit_unsafe_path};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 static SOURCE_EDIT_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 

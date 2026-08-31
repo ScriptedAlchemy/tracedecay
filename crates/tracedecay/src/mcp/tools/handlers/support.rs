@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);
 static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =

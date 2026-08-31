@@ -25,7 +25,7 @@ use tracedecay_application::source_edit::{
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::path_safety::{
     normalize_source_edit_relative_path, source_edit_path_error, source_edit_unsafe_path,
 };
@@ -303,14 +303,14 @@ pub fn validate_planned_source_edit(
                 .iter()
                 .find(|file| file.relative_path == relative_path)
             else {
-                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
                         "source edit apply produced unplanned candidate {relative_path}"
                     ),
                 });
             };
             if planned.expected.as_deref() != expected || planned.intended.as_deref() != intended {
-                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
                         "source edit candidate {relative_path} drifted from its exact preview"
                     ),
@@ -429,7 +429,7 @@ impl SourceEditCandidateAuthority {
             .current_identity()?
             .ok_or_else(source_edit_unsafe_path)?;
         if current != identity {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "source edit candidate changed while it was read".to_owned(),
             });
         }
@@ -466,7 +466,7 @@ pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
         .truncate(false)
         .open(lock_path)?;
     file.try_lock_exclusive().map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::SyncLock {
+        tracedecay_domain::errors::TraceDecayError::SyncLock {
             message: format!("could not lock sync lockfile: {error}"),
         }
     })?;

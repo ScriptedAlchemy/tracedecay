@@ -6,7 +6,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::db::is_lock_contended;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const LIFECYCLE_LOCK_FILENAME: &str = "lifecycle.lock";
 const EXCLUSIVE_LEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);

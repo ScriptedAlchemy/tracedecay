@@ -9,7 +9,7 @@ use tracedecay_graph_db::{
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
     VerifiedGraphSnapshot,
 };
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_store::{
     FactReadControl, GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1,
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationKeyV1,

@@ -623,8 +623,7 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     pub(super) proposal_routing: super::work_routing::DaemonWorkProposalRoutingAuthorityV1,
     /// Canonical Work evidence retrieval adapter with per-request
     /// evaluated-profile resolution.
-    pub(super) evidence_retrieval:
-        crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1,
+    pub(super) evidence_retrieval: Arc<dyn WorkEvidenceRetrievalPortV1>,
     /// Project-owned bounded replay for receipts that closed outside a request
     /// response, such as terminal attempt compare-and-swaps.
     pub(super) blocked_interval_observation_recovery:
@@ -701,7 +700,7 @@ impl RegisteredFeedbackRuntime {
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredCallableCodeRuntime {
     pub(super) scope: ResolvedScope,
-    pub(super) authorization: DaemonCallableCodeAuthorizationSource,
+    pub(super) authorization: Arc<dyn CallableCodeAuthorizationSourcePort>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

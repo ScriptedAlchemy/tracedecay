@@ -7,7 +7,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::support::tool_json_with_md;
 use tracedecay_mcp::tools::renderers;

@@ -33,7 +33,7 @@ use tracedecay_runtime_core::db::MemoryConnection;
 use tracedecay_runtime_core::db::engine::TransactionBehavior;
 use tracedecay_runtime_core::db::engine::{IntoParams, Row, Rows, Value, params};
 use tracedecay_runtime_core::db::{Database, DatabaseMemoryTransaction};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Durable tables for generation-bound diagnostic records.

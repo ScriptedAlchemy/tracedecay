@@ -44,7 +44,7 @@ const BOOTSTRAP_TERMINAL_CACHE_FOR: Duration = Duration::from_secs(2);
 const BOOTSTRAP_RETRY_BUDGET: Duration = Duration::from_mins(1);
 
 pub(super) type ProfileHostAdmissionBootstrapOperation = Arc<
-    dyn Fn() -> Pin<Box<dyn Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send>>
+    dyn Fn() -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send>>
         + Send
         + Sync,
 >;
@@ -86,7 +86,7 @@ struct ProfileHostAdmissionBootstrapWorker {
     state: AtomicU8,
     attempt_count: AtomicUsize,
     backoff_count: AtomicUsize,
-    terminal_error: std::sync::Mutex<Option<Arc<tracedecay_runtime_core::errors::TraceDecayError>>>,
+    terminal_error: std::sync::Mutex<Option<Arc<tracedecay_domain::errors::TraceDecayError>>>,
     completed_at: std::sync::Mutex<Option<Instant>>,
     completed: Notify,
     cancellation: Arc<ProfileHostAdmissionCancellation>,
@@ -97,7 +97,7 @@ struct ProfileHostAdmissionBootstrapWorker {
 pub(super) enum ProfileHostAdmissionBootstrapStatus {
     Running,
     Ready,
-    Terminal(Arc<tracedecay_runtime_core::errors::TraceDecayError>),
+    Terminal(Arc<tracedecay_domain::errors::TraceDecayError>),
     Cancelled,
 }
 
@@ -476,7 +476,7 @@ impl ProfileHostAdmissionBootstrapWorker {
         self.completed.notify_waiters();
     }
 
-    fn finish_terminal(&self, error: tracedecay_runtime_core::errors::TraceDecayError) {
+    fn finish_terminal(&self, error: tracedecay_domain::errors::TraceDecayError) {
         *self
             .terminal_error
             .lock()
@@ -590,7 +590,7 @@ impl ProfileHostAdmissionBootstrapWorker {
 }
 
 fn bootstrap_error_disposition(
-    error: &tracedecay_runtime_core::errors::TraceDecayError,
+    error: &tracedecay_domain::errors::TraceDecayError,
 ) -> (&str, bool) {
     if error.reset_required_context().is_some() {
         ("reset_required", false)
@@ -920,7 +920,7 @@ mod tests {
             Box::pin(async move {
                 attempts.fetch_add(1, Ordering::AcqRel);
                 Err(
-                    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                    tracedecay_domain::errors::TraceDecayError::project_route(
                         "test_bootstrap_terminal",
                         false,
                         "repair required",
@@ -966,7 +966,7 @@ mod tests {
             Box::pin(async move {
                 attempts.fetch_add(1, Ordering::AcqRel);
                 Err(
-                    tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                    tracedecay_domain::errors::TraceDecayError::reset_required(
                         "host-admission spool",
                         "future spool version 3 is incompatible with required version 2",
                     ),
@@ -1016,7 +1016,7 @@ mod tests {
             Box::pin(async move {
                 if attempts.fetch_add(1, Ordering::AcqRel) == 0 {
                     Err(
-                        tracedecay_runtime_core::errors::TraceDecayError::hook_runtime(
+                        tracedecay_domain::errors::TraceDecayError::hook_runtime(
                             "spool_io_failed",
                             true,
                             "host-admission spool open failed",
@@ -1048,7 +1048,7 @@ mod tests {
         let terminal_operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
             Box::pin(async move {
                 Err(
-                    tracedecay_runtime_core::errors::TraceDecayError::hook_runtime(
+                    tracedecay_domain::errors::TraceDecayError::hook_runtime(
                         "spool_corrupted",
                         false,
                         "host-admission spool is corrupted",
@@ -1096,7 +1096,7 @@ mod tests {
                 let attempt = attempts.fetch_add(1, Ordering::AcqRel);
                 if attempt < 2 {
                     Err(
-                        tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                        tracedecay_domain::errors::TraceDecayError::project_route(
                             "test_bootstrap_unavailable",
                             true,
                             "transient test failure",
@@ -1137,7 +1137,7 @@ mod tests {
             Box::pin(async move {
                 attempts.fetch_add(1, Ordering::AcqRel);
                 Err(
-                    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                    tracedecay_domain::errors::TraceDecayError::project_route(
                         "test_bootstrap_unavailable",
                         true,
                         "permanently retryable test failure",
@@ -1189,7 +1189,7 @@ mod tests {
             let started = Arc::clone(&operation_started);
             Box::pin(async move {
                 started.notify_one();
-                std::future::pending::<tracedecay_runtime_core::errors::Result<()>>().await
+                std::future::pending::<tracedecay_domain::errors::Result<()>>().await
             })
         });
 

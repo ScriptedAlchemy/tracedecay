@@ -227,7 +227,7 @@ fn external_admission_for_recovery_project(
     let FactOwnerV1::Project { project_id } = owner else {
         panic!("automation recovery fixture requires a project owner")
     };
-    let recovery_scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+    let recovery_scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         cg.project_root(),
         &project_id,
     )
@@ -251,7 +251,7 @@ fn retirement_admission_for_recovery_project(
     let FactOwnerV1::Project { project_id } = owner.clone() else {
         panic!("automation retirement fixture requires a project owner")
     };
-    let recovery_scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+    let recovery_scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         cg.project_root(),
         &project_id,
     )
@@ -604,7 +604,7 @@ fn retirement_capture_count(dashboard_root: &std::path::Path) -> usize {
         .count()
 }
 
-fn assert_admission_conflict(result: tracedecay_runtime_core::errors::Result<ReservationResult>) {
+fn assert_admission_conflict(result: tracedecay_domain::errors::Result<ReservationResult>) {
     assert!(matches!(
         result.expect("valid durable mismatch"),
         ReservationResult::Conflict { .. }
@@ -2937,7 +2937,7 @@ async fn project_open_repairs_corrupt_append_intent_at_clean_eof_without_pending
     assert!(
         recovery_index::indexed_journals_blocking(
             dashboard_root,
-            &crate::daemon::project_open_owners::resolved_scope_for_project(
+            &tracedecay_code_index_runtime::resolved_scope_for_project(
                 cg.project_root(),
                 &match cg.project_memory_owner().expect("project owner") {
                     FactOwnerV1::Project { project_id } => project_id,
@@ -3085,11 +3085,11 @@ fn retained_settlement_waiter_is_send_and_static() {
     fn assert_send_static<T: Send + 'static>() {}
 
     assert_send_static::<
-        super::RetainedSettlementWaiter<tracedecay_runtime_core::errors::Result<()>>,
+        super::RetainedSettlementWaiter<tracedecay_domain::errors::Result<()>>,
     >();
     assert_send_static::<
         super::RetainedSettlementWaiter<
-            tracedecay_runtime_core::errors::Result<(
+            tracedecay_domain::errors::Result<(
                 super::AutomationSettledTerminal,
                 AutomationRunLedgerRecord,
             )>,
@@ -3097,7 +3097,7 @@ fn retained_settlement_waiter_is_send_and_static() {
     >();
     assert_send_static::<
         super::RetainedSettlementWaiter<
-            tracedecay_runtime_core::errors::Result<(
+            tracedecay_domain::errors::Result<(
                 super::AutomationSettledProblem,
                 Option<AutomationRunLedgerRecord>,
             )>,
@@ -3107,7 +3107,7 @@ fn retained_settlement_waiter_is_send_and_static() {
     assert_send_static::<super::DeferredSettlementPairSubmission<()>>();
     assert_send_static::<
         super::RetainedSettlementWaiter<
-            tracedecay_runtime_core::errors::Result<super::RetainedAutomationSettlementOutcome>,
+            tracedecay_domain::errors::Result<super::RetainedAutomationSettlementOutcome>,
         >,
     >();
 }
@@ -3122,7 +3122,7 @@ async fn dropping_retained_waiter_does_not_abort_blocking_owner() {
             started_tx.send(()).expect("signal blocking owner");
             release_rx.recv().expect("release blocking owner");
             finished_tx.send(()).expect("signal owner completion");
-            tracedecay_runtime_core::errors::Result::Ok(())
+            tracedecay_domain::errors::Result::Ok(())
         }),
     };
 
@@ -3469,7 +3469,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let FactOwnerV1::Project { project_id } = owner else {
         panic!("retained cleanup recovery requires a project owner")
     };
-    let recovery_scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+    let recovery_scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         cg.project_root(),
         &project_id,
     )

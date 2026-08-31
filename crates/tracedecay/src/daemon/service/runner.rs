@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::probe::{DaemonSocketState, daemon_socket_state};
 use super::{DaemonServiceState, LAUNCHD_LABEL, tracedecay_data_dir, windows_task};
@@ -212,7 +212,7 @@ impl ServiceRunner {
     pub(super) fn log_hint(&self) -> String {
         match self {
             Self::Systemd => format!("journalctl --user -u {} -f", super::super::SERVICE_NAME),
-            Self::Launchd => crate::config::user_data_dir().map_or_else(
+            Self::Launchd => tracedecay_runtime_core::config::user_data_dir().map_or_else(
                 || "tail -f <tracedecay-data-dir>/daemon.err.log".to_string(),
                 |dir| format!("tail -f \"{}\"", dir.join("daemon.err.log").display()),
             ),

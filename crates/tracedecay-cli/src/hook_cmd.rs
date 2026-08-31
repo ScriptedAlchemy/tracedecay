@@ -3,7 +3,7 @@ use crate::cli::Commands;
 #[hotpath::measure(label = "cli.hook.dispatch", future = true)]
 pub(crate) async fn handle_hook_command(
     command: Commands,
-) -> tracedecay_runtime_core::errors::Result<i32> {
+) -> tracedecay_domain::errors::Result<i32> {
     handle_hook_command_inner(command).await
 }
 
@@ -11,7 +11,7 @@ fn handle_hook_command_inner(
     command: Commands,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<i32>>
+        dyn std::future::Future<Output = tracedecay_domain::errors::Result<i32>>
             + Send
             + 'static,
     >,

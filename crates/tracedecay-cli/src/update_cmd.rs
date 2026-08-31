@@ -24,7 +24,7 @@ use tracedecay_usecases::user_config::UserConfig;
 // server-shutdown bounds with margin for service-manager/process-exit latency.
 const DAEMON_RESTART_LEASE_TIMEOUT: Duration = Duration::from_secs(90);
 
-pub(crate) async fn refresh_generated_plugins() -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn refresh_generated_plugins() -> tracedecay_domain::errors::Result<()> {
     let home = tracedecay_home_dir()?;
     let tracedecay_bin = tracedecay_bin_for_generated_artifacts()?;
     refresh_generated_plugins_at(
@@ -60,7 +60,7 @@ fn refresh_generated_plugins_at(
     integrations: Vec<Box<dyn tracedecay::agents::AgentIntegration>>,
     home: &Path,
     tracedecay_bin: &str,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     eprintln!(
         "Refreshing tracedecay-generated plugin artifacts (supported user configs are preserved)"
     );
@@ -121,7 +121,7 @@ fn refresh_generated_plugins_at(
         eprintln!("No generated plugin installs detected — nothing to update.");
     }
     if !failures.is_empty() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("update-plugin failed for {}", failures.join("; ")),
         });
     }
@@ -133,12 +133,12 @@ fn refresh_generated_plugins_at(
 /// path and its socket, or `None` when no service is installed.
 fn refresh_daemon_service(
     previous_state: tracedecay::daemon::DaemonServiceState,
-) -> tracedecay_runtime_core::errors::Result<Option<(PathBuf, PathBuf)>> {
+) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>> {
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(None);
     }
     let tracedecay_bin = tracedecay::agents::which_tracedecay_path().ok_or_else(|| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: "tracedecay not found on PATH".to_string(),
         }
     })?;
@@ -149,7 +149,7 @@ fn refresh_daemon_service(
 fn refresh_daemon_service_with_spec(
     previous_state: tracedecay::daemon::DaemonServiceState,
     spec: &tracedecay::daemon::DaemonServiceSpec,
-) -> tracedecay_runtime_core::errors::Result<Option<(PathBuf, PathBuf)>> {
+) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>> {
     let socket_path = tracedecay::daemon::installed_service_socket_path()?
         .unwrap_or_else(|| spec.socket_path.clone());
     Ok(
@@ -171,7 +171,7 @@ fn print_daemon_transport_location(socket_path: &Path) {
 
 fn refresh_daemon_service_after_update(
     previous_state: tracedecay::daemon::DaemonServiceState,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     match refresh_daemon_service(previous_state)? {
         Some((service_path, socket_path)) => {
             eprintln!(
@@ -199,17 +199,17 @@ fn restart_daemon_service_with<Lease, Quiesce, Acquire, Refresh, Restore>(
     acquire: Acquire,
     refresh: Refresh,
     restore: Restore,
-) -> tracedecay_runtime_core::errors::Result<Option<(PathBuf, PathBuf)>>
+) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>>
 where
     Quiesce:
-        FnOnce() -> tracedecay_runtime_core::errors::Result<tracedecay::daemon::DaemonServiceState>,
-    Acquire: FnOnce() -> tracedecay_runtime_core::errors::Result<Lease>,
+        FnOnce() -> tracedecay_domain::errors::Result<tracedecay::daemon::DaemonServiceState>,
+    Acquire: FnOnce() -> tracedecay_domain::errors::Result<Lease>,
     Refresh: FnOnce(
         tracedecay::daemon::DaemonServiceState,
-    ) -> tracedecay_runtime_core::errors::Result<Option<(PathBuf, PathBuf)>>,
+    ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>>,
     Restore: FnOnce(
         tracedecay::daemon::DaemonServiceState,
-    ) -> tracedecay_runtime_core::errors::Result<()>,
+    ) -> tracedecay_domain::errors::Result<()>,
 {
     let previous_state = quiesce()?;
     let _lifecycle_lease = match acquire() {
@@ -221,7 +221,7 @@ where
                     | tracedecay::daemon::DaemonServiceState::RunningDisabled
             ) && let Err(restore_error) = restore(previous_state)
             {
-                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
                         "{acquire_error}; additionally failed to restore the managed daemon service: {restore_error}"
                     ),
@@ -233,7 +233,7 @@ where
     refresh(tracedecay::daemon::DaemonServiceState::RunningEnabled)
 }
 
-pub(crate) fn restart_daemon_service() -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> {
     let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire_with_timeout(
         "daemon restart",
         DAEMON_RESTART_LEASE_TIMEOUT,
@@ -250,12 +250,12 @@ pub(crate) fn restart_daemon_service() -> tracedecay_runtime_core::errors::Resul
             tracedecay::daemon::DaemonServiceState::RunningDisabled,
         ),
         tracedecay::daemon::DaemonServiceState::Missing => {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "no TraceDecay daemon service is installed — restart your `tracedecay daemon run` process manually, or run `tracedecay daemon install-service` to manage it as a service".to_string(),
             });
         }
         tracedecay::daemon::DaemonServiceState::Masked => {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "TraceDecay daemon service is masked; unmask it before restarting"
                     .to_string(),
             });
@@ -276,23 +276,23 @@ pub(crate) fn restart_daemon_service() -> tracedecay_runtime_core::errors::Resul
     }
 }
 
-fn tracedecay_home_dir() -> tracedecay_runtime_core::errors::Result<PathBuf> {
+fn tracedecay_home_dir() -> tracedecay_domain::errors::Result<PathBuf> {
     tracedecay::agents::home_dir().ok_or_else(|| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
         }
     })
 }
 
-pub(crate) fn tracedecay_bin_on_path() -> tracedecay_runtime_core::errors::Result<String> {
+pub(crate) fn tracedecay_bin_on_path() -> tracedecay_domain::errors::Result<String> {
     tracedecay::agents::which_tracedecay().ok_or_else(|| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: "tracedecay not found on PATH".to_string(),
         }
     })
 }
 
-fn tracedecay_bin_for_generated_artifacts() -> tracedecay_runtime_core::errors::Result<String> {
+fn tracedecay_bin_for_generated_artifacts() -> tracedecay_domain::errors::Result<String> {
     current_tracedecay_exe().map_or_else(tracedecay_bin_on_path, Ok)
 }
 
@@ -331,10 +331,10 @@ pub(crate) fn run_install_then_refresh<U, P>(
     policy: RefreshPolicy,
     upgrade: U,
     post_update: P,
-) -> tracedecay_runtime_core::errors::Result<()>
+) -> tracedecay_domain::errors::Result<()>
 where
-    U: FnOnce() -> tracedecay_runtime_core::errors::Result<UpgradeOutcome>,
-    P: FnOnce(Option<&Path>) -> tracedecay_runtime_core::errors::Result<()>,
+    U: FnOnce() -> tracedecay_domain::errors::Result<UpgradeOutcome>,
+    P: FnOnce(Option<&Path>) -> tracedecay_domain::errors::Result<()>,
 {
     let outcome = upgrade()?;
     match policy {
@@ -376,14 +376,14 @@ where
 #[hotpath::measure(label = "cli.update.run")]
 pub(crate) fn run_update_command(
     no_reinstall: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     run_update_flow("update", RefreshPolicy::Always, no_reinstall)
 }
 
 #[hotpath::measure(label = "cli.upgrade.run")]
 pub(crate) fn run_upgrade_command(
     no_reinstall: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
 }
 
@@ -391,7 +391,7 @@ fn run_update_flow(
     operation: &str,
     refresh_policy: RefreshPolicy,
     no_reinstall: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     tracedecay::daemon::with_exclusive_maintenance_window(operation, |lease_token| {
         run_install_then_refresh(refresh_policy, crate::upgrade::run_upgrade, |binary| {
             run_post_update_subcommand(no_reinstall, binary, lease_token)
@@ -401,15 +401,15 @@ fn run_update_flow(
 
 fn combine_operation_and_restore<T>(
     operation: &str,
-    operation_result: tracedecay_runtime_core::errors::Result<T>,
-    restore_result: tracedecay_runtime_core::errors::Result<()>,
-) -> tracedecay_runtime_core::errors::Result<T> {
+    operation_result: tracedecay_domain::errors::Result<T>,
+    restore_result: tracedecay_domain::errors::Result<()>,
+) -> tracedecay_domain::errors::Result<T> {
     match (operation_result, restore_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error),
         (Err(operation_error), Err(restore_error)) => {
-            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "{operation} failed: {operation_error}; daemon state restoration also failed: {restore_error}"
                 ),
@@ -422,7 +422,7 @@ fn combine_operation_and_restore<T>(
 pub(crate) async fn run_post_update_command(
     no_reinstall: bool,
     lifecycle_lease_token: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if let Some(token) = lifecycle_lease_token {
         let lifecycle_lease =
             tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_or_inherited(
@@ -461,7 +461,7 @@ fn prepare_post_update_lease(
 
 /// The binary to re-exec for `post-update`: freshly installed when reported,
 /// otherwise the currently running binary.
-fn post_update_binary(installed: Option<&Path>) -> tracedecay_runtime_core::errors::Result<String> {
+fn post_update_binary(installed: Option<&Path>) -> tracedecay_domain::errors::Result<String> {
     let current = std::env::current_exe().ok();
     post_update_binary_from(installed, current.as_deref()).map_or_else(tracedecay_bin_on_path, Ok)
 }
@@ -477,7 +477,7 @@ fn run_post_update_subcommand(
     no_reinstall: bool,
     installed: Option<&Path>,
     lifecycle_lease_token: &str,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let tracedecay_bin = post_update_binary(installed)?;
     let mut command = std::process::Command::new(&tracedecay_bin);
     command
@@ -489,14 +489,14 @@ fn run_post_update_subcommand(
     }
     let status =
         command.status().map_err(
-            |e| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            |e| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to run post-update with '{tracedecay_bin}': {e}"),
             },
         )?;
     if status.success() {
         return Ok(());
     }
-    Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+    Err(tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("post-update failed with status: {status}"),
     })
 }
@@ -519,7 +519,7 @@ pub(crate) enum ReinstallOutcome {
 pub(crate) fn partition_reinstall_results(
     results: Vec<(
         String,
-        tracedecay_runtime_core::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
+        tracedecay_domain::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
     )>,
 ) -> ReinstallOutcome {
     // Carry the reason, not just the name, so the operator can diagnose a
@@ -549,10 +549,10 @@ pub(crate) fn partition_reinstall_results(
 /// durably recorded.
 pub(crate) fn record_completed_reinstall_pass(
     config: &mut UserConfig,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
         config.save().map_err(
-            |err| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            |err| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("could not save tracedecay config: {err}"),
             },
         )?;
@@ -614,7 +614,7 @@ async fn reinstall_tracked_agents_under_lease(
 pub(crate) async fn run_post_update_tasks(
     no_reinstall: bool,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     eprintln!("\nPreparing safe post-update maintenance.");
     eprintln!("  Waiting for TraceDecay writers to shut down cleanly — do not interrupt.");
     let previous_daemon_state =
@@ -628,7 +628,7 @@ pub(crate) async fn run_post_update_tasks(
 async fn run_post_update_mutations(
     no_reinstall: bool,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     refresh_generated_plugins().await?;
 
     if no_reinstall {
@@ -789,7 +789,7 @@ mod tests {
                 order.borrow_mut().push("quiesce");
                 Ok(tracedecay::daemon::DaemonServiceState::RunningEnabled)
             },
-            || -> tracedecay_runtime_core::errors::Result<()> {
+            || -> tracedecay_domain::errors::Result<()> {
                 order.borrow_mut().push("acquire");
                 Err(config_err("lifecycle lease busy"))
             },
@@ -840,8 +840,8 @@ mod tests {
 
     use tracedecay_usecases::user_config::UserConfig;
 
-    fn config_err(message: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+    fn config_err(message: &str) -> tracedecay_domain::errors::TraceDecayError {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: message.to_string(),
         }
     }
@@ -850,7 +850,7 @@ mod tests {
         id: &str,
     ) -> (
         String,
-        tracedecay_runtime_core::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
+        tracedecay_domain::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
     ) {
         (
             id.to_string(),
@@ -862,7 +862,7 @@ mod tests {
         id: &str,
     ) -> (
         String,
-        tracedecay_runtime_core::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
+        tracedecay_domain::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
     ) {
         (id.to_string(), Err(config_err("install failed")))
     }
@@ -1122,8 +1122,8 @@ mod tests {
     fn record_upgrade<'a>(
         calls: &'a RefCell<Vec<&'static str>>,
         label: &'static str,
-        result: tracedecay_runtime_core::errors::Result<UpgradeOutcome>,
-    ) -> impl FnOnce() -> tracedecay_runtime_core::errors::Result<UpgradeOutcome> + 'a {
+        result: tracedecay_domain::errors::Result<UpgradeOutcome>,
+    ) -> impl FnOnce() -> tracedecay_domain::errors::Result<UpgradeOutcome> + 'a {
         move || {
             calls.borrow_mut().push(label);
             result
@@ -1134,8 +1134,8 @@ mod tests {
         calls: &'a RefCell<Vec<&'static str>>,
         label: &'static str,
         seen_binary: &'a RefCell<Option<Option<PathBuf>>>,
-        result: tracedecay_runtime_core::errors::Result<()>,
-    ) -> impl FnOnce(Option<&Path>) -> tracedecay_runtime_core::errors::Result<()> + 'a {
+        result: tracedecay_domain::errors::Result<()>,
+    ) -> impl FnOnce(Option<&Path>) -> tracedecay_domain::errors::Result<()> + 'a {
         move |binary| {
             calls.borrow_mut().push(label);
             *seen_binary.borrow_mut() = Some(binary.map(Path::to_path_buf));

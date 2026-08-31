@@ -10,7 +10,7 @@ use crate::daemon::automation_effect::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
 };
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::branch_admin::MaintenanceReaperKind;
 use super::{

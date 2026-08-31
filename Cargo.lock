@@ -6285,7 +6285,6 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-domain",
  "tracedecay-private-fs",
- "tracedecay-runtime-core",
  "tracedecay-tool-catalog",
 ]
 
@@ -6375,6 +6374,7 @@ name = "tracedecay-graph-db"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "fs2",
  "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
@@ -6499,6 +6499,7 @@ name = "tracedecay-mcp"
 version = "0.1.0"
 dependencies = [
  "hotpath",
+ "libc",
  "schemars",
  "serde",
  "serde_json",
@@ -6512,6 +6513,7 @@ dependencies = [
  "tracedecay-hooks",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
+ "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
  "tracing",
@@ -6599,7 +6601,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
- "tracedecay-automation",
  "tracedecay-capture",
  "tracedecay-domain",
  "tracedecay-graph-db",
@@ -6725,7 +6726,6 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-query",
  "tracedecay-runtime-core",
- "tracedecay-rusqlite-runtime",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",

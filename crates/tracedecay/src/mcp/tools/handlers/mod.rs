@@ -40,11 +40,8 @@ pub mod grep;
 pub mod health;
 pub mod hook_runtime;
 pub mod info;
-mod multi_root;
-mod project_registry;
 pub mod redundancy;
 pub(crate) mod retained_catalog;
-pub mod session;
 mod session_authorities;
 pub mod skills;
 mod support;
@@ -52,18 +49,6 @@ mod tool_call_support;
 mod work;
 pub mod workflow;
 mod workflow_family;
-pub(crate) use project_registry::{
-    ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
-    ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
-    ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
-    ProjectRegistryReadPort, ProjectRegistrySelector,
-};
-pub(crate) use session::{
-    SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
-    SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
-    SessionRefreshServiceOutcome, SessionRefreshServicePort, utc_micros_value,
-};
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -160,6 +145,8 @@ use super::binding::{
 };
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::tracedecay::TraceDecay;
+use tracedecay_application::ProjectRegistryReadPort;
+use tracedecay_mcp::handle_multi_root;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,
@@ -167,7 +154,6 @@ use dispatch_groups::{
     dispatch_info_tools, dispatch_memory_tools, dispatch_retained_application_tools,
     dispatch_session_workflow_tools,
 };
-use multi_root::handle_multi_root;
 use retained_catalog::dispatch_profile_retained_application_tool;
 #[cfg(test)]
 use retained_catalog::retained_mcp_composition;
@@ -175,7 +161,7 @@ pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use work::handle_work;
 use workflow_family::handle_workflow;
 

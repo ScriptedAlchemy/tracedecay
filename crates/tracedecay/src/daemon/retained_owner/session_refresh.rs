@@ -26,8 +26,8 @@ use tracedecay_usecases::context::{
 };
 use tracedecay_usecases::session::{SessionRefreshTarget, SessionRequestBinding};
 
-pub(crate) use crate::mcp::tools::SessionRefreshServicePort as RetainedSessionRefreshPortV1;
-use crate::mcp::tools::{SessionRefreshAction, SessionRefreshCommand};
+pub(crate) use tracedecay_mcp::SessionRefreshServicePort as RetainedSessionRefreshPortV1;
+use tracedecay_mcp::{SessionRefreshAction, SessionRefreshCommand};
 
 const REQUEST_MAX_RESULTS: u64 = 64;
 const REQUEST_MAX_BYTES: u64 = 64 * 1024 * 1024;

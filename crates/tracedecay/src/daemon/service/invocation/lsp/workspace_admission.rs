@@ -140,12 +140,8 @@ impl DaemonInvocationService {
             selector_digest.as_str().trim_start_matches("sha256:")
         ))
         .ok()?;
-        let capability =
-            CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
-                .ok()?;
-        let use_case =
-            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
-                .ok()?;
+        let capability = CapabilityId::new(super::LSP_WORKSPACE_CAPABILITY_ID_V1).ok()?;
+        let use_case = UseCaseId::new(super::LSP_WORKSPACE_USE_CASE_ID_V1).ok()?;
         let mut admissions = Vec::with_capacity(roots.len());
         let mut factories = Vec::with_capacity(roots.len());
         let mut admitted = Vec::with_capacity(roots.len());

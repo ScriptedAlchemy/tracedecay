@@ -48,22 +48,47 @@
 #![allow(clippy::large_futures)]
 #![allow(unreachable_pub)]
 
+pub mod analysis;
 pub mod application_output;
 mod catalog_error;
 pub mod context_headings;
+pub mod handlers;
 pub mod hook_events;
+pub mod hook_runtime;
 pub mod host_cli;
 pub mod jsonrpc;
 pub mod lifecycle;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
+pub mod session_refresh;
 pub mod tool_call_deadline;
 pub mod tool_errors;
 pub mod tools;
 pub mod transport;
+pub mod workflow;
 
+pub use analysis::{is_ident_byte, line_number_at, skip_ascii_whitespace};
 pub use catalog_error::McpCatalogError;
+pub use handlers::{
+    handle_multi_root, retained_problem_envelope, retained_safe_diagnostic,
+    validated_retained_response,
+};
+pub use hook_runtime::{
+    hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,
+    map_transcript_ingest_error,
+};
+pub use session_refresh::{
+    SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
+    SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
+    SessionRefreshServiceFuture, SessionRefreshServiceOutcome, SessionRefreshServicePort,
+    utc_micros_value,
+};
+pub use workflow::{
+    MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile, TestRunControl,
+    TestRunFailure, TestRunOutput, TestRunStream, cargo_test_args, libtest_identity,
+    libtest_module_prefix, parse_libtest_output, run_cargo_tests,
+};
 pub use context_headings::{
     CODE_CONTEXT_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
     CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,

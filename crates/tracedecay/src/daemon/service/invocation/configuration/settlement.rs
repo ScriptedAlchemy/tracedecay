@@ -1,6 +1,7 @@
 //! Durable configuration effect rendering and runtime reconciliation.
 
 use super::*;
+use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
 #[hotpath::measure(label = "daemon.service.configuration.reconcile", future = true)]
 pub(super) async fn reconcile_configuration_runtime(
@@ -25,12 +26,8 @@ pub(super) async fn reconcile_configuration_runtime(
         }
     };
     let installation = hotpath::measure_block!("daemon.service.configuration.activate", {
-        crate::config::root_runtime_configuration(&current)
+        tracedecay_usecases::config::publish_pinned_runtime_configuration(current.clone())
             .map_err(|error| error.to_string())
-            .and_then(|root| {
-                crate::config::install_pinned_runtime_configuration(root)
-                    .map_err(|error| error.to_string())
-            })
     });
     let (observed_revision_id, activation_error_code) = match installation {
         Ok(()) => (Some(current.revision_id), None),
@@ -66,7 +63,7 @@ pub(super) fn configuration_effect(
     mut authority: AuthorityReceipt,
     actor: &ActorId,
     scope: &ResolvedScope,
-    operation: crate::application_surface::ApplicationSurfaceOperation,
+    operation: ApplicationSurfaceOperation,
     caller_idempotency_key: &ConfigurationIdempotencyKey,
     expected_revision: &ConfigurationRevisionId,
     operation_digest: ManifestDigest,
@@ -220,7 +217,7 @@ mod tests {
                 authority,
                 &actor,
                 &scope,
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+                ApplicationSurfaceOperation::ConfigurationSet,
                 &ConfigurationIdempotencyKey::new("configuration.idempotency.effect-replay")
                     .unwrap(),
                 &ConfigurationRevisionId::new("configuration.revision.base").unwrap(),

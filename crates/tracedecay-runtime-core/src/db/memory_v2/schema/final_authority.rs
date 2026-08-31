@@ -1,6 +1,6 @@
 //! Final project-wide memory support schema.
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::super::{MemoryV2Executor, db_error};
 

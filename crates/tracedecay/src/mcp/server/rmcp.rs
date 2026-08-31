@@ -39,10 +39,10 @@ pub(crate) struct RmcpSelectedProjectResponseAuthority {
 }
 
 impl RmcpSelectedProjectResponseAuthority {
-    fn request_key(id: &Value) -> tracedecay_runtime_core::errors::Result<String> {
+    fn request_key(id: &Value) -> tracedecay_domain::errors::Result<String> {
         if id.is_null() {
             return Err(
-                tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                tracedecay_domain::errors::TraceDecayError::project_route(
                     "project_route_unavailable",
                     true,
                     "selected RMCP response has no request identity",
@@ -50,7 +50,7 @@ impl RmcpSelectedProjectResponseAuthority {
             );
         }
         serde_json::to_string(id).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+            tracedecay_domain::errors::TraceDecayError::project_route(
                 "project_route_unavailable",
                 true,
                 format!("selected RMCP response identity is invalid: {error}"),
@@ -62,10 +62,10 @@ impl RmcpSelectedProjectResponseAuthority {
         &self,
         id: &Value,
         lease: super::routing::SelectedProjectResponseLease,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let key = Self::request_key(id)?;
         let mut leases = self.leases.lock().map_err(|_| {
-            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+            tracedecay_domain::errors::TraceDecayError::project_route(
                 "project_route_unavailable",
                 true,
                 "selected RMCP response authority is poisoned during handler handoff",
@@ -73,7 +73,7 @@ impl RmcpSelectedProjectResponseAuthority {
         })?;
         if leases.contains_key(&key) {
             return Err(
-                tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                tracedecay_domain::errors::TraceDecayError::project_route(
                     "project_route_unavailable",
                     true,
                     "selected RMCP response identity is already awaiting transport delivery",
@@ -87,7 +87,7 @@ impl RmcpSelectedProjectResponseAuthority {
     pub(crate) fn take(
         &self,
         id: Option<&Value>,
-    ) -> tracedecay_runtime_core::errors::Result<Option<super::routing::SelectedProjectResponseLease>>
+    ) -> tracedecay_domain::errors::Result<Option<super::routing::SelectedProjectResponseLease>>
     {
         let Some(id) = id else {
             return Ok(None);
@@ -104,7 +104,7 @@ impl RmcpSelectedProjectResponseAuthority {
         self.leases
             .lock()
             .map_err(|_| {
-                tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                tracedecay_domain::errors::TraceDecayError::project_route(
                     "project_route_unavailable",
                     true,
                     "selected RMCP response authority is poisoned during transport delivery",
@@ -261,7 +261,7 @@ impl RmcpConnectionAdapter {
         server: Arc<McpServer>,
         timings_enabled: bool,
         initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let connection = server.new_connection_route_state()?;
         let memory_request_scope = connection.memory_request_scope().to_owned();
         Ok(Self {

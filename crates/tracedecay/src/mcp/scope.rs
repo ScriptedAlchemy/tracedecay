@@ -379,7 +379,7 @@ mod tests {
 
         let scope = resolve_query_scope(&owner, &requested).unwrap();
         let daemon_scope =
-            crate::daemon::project_open_owners::resolved_scope_for_project(&linked, &project_id)
+            tracedecay_code_index_runtime::resolved_scope_for_project(&linked, &project_id)
                 .unwrap();
 
         assert_eq!(
@@ -418,7 +418,7 @@ mod tests {
 
         let scope = resolve_query_scope(&owner, &requested).unwrap();
         let daemon_scope =
-            crate::daemon::project_open_owners::resolved_scope_for_project(&linked, &project_id)
+            tracedecay_code_index_runtime::resolved_scope_for_project(&linked, &project_id)
                 .unwrap();
 
         assert_eq!(

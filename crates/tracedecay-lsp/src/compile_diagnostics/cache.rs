@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 
 use super::fingerprint::DiagnosticsFingerprint;
 use super::{Diagnostic, Scope, run_all};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 #[derive(Debug, Default)]
 pub struct DiagnosticsCache {

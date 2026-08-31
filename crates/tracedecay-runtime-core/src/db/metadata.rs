@@ -1,7 +1,7 @@
 use crate::db::engine::params;
 
 use super::connection::{Database, DatabaseWriteTransaction};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Result of one metadata point read whose payload is projected by `SQLite` only
 /// when its encoded byte length is within the caller's bound.

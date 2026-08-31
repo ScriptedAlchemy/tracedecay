@@ -16,7 +16,8 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_usecases::configuration::ConfigurationCurrentStateV1;
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
-use crate::config::{SEMANTIC_RUNTIME_SETTING_KEY, SemanticConfig, SemanticProfileSelection};
+use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
+use tracedecay_global_db::configuration::semantic::{SemanticConfig, SemanticProfileSelection};
 use tracedecay_semantic::{SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1};
 
 /// Installed-model material required to author a semantic profile selection.

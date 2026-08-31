@@ -11,7 +11,7 @@ use super::read_modes::{
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::ProjectPath;
 
 pub struct SourceReadRequest<'a> {

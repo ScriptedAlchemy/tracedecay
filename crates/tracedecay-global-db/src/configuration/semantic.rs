@@ -9,7 +9,7 @@ use std::path::{Component, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::default_true;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {

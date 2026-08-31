@@ -25,13 +25,20 @@ pub(super) fn evidence_outcome(
     let finished_at = now_micros();
     let effective_deadline = effective_memory_deadline(context);
     let authority = authority_receipt(context, finished_at)?;
-    let result_digest = canonical_sha256(&(operation.as_str(), &result))
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let result_digest = canonical_sha256(&(operation.as_str(), &result)).map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let evidence_id = EvidenceIdentity::new(format!(
         "evidence.retained.{}",
         result_digest.as_str().trim_start_matches("sha256:")
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let coverage = EvidenceCoverage {
         requested_domains: vec![domain],
         visited: facts.visited,
@@ -43,17 +50,28 @@ pub(super) fn evidence_outcome(
             completeness: facts.completeness,
         }],
     };
-    coverage
-        .validate()
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    coverage.validate().map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let mut page = PageState::first_page(
-        SortContractId::new(format!("sort.retained.{}.v1", operation.as_str()))
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?,
+        SortContractId::new(format!("sort.retained.{}.v1", operation.as_str())).map_err(
+            |error| {
+                RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                    "the retained evidence receipt could not be assembled: {error}"
+                ))
+            },
+        )?,
         1,
         facts.total,
         facts.returned,
     )
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     page.cursor.clone_from(&facts.next_cursor);
     let execution = OperationReceipt::completed(
         context.observed_at,
@@ -61,7 +79,11 @@ pub(super) fn evidence_outcome(
         effective_deadline.clone(),
         measured_budget(context.observed_at, finished_at, &result)?,
     )
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let outcome = ApplicationOutcome::Evidence(EvidencePacket {
         temporal: evidence_temporal_state(&facts, context.observed_at, finished_at)?,
         authority,
@@ -70,8 +92,13 @@ pub(super) fn evidence_outcome(
             source_kind: "mounted_retained_authority".to_owned(),
             producer: operation.as_str().to_owned(),
             scope: context.request_context.scope().clone(),
-            revision: ComponentVersion::new("tracedecay.application.retained-surface.v1")
-                .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?,
+            revision: ComponentVersion::new("tracedecay.application.retained-surface.v1").map_err(
+                |error| {
+                    RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                        "the retained evidence receipt could not be assembled: {error}"
+                    ))
+                },
+            )?,
             horizon: None,
         }],
         coverage,
@@ -152,7 +179,11 @@ pub(crate) fn prepare_retained_effect<T: Serialize>(
         delivery_id,
         request,
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let expected_state = canonical_sha256(&(
         "tracedecay.retained.effect.expected-state.v1",
         context.request_context.scope(),
@@ -161,32 +192,52 @@ pub(crate) fn prepare_retained_effect<T: Serialize>(
         delivery_id,
         request,
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let catalog_digest = canonical_sha256(&(
         "tracedecay.retained.effect.catalog.v1",
         context.operation.capability_id(),
         context.operation.use_case_id(),
         context.operation.result_contract(),
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let privacy_digest = canonical_sha256(&(
         "tracedecay.retained.effect.privacy.v1",
         context.request_context.scope(),
         context.request_context.grant().disclosure,
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let suffix = input_digest.as_str().trim_start_matches("sha256:");
     let idempotency_key = IdempotencyKey::new(format!(
         "idempotency.retained.{}.{suffix}",
         operation.as_str()
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let effect_id = EffectId::new(format!(
         "effect.retained.{}.{}",
         operation.as_str(),
         durable_operation_id
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     let mut receipt_template = EffectReceipt {
         operation: context.operation.use_case_id().clone(),
         request_id: context.request_context.request_id().clone(),
@@ -202,14 +253,21 @@ pub(crate) fn prepare_retained_effect<T: Serialize>(
         privacy_digest,
         outcome: EffectTermination::Partial,
         committed_state: Some(
-            canonical_sha256(&"tracedecay.retained.effect.uncommitted-placeholder.v1")
-                .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?,
+            canonical_sha256(&"tracedecay.retained.effect.uncommitted-placeholder.v1").map_err(
+                |error| {
+                    RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                        "the retained evidence receipt could not be assembled: {error}"
+                    ))
+                },
+            )?,
         ),
         external_proof: None,
     };
-    receipt_template
-        .validate()
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    receipt_template.validate().map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     receipt_template.committed_state = None;
     Ok(PreparedRetainedEffect {
         operation,
@@ -233,7 +291,11 @@ impl PreparedRetainedEffect {
             &self.durable_operation_id,
             committed_state_material,
         ))
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the retained evidence receipt could not be assembled: {error}"
+            ))
+        })
     }
 
     fn partial_receipt(&self, committed_state: &ManifestDigest) -> EffectReceipt {
@@ -442,7 +504,11 @@ pub(super) fn retained_effect_outcome<T: Serialize, C: Serialize + ?Sized>(
         request,
         durable_operation_id,
     )?;
-    let result = result.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let result = result.ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the retained effect completed without a result payload",
+        )
+    })?;
     prepared.complete(
         context,
         committed_state_material,
@@ -503,10 +569,12 @@ fn map_evidence_terminal(
         RetainedSurfaceEvidenceTerminalV1::Unsupported => {
             RetainedSurfaceExecutionErrorV1::Unsupported
         }
-        RetainedSurfaceEvidenceTerminalV1::Failed
+        terminal @ (RetainedSurfaceEvidenceTerminalV1::Failed
         | RetainedSurfaceEvidenceTerminalV1::InvalidOutput
-        | RetainedSurfaceEvidenceTerminalV1::Unavailable => {
-            RetainedSurfaceExecutionErrorV1::Unavailable
+        | RetainedSurfaceEvidenceTerminalV1::Unavailable) => {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the retained evidence facts reported a {terminal:?} terminal"
+            ))
         }
     }
 }
@@ -527,8 +595,11 @@ fn evidence_temporal_state(
         });
     };
     let requested_mode = temporal_request_mode(&temporal.requests)?;
-    let watermark_digest = canonical_sha256(&temporal.watermarks)
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let watermark_digest = canonical_sha256(&temporal.watermarks).map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     Ok(TemporalState {
         requested_mode,
         requested_at,
@@ -546,7 +617,9 @@ fn temporal_request_mode(
         return Ok(TemporalModeV1::Current);
     };
     if requests.iter().any(|request| request.mode != first.mode) {
-        return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
+        return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+            "the temporal coverage requests disagreed on their mode",
+        ));
     }
     Ok(match first.mode {
         SessionCoverageModeV1::Current => TemporalModeV1::Current,
@@ -575,8 +648,11 @@ impl std::io::Write for CountingSink {
 
 fn count_serialized_bytes<T: Serialize>(value: &T) -> Result<u64, RetainedSurfaceExecutionErrorV1> {
     let mut output = CountingSink { written: 0 };
-    serde_json::to_writer(&mut output, value)
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    serde_json::to_writer(&mut output, value).map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
     Ok(output.written)
 }
 
@@ -589,7 +665,11 @@ pub(super) fn measured_budget<T: Serialize>(
         .0
         .checked_sub(started_at.0)
         .and_then(|elapsed| u64::try_from(elapsed).ok())
-        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        .ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the operation elapsed time went backwards and could not be measured",
+            )
+        })?;
     let bytes_consumed = count_serialized_bytes(result)?;
     Ok(OperationBudgetUsage {
         units_consumed: 1,
@@ -606,12 +686,22 @@ pub(super) fn authority_receipt(
         "policy.admitted-capability-grant.v1",
         context.request_context.grant().revision,
         context.request_context.grant().digest.clone(),
-        ComponentVersion::new("tracedecay.application.retained-surface.v1")
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?,
+        ComponentVersion::new("tracedecay.application.retained-surface.v1").map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the retained evidence receipt could not be assembled: {error}"
+            ))
+        })?,
     )
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    AuthorityReceipt::from_context(context.request_context, policy, observed_at)
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })?;
+    AuthorityReceipt::from_context(context.request_context, policy, observed_at).map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the retained evidence receipt could not be assembled: {error}"
+        ))
+    })
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::{PROCESS_STARTED_EPOCH_MS, TOKEN_NONCE, WriterOwner, access_error, access_io_error};
 

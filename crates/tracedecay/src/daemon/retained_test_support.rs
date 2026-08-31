@@ -16,12 +16,13 @@ use tokio::sync::Mutex;
 use tracedecay_lsp::LspSessionRegistry;
 
 use super::project_open_owners::{
-    daemon_owned_project_source_access_at, project_open_retained_grant, resolved_scope_for_project,
+    daemon_owned_project_source_access_at, project_open_retained_grant,
 };
 use super::service::invocation::{DaemonInvocationService, DaemonRetainedRuntimeRegistrar};
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_daemon_protocol::invocation_now_micros;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Clone)]
 struct RetainedOwnerTestExecutor {

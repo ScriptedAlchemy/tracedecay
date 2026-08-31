@@ -925,6 +925,123 @@ fn tail_handles_short_input() {
     assert_eq!(tail("0123456789", 4), "6789");
 }
 
+/// Fifteen symbols across a dozen files, so a file-scale budget (8) is far
+/// below the corpus while comfortably above the two requested files. Before
+/// the per-file index cutover, both scoped reads hydrated the whole corpus
+/// stream and refused this exact shape with a budget error — a 13-file PR
+/// paid (and could not even complete) a full-corpus sweep.
+fn scoped_read_fixture() -> crate::tracedecay::queries::graph::VerifiedGraphQuery {
+    let mut fixture_symbols = vec![
+        FixtureSymbol {
+            path: "src/hot.rs",
+            qualified_name: "hot_case",
+            annotated_test: true,
+        },
+        FixtureSymbol {
+            path: "src/warm.rs",
+            qualified_name: "warm_helper",
+            annotated_test: false,
+        },
+    ];
+    let bulk_paths: Vec<String> = (0..12).map(|index| format!("src/bulk_{index}.rs")).collect();
+    for path in &bulk_paths {
+        fixture_symbols.push(FixtureSymbol {
+            path,
+            qualified_name: "bulk_fn",
+            annotated_test: false,
+        });
+    }
+    verified_graph(&fixture_symbols)
+}
+
+#[test]
+fn scoped_test_annotation_lookup_needs_only_a_file_scale_budget() {
+    let graph = scoped_read_fixture();
+    let requested: HashSet<String> = ["src/hot.rs".to_owned(), "src/warm.rs".to_owned()]
+        .into_iter()
+        .collect();
+
+    let annotated = graph
+        .test_annotated_logical_files(Some(&requested), 8, 64)
+        .expect("a two-file question must not require a corpus-scale symbol budget");
+    assert_eq!(
+        annotated,
+        ["src/hot.rs".to_owned()].into_iter().collect::<HashSet<_>>(),
+        "only the file whose function carries a test marker is reported"
+    );
+
+    // The unscoped census keeps its corpus sweep and its budget contract.
+    let census = graph.test_annotated_logical_files(None, 8, 64);
+    assert!(
+        census.is_err(),
+        "the whole-corpus census still refuses a budget below the corpus size"
+    );
+
+    // The scoped budget still bounds the requested files themselves.
+    let hot_only: HashSet<String> = ["src/hot.rs".to_owned()].into_iter().collect();
+    assert!(
+        graph
+            .test_annotated_logical_files(Some(&hot_only), 1, 64)
+            .is_err(),
+        "requested files larger than the budget stay a typed refusal"
+    );
+}
+
+#[test]
+fn scoped_file_symbol_page_needs_only_a_file_scale_budget() {
+    let graph = scoped_read_fixture();
+    let requested: HashSet<String> = ["src/hot.rs".to_owned(), "src/warm.rs".to_owned()]
+        .into_iter()
+        .collect();
+
+    let full = graph
+        .symbols_in_logical_files_page(&requested, None, 10, 8)
+        .expect("a two-file page must not require a corpus-scale scan budget");
+    assert!(!full.has_more);
+    let full_paths: Vec<&str> = full
+        .symbols
+        .iter()
+        .filter_map(|symbol| symbol.binding.as_ref()?.logical_path.as_deref())
+        .collect();
+    assert_eq!(full_paths.len(), 3, "hot function + marker + warm helper");
+    assert!(full_paths.iter().all(|path| requested.contains(*path)));
+
+    // Page identity: walking with limit 1 reproduces the same symbols in the
+    // same canonical occurrence order as the single full page.
+    let mut walked = Vec::new();
+    let mut after = None;
+    loop {
+        let page = graph
+            .symbols_in_logical_files_page(&requested, after.as_ref(), 1, 8)
+            .expect("paged walk stays within the file-scale budget");
+        let Some(symbol) = page.symbols.first() else {
+            assert!(!page.has_more);
+            break;
+        };
+        walked.push(symbol.occurrence.clone());
+        after = Some(symbol.occurrence.clone());
+        if !page.has_more {
+            break;
+        }
+    }
+    let full_occurrences: Vec<_> = full
+        .symbols
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect();
+    assert_eq!(
+        walked, full_occurrences,
+        "cursor pagination preserves the canonical occurrence order"
+    );
+
+    assert!(
+        graph
+            .symbols_in_logical_files_page(&requested, None, 10, 2)
+            .is_err(),
+        "requested files larger than the scan budget stay a typed refusal"
+    );
+}
+
 fn tool_result_body(result: ToolResult) -> Value {
     let text = result.value["content"][0]["text"]
         .as_str()

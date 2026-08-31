@@ -5,7 +5,7 @@ use thiserror::Error;
 use tracedecay_domain::{ProjectId, UserProfileId};
 
 use super::super::{DaemonInvocationService, InvocationProjectRuntimeIdentityV1};
-use crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1;
+use tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1;
 use tracedecay_runtime_core::db::Database;
 
 #[derive(Debug, Error)]

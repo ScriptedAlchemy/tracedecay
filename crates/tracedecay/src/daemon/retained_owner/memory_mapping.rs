@@ -130,7 +130,11 @@ pub(super) fn update_logical_effect(
         confidence(request.trust)?,
         &request.metadata,
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the memory effect payload could not be serialized: {error}"
+        ))
+    })
 }
 
 pub(super) fn remove_logical_effect(
@@ -145,7 +149,11 @@ pub(super) fn remove_logical_effect(
         target.fact_id(),
         &request.expected_last_event_id,
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the memory effect payload could not be serialized: {error}"
+        ))
+    })
 }
 
 pub(super) fn feedback_logical_effect(
@@ -163,7 +171,11 @@ pub(super) fn feedback_logical_effect(
         &request.source_label,
         &request.reason,
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the memory effect payload could not be serialized: {error}"
+        ))
+    })
 }
 
 pub(super) fn search_logical_effect(
@@ -179,7 +191,11 @@ pub(super) fn search_logical_effect(
         fact_limit(request.options.limit)?,
         &request.after,
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the memory effect payload could not be serialized: {error}"
+        ))
+    })
 }
 
 pub(super) fn update_command(
@@ -350,7 +366,11 @@ pub(super) fn available_fact(
 ) -> Result<FactV1, RetainedSurfaceExecutionErrorV1> {
     let metadata = match fact.metadata() {
         Value::Object(metadata) => metadata.clone().into_iter().collect(),
-        _ => return Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+        _ => {
+            return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                "the stored fact metadata payload is not a JSON object",
+            ));
+        }
     };
     let source = match fact.source() {
         FactIdentitySourceV1::Evidence {
@@ -401,7 +421,9 @@ fn unavailable_fact(
     let status = fact.status();
     let payload_access = match status.payload_access() {
         PayloadAccessState::Eligible => {
-            return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
+            return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                "an unavailable fact projection reported an eligible payload state",
+            ));
         }
         PayloadAccessState::Redacted => FactPayloadAccessV1::Redacted,
         PayloadAccessState::Quarantined => FactPayloadAccessV1::Quarantined,
@@ -488,7 +510,7 @@ pub(super) fn retrieval_telemetry_degradation(
     error: &RetainedSurfaceExecutionErrorV1,
 ) -> Option<FactRetrievalTelemetryDegradationV1> {
     match error {
-        RetainedSurfaceExecutionErrorV1::Unavailable => {
+        RetainedSurfaceExecutionErrorV1::Unavailable { .. } => {
             Some(FactRetrievalTelemetryDegradationV1::Unavailable)
         }
         RetainedSurfaceExecutionErrorV1::Saturated => {
@@ -524,9 +546,15 @@ pub(super) fn refresh_search_hits(
         let projection = projections
             .iter()
             .find(|projection| projection.fact_id() == &hit.fact.fact_id)
-            .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+            .ok_or_else(|| {
+                RetainedSurfaceExecutionErrorV1::unavailable(
+                    "a refreshed search hit lost its fact projection",
+                )
+            })?;
         let ProjectMemoryFactProjectionV1::Available(fact) = projection else {
-            return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
+            return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                "a refreshed search hit projection is no longer available",
+            ));
         };
         hit.fact = available_fact(fact)?;
     }
@@ -696,11 +724,17 @@ pub(super) fn add_result(
         if outcome.disposition() != ProjectMemoryFactAddDispositionV1::NearDuplicate
             || outcome.commit_replayed()
         {
-            return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
+            return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                "the fact add outcome carried no commit receipt",
+            ));
         }
         return Ok(FactStoreAddResultV1::NormalizedDuplicate {
             fact,
-            closest_fact_id: closest.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?,
+            closest_fact_id: closest.ok_or_else(|| {
+                RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the normalized-duplicate fact outcome carried no closest fact id",
+                )
+            })?,
         });
     };
     let commit = commit_receipt(receipt, outcome.commit_replayed());
@@ -708,19 +742,19 @@ pub(super) fn add_result(
         ProjectMemoryFactAddDispositionV1::Added => FactStoreAddCommitV1::Added { fact, commit },
         ProjectMemoryFactAddDispositionV1::NearDuplicate => FactStoreAddCommitV1::NearDuplicate {
             fact,
-            closest_fact_id: closest.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?,
+            closest_fact_id: closest.ok_or_else(near_duplicate_missing_closest)?,
             similarity_millionths: outcome
                 .similarity_millionths()
-                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?,
+                .ok_or_else(near_duplicate_missing_similarity)?,
             commit,
         },
         ProjectMemoryFactAddDispositionV1::PossibleConflict => {
             FactStoreAddCommitV1::PossibleConflict {
                 fact,
-                closest_fact_id: closest.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?,
+                closest_fact_id: closest.ok_or_else(near_duplicate_missing_closest)?,
                 similarity_millionths: outcome
                     .similarity_millionths()
-                    .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?,
+                    .ok_or_else(near_duplicate_missing_similarity)?,
                 commit,
             }
         }
@@ -728,19 +762,40 @@ pub(super) fn add_result(
     Ok(FactStoreAddResultV1::Committed { result })
 }
 
+fn near_duplicate_missing_closest() -> RetainedSurfaceExecutionErrorV1 {
+    RetainedSurfaceExecutionErrorV1::unavailable(
+        "the near-duplicate fact outcome carried no closest fact id",
+    )
+}
+
+fn near_duplicate_missing_similarity() -> RetainedSurfaceExecutionErrorV1 {
+    RetainedSurfaceExecutionErrorV1::unavailable(
+        "the near-duplicate fact outcome carried no similarity score",
+    )
+}
+
 pub(super) fn add_committed_state(
     outcome: &ProjectMemoryFactAddRequestOutcome,
 ) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
     let ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome else {
         return serde_json::to_value(("project-memory-fact-add-no-write.v1", "secret_rejected"))
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable);
+            .map_err(|error| {
+                RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                    "the memory effect payload could not be serialized: {error}"
+                ))
+            });
     };
     if let Some(receipt) = outcome.commit_receipt() {
-        return serde_json::to_value(receipt)
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable);
+        return serde_json::to_value(receipt).map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the memory effect payload could not be serialized: {error}"
+            ))
+        });
     }
     if outcome.disposition() != ProjectMemoryFactAddDispositionV1::NearDuplicate {
-        return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
+        return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+            "the fact add outcome without a commit was not a normalized duplicate",
+        ));
     }
     serde_json::to_value((
         "project-memory-fact-add-no-write.v1",
@@ -750,7 +805,11 @@ pub(super) fn add_committed_state(
             .map(ProjectMemoryFactIdV1::fact_id),
         outcome.similarity_millionths(),
     ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the memory effect payload could not be serialized: {error}"
+        ))
+    })
 }
 
 pub(super) fn update_result(
@@ -787,7 +846,9 @@ pub(super) fn remove_result(
                 remaining_fact_count: outcome.remaining_fact_count(),
             })
         }
-        _ => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+        _ => Err(RetainedSurfaceExecutionErrorV1::unavailable(
+            "the fact remove outcome had an inconsistent receipt shape",
+        )),
     }
 }
 
@@ -855,9 +916,11 @@ pub(super) fn map_memory_error(error: MemoryApplicationError) -> RetainedSurface
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
         MemoryApplicationError::Store(error) => map_store_error(error),
-        MemoryApplicationError::InvalidAuthorityResult { .. }
+        error @ (MemoryApplicationError::InvalidAuthorityResult { .. }
         | MemoryApplicationError::InvalidEvidenceAnchor(_)
-        | MemoryApplicationError::EvidenceAnchor(_) => RetainedSurfaceExecutionErrorV1::Unavailable,
+        | MemoryApplicationError::EvidenceAnchor(_)) => {
+            RetainedSurfaceExecutionErrorV1::unavailable(error.to_string())
+        }
     }
 }
 
@@ -889,7 +952,7 @@ pub(super) fn map_store_error(error: FactStoreError) -> RetainedSurfaceExecution
             FactOwnerV1::Profile => RetainedSurfaceExecutionErrorV1::ProfileResetRequired,
             FactOwnerV1::Project { .. } => RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
         },
-        _ => RetainedSurfaceExecutionErrorV1::Unavailable,
+        error => RetainedSurfaceExecutionErrorV1::unavailable(error.to_string()),
     }
 }
 
@@ -977,7 +1040,9 @@ mod tests {
     #[test]
     fn retrieval_telemetry_degrades_only_on_unavailability() {
         assert_eq!(
-            retrieval_telemetry_degradation(&RetainedSurfaceExecutionErrorV1::Unavailable),
+            retrieval_telemetry_degradation(&RetainedSurfaceExecutionErrorV1::unavailable(
+                "telemetry write lane unavailable"
+            )),
             Some(FactRetrievalTelemetryDegradationV1::Unavailable)
         );
         assert_eq!(

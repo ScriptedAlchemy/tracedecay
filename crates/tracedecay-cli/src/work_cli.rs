@@ -37,7 +37,7 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
     WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const WORK_CLI_DEADLINE_MICROS: i64 = 120_000_000;
 

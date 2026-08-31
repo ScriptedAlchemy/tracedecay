@@ -12,6 +12,7 @@ use tracedecay_application::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId,
 };
 use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
+use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
 use super::project_lifecycle::SessionSyncTaskV1;
 use super::{DaemonSessionSyncConfig, DaemonSessionSyncService};
@@ -726,7 +727,7 @@ fn configured_off_transcript_ingest_does_not_fail_the_project_mount() {
     assert!(
         DaemonSessionSyncService::classify_startup_import_outcome(
             SessionSyncOutcomeV1::Unavailable {
-                reason_code: crate::daemon::SESSION_INGEST_DISABLED_REASON_V1,
+                reason_code: SESSION_INGEST_DISABLED_REASON_V1,
             },
         )
         .is_ok(),

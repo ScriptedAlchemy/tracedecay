@@ -1,4 +1,4 @@
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::{
     ANCHOR_RELEASED_MARKER, CREATE_ANCHOR_UPDATE_TRIGGER, CREATE_OBSERVATION_UPDATE_TRIGGER,

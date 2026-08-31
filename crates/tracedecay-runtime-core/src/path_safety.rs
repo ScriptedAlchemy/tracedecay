@@ -16,7 +16,7 @@
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Canonicalizes `path`, or the deepest ancestor that canonicalizes with the
 /// still-missing tail reattached. `None` when no ancestor canonicalizes.

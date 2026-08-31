@@ -24,7 +24,7 @@ use url::Url;
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::tracedecay::{TraceDecay, is_test_file};
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::diagnose::{Severity, parse_cargo_output};
 use tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_usecases::diagnostics_query::DiagnosticsQuery;
@@ -38,24 +38,14 @@ use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
 
 mod affected_test_failure;
-mod test_identity;
-mod test_request;
-mod test_runner;
 
-use test_identity::libtest_identity;
-#[cfg(test)]
-use test_request::MAX_TEST_TIMEOUT_SECS;
-use test_request::{RunAffectedArgs, TestProfile};
-#[cfg(test)]
-use test_runner::cargo_test_args;
-use test_runner::{
-    TestRunControl, TestRunFailure, TestRunOutput, parse_libtest_output, run_cargo_tests,
+use tracedecay_mcp::{
+    RunAffectedArgs, TestProfile, TestRunControl, TestRunFailure, TestRunOutput, libtest_identity,
+    parse_libtest_output, run_cargo_tests,
 };
+#[cfg(test)]
+use tracedecay_mcp::{MAX_TEST_TIMEOUT_SECS, cargo_test_args};
 
-/// Maximum exact test identities admitted to one managed foreground request.
-/// Each identity receives a separate Cargo invocation under the request's
-/// shared deadline, cancellation, and output budget.
-const MAX_TESTS_HARD_CAP: usize = 500;
 /// Maximum near-duplicate matches attached per diagnostic.
 const NEAR_DUP_MAX: usize = 3;
 

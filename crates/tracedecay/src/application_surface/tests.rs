@@ -1039,7 +1039,7 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
         QueryNormalizationRevision::new("normalization.daemon-owned-test.v1")
             .expect("normalization revision");
     let PrimitiveRequest::SymbolSearch(symbol_search) =
-        crate::application_surface::primitive_code_into_primitive(
+        tracedecay_application::primitive_code_into_primitive(
             symbol_search,
             sanitizer_revision.clone(),
             normalization_revision.clone(),
@@ -1651,6 +1651,111 @@ fn storage_status_empty_request_uses_typed_default() {
         ApplicationSurfaceRequest::Primitive(PrimitiveRequest::StorageStatus(request))
             if !request.include_details
     ));
+}
+
+/// A dead daemon socket must be a fail-fast dispatch error carrying the
+/// typed connect diagnostic — never a retryable problem envelope. Wrapping
+/// it as retryable made the CLI re-dispatch (re-paying the 8 s connect
+/// grace each pass) until its 120 s deadline: 131 s measured for
+/// `storage_status` against a dead socket while sibling compatibility tools
+/// failed typed in ~9 s.
+#[tokio::test]
+async fn dead_daemon_surface_dispatch_fails_fast_with_typed_unreachable() {
+    struct UnreachableExecutor;
+
+    impl tracedecay_application::ApplicationInvocationExecutor for UnreachableExecutor {
+        fn invoke(
+            &self,
+            _invocation: tracedecay_application::ApplicationInvocation,
+        ) -> tracedecay_application::ApplicationInvocationFuture<
+            '_,
+            Result<
+                tracedecay_application::ApplicationResponse,
+                tracedecay_application::InvocationError,
+            >,
+        > {
+            Box::pin(async {
+                Err(tracedecay_application::InvocationError::Unreachable {
+                    reason_code: "daemon_connect_down".to_owned(),
+                    detail: "could not connect to TraceDecay daemon endpoint 'unix:///dead.sock'"
+                        .to_owned(),
+                })
+            })
+        }
+    }
+
+    impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnreachableExecutor {
+        fn invoke_controlled(
+            &self,
+            _request: tracedecay_daemon_protocol::DaemonInvocationRequest,
+            _deadline: Deadline,
+            _cancellation: CancellationSignal,
+            _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+            '_,
+            Result<
+                tracedecay_daemon_protocol::DaemonInvocationResponse,
+                tracedecay_daemon_protocol::DaemonInvocationError,
+            >,
+        > {
+            Box::pin(async {
+                Err(tracedecay_daemon_protocol::DaemonInvocationError::Unreachable {
+                    reason_code: "daemon_connect_down".to_owned(),
+                    detail: "could not connect to TraceDecay daemon endpoint 'unix:///dead.sock'"
+                        .to_owned(),
+                })
+            })
+        }
+
+        fn observe_feedback(
+            &self,
+            _subject_digest: ManifestDigest,
+            _observed_at: UtcMicros,
+            _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+            '_,
+            tracedecay_domain::errors::Result<()>,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    let request = parse_application_surface_request(
+        ApplicationSurfaceOperation::StorageStatus,
+        serde_json::json!({}),
+    )
+    .expect("storage-status request");
+    let dispatched = resolve_application_surface_dispatch(
+        tracedecay_tool_catalog::BindingSurface::Cli,
+        ApplicationSurfaceOperation::StorageStatus,
+        RequestId::new("request.dead-daemon-storage-status").expect("request id"),
+        request,
+        RequestedOutputFormat::Json,
+    )
+    .expect("storage-status dispatch");
+
+    let result = execute_application_surface(
+        ApplicationSurfaceOperation::StorageStatus,
+        dispatched,
+        Some(&UnreachableExecutor),
+    )
+    .await;
+    match result {
+        Err(ApplicationSurfaceAdapterError::DaemonUnreachable {
+            reason_code,
+            detail,
+        }) => {
+            assert_eq!(reason_code, "daemon_connect_down");
+            assert!(
+                detail.contains("could not connect"),
+                "the connect diagnostic must survive to the dispatcher: {detail}"
+            );
+        }
+        Err(other) => panic!(
+            "a dead daemon must be a fail-fast typed dispatch error, not a problem envelope: {other:?}"
+        ),
+        Ok(_) => panic!("a dead daemon must be a fail-fast typed dispatch error, not a success"),
+    }
 }
 
 #[tokio::test]

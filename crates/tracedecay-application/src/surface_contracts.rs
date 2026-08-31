@@ -14,6 +14,6 @@ pub use callable_code::{
     CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
     CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
     CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
-    PrimitiveCodeSurfaceRequest,
+    PrimitiveCodeSurfaceRequest, primitive_code_into_primitive,
 };
 pub use native_integration::NativeIntegrationSurfaceRequest;

@@ -16,22 +16,22 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use super::test_request::TestProfile;
+use super::TestProfile;
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TERMINATION_GRACE: Duration = Duration::from_millis(500);
 const MAX_TEST_RUN_OUTPUT_BYTES: u64 = 128 * 1024;
 
 #[derive(Clone, Debug)]
-pub(super) struct TestRunOutput {
-    pub(super) exit_code: Option<i32>,
-    pub(super) stdout: String,
-    pub(super) stderr: String,
-    pub(super) output_bytes: u64,
+pub struct TestRunOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub output_bytes: u64,
 }
 
 #[derive(Debug)]
-pub(super) enum TestRunFailure {
+pub enum TestRunFailure {
     Spawn(String),
     Cancelled {
         output_bytes: u64,
@@ -128,7 +128,7 @@ impl TestRunFailure {
         }
     }
 
-    pub(super) fn partial_output(&self) -> Option<&TestRunOutput> {
+    pub fn partial_output(&self) -> Option<&TestRunOutput> {
         match self {
             Self::Cancelled { partial, .. }
             | Self::Timeout { partial, .. }
@@ -142,7 +142,7 @@ impl TestRunFailure {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum TestRunStream {
+pub enum TestRunStream {
     Stdout,
     Stderr,
 }
@@ -162,7 +162,7 @@ impl Display for TestRunStream {
 /// cancellation before or after the child starts without racing an orphaned
 /// test binary. The runner always performs the matching reap before returning.
 #[derive(Clone, Default)]
-pub(super) struct TestRunControl {
+pub struct TestRunControl {
     cancelled: Arc<AtomicBool>,
     output_limit: Arc<AtomicU8>,
     output_bytes: Arc<AtomicU64>,
@@ -170,7 +170,7 @@ pub(super) struct TestRunControl {
 }
 
 impl TestRunControl {
-    pub(super) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         if let Some(process_group) = self.active_process_group() {
             signal_process_tree(process_group, TerminationSignal::Terminate);
@@ -255,7 +255,7 @@ impl TestRunControl {
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.run")]
-pub(super) async fn run_cargo_tests(
+pub async fn run_cargo_tests(
     project_root: PathBuf,
     profile: TestProfile,
     test_names: Vec<String>,
@@ -269,7 +269,7 @@ pub(super) async fn run_cargo_tests(
     .map_err(|_| TestRunFailure::Spawn("cargo test runner task ended unexpectedly".to_owned()))?
 }
 
-pub(super) fn cargo_test_args(profile: TestProfile, test_identity: &str) -> Vec<String> {
+pub fn cargo_test_args(profile: TestProfile, test_identity: &str) -> Vec<String> {
     let mut args = vec!["test".to_string(), "--no-fail-fast".to_string()];
     if profile == TestProfile::Release {
         args.push("--release".to_string());
@@ -648,7 +648,7 @@ fn signal_process_tree(process_group: u32, _signal: TerminationSignal) {
 #[cfg(not(any(unix, windows)))]
 fn signal_process_tree(_process_group: u32, _signal: TerminationSignal) {}
 
-pub(super) fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
+pub fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
     let mut results = Vec::new();
     for raw in stdout.lines() {
         let line = raw.trim_start_matches("\u{1b}[0m").trim();
@@ -706,7 +706,7 @@ mod tests {
                     "child_idle"
                 };
                 let mut child = Command::new(std::env::current_exe().expect("fixture exe"))
-                    .arg("mcp::tools::handlers::workflow::test_runner::tests::bounded_runner_fixture")
+                    .arg("workflow::test_runner::tests::bounded_runner_fixture")
                     .arg("--exact")
                     .env(FIXTURE_MODE, child_mode)
                     .env(FIXTURE_MARKER, marker)
@@ -937,7 +937,7 @@ mod tests {
     fn fixture_command(marker: &std::path::Path, mode: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().expect("fixture exe"));
         command
-            .arg("mcp::tools::handlers::workflow::test_runner::tests::bounded_runner_fixture")
+            .arg("workflow::test_runner::tests::bounded_runner_fixture")
             .arg("--exact")
             .env(FIXTURE_MODE, mode)
             .env(FIXTURE_MARKER, marker);

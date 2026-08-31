@@ -254,7 +254,7 @@ pub async fn prepare_branch_tracking_in_layout(
     project_root: &Path,
     branch_name: &str,
     tracedecay_dir: &Path,
-) -> crate::errors::Result<BranchTrackingPreparation> {
+) -> tracedecay_domain::errors::Result<BranchTrackingPreparation> {
     use crate::branch_meta;
 
     let _branch_lock = {
@@ -262,13 +262,13 @@ pub async fn prepare_branch_tracking_in_layout(
         loop {
             match try_acquire_branch_add_lock(tracedecay_dir) {
                 Ok(lock) => break lock,
-                Err(crate::errors::TraceDecayError::SyncLock { .. })
+                Err(tracedecay_domain::errors::TraceDecayError::SyncLock { .. })
                     if attempts < BRANCH_LOCK_RETRY_ATTEMPTS =>
                 {
                     attempts += 1;
                     tokio::time::sleep(BRANCH_LOCK_RETRY_INTERVAL).await;
                 }
-                Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
+                Err(tracedecay_domain::errors::TraceDecayError::SyncLock { .. }) => {
                     return Ok(BranchTrackingPreparation::Deferred);
                 }
                 Err(e) => return Err(e),
@@ -280,7 +280,7 @@ pub async fn prepare_branch_tracking_in_layout(
     let (mut meta, metadata_was_missing) = match branch_meta::load_branch_meta(tracedecay_dir) {
         Some(meta) => (meta, false),
         None if meta_path.exists() => {
-            return Err(crate::errors::TraceDecayError::Config {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "corrupt branch metadata at '{}'; repair or remove it before adding branch tracking",
                     meta_path.display()
@@ -289,7 +289,7 @@ pub async fn prepare_branch_tracking_in_layout(
         }
         None => {
             let default = detect_default_branch(project_root).ok_or_else(|| {
-                crate::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
                         "cannot initialize missing branch metadata at '{}': repository default branch is unknown (detached HEAD or no default ref)",
                         meta_path.display()
@@ -314,7 +314,7 @@ pub async fn prepare_branch_tracking_in_layout(
     // A name that sanitizes to empty (e.g. "..") can never be a real git
     // branch; refuse it instead of publishing nonsense tracking metadata.
     if sanitize_branch_name(branch_name).is_empty() {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("cannot track branch '{branch_name}': not a valid branch name"),
         });
     }
@@ -328,7 +328,7 @@ pub async fn prepare_branch_tracking_in_layout(
     let db_file = crate::config::db_filename(tracedecay_dir).to_owned();
     meta.add_branch(branch_name, &db_file, &parent);
     let entry = meta.branches.get(branch_name).cloned().ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "branch tracking prepared '{branch_name}' without a matching metadata entry"
             ),
@@ -490,7 +490,7 @@ pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &Prepa
 pub fn rollback_prepared_branch_tracking(
     tracedecay_dir: &Path,
     prepared: &PreparedBranchTracking,
-) -> crate::errors::Result<PreparedBranchRollbackOutcome> {
+) -> tracedecay_domain::errors::Result<PreparedBranchRollbackOutcome> {
     let _branch_lock = acquire_branch_lock_blocking(tracedecay_dir)?;
     let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) else {
         return Ok(PreparedBranchRollbackOutcome::NoMatch);
@@ -510,7 +510,7 @@ fn rollback_branch_tracking(
     tracedecay_dir: &Path,
     branch_name: &str,
     db_file: &str,
-) -> crate::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     super::admin::rollback_published_branch_tracking(tracedecay_dir, branch_name, db_file)
 }
 

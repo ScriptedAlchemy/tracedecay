@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 // The transport-neutral handle authority lives in `tracedecay-usecases`. This
 // module keeps the MCP telemetry and adapters.

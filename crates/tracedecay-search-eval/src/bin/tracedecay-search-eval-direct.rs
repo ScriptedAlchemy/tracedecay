@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracedecay_application::CancellationSignal;
 use tracedecay_daemon_protocol::{
-    DaemonConnection, DaemonEndpoint, DaemonHandshake, DaemonInvocationClient, MovedStoreAdoption,
-    SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS, current_daemon_client_identity,
+    DaemonClientIdentity, DaemonConnection, DaemonEndpoint, DaemonHandshake,
+    DaemonInvocationClient, MovedStoreAdoption,
+    SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
 };
-use tracedecay_runtime_core::errors::{Result as RuntimeResult, TraceDecayError};
+use tracedecay_domain::errors::{Result as RuntimeResult, TraceDecayError};
 use tracedecay_search_eval::{
     DirectEvaluationStatusV1, DirectWorkloadSummaryV1, GenerateCandidateOutputsOptions,
     SearchEvalError, compare_default_direct, compare_direct, generate_candidate_outputs,
@@ -341,6 +342,20 @@ fn emit(value: &impl Serialize, exit: ExitCode) -> ExitCode {
     exit
 }
 
+fn eval_daemon_client_identity() -> RuntimeResult<DaemonClientIdentity> {
+    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
+        TraceDecayError::Config {
+            message: "could not determine TraceDecay user data directory".to_string(),
+        }
+    })?;
+    let global_db_path = tracedecay_runtime_core::config::global_db_path().ok_or_else(|| {
+        TraceDecayError::Config {
+            message: "could not determine TraceDecay global database path".to_string(),
+        }
+    })?;
+    Ok(DaemonClientIdentity::new(profile_root, global_db_path))
+}
+
 fn handshake_for_eval_client(project_root: PathBuf) -> RuntimeResult<DaemonHandshake> {
     Ok(DaemonHandshake {
         project_path: Some(project_root),
@@ -348,7 +363,7 @@ fn handshake_for_eval_client(project_root: PathBuf) -> RuntimeResult<DaemonHands
         timings: false,
         allow_init: false,
         allow_initialize_root_routing: false,
-        client_identity: current_daemon_client_identity()?,
+        client_identity: eval_daemon_client_identity()?,
         client_version: env!("CARGO_PKG_VERSION").to_string(),
         client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
         tool_list_changed_capable: false,

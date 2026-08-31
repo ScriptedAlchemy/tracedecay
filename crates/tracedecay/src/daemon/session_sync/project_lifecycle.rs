@@ -12,6 +12,7 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
 use super::{
     ActiveSessionImport, DaemonSessionSyncConfig, DaemonSessionSyncService,
@@ -111,7 +112,7 @@ impl DaemonSessionSyncService {
         &self,
         context: &Arc<SessionSyncProjectContext>,
         project_sessions: &RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_runtime_core::errors::Result<bool> {
+    ) -> tracedecay_domain::errors::Result<bool> {
         let scope = SessionSyncScopeV1::new(context.project_id.clone(), context.profile_id.clone());
         let prefix = journal_prefix(&scope);
         let mut recovered_import = false;
@@ -280,7 +281,7 @@ impl DaemonSessionSyncService {
     pub(crate) async fn register_project(
         &self,
         config: DaemonSessionSyncConfig,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let scope = SessionSyncScopeV1::new(config.project_id.clone(), config.profile_id.clone());
         let project_gate = self.project_gate(&scope);
         let project = project_gate.lock().await;
@@ -375,7 +376,7 @@ impl DaemonSessionSyncService {
         context: &Arc<SessionSyncProjectContext>,
         project_sessions: &RegisteredGlobalDbLeaseV1,
         scope: SessionSyncScopeV1,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let stable = format!(
             "session-sync.startup.{}.{}",
             tracedecay_runtime_core::runtime_identity::process_run_id(),
@@ -421,13 +422,13 @@ impl DaemonSessionSyncService {
     /// ingest, never to unmount indexing.
     pub(super) fn classify_startup_import_outcome(
         outcome: SessionSyncOutcomeV1,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         match outcome {
             SessionSyncOutcomeV1::Accepted(_)
             | SessionSyncOutcomeV1::Joined(_)
             | SessionSyncOutcomeV1::Complete(_) => Ok(()),
             SessionSyncOutcomeV1::Unavailable { reason_code }
-                if reason_code == crate::daemon::SESSION_INGEST_DISABLED_REASON_V1 =>
+                if reason_code == SESSION_INGEST_DISABLED_REASON_V1 =>
             {
                 tracing::info!(
                     event = "session_sync_startup_import_skipped",

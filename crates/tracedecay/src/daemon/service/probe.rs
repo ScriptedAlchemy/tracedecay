@@ -5,7 +5,7 @@ use std::net::TcpStream as StdTcpStream;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[cfg(unix)]
 use super::default_socket_path;
@@ -379,7 +379,7 @@ fn current_loopback_authority(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(Path::to_path_buf)
-        .or_else(crate::config::user_data_dir)
+        .or_else(tracedecay_runtime_core::config::user_data_dir)
         .ok_or_else(|| TraceDecayError::Config {
             message: "could not determine TraceDecay user data directory".to_string(),
         })?;

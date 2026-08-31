@@ -3,7 +3,7 @@ name = "tracedecay-runtime-core"
 version = "0.1.0"
 publish = false
 edition.workspace = true
-description = "TraceDecay runtime kernel: errors, storage layout, database engine, stores, memory, git/worktree topology, and process leases"
+description = "TraceDecay runtime kernel: storage layout, database engine, stores, memory, git/worktree topology, and process leases"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
@@ -13,7 +13,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 hotpath = [
     "tracedecay-domain/hotpath",
     "hotpath/hotpath",
-    "tracedecay-automation/hotpath",
     "tracedecay-capture/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-private-fs/hotpath",
@@ -24,7 +23,6 @@ hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-automation/hotpath-alloc",
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
@@ -35,7 +33,6 @@ hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-automation/hotpath-cpu",
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
@@ -57,7 +54,6 @@ test-helpers = []
 memmap2 = "0.9"
 aho-corasick = "1.1.5"
 hotpath.workspace = true
-tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }

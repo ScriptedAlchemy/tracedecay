@@ -17,7 +17,7 @@ use std::path::Path;
 use tracedecay_runtime_core::db::DatabaseEngineReadConnection;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, IntoParams, Rows};
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 

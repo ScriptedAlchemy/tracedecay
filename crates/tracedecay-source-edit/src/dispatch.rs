@@ -4,7 +4,7 @@ use tracedecay_application::{RequestContext, SourceEditRequest};
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::GraphCancellation;
 
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_usecases::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadRequest, map_code_graph_read_runtime_error,
 };

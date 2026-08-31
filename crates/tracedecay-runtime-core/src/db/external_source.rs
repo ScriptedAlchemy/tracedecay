@@ -1,7 +1,7 @@
 //! Additive external-source state schema owned by the canonical database.
 
 use crate::db::engine::Executor;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub async fn install_external_source_schema(
     connection: &impl Executor,

@@ -16,7 +16,7 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
     WorkflowApplicationOutcome,
 };
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 use super::super::current_micros;
 use super::{RegisteredWorkRuntime, work_command_effect, work_effect, work_evidence_packet};
@@ -346,7 +346,7 @@ fn workflow_effect_operation(operation_key: &str) -> Option<WorkflowEffectOperat
 
 pub(super) fn workflow_storage_problem(error: &TraceDecayError) -> DaemonInvocationProblem {
     match error {
-        tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { authority, .. }
+        tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, .. }
             if authority == "workflow" =>
         {
             DaemonInvocationProblem::ResetRequired

@@ -8,7 +8,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 struct GraphQueryFixture {
     production: ProductionCompositionFixture,
@@ -89,7 +89,7 @@ async fn call_production_tool(
     mut arguments: Value,
     _server_stats: Option<Value>,
     scope_prefix: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<ToolResult> {
+) -> tracedecay_domain::errors::Result<ToolResult> {
     if scope_prefix.is_some() {
         return Err(TraceDecayError::Config {
             message:

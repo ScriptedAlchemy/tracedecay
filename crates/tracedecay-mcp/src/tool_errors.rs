@@ -1,7 +1,7 @@
 //! Semantic tool-failure classification and JSON-RPC error-response mapping.
 
 use serde_json::{Value, json};
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_sessions::admission::HostAdmissionStatus;
 
 use crate::response_handles::RESPONSE_RETRIEVE_TOOL;

@@ -1378,7 +1378,7 @@ async fn project_store_resolution_rejects_conflicting_common_dir_and_marker_iden
         .unwrap_err();
     assert!(matches!(
         error,
-        tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
+        tracedecay_domain::errors::TraceDecayError::ProjectRoute {
             reason_code,
             retryable: false,
             ..

@@ -17,7 +17,7 @@ const DEFAULT_STATUS_COMMAND_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_STATUS_COMMAND_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 const STATUS_DEADLINE_ENV: &str = "TRACEDECAY_STATUS_DEADLINE_MS";
 
-fn status_command_deadline() -> tracedecay_runtime_core::errors::Result<Duration> {
+fn status_command_deadline() -> tracedecay_domain::errors::Result<Duration> {
     commands::env_duration_ms(
         STATUS_DEADLINE_ENV,
         DEFAULT_STATUS_COMMAND_DEADLINE,
@@ -51,7 +51,7 @@ async fn daemon_tool_json_within(
     project_path: &Path,
     tool_name: &str,
     arguments: Value,
-) -> tracedecay_runtime_core::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
     // The deadline rides inside the call so a warming project open is waited
     // out on the caller's budget; the outer timeout is only a backstop against
     // stages that cannot observe it.
@@ -61,7 +61,7 @@ async fn daemon_tool_json_within(
     )
     .await
     .map_err(
-        |_| tracedecay_runtime_core::errors::TraceDecayError::Config {
+        |_| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "timed out waiting for daemon tool {tool_name} before status deadline"
             ),
@@ -122,7 +122,7 @@ pub(crate) async fn handle_status_command(
     json: bool,
     short: bool,
     runtime: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let budget = status_command_deadline()?;
     let deadline = Instant::now() + budget;
     timeout_at(
@@ -139,7 +139,7 @@ pub(crate) async fn handle_status_command(
     )
     .await
     .map_err(
-        |_| tracedecay_runtime_core::errors::TraceDecayError::Config {
+        |_| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "status did not complete within {}s; the daemon may still be \
              starting or opening this project — retry, or raise \
@@ -159,7 +159,7 @@ async fn handle_status_command_within(
     json: bool,
     short: bool,
     runtime: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
     if runtime {
         let result = daemon_tool_json_within(
@@ -199,7 +199,7 @@ async fn handle_status_command_within(
     // failure rather than a silently defaulted table.
     let census: tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot =
         serde_json::from_value(daemon_status.get("graph_statistics").cloned().ok_or_else(
-            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+            || tracedecay_domain::errors::TraceDecayError::Config {
                 message: "daemon status response omitted graph_statistics".to_string(),
             },
         )?)?;
@@ -223,7 +223,7 @@ async fn handle_status_command_within(
         .get("tokens_saved")
         .and_then(Value::as_u64)
         .ok_or_else(
-            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+            || tracedecay_domain::errors::TraceDecayError::Config {
                 message: "daemon status accounting omitted token count".to_string(),
             },
         )?;
@@ -235,7 +235,7 @@ async fn handle_status_command_within(
         commands::canonical_upload_enabled(&project_path),
     )
     .await
-    .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
+    .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
         message:
             "timed out waiting for canonical worldwide-counter upload setting before status deadline"
                 .to_string(),

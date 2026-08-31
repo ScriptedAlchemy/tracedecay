@@ -25,7 +25,7 @@ use tracedecay_store::{
 };
 
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// One canonical message observation to seed for a dashboard fixture session.
 pub struct DashboardSessionMessageSeedV1<'a> {

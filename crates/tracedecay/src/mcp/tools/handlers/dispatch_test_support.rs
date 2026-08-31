@@ -137,7 +137,7 @@ pub(super) fn verified_graph_options<'a>(
         .as_deref()
         .and_then(|value| tracedecay_domain::ProjectId::new(value.to_owned()).ok())
         .expect("registered graph fixture project identity");
-    let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         cg.project_root(),
         &project_id,
     )
