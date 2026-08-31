@@ -47,6 +47,10 @@ const MAX_CLAUDE_SOURCES_PER_PASS: usize = 64;
 const CLAUDE_SOURCE_FRONTIER_KEY: &str =
     "tracedecay-internal:claude-observation-source-frontier:v1";
 const MAX_PROJECTIONS_PER_PASS: usize = 256;
+/// Consecutive in-scope frames captured through one batched admission window
+/// (one sanitize fan-out, one store transaction). Bounds admission latency and
+/// the byte volume a rolled-back window re-scans on scalar replay.
+const CLAUDE_CAPTURE_WINDOW_FRAMES: usize = 32;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClaudeObservationIngestStats {
@@ -322,13 +326,13 @@ fn cursor_after_receipt(
     }
 }
 
-/// Sanitize and commit one already-framed record before any V1 sink.
-async fn capture_frame<A: HostAdmission + ?Sized>(
-    admission: &A,
+/// Builds the admission request for one framed record, consuming the frame's
+/// parsed payload.
+fn build_claude_capture_request(
     frame: &mut ClaudeSourceFrame,
     expected_cursor: Option<ClaudeSourceCursorV1>,
     context: &FrameCaptureContext,
-) -> Result<FrameCaptureOutcome, ClaudeObservationIngestError> {
+) -> Result<CaptureClaudeObservationRequest, ClaudeObservationIngestError> {
     let parsed_record = frame
         .take_parsed_record()
         .ok_or(ClaudeObservationIngestError::MissingParsedRecord)?;
@@ -348,14 +352,24 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
         parsed_record.ordering_domain(),
         native_record_id,
     )?;
-    let request = CaptureClaudeObservationRequest::new(
+    Ok(CaptureClaudeObservationRequest::new(
         parsed_record,
         identity,
         expected_cursor,
         context.retention_class.clone(),
         context.cancellation.clone(),
     )?
-    .with_resume_checkpoint(context.file_identity, frame.resume_fingerprint);
+    .with_resume_checkpoint(context.file_identity, frame.resume_fingerprint))
+}
+
+/// Sanitize and commit one already-framed record before any V1 sink.
+async fn capture_frame<A: HostAdmission + ?Sized>(
+    admission: &A,
+    frame: &mut ClaudeSourceFrame,
+    expected_cursor: Option<ClaudeSourceCursorV1>,
+    context: &FrameCaptureContext,
+) -> Result<FrameCaptureOutcome, ClaudeObservationIngestError> {
+    let request = build_claude_capture_request(frame, expected_cursor, context)?;
     match admission
         .capture_observation(request)
         .await
@@ -761,6 +775,200 @@ async fn apply_prepared_source<A: HostAdmission + ?Sized>(
     Ok(stats)
 }
 
+/// Why a windowed capture pass could not finish its source.
+enum ClaudeWindowedCaptureFailure {
+    /// The admission batch demands per-frame capture (a non-durable record in
+    /// the window or a store-level scalar-fallback verdict). Nothing from the
+    /// failed window committed; the carried stats cover only committed work.
+    ScalarReplay(ClaudeObservationIngestStats),
+    Error(ClaudeObservationIngestError),
+}
+
+/// Captures one window of consecutive in-scope frames through the batched
+/// admission port: one sanitize fan-out and one store transaction, with the
+/// per-frame expected-cursor chain preserved.
+async fn capture_frame_window<A: HostAdmission + ?Sized>(
+    admission: &A,
+    context: &FrameCaptureContext,
+    observation_cursor: &mut Option<ClaudeSourceCursorV1>,
+    window: &mut Vec<Box<ClaudeSourceFrame>>,
+    stats: &mut ClaudeObservationIngestStats,
+) -> Result<(), ClaudeWindowedCaptureFailure> {
+    let frames = std::mem::take(window);
+    if frames.is_empty() {
+        return Ok(());
+    }
+    let mut requests = Vec::with_capacity(frames.len());
+    let mut batch_expected = expected_cursor_for_frame(
+        observation_cursor.as_ref(),
+        &context.source,
+        &context.scope,
+        context.generation,
+        frames[0].offset,
+    )
+    .map_err(|error| ClaudeWindowedCaptureFailure::Error(error.into()))?;
+    for mut frame in frames {
+        let next_expected = cursor_at(
+            &context.source,
+            &context.scope,
+            context.generation,
+            frame.end_offset,
+            Some((context.file_identity, frame.resume_fingerprint)),
+        )
+        .map_err(|error| ClaudeWindowedCaptureFailure::Error(error.into()))?;
+        requests.push(
+            build_claude_capture_request(&mut frame, batch_expected, context)
+                .map_err(ClaudeWindowedCaptureFailure::Error)?,
+        );
+        batch_expected = Some(next_expected);
+    }
+    let request_count = requests.len();
+    match admission.capture_observations(requests).await {
+        Ok(outcomes) => {
+            if outcomes.len() != request_count {
+                return Err(ClaudeWindowedCaptureFailure::Error(
+                    ClaudeObservationIngestError::InvalidFrameState,
+                ));
+            }
+            for outcome in outcomes {
+                match outcome {
+                    CaptureClaudeObservationOutcome::Persisted { outcome, .. }
+                    | CaptureClaudeObservationOutcome::AcceptedForReplay { outcome, .. } => {
+                        let receipt = outcome.receipt();
+                        *observation_cursor = Some(cursor_after_receipt(
+                            observation_cursor.take(),
+                            receipt.committed_cursor(),
+                        ));
+                        if matches!(
+                            *outcome,
+                            ObservationPersistOutcome::ExactDuplicate(_)
+                                | ObservationPersistOutcome::CoveredDuplicate(_)
+                        ) {
+                            stats.observation_duplicates =
+                                stats.observation_duplicates.saturating_add(1);
+                        } else {
+                            stats.observations_committed =
+                                stats.observations_committed.saturating_add(1);
+                        }
+                    }
+                    // The facade's batched port refuses mixed windows before
+                    // persisting, but the trait's default walks frames one at
+                    // a time and surfaces non-durable outcomes inline. Either
+                    // way the per-frame replay pass owns typed rejected and
+                    // quarantined coverage advances.
+                    CaptureClaudeObservationOutcome::Rejected { .. }
+                    | CaptureClaudeObservationOutcome::Quarantined { .. } => {
+                        return Err(ClaudeWindowedCaptureFailure::ScalarReplay(std::mem::take(
+                            stats,
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(outcome) => {
+            if outcome.recovery.is_some() && !context.cancellation.is_cancelled() {
+                return Err(ClaudeWindowedCaptureFailure::ScalarReplay(std::mem::take(
+                    stats,
+                )));
+            }
+            Err(ClaudeWindowedCaptureFailure::Error(
+                host_admission_error("claude", outcome).into(),
+            ))
+        }
+    }
+}
+
+/// Windowed variant of [`apply_prepared_source`]: consecutive in-scope frames
+/// flow through batched admission windows; skipped segments flush the pending
+/// window first so cursor coverage stays contiguous and ordered.
+async fn apply_prepared_source_windowed<A: HostAdmission + ?Sized>(
+    prepared: PreparedSource,
+    admission: &A,
+    cancellation: &ObservationCancellation,
+) -> Result<ClaudeObservationIngestStats, ClaudeWindowedCaptureFailure> {
+    let PreparedSource {
+        capture_context,
+        mut observation_cursor,
+        segments,
+        mut stats,
+    } = prepared;
+    let mut window: Vec<Box<ClaudeSourceFrame>> = Vec::new();
+    let fail = |stats: ClaudeObservationIngestStats, error: ClaudeObservationIngestError| {
+        ClaudeWindowedCaptureFailure::Error(terminal_error_after_progress(stats, error))
+    };
+    for segment in segments {
+        if cancellation.is_cancelled() {
+            return Err(fail(stats, ObservationApplicationError::Cancelled.into()));
+        }
+        match segment {
+            ScannedSegment::Frame(frame) => {
+                window.push(frame);
+                if window.len() >= CLAUDE_CAPTURE_WINDOW_FRAMES {
+                    capture_frame_window(
+                        admission,
+                        &capture_context,
+                        &mut observation_cursor,
+                        &mut window,
+                        &mut stats,
+                    )
+                    .await
+                    .map_err(|failure| match failure {
+                        ClaudeWindowedCaptureFailure::Error(error) => fail(
+                            std::mem::take(&mut stats),
+                            error,
+                        ),
+                        replay => replay,
+                    })?;
+                }
+            }
+            skipped @ ScannedSegment::Skipped(_) => {
+                // Frames preceding this range must commit before its cursor
+                // advance, or coverage would leapfrog unpersisted records.
+                capture_frame_window(
+                    admission,
+                    &capture_context,
+                    &mut observation_cursor,
+                    &mut window,
+                    &mut stats,
+                )
+                .await
+                .map_err(|failure| match failure {
+                    ClaudeWindowedCaptureFailure::Error(error) => {
+                        fail(std::mem::take(&mut stats), error)
+                    }
+                    replay => replay,
+                })?;
+                let applied = apply_scanned_segment(
+                    admission,
+                    &capture_context,
+                    &mut observation_cursor,
+                    skipped,
+                    &mut stats,
+                )
+                .await
+                .map_err(|error| fail(std::mem::take(&mut stats), error))?;
+                if !applied {
+                    return Ok(stats);
+                }
+            }
+        }
+    }
+    capture_frame_window(
+        admission,
+        &capture_context,
+        &mut observation_cursor,
+        &mut window,
+        &mut stats,
+    )
+    .await
+    .map_err(|failure| match failure {
+        ClaudeWindowedCaptureFailure::Error(error) => fail(std::mem::take(&mut stats), error),
+        replay => replay,
+    })?;
+    Ok(stats)
+}
+
 async fn process_source<A>(
     context: &SourceProcessingContext<'_, A>,
     path: &Path,
@@ -772,8 +980,55 @@ where
     match prepare_source(context, path, max_new_bytes).await? {
         SourcePreparation::Finished(stats) => Ok(stats),
         SourcePreparation::Ready(prepared) => {
-            apply_prepared_source(*prepared, context.admission, context.cancellation).await
+            match apply_prepared_source_windowed(*prepared, context.admission, context.cancellation)
+                .await
+            {
+                Ok(stats) => Ok(stats),
+                Err(ClaudeWindowedCaptureFailure::Error(error)) => Err(error),
+                Err(ClaudeWindowedCaptureFailure::ScalarReplay(committed)) => {
+                    // Nothing from the refused window committed, so a fresh
+                    // scan from the durable cursor reproduces exactly the
+                    // uncaptured tail; per-frame capture then lands typed
+                    // rejected/quarantined coverage for the offending record.
+                    let replay = match prepare_source(context, path, max_new_bytes).await {
+                        Ok(SourcePreparation::Finished(stats)) => stats,
+                        Ok(SourcePreparation::Ready(prepared)) => {
+                            match apply_prepared_source(
+                                *prepared,
+                                context.admission,
+                                context.cancellation,
+                            )
+                            .await
+                            {
+                                Ok(stats) => stats,
+                                Err(error) => {
+                                    return Err(merge_committed_into_error(committed, error));
+                                }
+                            }
+                        }
+                        Err(error) => return Err(merge_committed_into_error(committed, error)),
+                    };
+                    Ok(committed.merge(replay))
+                }
+            }
         }
+    }
+}
+
+/// Folds windowed-phase committed stats into a replay failure so terminal
+/// errors keep reporting every durable effect of this source pass.
+fn merge_committed_into_error(
+    committed: ClaudeObservationIngestStats,
+    error: ClaudeObservationIngestError,
+) -> ClaudeObservationIngestError {
+    match error {
+        ClaudeObservationIngestError::Terminated { stats, error } => {
+            ClaudeObservationIngestError::Terminated {
+                stats: Box::new(committed.merge(*stats)),
+                error,
+            }
+        }
+        other => terminal_error_after_progress(committed, other),
     }
 }
 
