@@ -237,7 +237,10 @@ impl GraphDb {
     /// The staging database remains the WAL-backed replay and fallback
     /// authority; configurations without a sealed artifact retain the
     /// original close/reopen proof when `reopen_fallback` requires it.
-    #[hotpath::measure(label = "graph_db.generation.publish.verify_proof", impl_type = "GraphDb")]
+    #[hotpath::measure(
+        label = "graph_db.generation.publish.verify_proof",
+        impl_type = "GraphDb"
+    )]
     pub(crate) fn verify_generation_for_publication(
         &self,
         identity: &GraphGenerationManifestIdentity,
@@ -1197,7 +1200,7 @@ impl GraphDb {
                         message: "verified traversal edge has no typed relation locator".to_owned(),
                     })?;
                     let (neighbor_namespace, neighbor_identity) =
-                        endpoints.identity(database, neighbor)?;
+                        endpoints.identity(database.graph_store().as_ref(), neighbor)?;
                     let Some(entity_projection) =
                         namespace_projection.get(&neighbor_namespace).cloned()
                     else {
@@ -1390,7 +1393,7 @@ fn typed_entity_ref(
     namespace_projection: &BTreeMap<GraphNamespace, crate::GraphProjectionIdentity>,
     cache: &mut EndpointIdentityCache,
 ) -> Result<GraphEntityRef, GraphDbError> {
-    let (namespace, identity) = cache.identity(database, node)?;
+    let (namespace, identity) = cache.identity(database.graph_store().as_ref(), node)?;
     let projection = namespace_projection
         .get(&namespace)
         .cloned()
