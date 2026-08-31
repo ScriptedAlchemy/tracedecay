@@ -153,24 +153,25 @@ pub fn response_handle_stats_json(project_root: Option<&Path>) -> Value {
         "last_cleanup_at": timestamp_json(timestamp(&telemetry.last_cleanup_at)),
     });
     if let (Some(project_root), Some(object)) = (project_root, stats.as_object_mut()) {
-        let on_disk =
-            match tracedecay_session_memory::response_handles::inventory_response_handles(project_root) {
-                Ok(inventory) => json!({
-                    "available": true,
-                    "file_count": inventory.file_count,
-                    "total_bytes": inventory.total_bytes,
-                    "oldest_expires_at": inventory.oldest_expires_at,
-                    "newest_expires_at": inventory.newest_expires_at,
-                }),
-                Err(error) => {
-                    let (reason_code, detail) = public_inventory_problem(&error);
-                    json!({
-                        "available": false,
-                        "reason_code": reason_code,
-                        "detail": detail,
-                    })
-                }
-            };
+        let on_disk = match tracedecay_session_memory::response_handles::inventory_response_handles(
+            project_root,
+        ) {
+            Ok(inventory) => json!({
+                "available": true,
+                "file_count": inventory.file_count,
+                "total_bytes": inventory.total_bytes,
+                "oldest_expires_at": inventory.oldest_expires_at,
+                "newest_expires_at": inventory.newest_expires_at,
+            }),
+            Err(error) => {
+                let (reason_code, detail) = public_inventory_problem(&error);
+                json!({
+                    "available": false,
+                    "reason_code": reason_code,
+                    "detail": detail,
+                })
+            }
+        };
         object.insert("on_disk".to_string(), on_disk);
     }
     stats
@@ -186,8 +187,11 @@ pub fn store_response_handle(
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     telemetry.store_attempts.fetch_add(1, Ordering::Relaxed);
-    let result =
-        tracedecay_session_memory::response_handles::store_response_handle(project_root, content, now);
+    let result = tracedecay_session_memory::response_handles::store_response_handle(
+        project_root,
+        content,
+        now,
+    );
     telemetry
         .store_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -223,8 +227,11 @@ pub fn retrieve_response_handle(
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
-    let result =
-        tracedecay_session_memory::response_handles::retrieve_response_handle(project_root, handle, now);
+    let result = tracedecay_session_memory::response_handles::retrieve_response_handle(
+        project_root,
+        handle,
+        now,
+    );
     telemetry
         .retrieve_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -280,8 +287,10 @@ pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     telemetry.cleanup_runs.fetch_add(1, Ordering::Relaxed);
-    let result =
-        tracedecay_session_memory::response_handles::cleanup_expired_response_handles(project_root, now);
+    let result = tracedecay_session_memory::response_handles::cleanup_expired_response_handles(
+        project_root,
+        now,
+    );
     telemetry
         .cleanup_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);

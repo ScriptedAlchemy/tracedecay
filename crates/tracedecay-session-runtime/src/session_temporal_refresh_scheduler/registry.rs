@@ -4,7 +4,6 @@ use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::StoreOwnerKey;
 use super::history::SharedSessionHistoricalIngestor;
 use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshPolicy,
@@ -17,6 +16,7 @@ use super::wake::{
     SessionTemporalRefreshWakeState,
 };
 use super::worker::run_session_temporal_refresh_scheduler;
+use crate::StoreOwnerKey;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_sessions::admission::session_ingest_disabled;
 
@@ -223,9 +223,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         self.codex_discovery.configure_preparation_resources(memory)
     }
 
-    pub fn codex_discovery(
-        &self,
-    ) -> Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub> {
+    pub fn codex_discovery(&self) -> Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub> {
         Arc::clone(&self.codex_discovery)
     }
 

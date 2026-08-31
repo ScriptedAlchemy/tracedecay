@@ -780,7 +780,9 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
                     | tracedecay_store::SemanticVectorStageAppendOutcome::ExactReplay { .. } => {
                         Ok(())
                     }
-                    _ => Err(GraphDbError::Conflict),
+                    _ => Err(GraphDbError::conflict(
+                        "evaluation_runtime.append_stage_batch",
+                    )),
                 }
             },
         )?;
@@ -846,7 +848,7 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
                     return Ok(SemanticVectorStageCancelOutcome::MissingStage);
                 };
                 if record.plan.key != *stage {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict("evaluation_runtime.cancel_stage"));
                 }
                 if record.state == SemanticVectorStageState::Cancelled {
                     return Ok(SemanticVectorStageCancelOutcome::ExactReplay(record));
@@ -864,7 +866,7 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
                     .map_err(map_publication_error)?
                     .is_some_and(|head| head.key == record.plan.publication_key)
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict("evaluation_runtime.cancel_stage"));
                 }
                 authority
                     .cancel_stage(stage, &record.plan.writer_fence, context)

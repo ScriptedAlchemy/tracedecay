@@ -18,11 +18,9 @@ async fn daemon_project_dashboard_root(
         .get("storage")
         .and_then(|storage| storage.get("data_root"))
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: "managed daemon returned no active project data_root".to_string(),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "managed daemon returned no active project data_root".to_string(),
+        })?;
     Ok(std::path::PathBuf::from(data_root).join("dashboard"))
 }
 

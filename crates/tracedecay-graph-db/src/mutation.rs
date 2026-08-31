@@ -588,7 +588,7 @@ fn validate_references(
                     identity,
                 ) && owner != batch.projection
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict("mutation.validate_references"));
                 }
                 relations.insert(key, None);
             }
@@ -597,7 +597,7 @@ fn validate_references(
                 if let Some(owner) = entity_owner(&entities, existing, &encoded_namespace, identity)
                     && owner != batch.projection
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict("mutation.validate_references"));
                 }
                 entities.insert(key, None);
             }
@@ -607,7 +607,7 @@ fn validate_references(
                     entity_owner(&entities, existing, &encoded_namespace, &entity.identity)
                     && owner != batch.projection
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict("mutation.validate_references"));
                 }
                 entities.insert(key, Some(batch.projection.clone()));
             }
@@ -620,7 +620,7 @@ fn validate_references(
                     &relation.identity,
                 ) && owner != batch.projection
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict("mutation.validate_references"));
                 }
                 relations.insert(
                     key,
@@ -829,7 +829,7 @@ fn map_commit_error(error: grafeo_common::utils::error::Error) -> GraphDbError {
     match error.error_code() {
         ErrorCode::TransactionConflict
         | ErrorCode::TransactionSerialization
-        | ErrorCode::TransactionDeadlock => GraphDbError::Conflict,
+        | ErrorCode::TransactionDeadlock => GraphDbError::conflict("mutation.map_commit_error"),
         _ => GraphDbError::unavailable(error.to_string()),
     }
 }

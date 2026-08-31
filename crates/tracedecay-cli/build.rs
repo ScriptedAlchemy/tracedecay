@@ -181,7 +181,10 @@ fn required_bundle_digest_env() -> Result<String, Box<dyn Error>> {
     Ok(expected)
 }
 
-fn bundle_digest(app_dist: &Path, sorted_relative_paths: &[String]) -> Result<String, Box<dyn Error>> {
+fn bundle_digest(
+    app_dist: &Path,
+    sorted_relative_paths: &[String],
+) -> Result<String, Box<dyn Error>> {
     let mut hasher = Sha256::new();
     hasher.update(BUNDLE_DIGEST_PREFIX);
     for relative in sorted_relative_paths {
@@ -296,11 +299,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
         })?),
     };
-    let provenance = source_provenance::resolve(
-        &repository_root,
-        &manifest_dir,
-        release_env_sha.as_deref(),
-    )?;
+    let provenance =
+        source_provenance::resolve(&repository_root, &manifest_dir, release_env_sha.as_deref())?;
     match &provenance.origin {
         source_provenance::ProvenanceOrigin::VerifiedGit => {
             // Repo-wide watch: the baked commit must track commits, staging,

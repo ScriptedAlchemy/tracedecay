@@ -206,11 +206,9 @@ fn registry_project_roots(
     let projects = payload
         .get("projects")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: "daemon registry list response omitted projects array".to_string(),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon registry list response omitted projects array".to_string(),
+        })?;
 
     projects
         .iter()
