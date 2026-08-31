@@ -1,4 +1,5 @@
 use super::*;
+use tracedecay_session_runtime::test_helpers::{lcm_compress, lcm_session_boundary};
 
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
@@ -9,14 +10,12 @@ impl HostAdmissionTestRuntimeV1 {
         tracedecay_lcm::LcmCompressionResponse,
         tracedecay_lcm::LcmError,
     > {
-        tracedecay_session_runtime::lcm_effects::DaemonLcmEffectService::new(
+        lcm_compress(
             self.project_registered
                 .clone()
                 .unwrap_or_else(|| self.profile_registered.clone()),
-            None,
-            None,
+            request,
         )
-        .compress(request)
         .await
     }
 
@@ -213,14 +212,12 @@ impl HostAdmissionTestRuntimeV1 {
         tracedecay_lcm::LcmSessionBoundaryResponse,
         tracedecay_lcm::LcmError,
     > {
-        tracedecay_session_runtime::lcm_effects::DaemonLcmEffectService::new(
+        lcm_session_boundary(
             self.project_registered
                 .clone()
                 .unwrap_or_else(|| self.profile_registered.clone()),
-            None,
-            None,
+            request,
         )
-        .session_boundary(request)
         .await
     }
 

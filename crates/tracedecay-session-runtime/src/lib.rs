@@ -8,12 +8,21 @@
 use std::time::Duration;
 
 pub mod lcm_authority;
-pub mod lcm_effects;
+mod lcm_effects;
 mod lcm_summarization;
 pub mod session_retrieval;
 pub mod session_sync;
 pub mod session_temporal_refresh_scheduler;
 mod store_owner;
+
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub mod test_helpers {
+    pub use crate::lcm_effects::{
+        lcm_compress_for_test as lcm_compress,
+        lcm_session_boundary_for_test as lcm_session_boundary,
+    };
+}
 
 pub use store_owner::StoreOwnerKey;
 
