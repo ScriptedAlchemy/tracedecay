@@ -153,13 +153,15 @@ impl SessionRetrievalServingIdentityV1 {
         serving.valid_project_shard().then_some(serving)
     }
 
-    pub fn resolve_profile(
-        profile_id: &tracedecay_domain::UserProfileId,
+    pub fn profile(
+        profile_id: ProfileId,
+        store_id: SessionStoreId,
+        root_id: SessionRootId,
         expected_runtime_shard: &StoreShardIdV1,
         serving_db: &Path,
         profile_root: &Path,
     ) -> Option<Self> {
-        if profile_id != &expected_runtime_shard.profile_id
+        if profile_id.as_str() != expected_runtime_shard.profile_id.as_str()
             || !matches!(
                 expected_runtime_shard.scope,
                 StoreShardScopeV1::ProfileSessions
@@ -171,11 +173,16 @@ impl SessionRetrievalServingIdentityV1 {
         if suffix.is_empty() {
             return None;
         }
+        if store_id.as_str() != format!("store.profile.{suffix}")
+            || root_id.as_str() != format!("root.profile.{suffix}")
+        {
+            return None;
+        }
         Some(Self {
             project_id: None,
-            profile_id: ProfileId::new(profile_id.as_str().to_owned()).ok()?,
-            store_id: SessionStoreId::new(format!("store.profile.{suffix}")).ok()?,
-            root_id: SessionRootId::new(format!("root.profile.{suffix}")).ok()?,
+            profile_id,
+            store_id,
+            root_id,
             expected_runtime_shard: expected_runtime_shard.clone(),
             serving_db: serving_db.to_path_buf(),
             project_root: profile_root.to_path_buf(),

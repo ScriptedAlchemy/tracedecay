@@ -9,9 +9,7 @@ use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, tool_error_response,
     tool_result_has_semantic_error,
 };
-use tracedecay_session_runtime::session_retrieval::{
-    DaemonSessionRetrievalRoot, SessionRetrievalServingIdentityV1,
-};
+use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
 use tracedecay_sessions::runtime::user_sessions_db_path;
 use tracedecay_store::StoreShardIdV1;
 
@@ -53,11 +51,10 @@ fn admit_projectless_connection(
         profile_identity.profile_id().clone(),
     );
     let serving_db = user_sessions_db_path(profile_identity.profile_root());
-    let serving = SessionRetrievalServingIdentityV1::resolve_profile(
-        profile_identity.profile_id(),
+    let serving = crate::daemon::retained_owner::profile_session_retrieval_serving_identity(
+        profile_identity,
         &shard,
         &serving_db,
-        profile_identity.profile_root(),
     )
     .ok_or_else(|| TraceDecayError::Config {
         message: "projectless profile session identity is unavailable".to_owned(),

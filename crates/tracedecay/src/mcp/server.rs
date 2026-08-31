@@ -946,12 +946,12 @@ impl McpServer {
             .as_deref()
             .zip(registered_user_session_db.as_ref())
             .and_then(|(profile, registered)| {
-                let serving = SessionRetrievalServingIdentityV1::resolve_profile(
-                    profile.profile_id(),
-                    &registered.binding().shard_id,
-                    registered.db_path(),
-                    profile.profile_root(),
-                )?;
+                let serving =
+                    crate::daemon::retained_owner::profile_session_retrieval_serving_identity(
+                        profile,
+                        &registered.binding().shard_id,
+                        registered.db_path(),
+                    )?;
                 DaemonSessionRetrievalRoot::profile(serving)
             });
         let project_session_refresh_service = session_db

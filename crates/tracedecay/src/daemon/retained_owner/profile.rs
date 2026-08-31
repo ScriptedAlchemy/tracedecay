@@ -17,7 +17,11 @@ use tracedecay_application::{
 use tracedecay_domain::{
     ActorId, BrainId, ManifestDigest, UserProfileId, UtcMicros, canonical_sha256,
 };
-use tracedecay_session_memory::context::ResolvedSessionIdentity;
+use tracedecay_session_memory::context::{
+    ProfileId, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+};
+use tracedecay_session_runtime::session_retrieval::SessionRetrievalServingIdentityV1;
+use tracedecay_store::StoreShardIdV1;
 
 use super::lcm::DirectRetainedLcmPortV1;
 use super::memory::DirectRetainedMemoryPortV1;
@@ -39,6 +43,30 @@ const PROFILE_RETAINED_ACTOR_DOMAIN_V1: &str =
     "tracedecay.daemon.profile-retained.local-profile-actor.v1";
 const PROFILE_RETAINED_REQUEST_GRANT_DOMAIN_V1: &str =
     "tracedecay.daemon.profile-retained.request-grant.v1";
+
+pub(crate) fn profile_session_retrieval_serving_identity(
+    identity: &dyn tracedecay_application::ProfileIdentityReadPort,
+    expected_runtime_shard: &StoreShardIdV1,
+    serving_db: &std::path::Path,
+) -> Option<SessionRetrievalServingIdentityV1> {
+    if &expected_runtime_shard.brain_id != identity.brain_id()
+        || &expected_runtime_shard.profile_id != identity.profile_id()
+    {
+        return None;
+    }
+    let suffix = identity.profile_id().as_str().strip_prefix("profile.")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    SessionRetrievalServingIdentityV1::profile(
+        ProfileId::new(identity.profile_id().as_str().to_owned()).ok()?,
+        SessionStoreId::new(format!("store.profile.{suffix}")).ok()?,
+        SessionRootId::new(format!("root.profile.{suffix}")).ok()?,
+        expected_runtime_shard,
+        serving_db,
+        identity.profile_root(),
+    )
+}
 
 /// Durable identity authority retained for one authenticated local-profile
 /// connection. Grants are deliberately absent: each request is admitted for
@@ -385,11 +413,10 @@ mod tests {
         );
         let serving_db =
             tracedecay_sessions::runtime::user_sessions_db_path(profile_identity.profile_root());
-        let serving = SessionRetrievalServingIdentityV1::resolve_profile(
-            profile_identity.profile_id(),
+        let serving = profile_session_retrieval_serving_identity(
+            profile_identity,
             &shard,
             &serving_db,
-            profile_identity.profile_root(),
         )
         .expect("profile serving identity");
         DaemonSessionRetrievalRoot::profile(serving).expect("profile retrieval root")

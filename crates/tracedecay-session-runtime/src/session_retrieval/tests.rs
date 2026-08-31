@@ -757,8 +757,15 @@ fn registered_profile_retrieval_root(
     database: &RegisteredGlobalDbLeaseV1,
 ) -> DaemonSessionRetrievalRoot {
     let profile_root = database.db_path().parent().expect("profile root");
-    let serving = SessionRetrievalServingIdentityV1::resolve_profile(
-        &database.binding().shard_id.profile_id,
+    let profile_id = &database.binding().shard_id.profile_id;
+    let suffix = profile_id
+        .as_str()
+        .strip_prefix("profile.")
+        .expect("profile identity prefix");
+    let serving = SessionRetrievalServingIdentityV1::profile(
+        ProfileId::new(profile_id.as_str().to_owned()).expect("profile identity"),
+        SessionStoreId::new(format!("store.profile.{suffix}")).expect("profile store identity"),
+        SessionRootId::new(format!("root.profile.{suffix}")).expect("profile root identity"),
         &database.binding().shard_id,
         database.db_path(),
         profile_root,
