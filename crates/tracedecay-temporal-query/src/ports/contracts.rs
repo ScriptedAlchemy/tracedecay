@@ -181,6 +181,7 @@ pub async fn prepare_temporal_candidate_cohort(
     TemporalPreparedCandidateCohort::new(candidates)
 }
 
+#[hotpath::measure]
 pub async fn pull_candidate_page(
     port: &impl TemporalReadPort,
     snapshot: &TemporalExecutionSnapshot,
@@ -227,6 +228,7 @@ pub async fn pull_candidate_page(
     commit_pulled_page(state, page, CANDIDATE_READ_BUDGET)
 }
 
+#[hotpath::measure]
 pub async fn pull_temporal_record_page(
     port: &impl TemporalReadPort,
     snapshot: &TemporalExecutionSnapshot,
@@ -267,6 +269,7 @@ pub async fn pull_temporal_record_page(
 /// cancellation checkpoint, limit validation, per-state cap admission, and the
 /// exhausted-state guard. `select_caps` picks the (item count, total bytes,
 /// item bytes) triple this read family is admitted against.
+#[hotpath::measure]
 fn begin_pull<T>(
     snapshot: &TemporalExecutionSnapshot,
     state: &ReadState<T>,
@@ -276,6 +279,7 @@ fn begin_pull<T>(
     begin_pull_request(snapshot.request(), state, select_caps, resources)
 }
 
+#[hotpath::measure]
 fn begin_pull_request<T>(
     request: &TemporalSnapshotRequest,
     state: &ReadState<T>,
@@ -293,6 +297,7 @@ fn begin_pull_request<T>(
     Ok(limits)
 }
 
+#[hotpath::measure]
 fn commit_pulled_page<T>(
     state: &mut ReadState<T>,
     page: BoundedPage<T>,
@@ -505,6 +510,7 @@ impl Write for BoundedByteCounter {
     }
 }
 
+#[hotpath::measure]
 fn measured_json_bytes(
     operation: &'static str,
     value: &impl Serialize,

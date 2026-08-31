@@ -11,6 +11,7 @@ use super::types::{
     ResolutionOccurrence, ResolvedOccurrence, TemporalResolution,
 };
 
+#[hotpath::measure]
 fn checkpoint(
     control: &ExecutionControl,
     hook: &mut dyn FnMut(ResolutionCheckpoint) -> Result<(), TemporalPortError>,
@@ -30,6 +31,7 @@ const fn authority_rank(authority: SessionAuthorityClassV1) -> u8 {
     }
 }
 
+#[hotpath::measure]
 fn evidence_strength(
     occurrence: &ResolutionOccurrence,
     support: &BTreeMap<RetrievalAnchorId, BTreeSet<RetrievalAnchorId>>,
@@ -43,6 +45,7 @@ fn evidence_strength(
     )
 }
 
+#[hotpath::measure]
 fn stable_occurrence_order(
     left: &ResolvedOccurrence,
     right: &ResolvedOccurrence,
@@ -130,6 +133,7 @@ struct SccFrame {
 /// computed, but in a single linear O(V + E) Tarjan pass instead of
 /// O(V * (V + E)). Recursion is expressed with an explicit work stack so deep
 /// chains cannot overflow the call stack.
+#[hotpath::measure]
 fn cycle_members_among(
     nodes: &BTreeSet<RetrievalAnchorId>,
     descendants: &BTreeMap<RetrievalAnchorId, BTreeSet<RetrievalAnchorId>>,
@@ -230,6 +234,7 @@ fn cycle_members_among(
     Ok(cyclic)
 }
 
+#[hotpath::measure]
 fn copy_sources(
     copies: &[LogicalCopyRecordV1],
     mode: TemporalModeV1,
@@ -299,6 +304,7 @@ pub fn copy_root(
 /// start node, so folding it into the shared memo would corrupt other starts.
 /// Those chains fall back to a full per-start walk, so the resolved root is
 /// byte-for-byte identical to the reference implementation for every input.
+#[hotpath::measure]
 fn copy_root_memoized(
     occurrence_id: &MessageOccurrenceIdV1,
     sources: &BTreeMap<MessageOccurrenceIdV1, MessageOccurrenceIdV1>,
@@ -343,6 +349,7 @@ fn copy_root_memoized(
     Ok(current)
 }
 
+#[hotpath::measure]
 fn collect_support(
     occurrences: &[ResolutionOccurrence],
     assertions: &[&ResolutionAssertion],
@@ -387,6 +394,7 @@ fn collect_support(
     Ok(support)
 }
 
+#[hotpath::measure]
 fn order_evolution(
     resolved: Vec<ResolvedOccurrence>,
     assertions: &[&ResolutionAssertion],
@@ -729,6 +737,7 @@ pub fn resolve_temporal_with_checkpoints(
     })
 }
 
+#[hotpath::measure]
 pub fn resolve_temporal_controlled(
     occurrences: &[ResolutionOccurrence],
     copies: &[LogicalCopyRecordV1],
@@ -740,6 +749,7 @@ pub fn resolve_temporal_controlled(
     resolve_temporal_with_checkpoints(occurrences, copies, assertions, mode, control, &mut hook)
 }
 
+#[hotpath::measure]
 pub fn resolve_temporal(
     occurrences: &[ResolutionOccurrence],
     copies: &[LogicalCopyRecordV1],

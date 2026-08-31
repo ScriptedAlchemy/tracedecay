@@ -22,6 +22,7 @@ pub enum CursorKeyError {
 #[derive(Clone, PartialEq, Eq)]
 pub struct CursorSignature([u8; 32]);
 
+#[hotpath::measure_all]
 impl CursorSignature {
     pub(crate) fn from_hex(encoded: &str) -> Result<Self, CursorKeyError> {
         let decoded = hex::decode(encoded).map_err(|_| CursorKeyError::AuthenticationFailed)?;
@@ -56,6 +57,7 @@ pub struct InMemoryCursorAuthenticator {
     secret: Zeroizing<Vec<u8>>,
 }
 
+#[hotpath::measure_all]
 impl InMemoryCursorAuthenticator {
     pub fn new(
         key: SignedCursorKeyRefV1,

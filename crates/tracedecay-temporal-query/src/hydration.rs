@@ -17,6 +17,7 @@ pub struct HydrationDenial {
     state: HydrationStateV1,
 }
 
+#[hotpath::measure_all]
 impl HydrationDenial {
     pub fn new(state: HydrationStateV1) -> Result<Self, HydrationError> {
         if state == HydrationStateV1::Available {
@@ -25,6 +26,7 @@ impl HydrationDenial {
         Ok(Self { state })
     }
 
+    #[hotpath::skip]
     pub const fn state(&self) -> HydrationStateV1 {
         self.state
     }
@@ -44,19 +46,24 @@ pub struct HydrationGrant<'a> {
     remaining_total_bytes: usize,
 }
 
+#[hotpath::measure_all]
 impl<'a> HydrationGrant<'a> {
+    #[hotpath::skip]
     pub const fn snapshot(&self) -> &'a TemporalExecutionSnapshot {
         self.snapshot
     }
 
+    #[hotpath::skip]
     pub const fn anchor_id(&self) -> &'a RetrievalAnchorId {
         self.anchor_id
     }
 
+    #[hotpath::skip]
     pub const fn max_bytes(&self) -> usize {
         self.max_bytes
     }
 
+    #[hotpath::skip]
     pub const fn max_chunk_bytes(&self) -> usize {
         self.max_chunk_bytes
     }
@@ -67,6 +74,7 @@ pub struct HydrationSink<'a> {
     bytes: Zeroizing<Vec<u8>>,
 }
 
+#[hotpath::measure_all]
 impl<'a> HydrationSink<'a> {
     fn with_grant(grant: &'a HydrationGrant<'a>) -> Result<Self, HydrationError> {
         let capacity = grant
@@ -165,6 +173,7 @@ pub struct HydratedPayload {
     bytes: Zeroizing<Vec<u8>>,
 }
 
+#[hotpath::measure_all]
 impl HydratedPayload {
     pub fn anchor_id(&self) -> &RetrievalAnchorId {
         &self.anchor_id
@@ -196,11 +205,13 @@ pub struct UnavailableHydration {
     state: HydrationStateV1,
 }
 
+#[hotpath::measure_all]
 impl UnavailableHydration {
     pub fn anchor_id(&self) -> &RetrievalAnchorId {
         &self.anchor_id
     }
 
+    #[hotpath::skip]
     pub const fn state(&self) -> HydrationStateV1 {
         self.state
     }

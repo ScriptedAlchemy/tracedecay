@@ -23,6 +23,7 @@ use super::{
     public_summary_omissions, temporal_context_frames,
 };
 
+#[hotpath::measure_all]
 impl TemporalCandidateExport {
     /// Project this frozen temporal page into the canonical compact retrieval
     /// contract without authorizing or reading any payload bytes.
@@ -222,10 +223,12 @@ impl TemporalCandidateExport {
     }
 }
 
+#[hotpath::measure]
 fn candidate_export_contract(error: impl fmt::Display) -> TemporalKernelError {
     TemporalKernelError::CandidateExportContract(error.to_string())
 }
 
+#[hotpath::measure]
 fn temporal_contribution(
     contribution: &super::ranking::RetrieverContribution,
 ) -> Result<TemporalCandidateContributionV1, TemporalKernelError> {
@@ -260,6 +263,7 @@ const fn temporal_channel(
     }
 }
 
+#[hotpath::measure]
 fn temporal_evidence_role(role: Option<&str>) -> EvidenceRole {
     match role {
         Some("corroboration") => EvidenceRole::Corroboration,
@@ -269,6 +273,7 @@ fn temporal_evidence_role(role: Option<&str>) -> EvidenceRole {
     }
 }
 
+#[hotpath::measure]
 fn participant_freshness(
     participant: &TemporalParticipantGeneration,
     request: &RetrievalRequest,

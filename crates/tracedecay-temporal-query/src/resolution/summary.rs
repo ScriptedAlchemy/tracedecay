@@ -94,6 +94,7 @@ pub struct SummaryLineageEligibility {
     pub omissions: Vec<SummaryOmission>,
 }
 
+#[hotpath::measure]
 fn summary_rejection_order(rejection: &SummaryLineageRejection) -> (u8, u8, &str) {
     let (privacy, kind, identity) = match rejection {
         SummaryLineageRejection::UnauthorizedSource { anchor_id } => (0, 0, anchor_id.as_str()),
@@ -130,6 +131,7 @@ fn summary_rejection_order(rejection: &SummaryLineageRejection) -> (u8, u8, &str
     (privacy, kind, identity)
 }
 
+#[hotpath::measure]
 fn prefer_summary_rejection(
     current: &mut Option<SummaryLineageRejection>,
     candidate: SummaryLineageRejection,
@@ -142,6 +144,7 @@ fn prefer_summary_rejection(
     }
 }
 
+#[hotpath::measure]
 fn summary_source_rejection(
     summary: &SessionSummaryRecordV1,
     source_states: &BTreeMap<RetrievalAnchorId, SummarySourceState>,
@@ -241,6 +244,7 @@ fn summary_source_rejection(
     Ok(rejection)
 }
 
+#[hotpath::measure]
 fn summary_chain_rejection(
     summary: &SessionSummaryRecordV1,
     by_id: &BTreeMap<SessionSummaryIdV1, &SessionSummaryRecordV1>,
@@ -291,6 +295,7 @@ fn summary_chain_rejection(
     Ok(None)
 }
 
+#[hotpath::measure]
 pub fn evaluate_summary_lineage_eligibility_controlled(
     summaries: &[SessionSummaryRecordV1],
     source_states: &BTreeMap<RetrievalAnchorId, SummarySourceState>,
@@ -374,6 +379,7 @@ pub fn evaluate_summary_lineage_eligibility_controlled(
     })
 }
 
+#[hotpath::measure]
 pub fn evaluate_summary_lineage_eligibility(
     summaries: &[SessionSummaryRecordV1],
     source_states: &BTreeMap<RetrievalAnchorId, SummarySourceState>,

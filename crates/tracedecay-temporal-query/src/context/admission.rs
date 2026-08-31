@@ -23,7 +23,9 @@ enum BudgetLimit {
     Token,
 }
 
+#[hotpath::measure_all]
 impl BudgetLimit {
+    #[hotpath::skip]
     const fn omission_reason(self) -> ContextOmissionReasonV1 {
         match self {
             Self::Byte => ContextOmissionReasonV1::ByteBudget,
@@ -63,6 +65,7 @@ struct WireSeparators {
     close: WireMeasure,
 }
 
+#[hotpath::measure_all]
 impl WireSeparators {
     fn measure(policy: TokenPolicy, control: &ExecutionControl) -> Result<Self, ContextError> {
         Ok(Self {
@@ -100,6 +103,7 @@ pub struct AdmissionDecision {
     pub tokens: u64,
 }
 
+#[hotpath::measure]
 pub fn prepare_admission<P: ContextPayload>(
     available: &[P],
     grain: RetrievalGrainV1,
@@ -207,6 +211,7 @@ pub fn prepare_admission<P: ContextPayload>(
     })
 }
 
+#[hotpath::measure]
 fn append_array_measure(
     prefix: &WireMeasure,
     item: &WireMeasure,
@@ -220,6 +225,7 @@ fn append_array_measure(
     }
 }
 
+#[hotpath::measure]
 fn measure_omissions(
     base: &[CompactContextOmissionV1],
     limit: Option<BudgetLimit>,
@@ -243,6 +249,7 @@ fn measure_omissions(
     measure_serializable(&values, policy, control)
 }
 
+#[hotpath::measure]
 pub fn choose_admission(
     prepared: &PreparedAdmission,
     bundle: &CompactContextBundleV1,
@@ -316,6 +323,7 @@ pub fn choose_admission(
     })
 }
 
+#[hotpath::measure]
 fn require_fit(measure: &WireMeasure, max_bytes: u64, max_tokens: u64) -> Result<(), ContextError> {
     if measure.bytes > max_bytes {
         return Err(ContextError::BudgetExceeded { resource: "byte" });
@@ -326,6 +334,7 @@ fn require_fit(measure: &WireMeasure, max_bytes: u64, max_tokens: u64) -> Result
     Ok(())
 }
 
+#[hotpath::measure]
 fn measure_candidate(
     prepared: &PreparedAdmission,
     _bundle: &CompactContextBundleV1,
@@ -373,6 +382,7 @@ fn measure_candidate(
     Ok(measure)
 }
 
+#[hotpath::measure]
 pub fn materialize_admission<P: ContextPayload>(
     bundle: &mut CompactContextBundleV1,
     available: &[P],
@@ -424,6 +434,7 @@ pub fn measure_context<P: ContextPayload>(
     )
 }
 
+#[hotpath::measure]
 pub fn render_exact<P: ContextPayload>(
     bundle: &CompactContextBundleV1,
     summary_omissions: &[SummaryOmission],
@@ -452,6 +463,7 @@ pub fn render_exact<P: ContextPayload>(
         .ok_or_else(|| ContextError::InvalidBundle("missing canonical context output".to_string()))
 }
 
+#[hotpath::measure]
 fn measure_serializable<T: Serialize + ?Sized>(
     value: &T,
     policy: TokenPolicy,
@@ -462,6 +474,7 @@ fn measure_serializable<T: Serialize + ?Sized>(
     writer.finish(result).map(|(measure, _)| measure)
 }
 
+#[hotpath::measure]
 fn measure_raw(
     value: &str,
     policy: TokenPolicy,

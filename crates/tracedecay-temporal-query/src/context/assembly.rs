@@ -62,6 +62,7 @@ pub fn assemble_context_parts<P: ContextPayload, U: ContextUnavailable>(
     )
 }
 
+#[hotpath::measure]
 pub fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailable>(
     available: &[P],
     unavailable: &[U],
@@ -175,6 +176,7 @@ pub fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailab
     })
 }
 
+#[hotpath::measure]
 fn order_context_omissions<U: ContextUnavailable>(
     omissions: &mut [CompactContextOmissionV1],
     unavailable: &[U],
@@ -196,6 +198,7 @@ fn order_context_omissions<U: ContextUnavailable>(
     );
 }
 
+#[hotpath::measure]
 pub fn try_reserve<T>(values: &mut Vec<T>, additional: usize) -> Result<(), ContextError> {
     values
         .try_reserve(additional)
@@ -204,6 +207,7 @@ pub fn try_reserve<T>(values: &mut Vec<T>, additional: usize) -> Result<(), Cont
         })
 }
 
+#[hotpath::measure]
 fn validate_frozen_bounds<P: ContextPayload, U: ContextUnavailable>(
     available: &[P],
     unavailable: &[U],
@@ -259,6 +263,7 @@ fn validate_frozen_bounds<P: ContextPayload, U: ContextUnavailable>(
     Ok(())
 }
 
+#[hotpath::measure]
 fn canonicalize_frames(frames: &mut TemporalContextFrames) -> Result<(), ContextError> {
     frames.omissions.sort_by(compare_omissions);
     frames.conflicts.sort_by(|left, right| {
@@ -280,6 +285,7 @@ fn canonicalize_frames(frames: &mut TemporalContextFrames) -> Result<(), Context
     validate_lineage_cycles_are_conflicted(&frames.lineage, &frames.conflicts)
 }
 
+#[hotpath::measure]
 pub fn compare_omissions(
     left: &CompactContextOmissionV1,
     right: &CompactContextOmissionV1,
@@ -289,6 +295,7 @@ pub fn compare_omissions(
         .then_with(|| left.reason.cmp(&right.reason))
 }
 
+#[hotpath::measure]
 pub fn compare_lineage(
     left: &CompactContextLineageEdgeV1,
     right: &CompactContextLineageEdgeV1,
@@ -303,6 +310,7 @@ pub fn compare_lineage(
         .then_with(|| left.supporting_anchor_ids.cmp(&right.supporting_anchor_ids))
 }
 
+#[hotpath::measure]
 fn compare_summary_omissions(left: &SummaryOmission, right: &SummaryOmission) -> Ordering {
     left.summary_id
         .cmp(&right.summary_id)
@@ -310,6 +318,7 @@ fn compare_summary_omissions(left: &SummaryOmission, right: &SummaryOmission) ->
         .then_with(|| compare_summary_rejections(&left.rejection, &right.rejection))
 }
 
+#[hotpath::measure]
 fn compare_summary_rejections(
     left: &SummaryLineageRejection,
     right: &SummaryLineageRejection,
@@ -319,6 +328,7 @@ fn compare_summary_rejections(
         .then_with(|| summary_rejection_value(left).cmp(summary_rejection_value(right)))
 }
 
+#[hotpath::measure]
 fn summary_rejection_rank(rejection: &SummaryLineageRejection) -> u8 {
     match rejection {
         SummaryLineageRejection::SessionMismatch => 0,
@@ -344,6 +354,7 @@ fn summary_rejection_rank(rejection: &SummaryLineageRejection) -> u8 {
     }
 }
 
+#[hotpath::measure]
 fn summary_rejection_value(rejection: &SummaryLineageRejection) -> &str {
     match rejection {
         SummaryLineageRejection::StaleSource { anchor_id }
@@ -375,6 +386,7 @@ fn summary_rejection_value(rejection: &SummaryLineageRejection) -> &str {
     }
 }
 
+#[hotpath::measure]
 fn validate_privacy_and_anchor_overlap<U: ContextUnavailable>(
     available_ids: &[RetrievalAnchorId],
     unavailable: &[U],
@@ -416,6 +428,7 @@ fn validate_privacy_and_anchor_overlap<U: ContextUnavailable>(
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn rejected_summary_detail_anchor(
     rejection: &SummaryLineageRejection,
 ) -> Option<&RetrievalAnchorId> {
@@ -443,6 +456,7 @@ pub fn rejected_summary_detail_anchor(
     }
 }
 
+#[hotpath::measure]
 fn terminal_rejected_detail(rejection: &SummaryLineageRejection) -> Option<&RetrievalAnchorId> {
     match rejection {
         SummaryLineageRejection::DeletedSource { anchor_id }
@@ -454,6 +468,7 @@ fn terminal_rejected_detail(rejection: &SummaryLineageRejection) -> Option<&Retr
     }
 }
 
+#[hotpath::measure]
 fn terminal_omission_reason(reason: ContextOmissionReasonV1) -> bool {
     matches!(
         reason,
@@ -465,6 +480,7 @@ fn terminal_omission_reason(reason: ContextOmissionReasonV1) -> bool {
     )
 }
 
+#[hotpath::measure]
 fn rejected_detail_omission_reason(rejection: &SummaryLineageRejection) -> ContextOmissionReasonV1 {
     match rejection {
         SummaryLineageRejection::UnauthorizedSource { .. }
@@ -478,6 +494,7 @@ fn rejected_detail_omission_reason(rejection: &SummaryLineageRejection) -> Conte
     }
 }
 
+#[hotpath::measure]
 fn preserve_rejected_summary_details(
     bundle: &mut CompactContextBundleV1,
     summary_omissions: &[SummaryOmission],
@@ -522,6 +539,7 @@ fn preserve_rejected_summary_details(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_lineage_cycles_are_conflicted(
     lineage: &[CompactContextLineageEdgeV1],
     conflicts: &[CompactContextConflictV1],
@@ -639,6 +657,7 @@ fn validate_lineage_cycles_are_conflicted(
     Ok(())
 }
 
+#[hotpath::measure]
 fn zeroed_usize_vec(len: usize) -> Result<Vec<usize>, ContextError> {
     let mut values = Vec::new();
     try_reserve(&mut values, len)?;
@@ -656,6 +675,7 @@ impl TerminalPrivacyReason for ContextOmissionReasonV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn validate_bundle(bundle: &CompactContextBundleV1) -> Result<(), ContextError> {
     bundle
         .validate()

@@ -116,6 +116,7 @@ struct CursorPayload {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct CursorScopeKind(String);
 
+#[hotpath::measure_all]
 impl CursorPayload {
     fn from_snapshot(
         snapshot: &TemporalExecutionSnapshot,
@@ -163,6 +164,7 @@ impl CursorPayload {
     }
 }
 
+#[hotpath::measure]
 pub fn encode_cursor(
     snapshot: &TemporalExecutionSnapshot,
     last_sort_key: &StableSortKey,
@@ -171,6 +173,7 @@ pub fn encode_cursor(
     encode_cursor_at(snapshot, last_sort_key, authenticator, now_micros()?)
 }
 
+#[hotpath::measure]
 fn encode_cursor_at(
     snapshot: &TemporalExecutionSnapshot,
     last_sort_key: &StableSortKey,
@@ -198,6 +201,7 @@ fn encode_cursor_at(
     Ok(format!("{authenticated}.{signature}"))
 }
 
+#[hotpath::measure]
 pub fn verify_cursor(
     encoded: &str,
     expected: &TemporalExecutionSnapshot,
@@ -206,6 +210,7 @@ pub fn verify_cursor(
     verify_cursor_at(encoded, expected, authenticator, now_micros()?)
 }
 
+#[hotpath::measure]
 fn verify_cursor_at(
     encoded: &str,
     expected: &TemporalExecutionSnapshot,
@@ -275,6 +280,7 @@ fn verify_cursor_at(
     Ok(payload.last_sort_key)
 }
 
+#[hotpath::measure]
 pub fn verify_cursor_for_sort_key(
     encoded: &str,
     expected: &TemporalExecutionSnapshot,
@@ -288,6 +294,7 @@ pub fn verify_cursor_for_sort_key(
     Ok(())
 }
 
+#[hotpath::measure]
 fn verify_bindings(
     payload: &CursorPayload,
     expected: &TemporalExecutionSnapshot,
@@ -356,6 +363,7 @@ fn verify_bindings(
     Ok(())
 }
 
+#[hotpath::measure]
 fn cursor_scope_kind(scope: &TemporalRetrievalScope) -> CursorScopeKind {
     match scope {
         TemporalRetrievalScope::Session(_) => CursorScopeKind("session".to_string()),
@@ -365,6 +373,7 @@ fn cursor_scope_kind(scope: &TemporalRetrievalScope) -> CursorScopeKind {
     }
 }
 
+#[hotpath::measure]
 fn validate_sort_key(sort_key: &StableSortKey) -> Result<(), CursorError> {
     if sort_key.stable_id.is_empty()
         || sort_key.stable_id.len() > MAX_SORT_KEY_STABLE_ID_BYTES
@@ -375,6 +384,7 @@ fn validate_sort_key(sort_key: &StableSortKey) -> Result<(), CursorError> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn verify_validity_window(payload: &CursorPayload, now_micros: i64) -> Result<(), CursorError> {
     let expected_expiry = payload
         .issued_at_micros
@@ -391,6 +401,7 @@ fn verify_validity_window(payload: &CursorPayload, now_micros: i64) -> Result<()
     Ok(())
 }
 
+#[hotpath::measure]
 fn now_micros() -> Result<i64, CursorError> {
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)

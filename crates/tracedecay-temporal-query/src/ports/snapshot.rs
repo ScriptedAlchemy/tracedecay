@@ -46,6 +46,7 @@ pub struct TemporalPreparedCandidateCohort {
     ordered_digest: BindingDigest,
 }
 
+#[hotpath::measure_all]
 impl TemporalPreparedCandidateCohort {
     pub fn new(candidates: Vec<RankingCandidate>) -> Result<Self, TemporalPortError> {
         let ordered_digest = candidate_cohort_digest(&candidates)?;
@@ -64,6 +65,7 @@ impl TemporalPreparedCandidateCohort {
     }
 }
 
+#[hotpath::measure]
 fn candidate_cohort_digest(
     candidates: &[RankingCandidate],
 ) -> Result<BindingDigest, TemporalPortError> {
@@ -188,6 +190,7 @@ pub struct TemporalParticipantGeneration {
     access: TemporalSourceAccess,
 }
 
+#[hotpath::measure_all]
 impl TemporalParticipantGeneration {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -229,10 +232,12 @@ impl TemporalParticipantGeneration {
         &self.source_id
     }
 
+    #[hotpath::skip]
     pub const fn generation(&self) -> u64 {
         self.generation
     }
 
+    #[hotpath::skip]
     pub const fn watermarks(&self) -> TemporalWatermarks {
         TemporalWatermarks {
             generation: self.generation,
@@ -243,6 +248,7 @@ impl TemporalParticipantGeneration {
         }
     }
 
+    #[hotpath::skip]
     pub const fn graph_watermark(&self) -> u64 {
         self.graph_watermark
     }
@@ -255,6 +261,7 @@ impl TemporalParticipantGeneration {
         &self.authorization_digest
     }
 
+    #[hotpath::skip]
     pub const fn authorization(&self) -> TemporalParticipantAuthorization {
         self.authorization
     }
@@ -264,6 +271,7 @@ impl TemporalParticipantGeneration {
     /// The legacy unauthorized source wire state remains denied for old signed
     /// manifests, while every newly built manifest uses the dedicated,
     /// fail-closed authorization field.
+    #[hotpath::skip]
     pub const fn is_authorized_for_snapshot(&self) -> bool {
         matches!(
             self.authorization,
@@ -271,6 +279,7 @@ impl TemporalParticipantGeneration {
         ) && !matches!(self.access, TemporalSourceAccess::LegacyUnauthorized)
     }
 
+    #[hotpath::skip]
     pub const fn access(&self) -> TemporalSourceAccess {
         self.access
     }
@@ -285,6 +294,7 @@ pub struct TemporalParticipantManifest {
     epoch_digest: String,
 }
 
+#[hotpath::measure_all]
 impl TemporalParticipantManifest {
     pub fn new(mut entries: Vec<TemporalParticipantGeneration>) -> Result<Self, TemporalPortError> {
         entries.sort_by(|left, right| {
@@ -444,6 +454,7 @@ pub struct TemporalExecutionSnapshot {
     prepared_candidate_cohort: Option<TemporalPreparedCandidateCohort>,
 }
 
+#[hotpath::measure_all]
 impl TemporalExecutionSnapshot {
     pub fn new_authorized(
         request: TemporalSnapshotRequest,
@@ -619,6 +630,7 @@ impl TemporalExecutionSnapshot {
         Ok(self)
     }
 
+    #[hotpath::skip]
     pub const fn authorization(&self) -> ValidatedAuthorization {
         self.authorization
     }
@@ -728,6 +740,7 @@ impl TemporalExecutionSnapshot {
         self.participants.source_coverage(self.temporal_mode())
     }
 
+    #[hotpath::skip]
     pub const fn has_authoritative_participant_manifest(&self) -> bool {
         self.participant_manifest_authoritative
     }
@@ -756,14 +769,17 @@ impl TemporalExecutionSnapshot {
         self.request.access_digest()
     }
 
+    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.request.temporal_mode()
     }
 
+    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.request.grain()
     }
 
+    #[hotpath::skip]
     pub const fn watermarks(&self) -> TemporalWatermarks {
         self.watermarks
     }

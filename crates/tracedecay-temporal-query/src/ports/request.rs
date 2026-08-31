@@ -11,7 +11,9 @@ pub enum TemporalRetrievalScope {
     AllSessionsInAuthorizedRoot,
 }
 
+#[hotpath::measure_all]
 impl TemporalRetrievalScope {
+    #[hotpath::skip]
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Session(_) => "session",
@@ -35,6 +37,7 @@ pub struct TemporalAuthorizedRoot {
     root_id: String,
 }
 
+#[hotpath::measure_all]
 impl TemporalAuthorizedRoot {
     pub fn profile(
         profile_id: impl Into<String>,
@@ -107,6 +110,7 @@ impl TemporalAuthorizedRoot {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortError> {
     if value.is_empty()
         || value.trim() != value
@@ -161,6 +165,7 @@ pub struct TemporalCandidateFilterV1 {
     pub goals: bool,
 }
 
+#[hotpath::measure_all]
 impl TemporalCandidateFilterV1 {
     pub fn validate(&self) -> Result<(), TemporalPortError> {
         if self
@@ -222,6 +227,7 @@ pub struct TemporalSnapshotRequest {
     control: ExecutionControl,
 }
 
+#[hotpath::measure_all]
 impl TemporalSnapshotRequest {
     pub fn new(
         session_id: SessionId,
@@ -356,10 +362,12 @@ impl TemporalSnapshotRequest {
         &self.access_digest
     }
 
+    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
+    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
@@ -368,6 +376,7 @@ impl TemporalSnapshotRequest {
         &self.semantic_filter
     }
 
+    #[hotpath::skip]
     pub const fn limits(&self) -> ExecutionLimits {
         self.limits
     }

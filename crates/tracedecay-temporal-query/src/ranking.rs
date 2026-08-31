@@ -36,7 +36,9 @@ pub struct DiversityLimits {
     pub per_evidence_role: usize,
 }
 
+#[hotpath::measure_all]
 impl DiversityLimits {
+    #[hotpath::skip]
     pub const fn unbounded() -> Self {
         Self {
             per_logical_message: usize::MAX,
@@ -110,6 +112,7 @@ enum SourcePartitionKey<'a> {
     Present(&'a str),
 }
 
+#[hotpath::measure_all]
 impl<'a> SourcePartitionKey<'a> {
     fn from_candidate(candidate: &'a RankingCandidate) -> Self {
         match candidate.source.as_deref() {
@@ -225,6 +228,7 @@ struct MergedMetadata<'a> {
     evidence_role: Option<&'a str>,
 }
 
+#[hotpath::measure]
 fn prepare_candidates(
     candidates: &[RankingCandidate],
 ) -> Result<Vec<RankingCandidate>, RankingError> {
@@ -323,6 +327,7 @@ fn prepare_candidates(
     Ok(prepared)
 }
 
+#[hotpath::measure]
 fn merged_metadata_conflicts(existing: &MergedMetadata<'_>, candidate: &RankingCandidate) -> bool {
     existing.first.anchor_id != candidate.anchor_id
         || existing.first.knowledge_at_micros != candidate.knowledge_at_micros
@@ -341,6 +346,7 @@ fn merged_metadata_conflicts(existing: &MergedMetadata<'_>, candidate: &RankingC
         )
 }
 
+#[hotpath::measure]
 fn apply_merged_metadata(candidate: &mut RankingCandidate, metadata: &MergedMetadata<'_>) {
     candidate.anchor_id = metadata.first.anchor_id.clone();
     candidate.knowledge_at_micros = metadata.first.knowledge_at_micros;
@@ -357,6 +363,7 @@ struct ScoredFusion {
     ranked: RankedCandidate,
 }
 
+#[hotpath::measure]
 fn merge_contribution(
     existing: &mut ScoredFusion,
     tier: RankTier,
@@ -372,6 +379,7 @@ fn merge_contribution(
     }
 }
 
+#[hotpath::measure]
 fn option_conflicts(left: Option<&str>, right: Option<&str>) -> bool {
     matches!((left, right), (Some(left), Some(right)) if left != right)
 }
@@ -390,6 +398,7 @@ const fn rank_tier(channel: CandidateChannel) -> RankTier {
     }
 }
 
+#[hotpath::measure]
 fn encode_score(tier: RankTier, within_tier: u64) -> u64 {
     let capped = if within_tier < TIER_SPAN {
         within_tier
@@ -401,6 +410,7 @@ fn encode_score(tier: RankTier, within_tier: u64) -> u64 {
         .saturating_add(capped)
 }
 
+#[hotpath::measure]
 fn apply_diversity(ranked: Vec<RankedCandidate>, limits: DiversityLimits) -> Vec<RankedCandidate> {
     let mut logical_messages = BTreeMap::new();
     let mut turns = BTreeMap::new();
@@ -435,6 +445,7 @@ fn apply_diversity(ranked: Vec<RankedCandidate>, limits: DiversityLimits) -> Vec
         .collect()
 }
 
+#[hotpath::measure]
 fn at_limit(counts: &BTreeMap<String, usize>, key: Option<&str>, limit: usize) -> bool {
     let Some(key) = key else {
         return false;
@@ -442,6 +453,7 @@ fn at_limit(counts: &BTreeMap<String, usize>, key: Option<&str>, limit: usize) -
     counts.get(key).copied().unwrap_or_default() >= limit
 }
 
+#[hotpath::measure]
 fn increment(counts: &mut BTreeMap<String, usize>, key: Option<&str>) {
     if let Some(key) = key {
         let count = counts.entry(key.to_string()).or_default();

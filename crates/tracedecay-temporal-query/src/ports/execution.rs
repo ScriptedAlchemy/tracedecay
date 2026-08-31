@@ -36,6 +36,7 @@ pub enum ExecutionLimitTighteningError {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BindingDigest(String);
 
+#[hotpath::measure_all]
 impl BindingDigest {
     pub fn new(field: &'static str, value: impl Into<String>) -> Result<Self, TemporalPortError> {
         let value = value.into();
@@ -97,6 +98,7 @@ impl Default for ExecutionLimits {
     }
 }
 
+#[hotpath::measure_all]
 impl ExecutionLimits {
     pub fn validate(self) -> Result<Self, TemporalPortError> {
         for (resource, value, max) in [
@@ -185,6 +187,7 @@ pub struct ExecutionControl {
     pub(super) remaining_work: Option<Arc<AtomicUsize>>,
 }
 
+#[hotpath::measure_all]
 impl ExecutionControl {
     pub fn new(deadline: Option<Instant>) -> Self {
         Self {
@@ -238,6 +241,7 @@ impl ExecutionControl {
     }
 }
 
+#[hotpath::measure]
 pub(crate) async fn await_controlled<T, E>(
     control: &ExecutionControl,
     future: impl Future<Output = Result<T, E>>,
