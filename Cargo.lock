@@ -5986,6 +5986,7 @@ dependencies = [
  "tracedecay-automation-runtime",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-framing",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-hooks",
