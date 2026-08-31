@@ -307,9 +307,8 @@ fn decode_session_refresh(
     body: serde_json::Value,
     action: SessionRefreshActionV1,
 ) -> Result<RetainedSurfaceRequestV1, serde_json::Error> {
-    let request =
-        serde_path_to_error::deserialize::<_, SessionRefreshActionRequestV1>(body)
-            .map_err(named_argument_error)?;
+    let request = serde_path_to_error::deserialize::<_, SessionRefreshActionRequestV1>(body)
+        .map_err(named_argument_error)?;
     Ok(RetainedSurfaceRequestV1::SessionRefresh(
         SessionRefreshRequestV1::with_action(action, request),
     ))

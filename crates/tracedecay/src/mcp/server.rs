@@ -650,8 +650,7 @@ impl McpServer {
             let transport = crate::daemon::retained_test_support::project_retained_owner_transport(
                 context.cg.project_root(),
             )?;
-            context =
-                context.with_application_invocation_executor(Arc::clone(&transport.executor));
+            context = context.with_application_invocation_executor(Arc::clone(&transport.executor));
             Some(transport)
         } else {
             None

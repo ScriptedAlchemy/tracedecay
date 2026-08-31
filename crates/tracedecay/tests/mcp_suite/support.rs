@@ -445,9 +445,6 @@ pub(crate) async fn handle_tool_call(
             serde_json::from_str(&response).map_err(|error| TraceDecayError::Config {
                 message: format!("{tool_name} returned invalid MCP JSON: {error}"),
             })?;
-        if std::env::var_os("TRACEDECAY_TEST_DEBUG_RETAINED").is_some() {
-            eprintln!("[retained-probe] {tool_name} response: {response}");
-        }
         if let Some(error) = response.get("error") {
             return Err(TraceDecayError::Config {
                 message: format!("{tool_name} failed over MCP: {error}"),
@@ -476,13 +473,12 @@ pub(crate) async fn handle_tool_call(
                 message: format!("{tool_name} answered with a retained refusal: {envelope}"),
             });
         }
-        let payload =
-            envelope
-                .pointer("/outcome/value/payload")
-                .cloned()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: format!("{tool_name} omitted its retained payload: {envelope}"),
-                })?;
+        let payload = envelope
+            .pointer("/outcome/value/payload")
+            .cloned()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("{tool_name} omitted its retained payload: {envelope}"),
+            })?;
         let mut unwrapped = result;
         unwrapped["content"] = serde_json::json!([
             { "type": "text", "text": payload.to_string() }
