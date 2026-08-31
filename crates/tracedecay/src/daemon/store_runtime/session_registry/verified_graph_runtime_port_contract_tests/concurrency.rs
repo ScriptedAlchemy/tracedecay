@@ -74,7 +74,7 @@ fn assert_concurrent_replay_and_conflict(
         .collect::<Vec<_>>();
     let conflicts = results
         .iter()
-        .filter(|result| matches!(result, Err(GraphDbError::Conflict)))
+        .filter(|result| matches!(result, Err(GraphDbError::Conflict { .. })))
         .count();
     assert_eq!(winners.len(), 1, "exactly one changed input must win");
     assert_eq!(conflicts, 1, "the losing changed input must conflict");

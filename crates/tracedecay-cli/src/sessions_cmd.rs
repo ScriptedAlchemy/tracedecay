@@ -62,6 +62,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
     Value::Object(arguments)
 }
 
+#[hotpath::measure(label = "cli.sessions.dispatch", future = true)]
 pub(crate) async fn handle_sessions_action(
     action: SessionsAction,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -119,9 +120,7 @@ async fn handle_sessions_import(
 }
 
 #[hotpath::measure(label = "cli.sessions.search", future = true)]
-async fn handle_sessions_search(
-    args: SessionsSearchArgs,
-) -> tracedecay_domain::errors::Result<()> {
+async fn handle_sessions_search(args: SessionsSearchArgs) -> tracedecay_domain::errors::Result<()> {
     let project_id = args.project_id.clone();
     let project_path = args.project_path.clone();
     let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
@@ -133,7 +132,7 @@ async fn handle_sessions_search(
     .await?;
     let result: MessageSearchResultV1 =
         crate::commands::retained_tool_payload("tracedecay_message_search", payload)?;
-    print!("{}", render_sessions_search_report(&result));
+    print!("{}", SessionsSearchReport::render(&result));
     if let Some(error) = &result.error {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("sessions search failed: {}: {}", error.code, error.message),
@@ -146,47 +145,52 @@ async fn handle_sessions_search(
 /// matched nothing must say so — and say what was searched — rather than
 /// printing nothing, and a typed error travels with whatever partial results
 /// accompanied it.
-fn render_sessions_search_report(result: &MessageSearchResultV1) -> String {
-    let mut report = String::new();
-    let hits = result.results.as_deref().unwrap_or_default();
-    for hit in hits {
-        let _ = writeln!(
-            report,
-            "[{}] {} {}: {}",
-            hit.session.provider,
-            hit.session.project_key,
-            hit.message.role,
-            hit.message.text.replace('\n', " ")
-        );
-    }
-    if hits.is_empty() && result.error.is_none() {
-        let status = retained_status_label(result.status);
-        let query = result.query.as_deref().unwrap_or("");
-        let _ = writeln!(
-            report,
-            "no messages matched query {query:?} \
-             (status: {status}, scope: {}, provider: {})",
-            result.scope, result.provider
-        );
-        if let Some(message) = &result.message {
-            let _ = writeln!(report, "{message}");
-        }
-        if let Some(next_action) = &result.next_action {
+struct SessionsSearchReport;
+
+#[hotpath::measure_all]
+impl SessionsSearchReport {
+    fn render(result: &MessageSearchResultV1) -> String {
+        let mut report = String::new();
+        let hits = result.results.as_deref().unwrap_or_default();
+        for hit in hits {
             let _ = writeln!(
                 report,
-                "next: {} {} — {}",
-                next_action.tool, next_action.action, next_action.reason
+                "[{}] {} {}: {}",
+                hit.session.provider,
+                hit.session.project_key,
+                hit.message.role,
+                hit.message.text.replace('\n', " ")
             );
         }
+        if hits.is_empty() && result.error.is_none() {
+            let status = Self::status_label(result.status);
+            let query = result.query.as_deref().unwrap_or("");
+            let _ = writeln!(
+                report,
+                "no messages matched query {query:?} \
+                 (status: {status}, scope: {}, provider: {})",
+                result.scope, result.provider
+            );
+            if let Some(message) = &result.message {
+                let _ = writeln!(report, "{message}");
+            }
+            if let Some(next_action) = &result.next_action {
+                let _ = writeln!(
+                    report,
+                    "next: {} {} — {}",
+                    next_action.tool, next_action.action, next_action.reason
+                );
+            }
+        }
+        report
     }
-    report
-}
 
-/// Wire (snake_case) spelling of a retained outcome status for report text.
-fn retained_status_label(status: RetainedOutcomeStatusV1) -> String {
-    match serde_json::to_value(status) {
-        Ok(Value::String(label)) => label,
-        _ => format!("{status:?}"),
+    /// Wire (snake_case) spelling of a retained outcome status for report text.
+    fn status_label(status: RetainedOutcomeStatusV1) -> String {
+        match serde_json::to_value(status) {
+            Ok(Value::String(label)) => label,
+            _ => format!("{status:?}"),
+        }
     }
 }
 
@@ -872,7 +876,7 @@ impl SessionRefreshDaemonTransport for LiveSessionRefreshDaemonTransport {
 mod search_report_tests {
     use serde_json::json;
 
-    use super::{MessageSearchResultV1, render_sessions_search_report};
+    use super::{MessageSearchResultV1, SessionsSearchReport};
 
     fn search_result(value: serde_json::Value) -> MessageSearchResultV1 {
         serde_json::from_value(value).expect("fixture search result decodes")
@@ -908,7 +912,7 @@ mod search_report_tests {
             "action": "begin",
             "reason": "session index is stale",
         });
-        let report = render_sessions_search_report(&search_result(value));
+        let report = SessionsSearchReport::render(&search_result(value));
         assert!(
             report.contains("no messages matched query \"lease fence\""),
             "empty search must be reported explicitly: {report}"
@@ -943,7 +947,7 @@ mod search_report_tests {
             },
             "score": 1.0,
         }]);
-        let report = render_sessions_search_report(&search_result(value));
+        let report = SessionsSearchReport::render(&search_result(value));
         assert_eq!(report, "[cursor] project-key assistant: first line\n");
     }
 
@@ -958,7 +962,7 @@ mod search_report_tests {
             "code": "retrieval_unavailable",
             "message": "the session index is not available",
         });
-        let report = render_sessions_search_report(&search_result(value));
+        let report = SessionsSearchReport::render(&search_result(value));
         assert!(
             !report.contains("no messages matched"),
             "a refusal is not an empty page: {report}"

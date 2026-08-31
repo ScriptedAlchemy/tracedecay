@@ -45,7 +45,7 @@ pub(super) fn check_cancelled(
 pub(super) fn map_graph_error(error: GraphDbError) -> VectorGenerationStoreErrorV1 {
     match error {
         GraphDbError::Cancelled => VectorGenerationStoreErrorV1::Cancelled,
-        GraphDbError::Conflict => VectorGenerationStoreErrorV1::ConcurrentMutation,
+        GraphDbError::Conflict { .. } => VectorGenerationStoreErrorV1::ConcurrentMutation,
         GraphDbError::ProjectionMismatch { message, .. }
         | GraphDbError::GenerationMismatch { message, .. } => {
             VectorGenerationStoreErrorV1::ResetRequired(message)

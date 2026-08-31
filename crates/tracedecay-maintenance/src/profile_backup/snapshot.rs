@@ -33,7 +33,7 @@ fn map_graph_error(context: &str, path: &Path, error: GraphDbError) -> ProfileBa
         | GraphDbError::ResetRequired { .. }
         | GraphDbError::ProjectionMismatch { .. }
         | GraphDbError::GenerationMismatch { .. } => ProfileBackupError::corrupt(message),
-        GraphDbError::Conflict => ProfileBackupError::conflict(message),
+        GraphDbError::Conflict { .. } => ProfileBackupError::conflict(message),
         GraphDbError::InvalidRequest { .. } => ProfileBackupError::invalid(message),
         GraphDbError::DurabilityUncertain { .. }
         | GraphDbError::Cancelled

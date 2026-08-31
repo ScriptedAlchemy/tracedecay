@@ -60,13 +60,9 @@ async fn daemon_tool_json_within(
         commands::daemon_tool_json_until(deadline, Some(project_path), tool_name, arguments),
     )
     .await
-    .map_err(
-        |_| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "timed out waiting for daemon tool {tool_name} before status deadline"
-            ),
-        },
-    )?
+    .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("timed out waiting for daemon tool {tool_name} before status deadline"),
+    })?
 }
 
 pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
@@ -138,16 +134,14 @@ pub(crate) async fn handle_status_command(
         ),
     )
     .await
-    .map_err(
-        |_| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "status did not complete within {}s; the daemon may still be \
+    .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!(
+            "status did not complete within {}s; the daemon may still be \
              starting or opening this project — retry, or raise \
              {STATUS_DEADLINE_ENV}",
-                budget.as_secs()
-            ),
-        },
-    )?
+            budget.as_secs()
+        ),
+    })?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -222,11 +216,9 @@ async fn handle_status_command_within(
     let tokens_saved = accounting
         .get("tokens_saved")
         .and_then(Value::as_u64)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: "daemon status accounting omitted token count".to_string(),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon status accounting omitted token count".to_string(),
+        })?;
     let global_tokens_saved = accounting
         .get("global_tokens_saved")
         .and_then(Value::as_u64);

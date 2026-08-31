@@ -5922,6 +5922,7 @@ dependencies = [
  "tracedecay-daemon-service",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
+ "tracedecay-framing",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-graph-query",
@@ -5985,6 +5986,7 @@ dependencies = [
  "tracedecay-automation-runtime",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-framing",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-hooks",
@@ -6335,6 +6337,7 @@ dependencies = [
  "tokio",
  "tracedecay-application",
  "tracedecay-domain",
+ "tracedecay-framing",
  "tracedecay-private-fs",
  "tracedecay-tool-catalog",
 ]
@@ -6430,6 +6433,14 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.19",
  "url",
+]
+
+[[package]]
+name = "tracedecay-framing"
+version = "0.1.0"
+dependencies = [
+ "hotpath",
+ "tokio",
 ]
 
 [[package]]
@@ -6655,6 +6666,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-framing",
  "tracedecay-graph-query",
  "tracedecay-hooks",
  "tracedecay-runtime-core",
@@ -6962,6 +6974,7 @@ name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "criterion",
  "dirs",
  "filetime",
  "gix",
@@ -6979,8 +6992,8 @@ dependencies = [
  "tokio",
  "tracedecay-application",
  "tracedecay-capture",
- "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-framing",
  "tracedecay-graph-db",
  "tracedecay-lcm",
  "tracedecay-private-fs",
