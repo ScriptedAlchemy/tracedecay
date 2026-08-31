@@ -90,7 +90,10 @@ pub async fn discover_repository_identity(
         return identity;
     }
 
-    let child = match async_repository_identity_command(directory).spawn() {
+    let Ok(mut command) = async_repository_identity_command(directory) else {
+        return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed);
+    };
+    let child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {
             return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed);
@@ -147,7 +150,9 @@ pub fn discover_repository_identity_with_control(
         return identity;
     }
 
-    let mut command = repository_identity_command(directory);
+    let Ok(mut command) = repository_identity_command(directory) else {
+        return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed);
+    };
     let child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {
@@ -248,8 +253,10 @@ fn repository_identity_from_authority(directory: &Path) -> Option<GitRepositoryI
     }
 }
 
-fn repository_identity_command(directory: &Path) -> Command {
-    let mut command = Command::new(crate::git::git_program());
+fn repository_identity_command(
+    directory: &Path,
+) -> Result<Command, crate::git::GitProgramUnavailable> {
+    let mut command = Command::new(crate::git::try_git_program()?);
     command
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
@@ -260,11 +267,13 @@ fn repository_identity_command(directory: &Path) -> Command {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    command
+    Ok(command)
 }
 
-fn async_repository_identity_command(directory: &Path) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(crate::git::git_program());
+fn async_repository_identity_command(
+    directory: &Path,
+) -> Result<tokio::process::Command, crate::git::GitProgramUnavailable> {
+    let mut command = tokio::process::Command::new(crate::git::try_git_program()?);
     command
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
@@ -276,7 +285,7 @@ fn async_repository_identity_command(directory: &Path) -> tokio::process::Comman
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    command
+    Ok(command)
 }
 
 fn parse_repository_identity(

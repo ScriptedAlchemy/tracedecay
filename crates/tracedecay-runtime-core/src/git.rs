@@ -13,6 +13,8 @@
 //! recovery, and reads where exact porcelain semantics remain the authority.
 
 use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -20,14 +22,17 @@ use std::time::{Duration, Instant};
 
 use crate::cancellation::CancellationToken;
 
-/// The literal used when resolution fails, preserving today's behavior (the OS
-/// PATH-walks per spawn, but callers keep working).
 const GIT_LITERAL: &str = "git";
 const GIT_CAPTURE_AT_TIMEOUT: Duration = Duration::from_secs(2);
 const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_READ_DEADLINE: Duration = Duration::from_secs(10);
 const DEFAULT_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
 const DEFAULT_STDERR_LIMIT: usize = 64 * 1024;
+
+/// Git cannot be spawned without an exact absolute executable path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("no absolute git executable could be resolved from GIT or PATH")]
+pub struct GitProgramUnavailable;
 
 /// Execution bounds for one read-only Git subprocess.
 #[derive(Clone, Debug)]
@@ -70,55 +75,88 @@ pub enum GitCommandError {
     Wait(#[source] std::io::Error),
 }
 
-/// Returns the resolved `git` program to spawn, as a cached `&'static OsStr`.
-///
-/// Resolution order (performed once, then cached):
-///   1. The `GIT` environment variable, if set and non-empty (explicit override,
-///      matching git's own habit of honoring a program override).
-///   2. An absolute path found by a which-style walk of `PATH` (+ `PATHEXT` on
-///      Windows).
-///   3. The literal `"git"` fallback, so behavior is never worse than a bare
-///      `Command::new("git")`.
-///
-/// Callers pass the result straight to `Command::new(..)` (both `std` and
-/// `tokio` accept `impl AsRef<OsStr>`).
-pub fn git_program() -> &'static OsStr {
-    static PROGRAM: OnceLock<OsString> = OnceLock::new();
-    PROGRAM.get_or_init(resolve_git_program).as_os_str()
+impl From<GitProgramUnavailable> for GitCommandError {
+    fn from(error: GitProgramUnavailable) -> Self {
+        Self::Unavailable(std::io::Error::new(std::io::ErrorKind::NotFound, error))
+    }
 }
 
-fn resolve_git_program() -> OsString {
-    // 1. Explicit override wins. Empty values are ignored so an accidental
-    //    `GIT=` does not break spawns.
-    if let Some(value) = std::env::var_os("GIT")
+/// Returns the resolved absolute `git` program to spawn.
+///
+/// Resolution order (performed once, then cached):
+///   1. The `GIT` environment variable, if it names an absolute executable.
+///   2. An absolute path found by a which-style walk of `PATH` (+ `PATHEXT` on
+///      Windows).
+///   3. A typed unavailable result. Production callers must not reintroduce a
+///      bare-program fallback because that delegates identity back to ambient
+///      `PATH` at spawn time.
+pub fn try_git_program() -> Result<&'static OsStr, GitProgramUnavailable> {
+    static PROGRAM: OnceLock<Result<OsString, GitProgramUnavailable>> = OnceLock::new();
+    PROGRAM
+        .get_or_init(resolve_git_program)
+        .as_ref()
+        .map(OsString::as_os_str)
+        .map_err(|error| *error)
+}
+
+fn resolve_git_program() -> Result<OsString, GitProgramUnavailable> {
+    resolve_git_program_from(
+        std::env::var_os("GIT").as_deref(),
+        std::env::var_os("PATH").as_deref(),
+        #[cfg(windows)]
+        std::env::var_os("PATHEXT").as_deref(),
+    )
+}
+
+fn resolve_git_program_from(
+    git_override: Option<&OsStr>,
+    path: Option<&OsStr>,
+    #[cfg(windows)] pathext: Option<&OsStr>,
+) -> Result<OsString, GitProgramUnavailable> {
+    if let Some(value) = git_override
         && !value.is_empty()
     {
-        return value;
+        let path = Path::new(value);
+        return (path.is_absolute() && is_executable_file(path))
+            .then(|| value.to_os_string())
+            .ok_or(GitProgramUnavailable);
     }
 
-    // 2. which-style lookup over PATH (+ PATHEXT on Windows).
-    if let Some(path) = find_in_path(GIT_LITERAL) {
-        return path.into_os_string();
-    }
-
-    // 3. Fallback: let the OS resolve it per-spawn, as before.
-    OsString::from(GIT_LITERAL)
+    find_in_path(
+        GIT_LITERAL,
+        path.ok_or(GitProgramUnavailable)?,
+        #[cfg(windows)]
+        pathext,
+    )
+    .map(PathBuf::into_os_string)
+    .ok_or(GitProgramUnavailable)
 }
 
 /// Minimal `which`-style lookup: find `name` as an executable on `PATH`.
 ///
 /// On Windows, each `PATH` entry is probed with every `PATHEXT` suffix (and the
 /// bare name) so `git.exe` resolves from `git`. On Unix, the bare name is probed
-/// and the entry must be a file (execute-permission is not separately checked —
-/// git's own PATH lookup does not either, and a false positive simply degrades to
-/// today's per-spawn PATH walk on exec failure).
-fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
+/// and the entry must carry at least one execute bit.
+fn find_in_path(
+    name: &str,
+    path: &OsStr,
+    #[cfg(windows)] pathext: Option<&OsStr>,
+) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path) {
         if dir.as_os_str().is_empty() {
             continue;
         }
-        if let Some(found) = probe_dir(&dir, name) {
+        let absolute_dir = if dir.is_absolute() {
+            dir
+        } else {
+            std::path::absolute(dir).ok()?
+        };
+        if let Some(found) = probe_dir(
+            &absolute_dir,
+            name,
+            #[cfg(windows)]
+            pathext,
+        ) {
             return Some(found);
         }
     }
@@ -126,14 +164,16 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn probe_dir(dir: &Path, name: &str) -> Option<PathBuf> {
+fn probe_dir(dir: &Path, name: &str, pathext: Option<&OsStr>) -> Option<PathBuf> {
     // PATHEXT holds the executable suffixes (";"-separated), e.g.
     // ".COM;.EXE;.BAT;.CMD". Fall back to a sane default when unset.
-    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let pathext = pathext
+        .and_then(OsStr::to_str)
+        .unwrap_or(".COM;.EXE;.BAT;.CMD");
 
     // If the name already carries an extension, try it verbatim first.
     let bare = dir.join(name);
-    if bare.is_file() {
+    if is_executable_file(&bare) {
         return Some(bare);
     }
     for ext in pathext.split(';') {
@@ -142,7 +182,7 @@ fn probe_dir(dir: &Path, name: &str) -> Option<PathBuf> {
             continue;
         }
         let candidate = dir.join(format!("{name}{ext}"));
-        if candidate.is_file() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
     }
@@ -152,10 +192,26 @@ fn probe_dir(dir: &Path, name: &str) -> Option<PathBuf> {
 #[cfg(not(windows))]
 fn probe_dir(dir: &Path, name: &str) -> Option<PathBuf> {
     let candidate = dir.join(name);
-    candidate.is_file().then_some(candidate)
+    is_executable_file(&candidate).then_some(candidate)
 }
 
-/// Runs `git <args>` in `repo_root` with the resolved [`git_program`], returning
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Runs `git <args>` in `repo_root` with the resolved [`try_git_program`], returning
 /// the command [`Output`] on a zero exit status, or `None` on spawn failure or a
 /// non-zero exit. Use this when the raw, untrimmed stdout matters (multi-line
 /// output such as `git reflog` or `git log`).
@@ -172,7 +228,8 @@ pub fn bounded_git_output(
     args: &[&str],
     bounds: &GitCommandBounds,
 ) -> Result<Output, GitCommandError> {
-    let mut command = Command::new(git_program());
+    let program = try_git_program().map_err(GitCommandError::from)?;
+    let mut command = Command::new(program);
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(&key);
@@ -410,7 +467,9 @@ pub enum GitCaptureAtResult {
 /// Git's `-C` resolves the repository after process startup and avoids that
 /// pre-argument cwd lookup. The child is killed and reaped at the hard deadline.
 pub fn git_capture_at(repo_root: &Path, args: &[&str]) -> GitCaptureAtResult {
-    let mut command = git_command_at(repo_root, args);
+    let Ok(mut command) = git_command_at(repo_root, args) else {
+        return GitCaptureAtResult::Failed;
+    };
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let Ok(child) = command.spawn() else {
         return GitCaptureAtResult::Failed;
@@ -432,8 +491,8 @@ pub fn git_capture_at(repo_root: &Path, args: &[&str]) -> GitCaptureAtResult {
     }
 }
 
-fn git_command_at(repo_root: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(git_program());
+fn git_command_at(repo_root: &Path, args: &[&str]) -> Result<Command, GitProgramUnavailable> {
+    let mut command = Command::new(try_git_program()?);
     // Repository selection must come from `-C <repo_root>`, never from
     // overrides inherited from the daemon's own environment: an inherited
     // GIT_DIR would silently resolve every probed path to the same repo.
@@ -441,7 +500,7 @@ fn git_command_at(repo_root: &Path, args: &[&str]) -> Command {
     command.env_remove("GIT_WORK_TREE");
     command.env_remove("GIT_COMMON_DIR");
     command.arg("-C").arg(repo_root).args(args);
-    command
+    Ok(command)
 }
 
 #[derive(Debug)]
@@ -491,20 +550,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn git_program_is_stable_and_resolves() {
-        // Cached: two calls return the identical pointer/value.
-        let first = git_program();
-        let second = git_program();
+    fn git_program_is_stable_and_absolute() {
+        let first = try_git_program().expect("git executable should resolve");
+        let second = try_git_program().expect("cached git executable should resolve");
         assert_eq!(first, second);
+        assert!(Path::new(first).is_absolute());
+    }
 
-        // Either an existing absolute path was found, or we fell back to the
-        // literal "git" — never worse than a bare Command::new("git").
-        let resolved = Path::new(first);
-        assert!(
-            resolved == Path::new(GIT_LITERAL) || resolved.is_file(),
-            "git_program() should be the \"git\" fallback or an existing file, got {}",
-            resolved.display()
-        );
+    #[test]
+    fn resolver_preserves_exact_absolute_override() {
+        let temporary = tempfile::tempdir().expect("temporary executable directory");
+        let executable = temporary
+            .path()
+            .join(if cfg!(windows) { "git.exe" } else { "git" });
+        std::fs::write(&executable, b"test executable").expect("write fake git executable");
+        #[cfg(unix)]
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake git executable");
+
+        let resolved = resolve_git_program_from(
+            Some(executable.as_os_str()),
+            None,
+            #[cfg(windows)]
+            None,
+        )
+        .expect("absolute override should resolve");
+
+        assert_eq!(resolved, executable.into_os_string());
+    }
+
+    #[test]
+    fn resolver_returns_absolute_path_candidate() {
+        let temporary = tempfile::tempdir().expect("temporary executable directory");
+        let executable = temporary
+            .path()
+            .join(if cfg!(windows) { "git.exe" } else { "git" });
+        std::fs::write(&executable, b"test executable").expect("write fake git executable");
+        #[cfg(unix)]
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake git executable");
+        let path = std::env::join_paths([temporary.path()]).expect("fixture PATH");
+
+        let resolved = resolve_git_program_from(
+            None,
+            Some(path.as_os_str()),
+            #[cfg(windows)]
+            None,
+        )
+        .expect("PATH candidate should resolve");
+
+        assert_eq!(resolved, executable.into_os_string());
+    }
+
+    #[test]
+    fn resolver_reports_unavailable_without_an_absolute_executable() {
+        let temporary = tempfile::tempdir().expect("empty PATH directory");
+        let path = std::env::join_paths([temporary.path()]).expect("fixture PATH");
+
+        let error = resolve_git_program_from(
+            Some(OsStr::new(GIT_LITERAL)),
+            Some(path.as_os_str()),
+            #[cfg(windows)]
+            None,
+        )
+        .expect_err("a relative override must not become an ambient PATH lookup");
+
+        assert_eq!(error, GitProgramUnavailable);
     }
 
     #[test]
@@ -513,7 +624,8 @@ mod tests {
         let command = git_command_at(
             repo_root,
             &["rev-parse", "--show-toplevel", "--git-common-dir"],
-        );
+        )
+        .expect("git executable should resolve");
 
         assert!(
             command.get_current_dir().is_none(),
@@ -536,7 +648,8 @@ mod tests {
 
     #[test]
     fn git_at_command_clears_repository_selection_overrides() {
-        let command = git_command_at(Path::new("/problematic/project/root"), &["status"]);
+        let command = git_command_at(Path::new("/problematic/project/root"), &["status"])
+            .expect("git executable should resolve");
 
         for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] {
             assert_eq!(
@@ -568,31 +681,6 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(2),
             "deadline must stop and reap the child promptly"
         );
-    }
-
-    #[test]
-    fn git_env_override_is_honored() {
-        // resolve_git_program() reads GIT directly; test it in isolation so the
-        // process-wide OnceLock cache in git_program() is untouched.
-        let sentinel = "/nonexistent/tracedecay-test-git-override";
-        unsafe {
-            std::env::set_var("GIT", sentinel);
-        }
-        let resolved = resolve_git_program();
-        unsafe {
-            std::env::remove_var("GIT");
-        }
-        assert_eq!(resolved, OsString::from(sentinel));
-
-        // An empty GIT is ignored (falls through to PATH lookup / literal).
-        unsafe {
-            std::env::set_var("GIT", "");
-        }
-        let resolved_empty = resolve_git_program();
-        unsafe {
-            std::env::remove_var("GIT");
-        }
-        assert_ne!(resolved_empty, OsString::from(""));
     }
 
     #[test]

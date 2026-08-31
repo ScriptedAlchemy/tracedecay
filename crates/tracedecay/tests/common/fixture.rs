@@ -31,7 +31,7 @@
 //! * [`RegisteredProject`] carries its own open options, so reopening a graph
 //!   or a branch cannot drift onto another profile, and it snapshots the store
 //!   layout *from the graph that created it* rather than resolving one again.
-//! * [`GitFixture`] builds repositories through [`tracedecay_runtime_core::git::git_program`]
+//! * [`GitFixture`] builds repositories through [`tracedecay_runtime_core::git::try_git_program`]
 //!   from a template built once per target directory.
 //!
 //! Negative identity states stay expressible on purpose through
@@ -553,18 +553,21 @@ const ORIGIN_TEMPLATE: &str = "origin.git";
 
 static GIT_TEMPLATE_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// Runs `git <args>` in `dir` through the cached [`tracedecay_runtime_core::git::git_program`].
+/// Runs `git <args>` in `dir` through the cached [`tracedecay_runtime_core::git::try_git_program`].
 ///
 /// Resolving `git` once per process (rather than letting the OS re-walk `PATH`
 /// per spawn) is worth 100-300 ms per call on Windows and makes the lookup
 /// deterministic under the parallel load nextest creates.
 pub fn git_output(dir: &Path, args: &[&str]) -> Output {
-    Command::new(tracedecay_runtime_core::git::git_program())
-        .args(GIT_FIXTURE_CONFIG)
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap_or_else(|err| panic!("failed to run git {args:?} in '{}': {err}", dir.display()))
+    Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .args(GIT_FIXTURE_CONFIG)
+    .args(args)
+    .current_dir(dir)
+    .output()
+    .unwrap_or_else(|err| panic!("failed to run git {args:?} in '{}': {err}", dir.display()))
 }
 
 /// [`git_output`], asserting a zero exit status.
@@ -817,11 +820,14 @@ fn build_git_template(dest: &Path) -> io::Result<()> {
 /// Template-build git runs report failures as `io::Error` rather than panicking,
 /// so an unusable git only disables the template instead of failing every test.
 fn run_template_git(dir: &Path, args: &[&str]) -> io::Result<()> {
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .args(GIT_FIXTURE_CONFIG)
-        .args(args)
-        .current_dir(dir)
-        .output()?;
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .args(GIT_FIXTURE_CONFIG)
+    .args(args)
+    .current_dir(dir)
+    .output()?;
     if output.status.success() {
         return Ok(());
     }

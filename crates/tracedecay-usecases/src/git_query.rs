@@ -667,10 +667,13 @@ mod tests {
     use crate::git_intelligence::NativeGitIntelligence;
 
     fn git_available() -> bool {
-        Command::new(tracedecay_runtime_core::git::git_program())
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
+        Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
     }
 
     struct Fixture {
@@ -683,19 +686,22 @@ mod tests {
         }
 
         fn git(&self, args: &[&str]) -> Output {
-            Command::new(tracedecay_runtime_core::git::git_program())
-                .args([
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.com",
-                    "-c",
-                    "commit.gpgsign=false",
-                ])
-                .args(args)
-                .current_dir(self.path())
-                .output()
-                .expect("git spawn failed")
+            Command::new(
+                tracedecay_runtime_core::git::try_git_program()
+                    .expect("absolute git executable should resolve"),
+            )
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(self.path())
+            .output()
+            .expect("git spawn failed")
         }
 
         fn git_ok(&self, args: &[&str]) -> String {

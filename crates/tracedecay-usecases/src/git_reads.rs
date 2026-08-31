@@ -721,11 +721,14 @@ mod tests {
     #[test]
     fn subprocess_output_bound_is_a_distinct_typed_unavailable_outcome() {
         let root = TempDir::new().expect("tempdir");
-        let initialized = std::process::Command::new(tracedecay_runtime_core::git::git_program())
-            .args(["init", "--quiet"])
-            .current_dir(root.path())
-            .status()
-            .expect("initialize git fixture");
+        let initialized = std::process::Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .args(["init", "--quiet"])
+        .current_dir(root.path())
+        .status()
+        .expect("initialize git fixture");
         assert!(initialized.success());
         let scope = scope("output-bound");
         let authority = GitReadAuthorityV1::new(root.path(), scope.clone());

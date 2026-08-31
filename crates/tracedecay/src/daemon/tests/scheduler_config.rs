@@ -830,10 +830,6 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
         &handshake.client_identity.profile_root,
         "scheduler-exit-reconcile-test",
     );
-    let server =
-        apply_project_automation_patch_via_surface(&engine, &handshake, scheduled.clone()).await;
-    let cg = server.cg().await;
-    let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     save_scheduler_control(
         &dashboard_root,
         &AutomationSchedulerControl { paused: true },
@@ -843,13 +839,17 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     let barrier = Arc::new(AutomationSchedulerExitBarrier::new());
     let barrier_release = AutomationExitBarrierRelease(Arc::clone(&barrier));
     *engine.automation_scheduler_exit_barrier.lock().await = Some(Arc::clone(&barrier));
-    // ensure starts the loop without MCP project_server open (schema-contract
-    // reject on session_temporal_generations unique(session_id) vs partial index).
+    let server =
+        apply_project_automation_patch_via_surface(&engine, &handshake, scheduled.clone()).await;
+    let cg = server.cg().await;
+    let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+    // Project-open setup owns the loop; ensure must notify it rather than
+    // publish a second owner.
     assert_eq!(
         engine
             .ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone())
             .await,
-        AutomationSchedulerReconcileOutcome::Started
+        AutomationSchedulerReconcileOutcome::RunningNotified
     );
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {

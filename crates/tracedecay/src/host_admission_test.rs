@@ -27,11 +27,14 @@ use tracedecay_usecases::observation::{
 
 fn initialize_repository(path: &Path) {
     fs::create_dir_all(path).unwrap();
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(path)
-        .output()
-        .unwrap();
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .args(["init", "-q", "-b", "main"])
+    .current_dir(path)
+    .output()
+    .unwrap();
     assert!(
         output.status.success(),
         "git init failed: {}",
@@ -249,16 +252,19 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     assert_eq!(initial_provenance.capture().project_id(), Some(&project_id));
     assert_eq!(initial_provenance.generation_id(), &initial_generation);
 
-    let remote = Command::new(tracedecay_runtime_core::git::git_program())
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "https://example.invalid/changed.git",
-        ])
-        .current_dir(&repository_root)
-        .output()
-        .unwrap();
+    let remote = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .args([
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/changed.git",
+    ])
+    .current_dir(&repository_root)
+    .output()
+    .unwrap();
     assert!(remote.status.success());
     let replay = facade
         .capture_observation(host_capture_request(
