@@ -186,8 +186,7 @@ fn verified_graph(
     let store = store
         .verified_store(&generation)
         .expect("open verified fixture generation");
-    let graph_cancellation =
-        tracedecay_graph_query::application_graph_cancellation(&cancellation);
+    let graph_cancellation = tracedecay_graph_query::application_graph_cancellation(&cancellation);
     let reader = store
         .interactive_reader_with_cancellation(&generation, Arc::clone(&graph_cancellation))
         .expect("open generation-pinned fixture reader");

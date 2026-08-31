@@ -663,20 +663,20 @@ fn cloned_lease_is_one_client_but_independent_resolves_are_two_clients() {
     let first = mount_and_resolve(&registry, request.clone()).unwrap();
     let clone = first.clone();
     drop(first);
-    assert_eq!(
+    assert!(matches!(
         registry.close(&request).unwrap_err(),
-        GraphDbError::Conflict
-    );
+        GraphDbError::Conflict { .. }
+    ));
     drop(clone);
     assert!(registry.close(&request).unwrap());
 
     let first = mount_and_resolve(&registry, request.clone()).unwrap();
     let second = registry.resolve(request.clone()).unwrap();
     drop(first);
-    assert_eq!(
+    assert!(matches!(
         registry.close(&request).unwrap_err(),
-        GraphDbError::Conflict
-    );
+        GraphDbError::Conflict { .. }
+    ));
     drop(second);
     assert!(registry.close(&request).unwrap());
 }
@@ -695,7 +695,7 @@ fn retirement_reservation_denies_new_resolves_and_drop_restores_ready_entry() {
     );
     assert!(matches!(
         registry.resolve(request.clone()),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
 
     drop(reservation);
@@ -799,7 +799,7 @@ fn retirement_batch_is_all_or_nothing_when_any_exact_entry_has_a_client() {
         Err(refusal) => refusal,
         Ok(_reservation) => panic!("an active client must refuse graph retirement"),
     };
-    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    assert!(matches!(refusal.error(), &GraphDbError::Conflict { .. }));
     let (_, retry_targets) = refusal.into_parts();
     assert_eq!(retry_targets, vec![first_target, second_target]);
     assert_eq!(
@@ -829,7 +829,7 @@ fn retirement_reservation_rejects_foreign_identity_without_transitioning_entry()
         Err(refusal) => refusal,
         Ok(_reservation) => panic!("a foreign graph retirement target must be refused"),
     };
-    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    assert!(matches!(refusal.error(), &GraphDbError::Conflict { .. }));
     let (_, retry_targets) = refusal.into_parts();
     assert_eq!(retry_targets, vec![foreign_target]);
     assert_eq!(
@@ -874,7 +874,7 @@ fn cancelled_retirement_commit_restores_all_preclose_entries() {
             std::time::Instant::now() + Duration::from_secs(30),
         )
         .unwrap_err();
-    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    assert!(matches!(refusal.error(), &GraphDbError::Conflict { .. }));
     assert!(refusal.targets().is_empty());
 }
 
@@ -912,7 +912,7 @@ fn retirement_commit_reports_every_closed_exact_entry() {
             std::time::Instant::now() + Duration::from_secs(30),
         )
         .unwrap_err();
-    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    assert!(matches!(refusal.error(), &GraphDbError::Conflict { .. }));
     assert!(refusal.targets().is_empty());
 }
 
@@ -928,21 +928,21 @@ fn identity_and_canonical_path_cannot_be_rebound() {
     )
     .unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         registry
             .resolve(registration(first_identity, second_root.path()))
             .unwrap_err(),
-        GraphDbError::Conflict
-    );
-    assert_eq!(
+        GraphDbError::Conflict { .. }
+    ));
+    assert!(matches!(
         registry
             .resolve(registration(
                 identity("profile-a", "project-b"),
                 first_root.path(),
             ))
             .unwrap_err(),
-        GraphDbError::Conflict
-    );
+        GraphDbError::Conflict { .. }
+    ));
     let mut changed_locator = registration(identity("profile-a", "project-a"), first_root.path());
     let mut verified_locator = changed_locator.authority_lease.verified_locator().clone();
     verified_locator.locator_digest =
@@ -976,18 +976,18 @@ fn stale_binding_cannot_close_or_rebind_the_registered_store() {
         mount_and_resolve(&registry, registration(registered.clone(), temp.path())).unwrap();
     drop(handle);
 
-    assert_eq!(
+    assert!(matches!(
         registry
             .status(&registration(stale.clone(), temp.path()))
             .unwrap_err(),
-        GraphDbError::Conflict
-    );
-    assert_eq!(
+        GraphDbError::Conflict { .. }
+    ));
+    assert!(matches!(
         registry
             .reopen_for_harness(owner_registration(registration(stale, temp.path())))
             .unwrap_err(),
-        GraphDbError::Conflict
-    );
+        GraphDbError::Conflict { .. }
+    ));
     assert_eq!(
         registry
             .status(&registration(registered.clone(), temp.path()))
@@ -1120,10 +1120,10 @@ fn close_and_retention_refuse_an_active_handle() {
     let first_request = registration(first_identity.clone(), first_root.path());
     let active = mount_and_resolve(&registry, first_request.clone()).unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         registry.close(&first_request).unwrap_err(),
-        GraphDbError::Conflict
-    );
+        GraphDbError::Conflict { .. }
+    ));
     assert_eq!(
         mount_and_resolve(
             &registry,
@@ -1151,12 +1151,12 @@ fn retained_close_uses_exact_registry_identity_after_root_loss() {
         binding.incarnation,
         StoreAuthorityEpochV1::new(binding.authority_epoch.get() + 1).unwrap(),
     );
-    assert_eq!(
+    assert!(matches!(
         registry
             .close_retained(&foreign_binding, &locator)
             .unwrap_err(),
-        GraphDbError::Conflict
-    );
+        GraphDbError::Conflict { .. }
+    ));
 
     std::fs::remove_dir_all(temp.path()).unwrap();
     assert!(registry.close_retained(&binding, &locator).unwrap());
@@ -1173,10 +1173,10 @@ fn snapshot_lease_prevents_close_after_operation_handle_is_dropped() {
     let snapshot = database.snapshot().unwrap();
     drop(database);
 
-    assert_eq!(
+    assert!(matches!(
         registry.close(&request).unwrap_err(),
-        GraphDbError::Conflict
-    );
+        GraphDbError::Conflict { .. }
+    ));
     assert!(
         snapshot
             .entity(
@@ -1442,7 +1442,9 @@ fn preexisting_empty_graph_file_is_quarantined_and_remounted_fresh() {
         .expect("the empty container must be quarantined, not silently replaced")
         .path();
     assert_eq!(
-        std::fs::metadata(quarantine.join("graph.grafeo")).unwrap().len(),
+        std::fs::metadata(quarantine.join("graph.grafeo"))
+            .unwrap()
+            .len(),
         0,
         "the forensic zero-byte container is retained"
     );

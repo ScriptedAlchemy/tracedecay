@@ -29,10 +29,10 @@ use std::path::Path;
 
 use crate::tools::render::Md;
 use serde_json::Value;
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_graph_query::context::markdown_sections::{
     SectionEnrichment, is_markdown_file, section_summary_lines,
 };
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Adds the section lane — title, truncated preview, full-body retrieval
 /// handle, line span, and parsed section structure — to every markdown section

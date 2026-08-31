@@ -667,13 +667,18 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         "the store must publish a branch claim for this test to be falsifiable",
     );
 
-    let freshness_reader = |latest_generation_id: Option<&str>| {
+    let freshness_reader = |latest_generation_id: Option<&str>,
+                            staleness_state: Option<&str>,
+                            rebuild_in_flight: bool| {
         let latest_generation_id = latest_generation_id.map(str::to_owned);
+        let staleness_state = staleness_state.map(str::to_owned);
         let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
             std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
                 let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                     worktree_root: worktree_root.display().to_string(),
                     latest_generation_id: latest_generation_id.clone(),
+                    staleness_state: staleness_state.clone(),
+                    rebuild_in_flight,
                     ..Default::default()
                 };
                 Box::pin(async move { Some(freshness) })
@@ -697,7 +702,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         None,
         None,
         ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(freshness_reader(None)),
+            code_index_freshness_reader: Some(freshness_reader(None, Some("indexing"), true)),
             ..Default::default()
         },
     )
@@ -722,19 +727,53 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         None,
         None,
         ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(freshness_reader(Some(
-                "generation.status-serving-truth.1",
-            ))),
+            code_index_freshness_reader: Some(freshness_reader(
+                Some("generation.status-serving-truth.1"),
+                Some("fresh"),
+                false,
+            )),
             ..Default::default()
         },
     )
     .await
     .expect("status answers while serving");
     let serving = status_output(serving);
-    assert_eq!(serving["retrieval_serving"], json!({"status": "serving"}));
     assert_eq!(
-        serving["serving_branch"], json!("main"),
+        serving["retrieval_serving"],
+        json!({"status": "serving", "freshness": "current"})
+    );
+    assert_eq!(
+        serving["serving_branch"],
+        json!("main"),
         "a serving census restores the branch claim: {serving}",
+    );
+
+    let rebuilding = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(freshness_reader(
+                Some("generation.status-serving-truth.1"),
+                Some("stale"),
+                true,
+            )),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("status answers while a stale seat is rebuilding");
+    let rebuilding = status_output(rebuilding);
+    assert_eq!(
+        rebuilding["retrieval_serving"]["freshness"],
+        json!("last_complete_stale")
+    );
+    assert_eq!(
+        rebuilding["retrieval_serving"]["condition"],
+        json!("rebuilding"),
+        "scheduler liveness must distinguish a routine rebuild: {rebuilding}",
     );
 
     // A seat sealed long ago surfaces its age inside the serving claim, so a
@@ -752,6 +791,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                     worktree_root: worktree_root.display().to_string(),
                     latest_generation_id: Some("generation.status-serving-truth.1".to_owned()),
                     sealed_at_micros: Some(sealed_at_micros),
+                    staleness_state: Some("stale".to_owned()),
                     ..Default::default()
                 };
             Box::pin(async move { Some(freshness) })
@@ -771,6 +811,15 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     .expect("status answers for an aged seat");
     let aged = status_output(aged);
     assert_eq!(aged["retrieval_serving"]["status"], json!("serving"));
+    assert_eq!(
+        aged["retrieval_serving"]["freshness"],
+        json!("last_complete_stale")
+    );
+    assert_eq!(
+        aged["retrieval_serving"]["condition"],
+        json!("stalled"),
+        "a stale seat with no scheduler remedy must be typed stalled: {aged}",
+    );
     let age_seconds = aged["retrieval_serving"]["seated_generation_age_seconds"]
         .as_i64()
         .expect("an aged seat reports its age in the serving claim");

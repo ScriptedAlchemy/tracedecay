@@ -58,44 +58,41 @@ pub mod request_cancellation;
 
 mod multi_root;
 
+pub use invocation::semantic_evaluation::SemanticInvocationControlV1;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use invocation::{
     AuthorizedDaemonLspWorkspace, DaemonFeedbackPublicationTestGate,
     InvocationProjectRuntimeIdentityV1, LspLeaseTaskRegistry, RuntimeLspSession,
-    WorkAttemptProcessRegistryV1, canonicalize_lsp_roots, current_micros,
-    execute_work_application, lsp_delivery_attempt, mounted_configuration_layers, now_millis,
-    retain_lsp_delivery_attempt,
+    WorkAttemptProcessRegistryV1, canonicalize_lsp_roots, current_micros, execute_work_application,
+    lsp_delivery_attempt, mounted_configuration_layers, now_millis, retain_lsp_delivery_attempt,
 };
 pub use invocation::{
     BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
-    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrationError,
-    DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationGrantAuthority,
+    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrar,
+    DaemonAdvisoryRuntimeRegistrationError, DaemonConfigurationGrantAuthority,
     DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackInvocationOwner,
-    DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService,
-    DaemonLspInvocationOwner, DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
-    DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
-    DaemonRetainedRuntimeRegistrar, DaemonSemanticRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrationError, DaemonWorkProposalRoutingAuthorityV1,
-    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1, HookOrchestrationRequestV1,
-    MAX_COALESCED_HOOK_COMPLETIONS,
-    HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1, LSP_WORKSPACE_CAPABILITY_ID_V1,
-    LSP_WORKSPACE_USE_CASE_ID_V1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
-    RegisteredFeedbackRuntime, RegisteredRetainedRequestContextError, RegisteredRetainedRuntime,
-    RegisteredWorkRuntime,
+    DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
+    DaemonInvocationService, DaemonLspInvocationOwner, DaemonLspOwnerRegistrar,
+    DaemonNativeIntegrationRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrar,
+    DaemonPrimitiveRuntimeRegistrationError, DaemonRetainedRuntimeRegistrar,
+    DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
+    DaemonWorkProposalRoutingAuthorityV1, DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1,
+    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
+    LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1, MAX_COALESCED_HOOK_COMPLETIONS,
+    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
+    RegisteredRetainedRequestContextError, RegisteredRetainedRuntime, RegisteredWorkRuntime,
     SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
     admit_registered_hook_orchestration, advisory_cycle_invocation_result,
     callable_code_request_context, daemon_operation_event_authority,
     register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
 };
-pub use invocation::semantic_evaluation::SemanticInvocationControlV1;
 pub use project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
     ProjectRuntimeRegistryV1, ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1,
-    RegisteredDeliveryReadAuthorityV1,
-    RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
-    StoreObservabilityRegistryV1,
+    RegisteredDeliveryReadAuthorityV1, RegisteredObservabilityProducerV1,
+    StoreObservabilityMountErrorV1, StoreObservabilityMountV1, StoreObservabilityRegistryV1,
 };
 pub use request_cancellation::{Lease, cancel, register};
 pub use tracedecay_daemon_protocol::{

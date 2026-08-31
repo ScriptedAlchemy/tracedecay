@@ -1,11 +1,14 @@
 //! Canonical project-memory scoring primitives.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::memory::encoding::{HolographicEncoder, HolographicEncodingError};
+use crate::memory::encoding::{
+    HolographicEncoder, HolographicEncodingError, HolographicQueryVector,
+};
 
-use tracedecay_domain::{FactId, UtcMicros};
+use tracedecay_domain::{FactAssertionId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
     FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_SEARCH_SCORE_MILLIONTHS,
     ProjectMemoryFactV1,
@@ -108,17 +111,89 @@ pub(super) fn project_memory_jaccard(left: &[String], right: &[String]) -> f64 {
     }
 }
 
+/// Bounds the resident fact-vector cache: 512 entries at 2048 `f64`
+/// coefficients each is 8 MiB, sized to cover every candidate arm of one
+/// search (each arm is capped at 1,000 ids with heavy overlap in practice)
+/// without letting a long-lived daemon accumulate vectors for unbounded
+/// historical facts.
+const FACT_VECTOR_CACHE_CAPACITY: usize = 512;
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct FactVectorKey {
+    owner: FactOwnerV1,
+    fact_id: FactId,
+    assertion_id: FactAssertionId,
+}
+
+#[derive(Default)]
+struct FactVectorCache {
+    vectors: HashMap<FactVectorKey, Arc<Vec<f64>>>,
+    order: VecDeque<FactVectorKey>,
+}
+
+/// Cached FHRR encodings of canonical fact payloads, shared across searches.
+///
+/// An assertion's payload is immutable (`memory_v2_payloads_no_update`
+/// rejects updates), and the encoded vector is a deterministic function of
+/// that payload's content and entities, so an entry keyed by the exact
+/// (owner, fact, active assertion) triple can never serve a stale vector:
+/// any payload change activates a new assertion id and misses this cache.
+/// Without it, ranking re-derives every candidate fact's encoding on every
+/// search — ~512 SHA-256 digests per distinct token at 2048 dimensions —
+/// which dominates recall latency once a store holds more than a handful of
+/// facts.
+static FACT_VECTOR_CACHE: LazyLock<Mutex<FactVectorCache>> =
+    LazyLock::new(|| Mutex::new(FactVectorCache::default()));
+
+/// Returns the FHRR encoding for a canonical fact projection, computing and
+/// retaining it on first use for the fact's current active assertion.
+pub(super) fn project_memory_fact_vector(
+    encoder: &HolographicEncoder,
+    fact: &ProjectMemoryFactV1,
+) -> Result<Arc<Vec<f64>>, HolographicEncodingError> {
+    let key = FactVectorKey {
+        owner: fact.owner().clone(),
+        fact_id: fact.fact_id().clone(),
+        assertion_id: fact.active_assertion_id().clone(),
+    };
+    {
+        let cache = FACT_VECTOR_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(vector) = cache.vectors.get(&key) {
+            return Ok(Arc::clone(vector));
+        }
+    }
+    let vector = Arc::new(encoder.encode_fact(fact.content(), fact.entities())?);
+    let mut cache = FACT_VECTOR_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache
+        .vectors
+        .insert(key.clone(), Arc::clone(&vector))
+        .is_none()
+    {
+        cache.order.push_back(key);
+        while cache.order.len() > FACT_VECTOR_CACHE_CAPACITY {
+            let Some(evicted) = cache.order.pop_front() else {
+                break;
+            };
+            cache.vectors.remove(&evicted);
+        }
+    }
+    Ok(vector)
+}
+
 pub(super) fn project_memory_holographic_score(
     encoder: &HolographicEncoder,
-    query_vector: &[f64],
+    query: &HolographicQueryVector,
     fact: &ProjectMemoryFactV1,
 ) -> FactStoreResult<f64> {
-    let fact_vector = encoder
-        .encode_fact(fact.content(), fact.entities())
-        .map_err(project_memory_holographic_error)?;
+    let fact_vector =
+        project_memory_fact_vector(encoder, fact).map_err(project_memory_holographic_error)?;
     Ok(project_memory_holographic_midpoint(
         encoder
-            .similarity(query_vector, &fact_vector)
+            .query_similarity(query, &fact_vector)
             .map_err(project_memory_holographic_error)?,
     ))
 }
@@ -212,16 +287,126 @@ pub(super) fn project_memory_holographic_error(error: HolographicEncodingError) 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
     use tracedecay_domain::{
-        FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ProvenanceId, UtcMicros,
+        ComponentVersion, Confidence, FactAssertionId, FactCategoryV1, FactEventId, FactId,
+        FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, FactPayloadV1,
+        PayloadReferenceV1, ProvenanceId, RetentionClass, SanitizationReceiptId,
+        SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+        UtcMicros,
+    };
+    use tracedecay_store::{
+        ProjectMemoryFactSnapshotV1, ProjectMemoryFactTelemetryV1, ProjectMemoryFactV1,
     };
 
     use super::{
-        project_memory_combined_score, project_memory_fts_component,
+        project_memory_combined_score, project_memory_fact_vector, project_memory_fts_component,
         project_memory_holographic_midpoint, project_memory_jaccard,
         project_memory_normalize_fts5_ranks, project_memory_score_millionths,
         project_memory_temporal_decay, project_memory_tokens,
     };
+    use crate::memory::encoding::HolographicEncoder;
+
+    fn domain_id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("fixture id")
+    }
+
+    fn projected_fact(operation: &str, assertion: &str) -> ProjectMemoryFactV1 {
+        let owner = FactOwnerV1::Profile;
+        let source = FactIdentitySourceV1::Application {
+            operation_id: domain_id::<ProvenanceId>(operation),
+        };
+        let derived = FactId::derive(
+            &FactIdentityMaterialV1::new(owner.clone(), source.clone())
+                .expect("fixture identity material"),
+        )
+        .expect("fixture fact id");
+        let content = "the daemon caches fact vectors";
+        let material = json!({
+            "content": content,
+            "category": "project",
+            "tags": ["memory"],
+            "entities": ["TraceDecay"],
+            "metadata": {},
+        });
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                domain_id::<SanitizationReceiptId>("receipt.fact.scoring.fixture"),
+                domain_id::<ComponentVersion>("sanitizer.fixture.v1"),
+            )
+            .expect("fixture receipt reference"),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&material).expect("fixture payload reference")),
+        )
+        .expect("fixture receipt");
+        let payload = FactPayloadV1::new(
+            content.to_owned(),
+            FactCategoryV1::Project,
+            vec!["memory".to_owned()],
+            vec!["TraceDecay".to_owned()],
+            json!({}),
+            None,
+            receipt,
+            RetentionClass::new("durable.fact").expect("fixture retention"),
+        )
+        .expect("fixture payload");
+        ProjectMemoryFactV1::new(
+            derived,
+            owner,
+            payload,
+            Confidence::new(0.5).expect("fixture trust"),
+            ProjectMemoryFactSnapshotV1::new(
+                domain_id::<FactAssertionId>(assertion),
+                domain_id::<FactEventId>("event.scoring-cache"),
+                UtcMicros(1),
+            ),
+            source,
+            ProjectMemoryFactTelemetryV1::new(
+                0,
+                0,
+                0,
+                0,
+                UtcMicros(1),
+                UtcMicros(1),
+                None,
+                None,
+                None,
+            )
+            .expect("fixture telemetry"),
+        )
+        .expect("fixture fact")
+    }
+
+    #[test]
+    fn fact_vector_cache_hits_the_active_assertion_and_misses_a_new_one() {
+        let encoder = HolographicEncoder::new();
+        let fact = projected_fact("operation.scoring-cache", "assertion.scoring-cache-one");
+        let first = project_memory_fact_vector(&encoder, &fact).expect("first encoding");
+        let cached = project_memory_fact_vector(&encoder, &fact).expect("cached encoding");
+        // The exact (owner, fact, assertion) triple returns the retained
+        // vector without re-deriving it.
+        assert!(Arc::ptr_eq(&first, &cached));
+        let fresh = encoder
+            .encode_fact(fact.content(), fact.entities())
+            .expect("fresh encoding");
+        assert_eq!(*first, fresh);
+
+        // Activating a new assertion misses the cache and re-encodes, so a
+        // payload change can never serve a stale vector.
+        let reasserted = projected_fact("operation.scoring-cache", "assertion.scoring-cache-two");
+        assert_eq!(reasserted.fact_id(), fact.fact_id());
+        let second =
+            project_memory_fact_vector(&encoder, &reasserted).expect("re-encoded assertion");
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(*second, fresh);
+    }
 
     fn fact_id(label: &str) -> FactId {
         FactId::derive(

@@ -461,7 +461,7 @@ impl GraphDbRetirementReservation {
     ) -> Result<GraphDbRetirementCommit, GraphDbRetirementRefusal> {
         if !self.armed {
             return Err(GraphDbRetirementRefusal::new(
-                GraphDbError::Conflict,
+                GraphDbError::conflict("registry.commit"),
                 Vec::new(),
             ));
         }
@@ -531,7 +531,7 @@ impl GraphDbRetirementReservation {
     ) -> std::result::Result<Vec<GraphDbRetirementTarget>, GraphDbRetirementRefusal> {
         if !self.armed {
             return Err(GraphDbRetirementRefusal::new(
-                GraphDbError::Conflict,
+                GraphDbError::conflict("registry.cancel"),
                 Vec::new(),
             ));
         }
@@ -679,7 +679,9 @@ impl GraphDbRegistry {
         let Some(RegistryEntry::Ready { owner, .. }) =
             state.entries.get(&registration.binding().shard_id)
         else {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "registry.inject_close_finish_failure",
+            ));
         };
         owner.inject_close_finish_failure(error);
         Ok(())
@@ -850,7 +852,7 @@ impl GraphDbRegistry {
                         ),
                         (&binding, &verified_locator, &path, expected_format),
                     )?;
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict("registry.resolve"));
                 }
                 None => {
                     return Err(GraphDbError::unavailable(
@@ -1015,7 +1017,7 @@ impl GraphDbRegistry {
                         // materializing) runtime: no native open runs, so a
                         // profile can separate these hits from full opens.
                         hotpath::gauge!("graph_db.registry.attach.already_mounted").inc(1.0);
-                        return Err(GraphDbError::Conflict);
+                        return Err(GraphDbError::conflict("registry.resolve_owner_attachment"));
                     }
                     Some(RegistryEntry::Faulted {
                         binding: registered_binding,
@@ -1205,7 +1207,11 @@ impl GraphDbRegistry {
                 }
                 | RegistryEntry::Retiring {
                     owner_id: current, ..
-                } if *current == owner_id => return Err(GraphDbError::Conflict),
+                } if *current == owner_id => {
+                    return Err(GraphDbError::conflict(
+                        "registry.retain_verification_fault_for_lease",
+                    ));
+                }
                 RegistryEntry::Faulted {
                     owner: Some(owner),
                     error: retained_error,
@@ -1548,7 +1554,7 @@ impl GraphDbRegistry {
             })
         }) {
             return Err(GraphDbRetirementRefusal::new(
-                GraphDbError::Conflict,
+                GraphDbError::conflict("registry.reserve_retirement_batch"),
                 retry_targets,
             ));
         }
@@ -1576,13 +1582,13 @@ impl GraphDbRegistry {
                 } = entry
                 else {
                     return Err(GraphDbRetirementRefusal::new(
-                        GraphDbError::Conflict,
+                        GraphDbError::conflict("registry.reserve_retirement_batch"),
                         retry_targets,
                     ));
                 };
                 if binding != target.binding() || verified_locator != target.verified_locator() {
                     return Err(GraphDbRetirementRefusal::new(
-                        GraphDbError::Conflict,
+                        GraphDbError::conflict("registry.reserve_retirement_batch"),
                         retry_targets,
                     ));
                 }
@@ -1694,16 +1700,16 @@ impl GraphDbRegistry {
                 registered_path != path || registered_format != format
             })
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("registry.reserve_close"));
         }
         match entry {
             RegistryEntry::Opening { .. }
             | RegistryEntry::Closing { .. }
             | RegistryEntry::Retiring { .. } => {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict("registry.reserve_close"));
             }
             RegistryEntry::Ready { owner, .. } if require_unleased && !owner.is_unleased() => {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict("registry.reserve_close"));
             }
             RegistryEntry::Faulted { error, .. } => return Err(error.clone()),
             RegistryEntry::Ready { .. } => {}
@@ -2442,7 +2448,7 @@ mod tests {
         for (error, expected) in [
             (
                 RetainedGraphStoreOwnerOperationLeaseErrorV1::Retiring,
-                GraphDbError::Conflict,
+                GraphDbError::conflict("owner.issue_lease"),
             ),
             (
                 RetainedGraphStoreOwnerOperationLeaseErrorV1::Unavailable,
@@ -2488,12 +2494,12 @@ mod tests {
             operation: operation.clone(),
         };
 
-        assert_eq!(
+        assert!(matches!(
             registry
                 .resolve_owner_attachment(foreign_owner)
                 .unwrap_err(),
-            GraphDbError::Conflict
-        );
+            GraphDbError::Conflict { .. }
+        ));
         assert!(matches!(
             registry.resolve(operation),
             Err(GraphDbError::Unavailable { .. })
@@ -2595,15 +2601,15 @@ mod tests {
         // The winner is inside its native open. A same-identity attacher must
         // observe the held Opening slot as a typed Conflict instead of
         // running a second identical open over the same store.
-        assert_eq!(
+        assert!(matches!(
             registry
                 .resolve_owner_attachment(owner_registration(registration_for(
                     root.path(),
                     "project.shared-open",
                 )))
                 .unwrap_err(),
-            GraphDbError::Conflict
-        );
+            GraphDbError::Conflict { .. }
+        ));
 
         gate.release();
         let attachment = winner.join().unwrap().unwrap();
@@ -2851,10 +2857,10 @@ mod tests {
             registry.status(&registration).unwrap(),
             Some(GraphDbRegistryStatus::Closed)
         );
-        assert_eq!(
+        assert!(matches!(
             attachment.issue_lease().unwrap_err(),
-            GraphDbError::Conflict
-        );
+            GraphDbError::Conflict { .. }
+        ));
         assert_eq!(
             registry.resolve(registration).unwrap_err(),
             GraphDbError::Closed
@@ -3144,7 +3150,7 @@ mod tests {
         let issued = resolved_rx.recv().unwrap();
         match (reservation, issued) {
             (Ok(reservation), false) => drop(reservation),
-            (Err(refusal), true) if matches!(refusal.error(), GraphDbError::Conflict) => {}
+            (Err(refusal), true) if matches!(refusal.error(), GraphDbError::Conflict { .. }) => {}
             (_, issued) => panic!(
                 "retirement and resolution must linearize to one typed winner, issued={issued}"
             ),
@@ -3172,7 +3178,7 @@ mod tests {
                 panic!("an external graph snapshot must refuse owner attachment retirement")
             }
         };
-        assert!(matches!(refusal.error(), GraphDbError::Conflict));
+        assert!(matches!(refusal.error(), GraphDbError::Conflict { .. }));
         let (_, retry_targets) = refusal.into_parts();
         assert_eq!(retry_targets, vec![target.clone()]);
         drop(snapshot);
@@ -3193,7 +3199,7 @@ mod tests {
 
         assert!(matches!(
             registry.reserve_retirement_batch(vec![target.clone()]),
-            Err(refusal) if matches!(refusal.error(), GraphDbError::Conflict)
+            Err(refusal) if matches!(refusal.error(), GraphDbError::Conflict { .. })
         ));
         drop(lease);
 
@@ -3212,10 +3218,10 @@ mod tests {
             .resolve_owner_attachment(owner_registration(registration.clone()))
             .unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             registry.resolve(foreign_registration).unwrap_err(),
-            GraphDbError::Conflict
-        );
+            GraphDbError::Conflict { .. }
+        ));
         let lease = registry.resolve(registration).unwrap();
         assert!(attachment.shares_runtime_with(&lease));
     }
@@ -3263,7 +3269,7 @@ mod tests {
         drop(lease);
         assert!(matches!(
             registry.reserve_retirement_batch(vec![attachment.retirement_target()]),
-            Err(refusal) if matches!(refusal.error(), GraphDbError::Conflict)
+            Err(refusal) if matches!(refusal.error(), GraphDbError::Conflict { .. })
         ));
         drop(snapshot);
         drop(clone);
@@ -3300,7 +3306,7 @@ mod tests {
 
         assert!(matches!(
             registry.reserve_retirement_batch(vec![foreign_target]),
-            Err(refusal) if matches!(refusal.error(), GraphDbError::Conflict)
+            Err(refusal) if matches!(refusal.error(), GraphDbError::Conflict { .. })
         ));
         assert_eq!(
             registry.status(&registration).unwrap(),
@@ -3321,7 +3327,7 @@ mod tests {
 
         assert!(matches!(
             registry.reserve_retirement_batch(vec![target]),
-            Err(refusal) if matches!(refusal.error(), GraphDbError::Conflict)
+            Err(refusal) if matches!(refusal.error(), GraphDbError::Conflict { .. })
         ));
         assert_eq!(
             registry.status(&registration).unwrap(),
@@ -3577,10 +3583,10 @@ mod tests {
             registry.resolve(registration.clone()),
             Err(GraphDbError::Unavailable { .. })
         ));
-        assert_eq!(
+        assert!(matches!(
             attachment.issue_lease().unwrap_err(),
-            GraphDbError::Conflict
-        );
+            GraphDbError::Conflict { .. }
+        ));
     }
 
     #[test]

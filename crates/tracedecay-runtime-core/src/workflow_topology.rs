@@ -53,7 +53,7 @@ impl From<GraphDbError> for WorkflowTopologyError {
             | GraphDbError::DurabilityUncertain { message }
             | GraphDbError::ProjectionMismatch { message, .. }
             | GraphDbError::GenerationMismatch { message, .. } => Self::Corrupt(message),
-            GraphDbError::Conflict => {
+            GraphDbError::Conflict { .. } => {
                 Self::Unavailable("workflow topology publication conflict".to_owned())
             }
             GraphDbError::Unavailable { message }

@@ -17,7 +17,7 @@ use super::failure::{
 use super::project::{home_dir, parse_git_log_commits, with_transcript_source_home};
 use super::scheduler::{
     finish_user_provider_coverage, merge_project_provider_backpressure,
-    plan_user_provider_admission,
+    plan_provider_rotation_admission,
 };
 use super::startup::{StartupUserIngestClaim, StartupUserIngestGuard, TranscriptIngestOutcome};
 use super::user::provider_selected;
@@ -768,13 +768,13 @@ fn user_provider_admission_applies_discovery_bound_to_actual_work() {
         bytes_per_pass: 8,
         ..TEST_INGEST_BOUNDS
     };
-    let first = plan_user_provider_admission(5, 0, bounds);
+    let first = plan_provider_rotation_admission(5, 0, bounds);
     assert_eq!(first.admitted_indices, vec![0, 1]);
     assert_eq!(
         first.coverage,
         IngestPassCoverage::Partial { deferred_units: 3 }
     );
-    let second = plan_user_provider_admission(5, 2, bounds);
+    let second = plan_provider_rotation_admission(5, 2, bounds);
     assert_eq!(second.admitted_indices, vec![2, 3]);
 }
 

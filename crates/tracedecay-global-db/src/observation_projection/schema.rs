@@ -562,10 +562,8 @@ mod tests {
 
     async fn open_registered_schema(
         path: &std::path::Path,
-    ) -> tracedecay_domain::errors::Result<(
-        RegisteredGlobalDbLeaseV1,
-        RegisteredGlobalDbOwnerV1,
-    )> {
+    ) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
+    {
         open_registered_test_database_fixture(path, TestDatabaseRuntimeScope::Profile).await
     }
 

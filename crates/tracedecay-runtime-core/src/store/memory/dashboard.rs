@@ -30,7 +30,7 @@ use super::primitives::{
 use super::projection::{
     load_project_memory_projection_controlled_tx, load_project_memory_projections_controlled_tx,
 };
-use super::scoring::project_memory_holographic_error;
+use super::scoring::{project_memory_fact_vector, project_memory_holographic_error};
 
 #[derive(Clone)]
 struct EntityAggregate {
@@ -601,9 +601,10 @@ pub(super) async fn dashboard_project_memory_vector_points_tx(
                     let entities = fact.entities();
                     (
                         Some(
-                            encoder
-                                .encode_fact(fact.content(), entities)
-                                .map_err(project_memory_holographic_error)?,
+                            project_memory_fact_vector(&encoder, fact)
+                                .map_err(project_memory_holographic_error)?
+                                .as_ref()
+                                .clone(),
                         ),
                         entities
                             .iter()

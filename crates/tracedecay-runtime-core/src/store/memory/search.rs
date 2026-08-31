@@ -46,7 +46,7 @@ use super::scoring::{
     project_memory_millionths, project_memory_score_millionths, project_memory_temporal_decay,
     project_memory_term_coverage, project_memory_tokens,
 };
-use crate::memory::encoding::HolographicEncoder;
+use crate::memory::encoding::{HolographicEncoder, HolographicQueryVector};
 
 /// Raw score components retained so the `why` explanation string is only
 /// formatted for hits that survive the zero-score and threshold filters.
@@ -78,7 +78,7 @@ impl ProjectMemorySearchWhy {
 fn project_memory_search_scores(
     query_tokens: &[String],
     encoder: &HolographicEncoder,
-    query_vector: &[f64],
+    query_vector: &HolographicQueryVector,
     normalized_bm25: f64,
     fact: &ProjectMemoryFactV1,
     now: UtcMicros,
@@ -215,6 +215,9 @@ async fn project_memory_rank_facts_tx(
             let encoder = HolographicEncoder::new();
             let query_vector = encoder
                 .encode_fact(text, &tokens)
+                .map_err(project_memory_holographic_error)?;
+            let query_vector = encoder
+                .prepare_query(&query_vector)
                 .map_err(project_memory_holographic_error)?;
             for fact in facts.drain(..) {
                 ensure_project_memory_read_active(read_control)?;
@@ -371,6 +374,7 @@ pub(super) async fn reason_project_memory_facts_tx(
     .await
 }
 
+#[hotpath::measure(label = "runtime_core.memory.search_candidates")]
 async fn project_memory_candidates_snapshot(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,
@@ -400,6 +404,7 @@ async fn project_memory_candidates_snapshot(
     finish_read_snapshot(transaction, result).await
 }
 
+#[hotpath::measure(label = "runtime_core.memory.graph_assist")]
 async fn project_memory_graph_assist(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,
@@ -468,6 +473,7 @@ pub(super) fn project_memory_graph_degradation(
     }
 }
 
+#[hotpath::measure(label = "runtime_core.memory.rank")]
 async fn project_memory_rank_snapshot(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,

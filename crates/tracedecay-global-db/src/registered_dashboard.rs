@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use tracedecay_domain::canonical_sha256;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
     engine::{Row, Value},
 };
-use tracedecay_domain::errors::TraceDecayError;
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectRegistryContext,

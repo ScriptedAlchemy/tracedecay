@@ -263,11 +263,9 @@ mod tests {
     #[test]
     fn selected_target_infrastructure_failures_remain_typed() {
         let RetainedSurfaceExecutionErrorV1::Unavailable { detail } =
-            map_target_infrastructure_error(
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "corrupt registry".to_owned(),
-                },
-            )
+            map_target_infrastructure_error(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "corrupt registry".to_owned(),
+            })
         else {
             panic!("infrastructure failures must map to the unavailable terminal");
         };

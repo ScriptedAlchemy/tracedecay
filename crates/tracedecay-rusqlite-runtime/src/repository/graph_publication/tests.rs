@@ -10,13 +10,14 @@ use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMic
 use tracedecay_store::{
     AdmissionConfigV1, GraphDependencyGenerationClosureDigestV1,
     GraphDependencyGenerationIdentityV1, GraphGenerationIdV1, GraphNamespaceV1,
-    GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
-    GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphPendingReplayDiscardOutcomeV1, GraphPendingReplayDiscardV1, GraphProjectionIdV1,
+    GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1,
+    GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
     GraphPublicationReplayPageRequestV1, GraphPublicationReplayRetirementV1,
     GraphPublicationReplayV1, GraphPublicationRetiredCleanupPageRequestV1,
-    GraphPublicationStoreErrorV1, GraphPublicationStoreV1, GraphRecoveredGenerationDigestV1,
-    GraphReplayAppendOutcomeV1, GraphReplayRetirementOutcomeV1,
+    GraphPublicationSequenceV1, GraphPublicationStoreErrorV1, GraphPublicationStoreV1,
+    GraphRecoveredGenerationDigestV1, GraphReplayAppendOutcomeV1, GraphReplayRetirementOutcomeV1,
     GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
     GraphVerifiedHeadCompareAndSwapV1, RepositoryWritePayloadV1, RuntimeCancellationIdV1,
     RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
@@ -752,6 +753,133 @@ fn concurrent_exact_writer_candidates_leave_one_pending_replay() {
         1
     );
     assert_eq!(fixture.replay_count(), 1);
+}
+
+#[test]
+fn pending_replay_discard_reopens_the_journal_for_a_fresh_publication() {
+    let fixture = Fixture::new();
+    let mut storage = fixture.storage();
+    let projection = projection("code");
+    // An established verified head, then a publication journaled by a
+    // publisher that died mid-activation (the issue #765 wedge shape).
+    let base = replay(
+        projection.clone(),
+        "generation.base",
+        "publish.base",
+        'a',
+        'e',
+        None,
+        b"base",
+    );
+    assert!(matches!(
+        append_with_fresh_context(&mut storage, &base, "base").unwrap(),
+        GraphReplayAppendOutcomeV1::Appended(_)
+    ));
+    let head = advance_head(&mut storage, &base);
+    let interrupted = replay(
+        projection.clone(),
+        "generation.interrupted",
+        "publish.interrupted",
+        'b',
+        'f',
+        Some(head.clone()),
+        b"interrupted",
+    );
+    let pending = match append_with_fresh_context(&mut storage, &interrupted, "interrupted") {
+        Ok(GraphReplayAppendOutcomeV1::Appended(record)) => record,
+        outcome => panic!("unexpected append outcome: {outcome:?}"),
+    };
+    // Any later publication is blocked on the orphan.
+    let successor = replay(
+        projection.clone(),
+        "generation.successor",
+        "publish.successor",
+        'c',
+        '1',
+        Some(head.clone()),
+        b"successor",
+    );
+    assert!(matches!(
+        append_with_fresh_context(&mut storage, &successor, "blocked").unwrap(),
+        GraphReplayAppendOutcomeV1::PendingReplayConflict { .. }
+    ));
+    let (control, probe) = control_and_probe("discard", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    // A discard naming a sequence the journal has moved past is refused with
+    // the actual row as evidence; nothing is deleted.
+    let stale = GraphPendingReplayDiscardV1 {
+        key: pending.publication.key.clone(),
+        sequence: GraphPublicationSequenceV1::new(pending.sequence.get() + 1).unwrap(),
+    };
+    match storage.discard_pending_replay(&stale, &context).unwrap() {
+        GraphPendingReplayDiscardOutcomeV1::SequenceMismatch { actual } => {
+            assert_eq!(actual, pending);
+        }
+        outcome => panic!("unexpected stale discard outcome: {outcome:?}"),
+    }
+    assert_eq!(fixture.replay_count(), 2);
+    // The verified head is never discardable as "pending".
+    let head_discard = GraphPendingReplayDiscardV1 {
+        key: base.key.clone(),
+        sequence: head.sequence,
+    };
+    match storage
+        .discard_pending_replay(&head_discard, &context)
+        .unwrap()
+    {
+        GraphPendingReplayDiscardOutcomeV1::CurrentVerifiedHead { head: actual } => {
+            assert_eq!(actual, head);
+        }
+        outcome => panic!("unexpected head discard outcome: {outcome:?}"),
+    }
+    // The exact observed row discards; the repeat is idempotent Missing.
+    let request = GraphPendingReplayDiscardV1 {
+        key: pending.publication.key.clone(),
+        sequence: pending.sequence,
+    };
+    match storage.discard_pending_replay(&request, &context).unwrap() {
+        GraphPendingReplayDiscardOutcomeV1::Discarded(discarded) => {
+            assert_eq!(discarded, pending);
+        }
+        outcome => panic!("unexpected discard outcome: {outcome:?}"),
+    }
+    assert_eq!(fixture.replay_count(), 1);
+    assert!(matches!(
+        storage.discard_pending_replay(&request, &context).unwrap(),
+        GraphPendingReplayDiscardOutcomeV1::Missing
+    ));
+    // The journal position is open again: a fresh replay for the same
+    // generation appends and publishes where the orphan wedged forever.
+    let fresh = replay(
+        projection,
+        "generation.interrupted",
+        "publish.fresh",
+        'b',
+        'f',
+        Some(head),
+        b"interrupted",
+    );
+    assert!(matches!(
+        append_with_fresh_context(&mut storage, &fresh, "fresh").unwrap(),
+        GraphReplayAppendOutcomeV1::Appended(_)
+    ));
+    let fresh_head = advance_head(&mut storage, &fresh);
+    // A completed publication superseded by a newer head refuses the discard
+    // with the winning head as evidence.
+    let superseded = GraphPendingReplayDiscardV1 {
+        key: base.key.clone(),
+        sequence: GraphPublicationSequenceV1::new(1).unwrap(),
+    };
+    match storage
+        .discard_pending_replay(&superseded, &context)
+        .unwrap()
+    {
+        GraphPendingReplayDiscardOutcomeV1::Superseded { head: actual } => {
+            assert_eq!(actual, fresh_head);
+        }
+        outcome => panic!("unexpected superseded discard outcome: {outcome:?}"),
+    }
+    assert_eq!(fixture.replay_count(), 2);
 }
 
 #[test]

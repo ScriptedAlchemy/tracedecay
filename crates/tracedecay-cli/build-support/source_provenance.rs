@@ -78,9 +78,7 @@ pub fn resolve(
 /// falls through to the explicit sources; a probe that half-answers — a HEAD
 /// with no readable status — is a hard failure rather than a fabricated
 /// "clean".
-fn resolve_from_git(
-    root: &std::path::Path,
-) -> Result<Option<ResolvedSourceProvenance>, String> {
+fn resolve_from_git(root: &std::path::Path) -> Result<Option<ResolvedSourceProvenance>, String> {
     if !is_own_worktree(root) {
         return Ok(None);
     }
@@ -124,16 +122,14 @@ fn resolve_from_release_env(sha: &str) -> Result<ResolvedSourceProvenance, Strin
     })
 }
 
-fn resolve_from_vcs_info(
-    vcs_info: &std::path::Path,
-) -> Result<ResolvedSourceProvenance, String> {
+fn resolve_from_vcs_info(vcs_info: &std::path::Path) -> Result<ResolvedSourceProvenance, String> {
     let bytes = std::fs::read(vcs_info)
         .map_err(|error| format!("failed to read {}: {error}", vcs_info.display()))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("failed to parse {}: {error}", vcs_info.display()))?;
-    let git = value.get("git").ok_or_else(|| {
-        format!("{} has no `git` object", vcs_info.display())
-    })?;
+    let git = value
+        .get("git")
+        .ok_or_else(|| format!("{} has no `git` object", vcs_info.display()))?;
     let sha = git
         .get("sha1")
         .and_then(serde_json::Value::as_str)

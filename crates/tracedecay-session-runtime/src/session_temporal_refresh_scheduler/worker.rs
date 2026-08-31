@@ -27,11 +27,17 @@ use tracedecay_session_temporal_store::{
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 
+/// Typed deferral reported when the daemon-wide historical-ingest admission
+/// has no free permit. The worker retries after the history-retry delay while
+/// projection serving continues unblocked.
+pub(super) const HISTORY_ADMISSION_SATURATED_REASON: &str = "history_admission_saturated";
+
 pub(super) async fn run_session_temporal_refresh_scheduler(
     database: RegisteredGlobalDbLeaseV1,
     state: Arc<SessionTemporalRefreshWakeState>,
     projector: Arc<dyn SessionTemporalRefreshProjector>,
     history: Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
+    history_admission: Arc<tokio::sync::Semaphore>,
     policy: SessionTemporalRefreshPolicy,
 ) {
     let mut retry_attempt = 0u32;
@@ -52,7 +58,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             state.pass_count.fetch_add(1, Ordering::AcqRel);
             let history_outcome = if history_requested {
                 hotpath::future!(
-                    session_history_refresh(&history),
+                    session_history_refresh(&history, &history_admission),
                     label = "daemon.scheduler.session_temporal.history"
                 )
                 .await
@@ -301,15 +307,33 @@ fn observe_retry(class: SessionTemporalRefreshRetryClass, attempt: u32) {
     hotpath::gauge!("session_temporal_refresh_last_retry_attempt").set(attempt);
 }
 
+/// Runs one historical ingest pass under the daemon-wide bounded admission.
+///
+/// The permit is held for the whole pass, so at most
+/// `MAX_CONCURRENT_HISTORICAL_INGEST_PASSES` passes run concurrently across
+/// every mounted project and the profile. A saturated admission defers this
+/// worker's pass as typed retryable state rather than queueing behind it:
+/// the worker's projection serving continues, and the history-retry wait
+/// re-attempts admission shortly after.
 async fn session_history_refresh(
     history: &Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
+    admission: &tokio::sync::Semaphore,
 ) -> Option<SessionHistoricalIngestOutcome> {
     let history = history
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
     match history {
-        Some(history) => Some(history.run_pass().await),
+        Some(history) => {
+            let Ok(_permit) = admission.try_acquire() else {
+                hotpath::gauge!("session_temporal_refresh_history_admission_deferrals").inc(1.0);
+                return Some(SessionHistoricalIngestOutcome::Retryable {
+                    reason_code: HISTORY_ADMISSION_SATURATED_REASON,
+                    made_progress: false,
+                });
+            };
+            Some(history.run_pass().await)
+        }
         None => None,
     }
 }

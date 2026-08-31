@@ -307,7 +307,10 @@ pub enum InvocationError {
     /// because re-dispatching in-process cannot succeed until a daemon is
     /// back: dispatchers fail fast with the typed connect diagnostic instead
     /// of retrying to their deadline.
-    Unreachable { reason_code: String, detail: String },
+    Unreachable {
+        reason_code: String,
+        detail: String,
+    },
     Denied,
     Cancelled,
     DeadlineExceeded,

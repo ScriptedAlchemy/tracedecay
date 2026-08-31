@@ -30,6 +30,7 @@ pub use report::{
     DirectWorstStratumV1,
 };
 
+pub use admitted_corpus::root_admitted_corpus_scope;
 pub use candidate_output::{
     AdmittedCorpusScopeFn, CandidateOutputError, CandidateWorkloadV1,
     DirectEvaluatedProfileMaterialV1, EvaluationExecutionContractV1,
@@ -51,7 +52,6 @@ pub use controlled_workloads::{
     compare_controlled_workloads, run_cursor_parse_batch_workload,
     run_framed_log_durability_workload, write_controlled_workload_reports,
 };
-pub use admitted_corpus::root_admitted_corpus_scope;
 pub use native_qualification::{
     NativeQualificationEvaluatorKeyV1, NativeQualificationExecutionResourceKeyV1,
     NativeQualificationExpectationsV1, NativeQualificationKeyV1, NativeQualificationModelKeyV1,

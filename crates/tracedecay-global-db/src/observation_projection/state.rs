@@ -8,8 +8,8 @@ use tracedecay_store::{
     SessionMessageProjection, SessionMessageRecord, SessionRecord,
 };
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_lcm::retrieval_content::projected_content_hash;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 

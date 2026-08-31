@@ -957,14 +957,15 @@ mod tests {
         std::fs::write(store_root.join("sessions.db"), b"live database").unwrap();
         std::fs::write(quarantine.join("tracedecay.grafeo"), b"corrupt container").unwrap();
         std::fs::write(
-            quarantine.join("tracedecay.grafeo.wal").join("wal_00000001.log"),
+            quarantine
+                .join("tracedecay.grafeo.wal")
+                .join("wal_00000001.log"),
             b"torn wal segment",
         )
         .unwrap();
         std::fs::write(quarantine.join("store-quarantined.json"), b"{}").unwrap();
-        let expected_bytes = (b"corrupt container".len()
-            + b"torn wal segment".len()
-            + b"{}".len()) as u64;
+        let expected_bytes =
+            (b"corrupt container".len() + b"torn wal segment".len() + b"{}".len()) as u64;
 
         let scan = scan_incident_debris(&entry(&store_root), profile.path(), NOW).unwrap();
 
@@ -978,7 +979,10 @@ mod tests {
         assert_eq!(scan.artifacts[0].size_bytes.get(), expected_bytes);
 
         let report = sweep_incident_debris(&[entry(&store_root)], profile.path(), 7 * DAY, NOW);
-        assert_eq!(report.quarantined, 0, "the directory is already quarantined");
+        assert_eq!(
+            report.quarantined, 0,
+            "the directory is already quarantined"
+        );
         assert_eq!(report.collected, 0);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(

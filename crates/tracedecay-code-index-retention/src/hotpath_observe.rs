@@ -54,6 +54,37 @@ pub(crate) fn retention_recovery_idle() {
     hotpath::gauge!("usecases.retention.cancellation_state").set(0.0);
 }
 
+/// One non-blocking probe while collection waits for the graph-replay pool.
+#[inline]
+pub(crate) fn retention_replay_pool_acquire_wait() {
+    hotpath::gauge!("usecases.retention.replay_pool_acquire_wait").inc(1.0);
+}
+
+/// Exclusive graph-replay pool lock taken by collection or recovery.
+#[inline]
+pub(crate) fn retention_replay_pool_acquired() {
+    hotpath::gauge!("usecases.retention.replay_pool_acquired").inc(1.0);
+}
+
+/// Collection deferred because the graph-replay pool stayed held through the
+/// carried acquire budget.
+#[inline]
+pub(crate) fn retention_replay_pool_busy() {
+    hotpath::gauge!("usecases.retention.replay_pool_busy").inc(1.0);
+}
+
+/// Collection abandoned the pool wait because the caller cancelled.
+#[inline]
+pub(crate) fn retention_replay_pool_acquire_cancelled() {
+    hotpath::gauge!("usecases.retention.replay_pool_acquire_cancelled").inc(1.0);
+}
+
+/// Exclusive graph-replay pool lock released by collection or recovery.
+#[inline]
+pub(crate) fn retention_replay_pool_released() {
+    hotpath::gauge!("usecases.retention.replay_pool_released").inc(1.0);
+}
+
 /// Durable graph-replay release events written for retired generations.
 #[inline]
 pub(crate) fn retention_replay_releases_queued(count: usize) {

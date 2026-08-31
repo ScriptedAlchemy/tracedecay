@@ -104,6 +104,7 @@ hotpath = [
     "tracedecay-daemon-identity/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-daemon-service/hotpath",
+    "tracedecay-framing/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-graph-query/hotpath",
@@ -148,6 +149,7 @@ hotpath-alloc = [
     "tracedecay-daemon-identity/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-daemon-service/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-graph-query/hotpath-alloc",
@@ -192,6 +194,7 @@ hotpath-cpu = [
     "tracedecay-daemon-identity/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-daemon-service/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-graph-query/hotpath-cpu",
@@ -411,6 +414,7 @@ tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version =
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
 tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["source-analysis"] }

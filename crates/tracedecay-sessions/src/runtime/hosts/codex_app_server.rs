@@ -19,10 +19,10 @@ use std::os::unix::process::CommandExt;
 use serde_json::{Value, json};
 use tracedecay_store::cursor_dispatch::CURSOR_MODEL_KEYS;
 
-use tracedecay_lcm::LcmSummaryRequest;
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader};
-use tracedecay_daemon_protocol::wire::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
+use tracedecay_framing::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_lcm::LcmSummaryRequest;
 
 pub const CODEX_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CODEX_SUMMARY_CHILD";
 const CODEX_APP_SERVER_SPAWN_RETRY_WINDOW: Duration = Duration::from_millis(250);
@@ -741,12 +741,12 @@ pub fn strip_reasoning_tags(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
     use serde_json::json;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+    use tracedecay_lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
 
     static APP_SERVER_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 

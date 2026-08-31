@@ -680,10 +680,8 @@ impl DaemonSessionSyncService {
             )
             .await
             .map_err(store_error)?
-            .ok_or_else(|| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "session sync journal disappeared".to_owned(),
-                }
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "session sync journal disappeared".to_owned(),
             })?;
             let mut journal: SessionSyncJournalV1 =
                 serde_json::from_str(&current).map_err(journal_decode_error)?;
@@ -739,11 +737,9 @@ impl DaemonSessionSyncService {
             .read_session_sync_journal(key)
             .await
             .map_err(store_error)?
-            .ok_or_else(
-                || tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "session sync journal disappeared".to_owned(),
-                },
-            )?;
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "session sync journal disappeared".to_owned(),
+            })?;
         let journal: SessionSyncJournalV1 =
             serde_json::from_str(&current).map_err(journal_decode_error)?;
         let source_frontiers = context
@@ -1181,9 +1177,7 @@ fn saturating_usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-fn contract_error(
-    error: impl std::fmt::Display,
-) -> tracedecay_domain::errors::TraceDecayError {
+fn contract_error(error: impl std::fmt::Display) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: error.to_string(),
     }

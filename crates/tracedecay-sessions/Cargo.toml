@@ -16,7 +16,7 @@ hotpath = [
     "hotpath/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-capture/hotpath",
-    "tracedecay-daemon-protocol/hotpath",
+    "tracedecay-framing/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-lcm/hotpath",
     "tracedecay-private-fs/hotpath",
@@ -31,7 +31,7 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
     "tracedecay-capture/hotpath-alloc",
-    "tracedecay-daemon-protocol/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-lcm/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
@@ -46,7 +46,7 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
     "tracedecay-capture/hotpath-cpu",
-    "tracedecay-daemon-protocol/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-lcm/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
@@ -77,8 +77,8 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
@@ -89,6 +89,7 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "
 url = "2"
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
 # `runtime::vibe` and `runtime::workflow_ingest` tests backdate file mtimes.
 filetime = "0.2"
 tempfile = "3"
@@ -101,3 +102,7 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0", 
 # The live git-attribution test publishes evidence through the hermetic
 # in-memory verified snapshot (`VerifiedGraphSnapshot::memory`).
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+
+[[bench]]
+name = "host_transcript_io"
+harness = false

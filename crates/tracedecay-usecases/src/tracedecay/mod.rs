@@ -23,8 +23,8 @@ use tracedecay_application::source_edit::{
     RenameSymbolBindingV1,
 };
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
-use tracedecay_graph_db::GraphCancellation;
 use tracedecay_domain::errors::Result;
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::path_safety::{
     normalize_source_edit_relative_path, source_edit_path_error, source_edit_unsafe_path,
 };

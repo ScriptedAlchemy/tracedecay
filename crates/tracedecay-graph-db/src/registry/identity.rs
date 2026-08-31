@@ -69,7 +69,7 @@ pub(super) fn require_binding(
         || registered_path != requested_path
         || registered_format != requested_format
     {
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::conflict("identity.require_binding"))
     } else {
         Ok(())
     }
@@ -187,7 +187,7 @@ pub(super) fn require_owner_attachment(
         || registration.verified_locator() != attachment.verified_locator()
         || registration.canonical_path() != attachment.canonical_path()
     {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict("identity.require_owner_attachment"));
     }
     Ok(())
 }

@@ -127,9 +127,7 @@ pub fn apply_canonical_summary_source_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_lcm::contracts::{
-        LcmExpandedSummarySource, LcmRawMessage, LcmStorageKind,
-    };
+    use tracedecay_lcm::contracts::{LcmExpandedSummarySource, LcmRawMessage, LcmStorageKind};
 
     fn source(store_id: i64) -> LcmExpandedSummarySource {
         LcmExpandedSummarySource {

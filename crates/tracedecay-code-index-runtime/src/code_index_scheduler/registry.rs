@@ -77,6 +77,29 @@ const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(any(test, feature = "
     Duration::from_mins(10)
 };
 
+/// Whether this activation failure repeats the previous attempt's conflict
+/// verdict for the same sealed generation. A first Conflict can be a race
+/// with a concurrent publisher and retries like any transient failure, but
+/// the same guard site refusing with identical compared evidence on the very
+/// next attempt over the same immutable sealed inputs is deterministic:
+/// retrying re-runs minutes of replay to reach the identical refusal, so the
+/// seat loop converts it into the terminal typed refusal instead of backing
+/// off forever (issue #765).
+pub(crate) fn is_repeated_conflict_verdict(
+    error: &CodeIndexSchedulerErrorV1,
+    seat_generation_id: &tracedecay_domain::CodeGenerationId,
+    last_seat_conflict: Option<&(
+        tracedecay_domain::CodeGenerationId,
+        tracedecay_graph_db::GraphConflictContextV1,
+    )>,
+) -> bool {
+    error.activation_conflict_context().is_some_and(|context| {
+        last_seat_conflict.is_some_and(|(prior_generation, prior_context)| {
+            prior_generation == seat_generation_id && prior_context == context
+        })
+    })
+}
+
 /// How many bounded text-projection slices one pass may run to completion
 /// before the optional graph decode. The projection is finite in the sealed
 /// generation's document count, so this only bounds a non-progressing builder:
@@ -245,13 +268,6 @@ pub mod watch_ingress;
 /// permit overlaps its I/O and publication phases without admitting an
 /// unbounded number of full-width indexing owners.
 const MAX_CONCURRENT_RECONCILE_WORKTREES: usize = 2;
-
-#[hotpath::measure]
-fn bounded_daemon_admission_permits() -> usize {
-    std::thread::available_parallelism().map_or(1, |cores| {
-        cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES)
-    })
-}
 
 #[cfg(test)]
 fn cold_mount_admission_barriers() -> &'static Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Barrier>>> {
@@ -496,6 +512,15 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// is not owner-private) and clears it when a pass progresses, so status
     /// and doctor report a typed parked state instead of indefinite warming.
     convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
+    /// Owner-configuration recovery observed by the scheduler. This stays
+    /// readable while a replacement build owns the scheduler mutex.
+    generation_recovery: Arc<
+        RwLock<
+            Option<
+                tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryV1,
+            >,
+        >,
+    >,
     /// Durable id from the last `Published` broadcast. Serving and text can
     /// lag until graph/text seating; observers of "latest" must not stay on
     /// the prior seated generation after a new id is published.
@@ -2672,6 +2697,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
+        let generation_recovery = opened.generation_recovery();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
         let build_progress = opened.build_progress_slot();
         let historical_generation_owner = opened.historical_generation_owner();
@@ -2813,6 +2839,19 @@ impl CodeIndexSchedulerRegistryV1 {
             // generation that serves text without a native graph to one per
             // generation, so a permanently unactivatable seal cannot spin.
             let mut graph_seat_attempted: Option<tracedecay_domain::CodeGenerationId> = None;
+            // The conflict verdict of the previous failed seat attempt. A
+            // Conflict can be a race (a concurrent publisher advanced the
+            // head) and is retried once like any transient failure, but the
+            // same guard site refusing with identical compared evidence for
+            // the same sealed generation on the very next attempt is a
+            // deterministic verdict that no backoff can outwait. One repeat
+            // converts the retry into the terminal typed refusal below, so
+            // the backoff ceiling can never become an infinite conflict loop
+            // (issue #765).
+            let mut last_seat_conflict: Option<(
+                tracedecay_domain::CodeGenerationId,
+                tracedecay_graph_db::GraphConflictContextV1,
+            )> = None;
             // Bounded retry state for a reconcile whose blocking task unwound.
             // Arbitrary user source runs through the indexing pool, so a panic
             // there is an input fault, not a programmer-contract break: it
@@ -3510,10 +3549,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         Ok(()) => {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                            last_seat_conflict = None;
                         }
                         Err(error) if error.is_graph_activation_refusal() => {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                            last_seat_conflict = None;
                             tracing::warn!(
                                 event = "code_index_graph_activation_refused",
                                 error = %error,
@@ -3521,10 +3562,23 @@ impl CodeIndexSchedulerRegistryV1 {
                             );
                         }
                         Err(error) => {
+                            let seat_generation_id =
+                                latest.generation().manifest().generation_id.clone();
+                            let repeated_conflict = is_repeated_conflict_verdict(
+                                &error,
+                                &seat_generation_id,
+                                last_seat_conflict.as_ref(),
+                            );
                             // The generation just sealed is complete; a retryable
                             // activation failure arms the same seat backoff so the
                             // next passes retry this artifact instead of resealing.
-                            if error.is_retryable_activation() {
+                            // A conflict verdict identical to the previous
+                            // attempt's for this same generation is deterministic
+                            // and falls through to the terminal arm instead.
+                            if error.is_retryable_activation() && !repeated_conflict {
+                                last_seat_conflict = error
+                                    .activation_conflict_context()
+                                    .map(|context| (seat_generation_id, context.clone()));
                                 next_seat_attempt_at = Some(Instant::now() + seat_retry_backoff);
                                 let retry_wake = Arc::clone(&worker_wake);
                                 let retry_delay = seat_retry_backoff;
@@ -3555,13 +3609,25 @@ impl CodeIndexSchedulerRegistryV1 {
                             } else {
                                 next_seat_attempt_at = None;
                                 seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                                last_seat_conflict = None;
                                 latest.mark_graph_activation_unavailable(error.to_string());
-                                tracing::warn!(
-                                    event = "code_index_graph_activation_failed",
-                                    error = %error,
-                                    "graph activation failed terminally; exact and lexical \
-                                     serving remain available with typed graph unavailability"
-                                );
+                                if repeated_conflict {
+                                    tracing::warn!(
+                                        event = "code_index_graph_activation_conflict_terminal",
+                                        error = %error,
+                                        "graph activation repeated an identical conflict \
+                                         verdict for the same sealed generation; retrying \
+                                         cannot succeed, so the generation serves exact and \
+                                         lexical with typed graph unavailability"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        event = "code_index_graph_activation_failed",
+                                        error = %error,
+                                        "graph activation failed terminally; exact and lexical \
+                                         serving remain available with typed graph unavailability"
+                                    );
+                                }
                             }
                         }
                     }
@@ -3825,6 +3891,7 @@ impl CodeIndexSchedulerRegistryV1 {
             last_reconciled_at_micros,
             text_generation,
             convergence_park,
+            generation_recovery,
             published_generation_id,
             serving_source_witness,
             build_progress,
@@ -4604,8 +4671,10 @@ impl CodeIndexSchedulerRegistryV1 {
             last_reconciled_at_micros,
             text_generation,
             convergence_park,
+            generation_recovery,
             build_progress,
             hints,
+            pending_wake,
             graph_activation_enabled,
         ) = {
             let mounted = self.mounted.lock().await;
@@ -4617,8 +4686,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.last_reconciled_at_micros),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.convergence_park),
+                Arc::clone(&worktree.generation_recovery),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.pending_wake),
                 worktree.graph_activation.policy().is_enabled(),
             )
         };
@@ -4641,7 +4712,18 @@ impl CodeIndexSchedulerRegistryV1 {
                 progress
             });
             let refreshing = reconcile_in_progress.load(Ordering::Acquire) != 0;
+            let rebuild_in_flight = refreshing
+                || pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .micros
+                    != 0;
             let parked = convergence_park
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let generation_recovery = generation_recovery
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
@@ -4691,6 +4773,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         worktree_root: canonical_root.display().to_string(),
                         code_graph_serving,
                         last_reconcile_micros,
+                        rebuild_in_flight,
                         staleness_state: Some(
                             if parked.is_some() && !ready {
                                 "parked"
@@ -4720,6 +4803,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .to_owned(),
                         progress,
                         parked,
+                        generation_recovery,
                         ..identity
                     };
                 }
@@ -4777,6 +4861,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree_root: canonical_root.display().to_string(),
                 code_graph_serving,
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
+                rebuild_in_flight,
                 staleness_state: Some(staleness_state.to_owned()),
                 hook_hint_count,
                 coverage: if refreshing {
@@ -4791,6 +4876,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .to_owned(),
                 progress,
                 parked,
+                generation_recovery,
                 ..identity
             }
         })

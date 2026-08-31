@@ -3007,7 +3007,8 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     fn session_sync_service(
         &self,
-    ) -> Arc<OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>> {
+    ) -> Arc<OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>
+    {
         Arc::clone(&self.session_sync_service)
     }
 

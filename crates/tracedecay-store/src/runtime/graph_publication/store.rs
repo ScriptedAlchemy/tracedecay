@@ -1,5 +1,6 @@
 use super::{
-    GraphProjectionIdentityV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphPendingReplayDiscardOutcomeV1, GraphPendingReplayDiscardV1, GraphProjectionIdentityV1,
+    GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationProjectionPageRequestV1, GraphPublicationProjectionPageV1,
     GraphPublicationReplayLookupV1, GraphPublicationReplayPageRequestV1,
     GraphPublicationReplayPageV1, GraphPublicationReplayRecordV1,
@@ -46,6 +47,16 @@ pub trait GraphPublicationStoreV1 {
         request: &GraphPublicationReplayRetirementV1,
         context: &GraphPublicationOperationContextV1<'_>,
     ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1>;
+
+    /// Delete one exact pending journaled replay row that an interrupted
+    /// publisher can never complete, so the journal position reopens for a
+    /// fresh append of the same key. Compare-and-swap shaped: refuses when
+    /// the row completed, was superseded, or moved to another sequence.
+    fn discard_pending_replay(
+        &mut self,
+        request: &GraphPendingReplayDiscardV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> GraphPublicationStoreResultV1<GraphPendingReplayDiscardOutcomeV1>;
 
     fn retired_cleanup_page(
         &mut self,

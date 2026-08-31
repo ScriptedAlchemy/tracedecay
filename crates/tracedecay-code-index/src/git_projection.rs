@@ -162,7 +162,7 @@ impl From<GraphDbError> for GitTopologyProjectionError {
             | GraphDbError::DurabilityUncertain { message }
             | GraphDbError::ProjectionMismatch { message, .. }
             | GraphDbError::GenerationMismatch { message, .. } => Self::Corrupt(message),
-            GraphDbError::Conflict => {
+            GraphDbError::Conflict { .. } => {
                 Self::Unavailable("Git topology publication conflict".to_owned())
             }
             GraphDbError::Unavailable { message }

@@ -303,10 +303,7 @@ impl DaemonEngine {
 
     /// Logs a `daemon_version_skew` event when this handshake's client runs a
     /// different binary version, deduped per distinct client version.
-    pub(super) async fn log_client_version_skew(
-        &self,
-        handshake: &DaemonHandshake,
-    ) -> Result<()> {
+    pub(super) async fn log_client_version_skew(&self, handshake: &DaemonHandshake) -> Result<()> {
         let Some(client_version) = self.client_version_skew_to_log(handshake).await? else {
             return Ok(());
         };
@@ -469,19 +466,25 @@ impl DaemonEngine {
         // wrapper so every profiling feature can compute its layout.
         Box::pin(async move {
             let (project_path, route) = Self::project_route(handshake)?;
-            let exact = {
+            // A route-alias hit returns the mounted server without re-running
+            // registry admission: enrollment was proven when this route was
+            // bound, and a mounted server's continued validity is owned by the
+            // retirement/revocation lifecycle (a retired owner drops its
+            // aliases, so the next request re-enters the admission path
+            // below). Re-checking enrollment per request re-derived registry
+            // and repository identity on every tool call.
+            if let Some(server) = {
                 let mut servers = self.store_administration.project_servers().lock().await;
                 servers
                     .get_route_and_touch_for(&route, requirement)
                     .map(|(_, server)| Arc::clone(server))
-            };
-            self.ensure_registered_project_route(&project_path, handshake.allow_init)
-                .await?;
-            if let Some(server) = exact {
+            } {
                 return Ok(Some(
                     self.activate_project_server(project_path, server).await,
                 ));
             }
+            self.ensure_registered_project_route(&project_path, handshake.allow_init)
+                .await?;
             let Some(key) =
                 resolved_project_server_key(&self.store_administration, &project_path, handshake)
                     .await?
@@ -502,6 +505,34 @@ impl DaemonEngine {
                 self.activate_project_server(project_path, server).await,
             ))
         })
+    }
+
+    /// Route-alias-only lookup for waiters that already hold an in-flight
+    /// open claim. The open composition binds `route -> key` before any heavy
+    /// work and `mark_ready` upgrades the publication in place, so polling
+    /// the alias is sufficient to observe publication. Re-running the full
+    /// resolution (`ensure_registered_project_route` +
+    /// `resolved_project_server_key`) on every wait iteration re-derived
+    /// registry and repository identity dozens of times per warming request.
+    #[hotpath::measure(label = "daemon.engine.route_bound_project_server", future = true)]
+    async fn route_bound_project_server(
+        &self,
+        handshake: &DaemonHandshake,
+        requirement: ProjectServerRequirement,
+    ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
+        let (project_path, route) = Self::project_route(handshake)?;
+        let bound = {
+            let mut servers = self.store_administration.project_servers().lock().await;
+            servers
+                .get_route_and_touch_for(&route, requirement)
+                .map(|(_, server)| Arc::clone(server))
+        };
+        match bound {
+            Some(server) => Ok(Some(
+                self.activate_project_server(project_path, server).await,
+            )),
+            None => Ok(None),
+        }
     }
 
     #[hotpath::measure(label = "daemon.engine.begin_project_open", future = true)]
@@ -628,8 +659,12 @@ impl DaemonEngine {
                 ProjectOpenTaskClaim::InFlight(mut state) => {
                     let publication = async {
                         loop {
+                            // The claim proves an open for this exact route is
+                            // in flight, so each iteration only needs to see
+                            // its publication land on the already-bound route
+                            // alias — never a fresh identity resolution.
                             if let Some(server) = self
-                                .cached_project_server_for_requirement(handshake, requirement)
+                                .route_bound_project_server(handshake, requirement)
                                 .await?
                             {
                                 return Ok(server);

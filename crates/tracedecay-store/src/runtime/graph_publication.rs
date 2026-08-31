@@ -952,6 +952,42 @@ pub enum GraphReplayRetirementOutcomeV1 {
     Missing,
 }
 
+/// Discard request for one exact pending journaled replay row: a publication
+/// journaled by an interrupted publisher that never advanced the verified
+/// head and deterministically refuses to complete. The row is named by both
+/// key and observed sequence so the discard is compare-and-swap shaped —
+/// only the exact row the caller diagnosed is removed, never a row a
+/// concurrent publisher re-journaled since.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphPendingReplayDiscardV1 {
+    pub key: GraphPublicationKeyV1,
+    pub sequence: GraphPublicationSequenceV1,
+}
+
+/// Outcome of discarding one pending journaled replay row. A discard deletes
+/// the row (no tombstone): the publication never took effect, so a fresh
+/// replay for the same key must be able to journal again afterwards.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphPendingReplayDiscardOutcomeV1 {
+    /// The exact pending row and its dependency edges were deleted; the
+    /// journal position is open for a fresh append.
+    Discarded(GraphPublicationReplayRecordV1),
+    /// No active replay row exists for the key: already discarded, retired,
+    /// or never journaled. Idempotent success for a repeated discard.
+    Missing,
+    /// The publication completed and seats the current verified head;
+    /// nothing is poisoned and nothing may be deleted.
+    CurrentVerifiedHead { head: GraphVerifiedHeadV1 },
+    /// The publication completed and was already superseded by a newer
+    /// verified head; the row is history awaiting retirement, not pending.
+    Superseded { head: GraphVerifiedHeadV1 },
+    /// The active row for this key is not the sequence the caller observed;
+    /// the journal moved since the diagnosis and must be re-read.
+    SequenceMismatch {
+        actual: GraphPublicationReplayRecordV1,
+    },
+}
+
 #[cfg(test)]
 #[path = "graph_publication/tests.rs"]
 mod tests;

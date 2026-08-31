@@ -210,6 +210,14 @@ impl GraphPublicationStoreV1 for ExactRecoveredDigestMismatch<'_> {
         self.inner.retire_replay(request, context)
     }
 
+    fn discard_pending_replay(
+        &mut self,
+        request: &tracedecay_store::GraphPendingReplayDiscardV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> GraphPublicationStoreResultV1<tracedecay_store::GraphPendingReplayDiscardOutcomeV1> {
+        self.inner.discard_pending_replay(request, context)
+    }
+
     fn retired_cleanup_page(
         &mut self,
         request: &GraphPublicationRetiredCleanupPageRequestV1,

@@ -1750,11 +1750,9 @@ pub async fn build_store_census(
     let projects = db.list_code_projects(usize::MAX).await?;
     build_store_census_for_projects(db, profile_root, &projects, None)
         .await?
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: "unbounded store census was unexpectedly interrupted".to_owned(),
-            },
-        )
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "unbounded store census was unexpectedly interrupted".to_owned(),
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -1781,11 +1779,9 @@ pub async fn build_store_census_page(
         .flatten();
     let entries = build_store_census_for_projects(db, profile_root, &projects, None)
         .await?
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: "unbounded store census page was unexpectedly interrupted".to_owned(),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "unbounded store census page was unexpectedly interrupted".to_owned(),
+        })?;
     Ok(StoreCensusPageV1 {
         entries,
         next_cursor,
@@ -1972,11 +1968,9 @@ async fn inspect_store_leaf_cheap(
     tokio::task::spawn_blocking(move || inspect_store_leaf_cheap_sync(&profile_root, &data_root))
         .await
         .map(Some)
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("store census inspect join failed: {error}"),
-            },
-        )
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("store census inspect join failed: {error}"),
+        })
 }
 
 async fn attach_lazy_content_fences(

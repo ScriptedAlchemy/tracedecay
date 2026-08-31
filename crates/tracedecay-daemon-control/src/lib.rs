@@ -84,8 +84,7 @@ mod service;
 pub use core_handshake::handshake_for_current_client;
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, MaintenanceWindowOutcome, QuiescedDaemonLifecycle,
-    daemon_reachable,
-    default_socket_path, install_service, install_service_under_lease,
+    daemon_reachable, default_socket_path, install_service, install_service_under_lease,
     installed_service_socket_path, installed_service_state, prepare_scoop_package_service,
     quiesce_installed_service_before_lease, refresh_installed_service_under_lease_with_state,
     restore_installed_service_after_update, restore_scoop_package_service, service_spec,

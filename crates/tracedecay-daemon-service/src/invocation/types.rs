@@ -227,10 +227,7 @@ impl BoundedHookOrchestratorV1 {
     }
 
     #[hotpath::measure(label = "daemon.service.hooks.admit")]
-    pub fn admit(
-        &self,
-        mut request: HookOrchestrationRequestV1,
-    ) -> HookOrchestrationAdmissionV1 {
+    pub fn admit(&self, mut request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
         let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
             return HookOrchestrationAdmissionV1::Unavailable;
         };
@@ -701,9 +698,7 @@ impl RegisteredFeedbackRuntime {
         DaemonFeedbackInvocationOwner::new(self.project_id.clone(), self.runtime.owner())
     }
 
-    pub fn source_observation_port(
-        &self,
-    ) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
+    pub fn source_observation_port(&self) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
         self.runtime.source_observation_port()
     }
 }
@@ -735,11 +730,7 @@ pub struct InvocationProjectRuntimeIdentityV1 {
 }
 
 impl InvocationProjectRuntimeIdentityV1 {
-    pub fn new(
-        profile_id: UserProfileId,
-        project_id: ProjectId,
-        project_root: PathBuf,
-    ) -> Self {
+    pub fn new(profile_id: UserProfileId, project_id: ProjectId, project_root: PathBuf) -> Self {
         Self {
             profile_id,
             project_id,
@@ -927,10 +918,7 @@ impl LspLeaseTaskRegistry {
         Ok(())
     }
 
-    pub async fn cancel(
-        &self,
-        session_id: &LspSessionId,
-    ) -> Result<(), DaemonInvocationProblem> {
+    pub async fn cancel(&self, session_id: &LspSessionId) -> Result<(), DaemonInvocationProblem> {
         self.stop_generation(session_id, None).await
     }
 

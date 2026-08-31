@@ -150,7 +150,9 @@ pub enum ProjectRegistryListingOutcome {
 pub enum ProjectRegistryContextOutcome {
     Context(Box<ProjectRegistryContextView>),
     /// The registry answered, and no registered project matches the selector.
-    NotFound { registry_path: PathBuf },
+    NotFound {
+        registry_path: PathBuf,
+    },
     RegistryUnavailable,
 }
 

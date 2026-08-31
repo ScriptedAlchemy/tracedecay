@@ -46,6 +46,19 @@ pub(super) fn log_code_generation_retention_degraded(failure: &str) {
     );
 }
 
+/// Shared deferral for a held graph-replay pool: the outer probe and the
+/// collection executor's typed busy result arm the same backoff and must
+/// not keep the daemon writer gate.
+pub(super) fn defer_graph_replay_pool_busy(
+    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    project_root: &Path,
+) -> super::CodeGenerationRetentionOutcomeV1 {
+    observations.record_graph_replay_release_unhealthy(project_root);
+    hotpath::gauge!("daemon.git.maintenance.replay_pool_busy_total").inc(1_u64);
+    log_code_generation_retention_degraded("graph_replay_pool_busy");
+    super::CodeGenerationRetentionOutcomeV1::Failed
+}
+
 /// The degraded event with the typed error attached. A bare failure label
 /// proved undiagnosable in production: `graph_replay_release_failed` recurred
 /// on every retention tick with no way to tell an unregistered graph shard
@@ -82,9 +95,10 @@ fn release_failure_is_runtime_unhealthy(error: &tracedecay_graph_db::GraphDbErro
 /// stayed wedged — and the collection executor behind it would park on the
 /// same lock's *deadline-free* blocking flock. One `try_lock` answers the
 /// same question for the cost of a syscall, before any full-digest planning
-/// is paid. The probe lock is dropped immediately; the later acquisitions
-/// re-take it, and the microsecond race window merely degrades to the old
-/// blocking behavior.
+/// is paid. The probe lock is dropped immediately; later acquisitions re-take
+/// it under a checked, budget-capped wait so a publisher that wins the
+/// probe-to-execute window defers with `GraphReplayPoolBusy` instead of
+/// pinning the daemon writer gate.
 #[hotpath::measure(label = "daemon.git.maintenance.replay_pool_probe")]
 pub(super) fn replay_pool_is_held(replay_pool_root: &Path) -> bool {
     if !replay_pool_root.is_dir() {
@@ -102,10 +116,7 @@ pub(super) fn replay_pool_is_held(replay_pool_root: &Path) -> bool {
     }
 }
 
-#[hotpath::measure(
-    label = "daemon.git.maintenance.graph_replay_release",
-    future = true
-)]
+#[hotpath::measure(label = "daemon.git.maintenance.graph_replay_release", future = true)]
 pub(super) async fn reconcile_graph_replay_releases(
     graph: &TraceDecay,
     store_root: &Path,

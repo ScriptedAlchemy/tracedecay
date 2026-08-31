@@ -408,7 +408,7 @@ pub async fn hook_prompt_submit() -> i32 {
         Ok(super::HookStdinRead::Oversized) => {
             eprintln!(
                 "tracedecay hook: stdin exceeds wire message bound ({})",
-                tracedecay_daemon_protocol::wire::WIRE_RECORD_TOO_LARGE
+                tracedecay_framing::WIRE_RECORD_TOO_LARGE
             );
             return 1;
         }
@@ -458,7 +458,7 @@ pub async fn hook_stop() -> i32 {
         Ok(super::HookStdinRead::Oversized) => {
             eprintln!(
                 "tracedecay hook: stdin exceeds wire message bound ({})",
-                tracedecay_daemon_protocol::wire::WIRE_RECORD_TOO_LARGE
+                tracedecay_framing::WIRE_RECORD_TOO_LARGE
             );
             return 1;
         }

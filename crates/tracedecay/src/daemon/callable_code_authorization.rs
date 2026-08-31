@@ -12,10 +12,10 @@ use tracedecay_application::{
 use tracedecay_daemon_service::callable_code_request_context;
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
+use tracedecay_graph_query::CodeGraphReadError;
 use tracedecay_usecases::configuration::{
     ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
 };
-use tracedecay_graph_query::CodeGraphReadError;
 use tracedecay_usecases::{
     CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
     ProjectSourceAccessSnapshot,

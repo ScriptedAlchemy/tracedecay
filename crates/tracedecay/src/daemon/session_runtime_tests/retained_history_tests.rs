@@ -414,6 +414,77 @@ async fn shutdown_cancels_and_joins_in_flight_history_pass() {
     assert!(ingestor.exited.load(Ordering::Acquire));
 }
 
+/// A saturated daemon-wide historical-ingest admission defers the pass as
+/// typed retryable state — the ingestor never runs, the worker keeps cycling
+/// (serving stays available) — and the deferred pass runs once a permit
+/// frees, so a huge backlog on other stores cannot wedge this one.
+#[tokio::test]
+async fn saturated_history_admission_defers_the_pass_and_resumes() {
+    let temp = TempDir::new().unwrap();
+    let authority = profile_authority(&temp, "history-admission-saturated").await;
+    let ingestor = Arc::new(ScriptedHistoricalIngestor::new([
+        SessionHistoricalIngestOutcome::Complete,
+    ]));
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let admission = registry.historical_ingest_admission();
+    let permits = u32::try_from(admission.available_permits()).unwrap();
+    assert!(permits > 0, "the historical ingest admission is bounded");
+    let held = admission
+        .try_acquire_many(permits)
+        .expect("occupy every historical ingest permit");
+
+    let wake = registry
+        .ensure_profile_with_history(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+            ingestor.clone(),
+        )
+        .await;
+
+    let saturated = SessionProjectionServingState::Stale {
+        reason: SessionProjectionStaleReason::HistoricalRetry {
+            reason_code: "history_admission_saturated".to_owned(),
+        },
+    };
+    assert!(
+        wait_until(
+            || wake.serving_status().state == saturated,
+            Duration::from_secs(2),
+        )
+        .await,
+        "the deferred pass must surface as typed retryable staleness"
+    );
+    assert_eq!(
+        ingestor.passes.load(Ordering::Acquire),
+        0,
+        "a saturated admission must not run the historical pass"
+    );
+    assert!(
+        registry
+            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
+            .await,
+        "the worker keeps serving between deferred history retries"
+    );
+    assert_eq!(ingestor.passes.load(Ordering::Acquire), 0);
+
+    drop(held);
+    assert!(
+        wait_until(
+            || ingestor.passes.load(Ordering::Acquire) >= 1,
+            Duration::from_secs(2),
+        )
+        .await,
+        "the deferred pass must run once a permit frees"
+    );
+    assert!(
+        registry
+            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
+            .await
+    );
+
+    registry.shutdown().await;
+}
+
 #[tokio::test]
 async fn retrying_history_is_typed_stale() {
     let temp = TempDir::new().unwrap();

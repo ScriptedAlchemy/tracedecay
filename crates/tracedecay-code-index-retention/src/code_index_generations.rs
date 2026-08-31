@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -66,15 +67,17 @@ pub use text_artifacts::{
 };
 
 use generation_transactions::{
-    GENERATION_RECEIPT_STORE, acquire_graph_replay_pool_lock, cleanup_committed_transaction,
-    cleanup_committed_transaction_under_graph_replay_pool_lock, clear_transaction,
-    expose_staged_generations_under_graph_replay_pool_lock, load_transaction,
+    GENERATION_RECEIPT_STORE, acquire_graph_replay_pool_lock_checked,
+    cleanup_committed_transaction, cleanup_committed_transaction_under_graph_replay_pool_lock,
+    clear_transaction, expose_staged_generations_under_graph_replay_pool_lock, load_transaction,
     open_file_sha256_hex_cancellable, path_still_names_open_file, persist_transaction,
     receipt_is_durable, regular_file_exists, remove_empty_stage_root, rollback_staged_transaction,
     stage_collectable_generations, transaction_path, write_receipt,
 };
 #[cfg(test)]
-use generation_transactions::{transaction_stage_root, verify_existing_graph_replay_pool_entry};
+use generation_transactions::{
+    acquire_graph_replay_pool_lock, transaction_stage_root, verify_existing_graph_replay_pool_entry,
+};
 use receipt_store::receipt_digest_file_component;
 use scope_roots::is_code_index_scope_hash;
 #[cfg(test)]
@@ -111,6 +114,17 @@ pub const CODE_TEXT_ARTIFACTS_DIRECTORY_V1: &str = "code-text-artifacts-v1";
 /// temporarily unavailable; only a scope that has been quiet for this long is
 /// treated as abandoned rather than idle.
 pub const DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// How long collection may poll a held graph-replay pool before deferring.
+///
+/// Publication hashes multi-GiB seals under this lock. Waiting that out
+/// behind the daemon writer gate is the remaining TOCTOU after the outer
+/// non-blocking probe: the executor must bound its own acquire instead of
+/// falling back to a deadline-free blocking flock.
+pub const GRAPH_REPLAY_POOL_ACQUIRE_BUDGET: Duration = Duration::from_millis(50);
+
+/// Pause between non-blocking pool-lock probes while the acquire budget remains.
+pub const GRAPH_REPLAY_POOL_ACQUIRE_POLL: Duration = Duration::from_millis(5);
 
 const ACTIVE_POINTER_FILE: &str = "active-code-generation-v1.json";
 const GENERATIONS_DIRECTORY: &str = "code-generations-v1";
@@ -333,6 +347,8 @@ pub enum CodeGenerationRetentionErrorV1 {
     Conflict(String),
     #[error("code-generation retention cancelled")]
     Cancelled,
+    #[error("code-generation retention deferred: graph replay pool is busy")]
+    GraphReplayPoolBusy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1011,9 +1027,18 @@ pub fn execute_code_generation_retention_cancellable(
         // Canonical order is code-generation store first, then graph replay
         // pool. Hold the pool lock through durable release publication and
         // committed cleanup so the reconciler cannot race an orphaning unlink.
-        let graph_replay_pool_lock = graph_replay_pool_root
-            .map(acquire_graph_replay_pool_lock)
-            .transpose()?;
+        // Acquire is checked and budget-capped: a publisher that took the
+        // pool after the outer non-blocking probe must not park this
+        // executor on a deadline-free flock while the daemon writer gate
+        // stays held.
+        let graph_replay_pool_lock = match graph_replay_pool_root {
+            Some(pool_root) => Some(acquire_graph_replay_pool_lock_checked(
+                pool_root,
+                Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+                is_cancelled,
+            )?),
+            None => None,
+        };
         persist_transaction(store_root, &transaction)?;
 
         let result = (|| {
@@ -1126,6 +1151,7 @@ fn recover_code_generation_retention_cancellable(
         store_root,
         vector_readable_sources,
         graph_replay_pool_root,
+        is_cancelled,
     )?;
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -1269,6 +1295,7 @@ fn recover_pending_transaction_unlocked(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     graph_replay_pool_root: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let Some(transaction) = load_transaction(store_root)? else {
         return Ok(());
@@ -1280,6 +1307,7 @@ fn recover_pending_transaction_unlocked(
             &transaction,
             vector_readable_sources,
             graph_replay_pool_root,
+            is_cancelled,
         )?;
     } else {
         rollback_staged_transaction(store_root, &transaction, graph_replay_pool_root)?;

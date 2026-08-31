@@ -431,14 +431,14 @@ impl GraphGenerationManifest {
         if publication.direct_dependency_generations
             != manifest.relational_dependency_generations(&projection.shard_id)?
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("generation.from_replay"));
         }
         if publication.dependency_generation_closure_digest.as_str()
             != manifest.dependency_closure_digest(check)?.as_str()
             || publication.expected_recovered_digest.as_str()
                 != manifest.expected_recovered_digest(check)?.as_str()
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("generation.from_replay"));
         }
         check()?;
         crate::hotpath_observe::record_counts(

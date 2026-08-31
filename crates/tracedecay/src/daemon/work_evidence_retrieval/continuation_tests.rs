@@ -96,8 +96,10 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
         .session_request_scope()
         .expect("resolved Work scope");
     let retrieval =
-        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(database, root, None)
-            .expect("mounted project retrieval service");
+        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
+            database, root, None,
+        )
+        .expect("mounted project retrieval service");
     let adapter = DaemonWorkEvidenceRetrievalV1::new(Arc::new(retrieval)).with_federated_authority(
         Arc::new(StaticFederatedAuthority(Arc::new(federated_authority(
             id::<PrivacyDomainId>("privacy.work-task-session-continuation"),

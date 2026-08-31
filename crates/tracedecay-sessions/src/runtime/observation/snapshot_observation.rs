@@ -16,7 +16,7 @@ use crate::runtime::SessionMessageRecord;
 use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
 };
-use tracedecay_daemon_protocol::wire::{WireReadOutcome, read_bounded_to_string};
+use tracedecay_framing::{WireReadOutcome, read_bounded_to_string};
 use tracedecay_runtime_core::privacy::ObservationRecordParseErrorV1;
 
 mod admission;

@@ -1,8 +1,6 @@
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::ParseOffset;
-use tracedecay_runtime_core::db::engine::{Executor, params};
-use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_lcm::{
     LCM_SCHEMA_VERSION, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError,
     LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
@@ -10,6 +8,8 @@ use tracedecay_lcm::{
     LcmSessionReplayRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
     MAX_DERIVED_SNIPPET_CHARS,
 };
+use tracedecay_runtime_core::db::engine::{Executor, params};
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 use crate::common::{self, lcm_dag_message as raw_message};

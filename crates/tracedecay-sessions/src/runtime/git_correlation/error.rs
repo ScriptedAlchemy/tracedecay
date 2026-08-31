@@ -62,8 +62,8 @@ impl From<tracedecay_graph_db::GraphDbError> for GitCorrelationError {
             | GraphDbError::DurabilityUncertain { message }
             | GraphDbError::ProjectionMismatch { message, .. }
             | GraphDbError::GenerationMismatch { message, .. } => Self::Corrupt(message),
-            GraphDbError::Conflict => {
-                Self::Unavailable("Git evidence publication conflict".to_owned())
+            GraphDbError::Conflict { context } => {
+                Self::Unavailable(format!("Git evidence publication conflict {context}"))
             }
             GraphDbError::Unavailable { message }
             | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),

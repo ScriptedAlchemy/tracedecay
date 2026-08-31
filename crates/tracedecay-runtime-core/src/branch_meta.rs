@@ -739,7 +739,10 @@ mod tests {
         update_synced_timestamp_with(dir.path(), "feature/foo", || {
             let error = crate::branch::try_acquire_branch_add_lock(dir.path())
                 .expect_err("timestamp update must already own the shared branch lock");
-            observed_contention = matches!(error, tracedecay_domain::errors::TraceDecayError::SyncLock { .. });
+            observed_contention = matches!(
+                error,
+                tracedecay_domain::errors::TraceDecayError::SyncLock { .. }
+            );
         });
 
         assert!(observed_contention);

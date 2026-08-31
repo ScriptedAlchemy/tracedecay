@@ -12,13 +12,13 @@ use tracedecay_store::{
 use super::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1, StoreRuntimeClientLease,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use crate::store_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
     StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
     StoreRuntimeResolver, StoreRuntimeRetirementTarget,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]

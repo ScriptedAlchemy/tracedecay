@@ -70,11 +70,11 @@ pub use retrieval_emit::{
     record_retrieval_ablation, record_retrieval_planner, record_retrieval_source,
     record_retrieval_synthesis, record_retriever,
 };
-pub use tracedecay_session_memory::observability_store::RegisteredObservabilityPortV1;
 pub use tracedecay_global_db::{
     DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,
     PendingDeliverySourceReceiptV1,
 };
+pub use tracedecay_session_memory::observability_store::RegisteredObservabilityPortV1;
 pub use work_blocked_interval_emit::{
     record_work_blocked_interval_observation, work_blocked_interval_observation_envelope,
 };

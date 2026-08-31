@@ -23,8 +23,8 @@ pub(super) fn validate_codex_automation_flags(
     Ok(())
 }
 
-pub(super) fn validate_codex_automation_project_path()
--> tracedecay_domain::errors::Result<PathBuf> {
+pub(super) fn validate_codex_automation_project_path() -> tracedecay_domain::errors::Result<PathBuf>
+{
     let project_path = std::env::current_dir().map_err(|e| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("could not determine current project directory: {e}"),

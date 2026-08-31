@@ -123,7 +123,7 @@ impl VerifiedGenerationState {
         lease: &Arc<VerifiedGenerationLease>,
     ) -> Result<(), GraphDbError> {
         if self.retiring.contains(&lease.locator) || self.collected.contains(&lease.locator) {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("lease.remember"));
         }
         self.quarantined.remove(&lease.locator);
         self.known
@@ -377,7 +377,7 @@ impl VerifiedGraphSnapshot {
         request: TraversalRequest,
     ) -> Result<VerifiedTraversalResult, GraphDbError> {
         if request.namespace != self.head.locator.projection.namespace {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("lease.traverse"));
         }
         self.with_operation(|| {
             // A dependency-free snapshot's whole closure is one generation,
@@ -592,7 +592,7 @@ impl VerifiedGraphSnapshot {
         if namespace != &self.head.locator.projection.namespace
             || projection != &self.head.locator.projection.projection
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("lease.require_head_projection"));
         }
         Ok(())
     }

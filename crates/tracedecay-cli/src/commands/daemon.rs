@@ -58,10 +58,11 @@ pub(crate) fn retained_tool_payload<T: DeserializeOwned>(
     tool_name: &str,
     reply: Value,
 ) -> tracedecay_domain::errors::Result<T> {
-    let decode_error =
-        |context: &str, error: serde_json::Error| tracedecay_domain::errors::TraceDecayError::Config {
+    let decode_error = |context: &str, error: serde_json::Error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("daemon tool {tool_name} returned {context}: {error}"),
-        };
+        }
+    };
     if reply.get("problem").is_some() {
         let envelope: ApplicationProblemEnvelope = serde_json::from_value(reply)
             .map_err(|error| decode_error("an undecodable problem envelope", error))?;
@@ -82,11 +83,12 @@ pub(crate) fn retained_tool_payload<T: DeserializeOwned>(
             });
         }
     };
-    let payload = packet
-        .payload
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} omitted its evidence payload"),
-        })?;
+    let payload =
+        packet
+            .payload
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("daemon tool {tool_name} omitted its evidence payload"),
+            })?;
     serde_json::from_value(payload).map_err(|error| decode_error("an undecodable payload", error))
 }
 
@@ -148,13 +150,11 @@ async fn recover_truncated_payload(
     let handle = payload
         .get("handle")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "daemon tool {tool_name} returned truncated JSON without a retrieval handle"
-                ),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "daemon tool {tool_name} returned truncated JSON without a retrieval handle"
+            ),
+        })?;
     let arguments = serde_json::json!({ "handle": handle, "format": "json" });
     let retrieved = match deadline {
         Some(deadline) => {
@@ -181,11 +181,9 @@ async fn recover_truncated_payload(
     let content = retrieved
         .get("content")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("daemon retrieval for {tool_name} omitted response content"),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("daemon retrieval for {tool_name} omitted response content"),
+        })?;
     serde_json::from_str(content).map_err(Into::into)
 }
 
@@ -212,11 +210,9 @@ pub(crate) async fn recover_truncated_mcp_result(
     let blocks = recovered_result
         .get_mut("content")
         .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("daemon tool {tool_name} returned no content blocks"),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned no content blocks"),
+        })?;
     let mut replaced = false;
     for block in blocks {
         let Some(block_text) = block.get("text").and_then(serde_json::Value::as_str) else {

@@ -44,7 +44,9 @@ pub(super) fn validate_semantic_native_batch(
             GraphMutation::UpsertEntity(entity) => {
                 entity.validate()?;
                 if entities.insert(entity.identity.as_str(), entity).is_some() {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "native_contract.validate_semantic_native_batch",
+                    ));
                 }
             }
             GraphMutation::UpsertRelation(relation) => {
@@ -53,23 +55,31 @@ pub(super) fn validate_semantic_native_batch(
                     .insert(relation.identity.as_str(), relation)
                     .is_some()
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "native_contract.validate_semantic_native_batch",
+                    ));
                 }
             }
             GraphMutation::DeleteEntity(_) | GraphMutation::DeleteRelation(_) => {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict(
+                    "native_contract.validate_semantic_native_batch",
+                ));
             }
         }
     }
 
-    let control = entities.remove(CONTROL_ID).ok_or(GraphDbError::Conflict)?;
+    let control = entities.remove(CONTROL_ID).ok_or(GraphDbError::conflict(
+        "native_contract.validate_semantic_native_batch",
+    ))?;
     require_labels(control, &[CONTROL_LABEL])?;
     require_properties(control, &[REVISION])?;
     require_nonnegative_i64(control, REVISION)?;
 
     let owner = entities
         .remove(owner_id.as_str())
-        .ok_or(GraphDbError::Conflict)?;
+        .ok_or(GraphDbError::conflict(
+            "native_contract.validate_semantic_native_batch",
+        ))?;
     require_labels(owner, &[GENERATION_LABEL])?;
     require_properties(
         owner,
@@ -114,14 +124,18 @@ pub(super) fn validate_semantic_native_batch(
 
     let receipt_row = entities
         .remove(receipt_id.as_str())
-        .ok_or(GraphDbError::Conflict)?;
+        .ok_or(GraphDbError::conflict(
+            "native_contract.validate_semantic_native_batch",
+        ))?;
     require_labels(receipt_row, &[GENERATION_RECEIPT_LABEL])?;
     require_properties(receipt_row, &[GENERATION_ID, RECEIPT, ORDINAL])?;
     require_string(receipt_row, GENERATION_ID, generation)?;
     require_i64(
         receipt_row,
         ORDINAL,
-        i64::try_from(receipt.key.ordinal).map_err(|_| GraphDbError::Conflict)?,
+        i64::try_from(receipt.key.ordinal).map_err(|_| {
+            GraphDbError::conflict("native_contract.validate_semantic_native_batch")
+        })?,
     )?;
     let projection_receipt = decode_generation_receipt(receipt_row)?;
     validate_projection_receipt(plan, receipt, &target_projection, &projection_receipt)?;
@@ -142,7 +156,9 @@ pub(super) fn validate_semantic_native_batch(
                 .to_string();
                 let effect = entities
                     .remove(effect_id.as_str())
-                    .ok_or(GraphDbError::Conflict)?;
+                    .ok_or(GraphDbError::conflict(
+                        "native_contract.validate_semantic_native_batch",
+                    ))?;
                 validate_vector_effect(
                     effect,
                     generation,
@@ -153,7 +169,9 @@ pub(super) fn validate_semantic_native_batch(
                     chunk
                         .output_digest
                         .as_ref()
-                        .ok_or(GraphDbError::Conflict)?
+                        .ok_or(GraphDbError::conflict(
+                            "native_contract.validate_semantic_native_batch",
+                        ))?
                         .as_str(),
                     expected_dimension,
                     expected_metric,
@@ -171,7 +189,9 @@ pub(super) fn validate_semantic_native_batch(
                 .to_string();
                 let effect = entities
                     .remove(effect_id.as_str())
-                    .ok_or(GraphDbError::Conflict)?;
+                    .ok_or(GraphDbError::conflict(
+                        "native_contract.validate_semantic_native_batch",
+                    ))?;
                 validate_tombstone_effect(
                     effect,
                     generation,
@@ -183,7 +203,9 @@ pub(super) fn validate_semantic_native_batch(
         }
     }
     if !entities.is_empty() {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "native_contract.validate_semantic_native_batch",
+        ));
     }
 
     require_relation(
@@ -210,7 +232,9 @@ pub(super) fn validate_semantic_native_batch(
         )?;
     }
     if !relations.is_empty() {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "native_contract.validate_semantic_native_batch",
+        ));
     }
     Ok(())
 }
@@ -221,9 +245,10 @@ fn validate_embedding_admission(
     target: &ProjectionKeyV1,
     embedding: &AdmittedEmbeddingProjectionKeyV1,
 ) -> Result<(), GraphDbError> {
-    let embedding_digest = canonical_sha256(embedding).map_err(|_| GraphDbError::Conflict)?;
-    let privacy_digest =
-        canonical_sha256(embedding.privacy_domain()).map_err(|_| GraphDbError::Conflict)?;
+    let embedding_digest = canonical_sha256(embedding)
+        .map_err(|_| GraphDbError::conflict("native_contract.validate_embedding_admission"))?;
+    let privacy_digest = canonical_sha256(embedding.privacy_domain())
+        .map_err(|_| GraphDbError::conflict("native_contract.validate_embedding_admission"))?;
     let key = embedding.embedding_key();
     if embedding.projection_key() != target
         || target.profile_digest.as_str() != plan.recipe.projection_manifest_digest.as_str()
@@ -233,7 +258,9 @@ fn validate_embedding_admission(
         || privacy_digest.as_str() != plan.recipe.privacy_domain_digest.as_str()
         || embedding.privacy_key_epoch() != plan.recipe.privacy_key_epoch
     {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "native_contract.validate_embedding_admission",
+        ));
     }
     Ok(())
 }
@@ -251,7 +278,8 @@ fn validate_projection_receipt(
     // self-consistent. They are equal only for a one-batch corpus.
     if &projection.target_projection_key != target
         || projection.source_generation.to_string() != plan.source_generation.as_str()
-        || projection_batch_publication_digest(projection).map_err(|_| GraphDbError::Conflict)?
+        || projection_batch_publication_digest(projection)
+            .map_err(|_| GraphDbError::conflict("native_contract.validate_projection_receipt"))?
             != projection.publication_digest
         || projection.receipts.len() != stage.chunks.len()
         || projection
@@ -266,9 +294,11 @@ fn validate_projection_receipt(
                     .filter(|chunk| chunk.operation == ProjectionOperationV1::Reused)
                     .count(),
             )
-            .map_err(|_| GraphDbError::Conflict)?
+            .map_err(|_| GraphDbError::conflict("native_contract.validate_projection_receipt"))?
     {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "native_contract.validate_projection_receipt",
+        ));
     }
     for (native, durable) in projection.receipts.iter().zip(&stage.chunks) {
         let operation_matches = matches!(
@@ -336,7 +366,9 @@ fn validate_projection_receipt(
             || native.source_generation != projection.source_generation
             || native.source_manifest_digest != projection.source_manifest_digest
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "native_contract.validate_projection_receipt",
+            ));
         }
     }
     Ok(())
@@ -378,19 +410,23 @@ fn validate_vector_effect(
                 && vector.metric == metric
                 && semantic_vector_output_digest(
                     projection,
-                    &CodeSearchChunkId::try_from(chunk_id.to_owned())
-                        .map_err(|_| GraphDbError::Conflict)?,
-                    &ContentDigest::try_from(chunk_digest.to_owned())
-                        .map_err(|_| GraphDbError::Conflict)?,
+                    &CodeSearchChunkId::try_from(chunk_id.to_owned()).map_err(|_| {
+                        GraphDbError::conflict("native_contract.validate_vector_effect")
+                    })?,
+                    &ContentDigest::try_from(chunk_digest.to_owned()).map_err(|_| {
+                        GraphDbError::conflict("native_contract.validate_vector_effect")
+                    })?,
                     &vector.values,
                 )
-                .map_err(|_| GraphDbError::Conflict)?
+                .map_err(|_| GraphDbError::conflict("native_contract.validate_vector_effect"))?
                 .as_str()
                     == output_digest =>
         {
             Ok(())
         }
-        _ => Err(GraphDbError::Conflict),
+        _ => Err(GraphDbError::conflict(
+            "native_contract.validate_vector_effect",
+        )),
     }
 }
 
@@ -420,13 +456,13 @@ fn require_relation<'a>(
     let id = semantic_vector_native::relation_id(&from_id, &to_id, kind, discriminator)?;
     let relation = relations
         .remove(id.as_str())
-        .ok_or(GraphDbError::Conflict)?;
+        .ok_or(GraphDbError::conflict("native_contract.require_relation"))?;
     if relation.from.as_str() != from
         || relation.to.as_str() != to
         || relation.kind.as_str() != kind
         || !relation.properties.is_empty()
     {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict("native_contract.require_relation"));
     }
     Ok(())
 }
@@ -442,7 +478,7 @@ fn require_labels(entity: &GraphEntity, expected: &[&str]) -> Result<(), GraphDb
     if actual == expected {
         Ok(())
     } else {
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::conflict("native_contract.require_labels"))
     }
 }
 
@@ -457,7 +493,7 @@ fn require_properties(entity: &GraphEntity, expected: &[&str]) -> Result<(), Gra
     if actual == expected {
         Ok(())
     } else {
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::conflict("native_contract.require_properties"))
     }
 }
 
@@ -466,14 +502,14 @@ fn property<'a>(entity: &'a GraphEntity, name: &str) -> Result<&'a GraphProperty
         .properties
         .iter()
         .find_map(|(key, value)| (key.as_str() == name).then_some(value))
-        .ok_or(GraphDbError::Conflict)
+        .ok_or(GraphDbError::conflict("native_contract.property"))
 }
 
 #[hotpath::measure]
 fn require_string(entity: &GraphEntity, name: &str, expected: &str) -> Result<(), GraphDbError> {
     match property(entity, name)? {
         GraphProperty::String(actual) if actual == expected => Ok(()),
-        _ => Err(GraphDbError::Conflict),
+        _ => Err(GraphDbError::conflict("native_contract.require_string")),
     }
 }
 
@@ -481,7 +517,7 @@ fn require_string(entity: &GraphEntity, name: &str, expected: &str) -> Result<()
 fn require_i64(entity: &GraphEntity, name: &str, expected: i64) -> Result<(), GraphDbError> {
     match property(entity, name)? {
         GraphProperty::I64(actual) if *actual == expected => Ok(()),
-        _ => Err(GraphDbError::Conflict),
+        _ => Err(GraphDbError::conflict("native_contract.require_i64")),
     }
 }
 
@@ -489,7 +525,9 @@ fn require_i64(entity: &GraphEntity, name: &str, expected: i64) -> Result<(), Gr
 fn require_nonnegative_i64(entity: &GraphEntity, name: &str) -> Result<(), GraphDbError> {
     match property(entity, name)? {
         GraphProperty::I64(actual) if *actual >= 0 => Ok(()),
-        _ => Err(GraphDbError::Conflict),
+        _ => Err(GraphDbError::conflict(
+            "native_contract.require_nonnegative_i64",
+        )),
     }
 }
 
@@ -497,7 +535,7 @@ fn require_nonnegative_i64(entity: &GraphEntity, name: &str) -> Result<(), Graph
 fn require_bytes(entity: &GraphEntity, name: &str) -> Result<(), GraphDbError> {
     match property(entity, name)? {
         GraphProperty::Bytes(_) => Ok(()),
-        _ => Err(GraphDbError::Conflict),
+        _ => Err(GraphDbError::conflict("native_contract.require_bytes")),
     }
 }
 
@@ -506,10 +544,9 @@ fn decode_bytes<T: serde::de::DeserializeOwned>(
     name: &str,
 ) -> Result<T, GraphDbError> {
     match property(entity, name)? {
-        GraphProperty::Bytes(bytes) => {
-            serde_json::from_slice(bytes).map_err(|_| GraphDbError::Conflict)
-        }
-        _ => Err(GraphDbError::Conflict),
+        GraphProperty::Bytes(bytes) => serde_json::from_slice(bytes)
+            .map_err(|_| GraphDbError::conflict("native_contract.decode_bytes")),
+        _ => Err(GraphDbError::conflict("native_contract.decode_bytes")),
     }
 }
 
@@ -519,7 +556,9 @@ fn decode_generation_receipt(
 ) -> Result<ProjectionBatchReceiptV1, GraphDbError> {
     match property(entity, RECEIPT)? {
         GraphProperty::Bytes(bytes) => semantic_vector_native::decode_generation_receipt(bytes),
-        _ => Err(GraphDbError::Conflict),
+        _ => Err(GraphDbError::conflict(
+            "native_contract.decode_generation_receipt",
+        )),
     }
 }
 

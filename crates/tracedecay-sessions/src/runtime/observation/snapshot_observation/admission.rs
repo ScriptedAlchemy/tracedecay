@@ -15,7 +15,10 @@ use crate::observation::{
 };
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::source::{FileDiscoveryReport, TranscriptIngestError, TranscriptIngestResult};
+use crate::runtime::source::{
+    FileDiscoveryReport, TranscriptIngestError, TranscriptIngestResult,
+    run_blocking_transcript_section,
+};
 
 use super::{canonical_snapshot_envelope, host_admission_error};
 
@@ -142,7 +145,10 @@ where
     L: Fn(&Path) -> TranscriptIngestResult<Option<(ObservationSourceGenerationV1, Vec<R>)>>,
 {
     ensure_snapshot_admission_active(provider, cancellation)?;
-    let discovery = discover();
+    let discovery = hotpath::measure_block!(
+        "sessions.observation.snapshot_discover_blocking",
+        run_blocking_transcript_section(discover)
+    );
     ensure_snapshot_admission_active(provider, cancellation)?;
     let mut runner = SnapshotAdmissionRunner::new(provider, max_new_bytes);
     if discovery.is_truncated() {
@@ -150,7 +156,10 @@ where
     }
     for path in discovery.paths {
         ensure_snapshot_admission_active(provider, cancellation)?;
-        let input_bytes = input_bytes_fn(&path)?;
+        let input_bytes = hotpath::measure_block!(
+            "sessions.observation.snapshot_bytes_blocking",
+            run_blocking_transcript_section(|| input_bytes_fn(&path))
+        )?;
         ensure_snapshot_admission_active(provider, cancellation)?;
         runner
             .admit_batch(facade, input_bytes, &scope, cancellation, || load_fn(&path))
@@ -166,6 +175,7 @@ pub struct SnapshotAdmissionRunner {
     sessions: BTreeSet<String>,
 }
 
+#[hotpath::measure_all]
 impl SnapshotAdmissionRunner {
     pub fn new(provider: &'static str, max_new_bytes: Option<u64>) -> Self {
         Self {
@@ -200,7 +210,10 @@ impl SnapshotAdmissionRunner {
             return Ok(());
         }
         ensure_snapshot_admission_active(self.provider, cancellation)?;
-        let loaded = load()?;
+        let loaded = hotpath::measure_block!(
+            "sessions.observation.snapshot_parse_blocking",
+            run_blocking_transcript_section(load)
+        )?;
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         let Some((generation, records)) = loaded else {
             return Ok(());
@@ -560,6 +573,175 @@ mod tests {
             bytes_charged: 0,
             files_considered: 0,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn snapshot_adapter_discovery_releases_the_only_worker() {
+        let handle = tokio::runtime::Handle::current();
+        tokio::spawn(async move {
+            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+                &MemoryHostAdmission::default(),
+                "test",
+                ObservationScopeV1::Profile,
+                &ObservationCancellation::default(),
+                None,
+                move || {
+                    crate::runtime::source::require_blocking_section_releases_worker(handle);
+                    discovery(Vec::new())
+                },
+                |_| Ok(0),
+                |_| Ok(None),
+            )
+            .await
+        })
+        .await
+        .expect("join snapshot discovery")
+        .expect("snapshot discovery");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn snapshot_adapter_metadata_read_releases_the_only_worker() {
+        let handle = tokio::runtime::Handle::current();
+        tokio::spawn(async move {
+            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+                &MemoryHostAdmission::default(),
+                "test",
+                ObservationScopeV1::Profile,
+                &ObservationCancellation::default(),
+                None,
+                || discovery(vec![PathBuf::from("session.snapshot")]),
+                move |_| {
+                    crate::runtime::source::require_blocking_section_releases_worker(
+                        handle.clone(),
+                    );
+                    Ok(0)
+                },
+                |_| Ok(None),
+            )
+            .await
+        })
+        .await
+        .expect("join snapshot metadata read")
+        .expect("snapshot metadata read");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn snapshot_adapter_parse_releases_the_only_worker() {
+        let handle = tokio::runtime::Handle::current();
+        tokio::spawn(async move {
+            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+                &MemoryHostAdmission::default(),
+                "test",
+                ObservationScopeV1::Profile,
+                &ObservationCancellation::default(),
+                None,
+                || discovery(vec![PathBuf::from("session.snapshot")]),
+                |_| Ok(0),
+                move |_| {
+                    crate::runtime::source::require_blocking_section_releases_worker(
+                        handle.clone(),
+                    );
+                    Ok(None)
+                },
+            )
+            .await
+        })
+        .await
+        .expect("join snapshot parse")
+        .expect("snapshot parse");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn snapshot_blocking_section_heartbeat_stays_under_budget() {
+        let handle = tokio::runtime::Handle::current();
+        let started = std::time::Instant::now();
+        let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel();
+        let (sleep_end_tx, sleep_end_rx) = std::sync::mpsc::channel();
+        tokio::spawn(async move {
+            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+                &MemoryHostAdmission::default(),
+                "test",
+                ObservationScopeV1::Profile,
+                &ObservationCancellation::default(),
+                None,
+                move || {
+                    handle.spawn(async move {
+                        let _ = heartbeat_tx.send(std::time::Instant::now());
+                    });
+                    // Long enough that a replacement-worker spawn under load
+                    // still lands before this mark. Inline filesystem work
+                    // cannot send the heartbeat Instant until after it.
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                    let _ = sleep_end_tx.send(std::time::Instant::now());
+                    discovery(Vec::new())
+                },
+                |_| Ok(0),
+                |_| Ok(None),
+            )
+            .await
+        })
+        .await
+        .expect("join snapshot discovery")
+        .expect("snapshot discovery");
+        let heartbeat = heartbeat_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("heartbeat must complete");
+        let sleep_end = sleep_end_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("sleep-end mark must complete");
+        let stall = heartbeat.saturating_duration_since(started);
+        assert!(
+            heartbeat < sleep_end,
+            "heartbeat after {stall:?} ran after the blocking sleep; snapshot filesystem work must yield the worker"
+        );
+        eprintln!("host-transcript-io scorecard: first heartbeat after {stall:?}");
+    }
+
+    #[tokio::test]
+    async fn snapshot_offload_keeps_ingest_payload_bytes_identical() {
+        let admission = MemoryHostAdmission::default();
+        let record = test_record();
+        let native: serde_json::Value =
+            serde_json::from_slice(record.payload()).expect("native snapshot payload");
+        let range = ObservationSourceRangeV1::new(0, 1).expect("snapshot range");
+        let expected = canonical_snapshot_envelope(
+            &native,
+            record.provider(),
+            record.session_id(),
+            record.native_record_id(),
+            range,
+        )
+        .expect("canonical snapshot envelope");
+        let expected =
+            tracedecay_domain::canonical_json_bytes(&expected).expect("canonical payload bytes");
+
+        capture_snapshot_observations(
+            &admission,
+            "test",
+            ObservationScopeV1::Profile,
+            &ObservationCancellation::default(),
+            None,
+            || discovery(vec![PathBuf::from("session.snapshot")]),
+            |_| Ok(1),
+            |_| {
+                Ok(Some((
+                    ObservationSourceGenerationV1::new(1).expect("generation"),
+                    vec![record.clone()],
+                )))
+            },
+        )
+        .await
+        .expect("snapshot capture");
+
+        let observations = admission.observations();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0]
+                .observation()
+                .canonical_payload_bytes()
+                .expect("stored canonical payload bytes"),
+            expected
+        );
     }
 
     #[tokio::test]

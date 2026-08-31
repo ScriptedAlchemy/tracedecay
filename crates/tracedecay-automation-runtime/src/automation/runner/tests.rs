@@ -11,9 +11,6 @@ use tracedecay_domain::{
     ActorId, FactOwnerV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
     TemporalCoverageCountsV1, UtcMicros, WorktreeId,
 };
-use tracedecay_temporal_query::TemporalKernelResult;
-use tracedecay_temporal_query::context::VersionedTokenEstimator;
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
@@ -26,6 +23,9 @@ use tracedecay_session_memory::session::{
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
     SessionTemporalExecutionPort, SessionTemporalQuery,
 };
+use tracedecay_temporal_query::TemporalKernelResult;
+use tracedecay_temporal_query::context::VersionedTokenEstimator;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::super::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
 use super::super::run_ledger::AutomationRunLedgerRecord;
@@ -382,7 +382,9 @@ fn temporal_automation_evidence_preserves_cursor_manifest_refusal() {
 fn complete_temporal_outcome_independently_requires_fresh_coverage() {
     let stale = SessionRetrievalOutcome::<TemporalKernelResult>::Complete {
         items: Vec::new(),
-        freshness: tracedecay_session_memory::session::SessionDataFreshness::Stored { generation_lag: 1 },
+        freshness: tracedecay_session_memory::session::SessionDataFreshness::Stored {
+            generation_lag: 1,
+        },
     };
     // Empty Complete is invalid at the type layer, but stale freshness must
     // still fail closed before any serialization or write path.
@@ -741,7 +743,8 @@ async fn proposal_validation_does_not_wait_for_the_writer_lane() {
         .add_preflighted_project_memory_fact(preflight, &write_control)
         .await
         .unwrap();
-    let tracedecay_session_memory::memory::ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome
+    let tracedecay_session_memory::memory::ProjectMemoryFactAddRequestOutcome::Applied(outcome) =
+        outcome
     else {
         panic!("seed request must apply");
     };

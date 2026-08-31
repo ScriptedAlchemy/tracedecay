@@ -171,15 +171,15 @@ impl HostAdmissionOutcome {
     }
 
     /// Host-event wire or MCP/daemon JSON-RPC frame exceeded its respective
-    /// bound ([`tracedecay_daemon_protocol::wire::MAX_WIRE_MESSAGE_BYTES`] or
-    /// [`tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES`])
+    /// bound ([`tracedecay_framing::MAX_WIRE_MESSAGE_BYTES`] or
+    /// [`tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES`])
     /// before durable retention.
     /// Non-retryable; full payload is not retained.
     pub const fn wire_record_too_large() -> Self {
         Self::new(
             HostAdmissionStatus::Degraded,
             false,
-            Some(tracedecay_daemon_protocol::wire::WIRE_RECORD_TOO_LARGE),
+            Some(tracedecay_framing::WIRE_RECORD_TOO_LARGE),
         )
     }
 
@@ -1170,7 +1170,7 @@ pub(crate) mod test_support {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod wire_disposition_tests {
     use super::{HostAdmissionOutcome, HostAdmissionStatus};
-    use tracedecay_daemon_protocol::wire::WIRE_RECORD_TOO_LARGE;
+    use tracedecay_framing::WIRE_RECORD_TOO_LARGE;
 
     #[test]
     fn wire_oversized_maps_to_typed_non_durable_outcome_without_payload() {

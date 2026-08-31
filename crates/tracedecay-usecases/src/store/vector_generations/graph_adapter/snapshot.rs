@@ -118,7 +118,7 @@ impl SemanticVectorVerifiedRead {
         if namespace != &self.inner.projection().namespace
             || projection != &self.inner.projection().projection
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("snapshot.require_projection"));
         }
         Ok(())
     }

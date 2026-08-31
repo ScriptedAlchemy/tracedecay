@@ -9,10 +9,10 @@ use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationRevisionId, UserProfileId,
 };
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::configuration::{
     ProfileCodeIndexWorkerCommitV1, ProfileCodeIndexWorkerConfigurationStore,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
 
 use super::{ConfigurationError, ConfigurationMutationAuthority, DirectConfigurationMutation};
 

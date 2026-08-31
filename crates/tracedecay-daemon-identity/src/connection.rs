@@ -102,10 +102,11 @@ pub fn invocation_client_for_current(
 }
 
 pub fn current_daemon_connection() -> Result<DaemonConnection> {
-    let profile_root =
-        tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
+    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
+        TraceDecayError::Config {
             message: "could not determine TraceDecay user data directory".to_string(),
-        })?;
+        }
+    })?;
     let record =
         authority::current_record(&profile_root)?.ok_or_else(|| TraceDecayError::Config {
             message:

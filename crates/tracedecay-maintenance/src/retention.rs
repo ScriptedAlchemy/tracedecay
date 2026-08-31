@@ -19,8 +19,8 @@ pub use tracedecay_automation::config::{
     DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_LEGACY_SESSION_RETENTION_DAYS, RetentionConfig,
 };
 
-use tracedecay_runtime_core::db::engine::Executor;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::db::engine::Executor;
 
 /// Free-page compaction for tracked branch databases, off the hot path
 /// (plan 38, §6).

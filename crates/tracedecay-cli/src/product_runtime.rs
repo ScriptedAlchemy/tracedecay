@@ -12,12 +12,12 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/product_runtime_generated.rs"));
 }
 
-/// Full 40-hex commit sha this binary was built from; stamped into generated
-/// host plugins as their `generator_commit` provenance.
-pub(crate) use generated::PRODUCT_FULL_SHA;
 /// `"{CARGO_PKG_VERSION}+{full_sha}"` plus `".dirty"` when the source tree
 /// carried uncommitted changes: the version every CLI surface reports.
 pub(crate) use generated::PRODUCT_BUILD_VERSION;
+/// Full 40-hex commit sha this binary was built from; stamped into generated
+/// host plugins as their `generator_commit` provenance.
+pub(crate) use generated::PRODUCT_FULL_SHA;
 
 pub(crate) fn provider() -> tracedecay::ProductRuntimeProvider {
     tracedecay::ProductRuntimeProvider {

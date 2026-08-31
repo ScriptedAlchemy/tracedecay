@@ -1231,7 +1231,7 @@ fn conditional_projection_replacement_rejects_a_stale_source_snapshot() {
             None,
         )
         .unwrap_err();
-    assert_eq!(stale, GraphDbError::Conflict);
+    assert!(matches!(stale, GraphDbError::Conflict { .. }));
     assert!(db.traverse(traversal("current")).is_ok());
     assert!(matches!(
         db.traverse(traversal("stale")),
@@ -1377,15 +1377,15 @@ fn publication_changed_input_and_stale_watermark_conflict() {
     let mut changed = publication("event-1", None);
     changed.next_watermark = watermark("w2");
     changed.batch.next_watermark = watermark("w2");
-    assert_eq!(
+    assert!(matches!(
         db.publish_unverified(changed).unwrap_err(),
-        GraphDbError::Conflict
-    );
-    assert_eq!(
+        GraphDbError::Conflict { .. }
+    ));
+    assert!(matches!(
         db.publish_unverified(publication("event-2", Some("stale")))
             .unwrap_err(),
-        GraphDbError::Conflict
-    );
+        GraphDbError::Conflict { .. }
+    ));
 }
 
 #[test]

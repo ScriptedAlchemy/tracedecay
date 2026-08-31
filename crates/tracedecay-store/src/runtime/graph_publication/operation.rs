@@ -71,6 +71,10 @@ impl<'a> GraphPublicationOperationContextV1<'a> {
         self.try_begin_commit()
     }
 
+    pub fn try_begin_pending_discard_commit(&self) -> bool {
+        self.try_begin_commit()
+    }
+
     pub fn try_begin_retired_cleanup_finalize_commit(&self) -> bool {
         self.try_begin_commit()
     }

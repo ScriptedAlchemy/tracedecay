@@ -297,6 +297,7 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
         &transaction,
         &BTreeSet::new(),
         Some(&pool_root),
+        &|| false,
     )
     .expect_err("cleanup must wait for the in-flight release to become terminal");
     assert!(matches!(
@@ -329,6 +330,7 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
         &transaction,
         &BTreeSet::new(),
         Some(&pool_root),
+        &|| false,
     )
     .expect("cleanup retries after release completion");
     clear_transaction(store.path()).expect("clear transaction journal");
