@@ -32,6 +32,12 @@ pub(super) struct BrokerStreamTransport {
     active_requests: Arc<
         std::sync::Mutex<HashMap<String, Option<tracedecay_domain::DeliverySettlementAttemptV1>>>,
     >,
+    /// Whether this connection ever accepted an identified request. After the
+    /// peer half-closes its request side, a connection that served requests
+    /// and has settled every one of them has nothing left to deliver, while a
+    /// connection that never carried a request keeps waiting for the peer's
+    /// full close.
+    accepted_any_request: Arc<std::sync::atomic::AtomicBool>,
     replay: VecDeque<String>,
     response_lifecycle: Option<crate::mcp::server::ProjectServerResponseLifecycle>,
     selected_project_responses: Option<RmcpSelectedProjectResponseAuthority>,
@@ -69,6 +75,7 @@ impl BrokerStreamTransport {
             reader: BoundedLineReader::new(tokio::io::BufReader::new(reader)),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
             active_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            accepted_any_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             replay: VecDeque::new(),
             response_lifecycle: None,
             selected_project_responses: None,
@@ -249,6 +256,39 @@ impl BrokerStreamTransport {
                 .as_ref()
                 .and_then(|settlement| settlement.attempt_for_request(value));
             active.insert(request_key, delivery_attempt);
+            self.accepted_any_request
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Resolves once this connection has accepted at least one request and
+    /// every accepted request has settled — delivered, suppressed, or answered
+    /// with its typed cancellation. After the peer half-closes its request
+    /// side, a connection in that state has nothing left it could ever
+    /// deliver, so waiting for the peer's full close would only strand clients
+    /// that hold their read half open awaiting the daemon's EOF (a cancelling
+    /// client does exactly that).
+    async fn wait_for_accepted_requests_settled(
+        active_requests: Arc<
+            std::sync::Mutex<
+                HashMap<String, Option<tracedecay_domain::DeliverySettlementAttemptV1>>,
+            >,
+        >,
+        accepted_any_request: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        loop {
+            if accepted_any_request.load(std::sync::atomic::Ordering::Acquire)
+                && active_requests
+                    .lock()
+                    .is_ok_and(|active| active.is_empty())
+            {
+                return;
+            }
+            // Settlement lands through independently spawned response and
+            // cancellation writers; poll on the same bounded interval the
+            // full-close monitor uses rather than threading a notifier
+            // through every removal site.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 
@@ -422,8 +462,20 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     // still waiting for an in-flight response. Keep rmcp's
                     // receive loop alive until the native transport observes
                     // the peer's full close; otherwise rmcp tears down the
-                    // service and strands the request permit.
-                    self.peer_fully_closed_after_eof().await;
+                    // service and strands the request permit. Once every
+                    // accepted request has settled, though, the half-open
+                    // connection has nothing left to deliver, and a client
+                    // that reads until daemon EOF — a cancelling client does —
+                    // needs this side to close first.
+                    let settled = Self::wait_for_accepted_requests_settled(
+                        Arc::clone(&self.active_requests),
+                        Arc::clone(&self.accepted_any_request),
+                    );
+                    let peer_full_close = self.peer_fully_closed_after_eof();
+                    tokio::select! {
+                        () = peer_full_close => {}
+                        () = settled => {}
+                    }
                     return None;
                 }
                 Err(error) if is_wire_oversized_io_error(&error) => {
@@ -646,6 +698,63 @@ mod peer_close_tests {
                 .expect("rmcp receive must finish after full peer close")
                 .is_none()
         );
+    }
+
+    /// A client that half-closes after every accepted request settled — the
+    /// cancelling client pattern: it keeps its read half open awaiting the
+    /// daemon's EOF — must observe this side close without a full peer close.
+    #[tokio::test]
+    async fn rmcp_receive_closes_after_half_close_once_accepted_requests_settle() {
+        let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+        let (client_reader, mut client_writer) = client.into_split();
+
+        client_writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"tracedecay_files","arguments":{}}}
+"#,
+            )
+            .await
+            .expect("request");
+        client_writer.flush().await.expect("flush request");
+        assert!(
+            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                &mut transport
+            )
+            .await
+            .is_some(),
+            "the transport must accept the request"
+        );
+        let response = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "result": {"content": [{"type": "text", "text": "settled"}]}
+        }))
+        .expect("typed response");
+        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
+            &mut transport,
+            response,
+        )
+        .await
+        .expect("response write");
+
+        client_writer
+            .shutdown()
+            .await
+            .expect("half-close client request side");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                    &mut transport,
+                ),
+            )
+            .await
+            .expect("settled connection must close after request half-close")
+            .is_none(),
+            "a settled half-closed connection carries no further messages"
+        );
+        drop(client_reader);
     }
 
     #[tokio::test]

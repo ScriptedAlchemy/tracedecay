@@ -2,7 +2,8 @@
 //! handshake handling, resources, and `tools/call` execution.
 
 use super::dispatch_settlement::{
-    ApplicationCancellationRegistration, DispatchControl, PreparedDispatchControl,
+    ApplicationCancellationRegistration, DispatchControl, DispatchSettlement,
+    PreparedDispatchControl, dispatch_cancelled_error,
 };
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -1449,11 +1450,29 @@ impl McpServer {
         // lifecycle locks or fall back to the caller's response authority.
         let response_lifecycle = dispatch_server.project_server_lifecycle.clone();
         let response_gate = Arc::clone(response_lifecycle.response_gate());
-        let response_guard = hotpath::future!(
-            response_gate.read_owned(),
-            label = "mcp.server.response_gate.wait"
-        )
-        .await;
+        // The gate wait races the request's own cancellation: a retiring or
+        // replacing project server holds the write side for as long as its
+        // drain takes, and a client that cancels during that wait must read
+        // its typed cancelled terminal instead of hanging on the gate. The
+        // gate arm is polled first so an immediately available lease still
+        // wins over a pre-cancelled signal and settlement stays with the
+        // admitted dispatch authority.
+        let request_cancelled =
+            tracedecay_daemon_protocol::wait_for_cancellation(control.cancellation());
+        let response_guard = tokio::select! {
+            biased;
+            guard = hotpath::future!(
+                response_gate.read_owned(),
+                label = "mcp.server.response_gate.wait"
+            ) => guard,
+            () = request_cancelled => {
+                return tool_error_response(
+                    id,
+                    &tool_name,
+                    &dispatch_cancelled_error(&tool_name, DispatchSettlement::NotStarted),
+                );
+            }
+        };
         if response_lifecycle.response_revoked().is_cancelled() {
             return dispatch_server
                 .project_server_revoked_response(&id, &tool_name)
