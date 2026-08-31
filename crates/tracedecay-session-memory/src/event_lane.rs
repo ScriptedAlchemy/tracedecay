@@ -40,7 +40,9 @@ pub enum ActivityFamilyV1 {
     Task,
 }
 
+#[hotpath::measure_all]
 impl ActivityFamilyV1 {
+    #[hotpath::skip]
     pub const fn stream_name(self) -> &'static str {
         match self {
             Self::Hook => "hook_activity",
@@ -51,6 +53,7 @@ impl ActivityFamilyV1 {
         }
     }
 
+    #[hotpath::skip]
     const fn observation_label(self) -> &'static str {
         match self {
             Self::Hook => "hook",
@@ -122,31 +125,37 @@ pub struct ActivityReplayV1 {
     pub resume_gap: bool,
 }
 
+#[hotpath::measure]
 fn live_bus() -> &'static broadcast::Sender<ActivityRecordV1> {
     static BUS: OnceLock<broadcast::Sender<ActivityRecordV1>> = OnceLock::new();
     BUS.get_or_init(|| broadcast::channel(BUS_CAPACITY).0)
 }
 
+#[hotpath::measure]
 fn boot_id() -> &'static str {
     static BOOT: OnceLock<String> = OnceLock::new();
     BOOT.get_or_init(|| format!("activity-{}-{}", std::process::id(), now_micros().0))
 }
 
+#[hotpath::measure]
 fn next_local_sequence() -> u64 {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
     SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
 }
 
+#[hotpath::measure]
 fn mcp_dispatch_boot_id() -> &'static str {
     static BOOT: OnceLock<String> = OnceLock::new();
     BOOT.get_or_init(|| format!("mcp-dispatch-{}-{}", std::process::id(), now_micros().0))
 }
 
+#[hotpath::measure]
 fn next_mcp_dispatch_sequence() -> u64 {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
     SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
 }
 
+#[hotpath::measure]
 fn authoritative_project_id(db: &RegisteredGlobalDb, supplied: Option<&str>) -> Option<String> {
     let bound = db.binding().shard_id.scope.project_id()?.as_str();
     match supplied {
@@ -155,6 +164,7 @@ fn authoritative_project_id(db: &RegisteredGlobalDb, supplied: Option<&str>) -> 
     }
 }
 
+#[hotpath::measure]
 fn activity_envelope(
     project_id: &str,
     family: ActivityFamilyV1,
@@ -210,6 +220,7 @@ fn activity_envelope(
     })
 }
 
+#[hotpath::measure]
 fn mcp_dispatch_envelope(
     project_id: &str,
     observation: McpDispatchObservedV1,
@@ -287,11 +298,13 @@ pub async fn record_mcp_dispatch(
     record_observability(db, envelope).await
 }
 
+#[hotpath::measure]
 pub fn enabled(db: Option<&RegisteredGlobalDb>) -> bool {
     db.and_then(|db| authoritative_project_id(db, None))
         .is_some()
 }
 
+#[hotpath::measure]
 pub fn subscribe() -> Option<broadcast::Receiver<ActivityRecordV1>> {
     Some(live_bus().subscribe())
 }
@@ -350,6 +363,7 @@ pub async fn publish(
 /// the slowest subscriber, and the current subscriber count. Keys are static
 /// capability names; every gauge is a no-op unless `hotpath` is selected.
 #[inline]
+#[hotpath::measure]
 fn observe_publish(queue_depth: usize, subscribers: usize) {
     hotpath::gauge!("usecases.event_lane.queue_depth").set(queue_depth as f64);
     hotpath::gauge!("usecases.event_lane.subscribers").set(subscribers as f64);

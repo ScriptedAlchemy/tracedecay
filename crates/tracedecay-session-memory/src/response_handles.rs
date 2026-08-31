@@ -16,6 +16,7 @@ use tracedecay_runtime_core::storage::{
 pub const RESPONSE_HANDLE_TTL_SECS: i64 = 86_400;
 
 /// Converts a UTC-micros clock sample to the second resolution the handle store uses.
+#[hotpath::measure]
 pub fn micros_to_seconds(value: UtcMicros) -> i64 {
     value.0.div_euclid(1_000_000)
 }
@@ -33,6 +34,7 @@ pub struct ResponseHandleRecord {
     pub content: String,
 }
 
+#[hotpath::measure_all]
 impl ResponseHandleRecord {
     pub fn original_chars(&self) -> usize {
         self.content.chars().count()
@@ -76,6 +78,7 @@ struct StoredFile {
     record: StoredResponseHandleRecord,
 }
 
+#[hotpath::measure]
 pub fn is_valid_response_handle(handle: &str) -> bool {
     let Some(hex) = handle.strip_prefix(HANDLE_PREFIX) else {
         return false;
@@ -86,6 +89,7 @@ pub fn is_valid_response_handle(handle: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+#[hotpath::measure]
 pub fn store_response_handle(
     project_root: &Path,
     content: &str,
@@ -97,6 +101,7 @@ pub fn store_response_handle(
     store_response_handle_in_root(&root, content, now)
 }
 
+#[hotpath::measure]
 fn store_response_handle_in_root(
     root: &Path,
     content: &str,
@@ -105,6 +110,7 @@ fn store_response_handle_in_root(
     with_exclusive_lock(root, || store_response_handle_locked(root, content, now))
 }
 
+#[hotpath::measure]
 fn store_response_handle_locked(
     root: &Path,
     content: &str,
@@ -167,6 +173,7 @@ fn store_response_handle_locked(
     })
 }
 
+#[hotpath::measure]
 pub fn retrieve_response_handle(
     project_root: &Path,
     handle: &str,
@@ -177,6 +184,7 @@ pub fn retrieve_response_handle(
     retrieve_from_root(&root, handle, now)
 }
 
+#[hotpath::measure]
 fn retrieve_from_root(root: &Path, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
     validate_handle(handle)?;
     validate_response_handle_path(root)?;
@@ -186,6 +194,7 @@ fn retrieve_from_root(root: &Path, handle: &str, now: i64) -> Result<ResponseHan
     with_exclusive_lock(root, || retrieve_from_root_locked(root, handle, now))
 }
 
+#[hotpath::measure]
 fn retrieve_from_root_locked(root: &Path, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
     let path = response_handle_path(root, handle)?;
     let Some(stored) = read_record(&path)? else {
@@ -208,6 +217,7 @@ fn retrieve_from_root_locked(root: &Path, handle: &str, now: i64) -> Result<Resp
     }))
 }
 
+#[hotpath::measure]
 pub fn cleanup_expired_response_handles(
     project_root: &Path,
     now: i64,
@@ -216,6 +226,7 @@ pub fn cleanup_expired_response_handles(
     cleanup_expired_response_handles_in_root(&root, now)
 }
 
+#[hotpath::measure]
 fn cleanup_expired_response_handles_in_root(
     root: &Path,
     now: i64,
@@ -247,11 +258,13 @@ fn cleanup_expired_response_handles_in_root(
     })
 }
 
+#[hotpath::measure]
 pub fn inventory_response_handles(project_root: &Path) -> Result<ResponseHandleInventory> {
     let root = resolve_response_handle_root(project_root)?;
     inventory_response_handles_in_root(&root)
 }
 
+#[hotpath::measure]
 fn inventory_response_handles_in_root(root: &Path) -> Result<ResponseHandleInventory> {
     validate_response_handle_path(root)?;
     if !path_exists(root)? {
@@ -282,6 +295,7 @@ fn inventory_response_handles_in_root(root: &Path) -> Result<ResponseHandleInven
     })
 }
 
+#[hotpath::measure]
 fn visit_stored_files(
     root: &Path,
     mut visit: impl FnMut(StoredFile) -> Result<()>,
@@ -323,6 +337,7 @@ fn visit_stored_files(
     Ok(scanned)
 }
 
+#[hotpath::measure]
 fn remove_abandoned_staging_files(root: &Path) -> Result<usize> {
     let entries = fs::read_dir(root)
         .map_err(|error| file_error(root, "read response-handle directory", error))?;
@@ -356,6 +371,7 @@ fn remove_abandoned_staging_files(root: &Path) -> Result<usize> {
     Ok(removed)
 }
 
+#[hotpath::measure]
 fn remove_orphaned_removal_tombstones(root: &Path) -> Result<usize> {
     let entries = fs::read_dir(root)
         .map_err(|error| file_error(root, "read response-handle directory", error))?;
@@ -391,6 +407,7 @@ fn remove_orphaned_removal_tombstones(root: &Path) -> Result<usize> {
     Ok(removed)
 }
 
+#[hotpath::measure]
 fn read_record(path: &Path) -> Result<Option<StoredResponseHandleRecord>> {
     validate_response_handle_path(path)?;
     let payload = match fs::read(path) {
@@ -403,6 +420,7 @@ fn read_record(path: &Path) -> Result<Option<StoredResponseHandleRecord>> {
         .map_err(|error| corrupt_record_error(path, &error.to_string()))
 }
 
+#[hotpath::measure]
 fn handle_from_record_path(path: &Path) -> Result<Option<String>> {
     if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
         return Ok(None);
@@ -415,6 +433,7 @@ fn handle_from_record_path(path: &Path) -> Result<Option<String>> {
     Ok(Some(handle.to_owned()))
 }
 
+#[hotpath::measure]
 fn validate_record(handle: &str, record: &StoredResponseHandleRecord, path: &Path) -> Result<()> {
     if record.expires_at != record.created_at.saturating_add(RESPONSE_HANDLE_TTL_SECS) {
         return Err(corrupt_record_error(
@@ -431,6 +450,7 @@ fn validate_record(handle: &str, record: &StoredResponseHandleRecord, path: &Pat
     Ok(())
 }
 
+#[hotpath::measure]
 fn response_handle_for(content: &str) -> String {
     let digest = Sha256::digest(content.as_bytes());
     format!(
@@ -439,11 +459,13 @@ fn response_handle_for(content: &str) -> String {
     )
 }
 
+#[hotpath::measure]
 fn response_handle_path(root: &Path, handle: &str) -> Result<PathBuf> {
     validate_handle(handle)?;
     Ok(root.join(format!("{handle}.json")))
 }
 
+#[hotpath::measure]
 fn validate_handle(handle: &str) -> Result<()> {
     if is_valid_response_handle(handle) {
         return Ok(());
@@ -455,16 +477,19 @@ fn validate_handle(handle: &str) -> Result<()> {
     })
 }
 
+#[hotpath::measure]
 fn path_exists(path: &Path) -> Result<bool> {
     path.try_exists()
         .map_err(|error| file_error(path, "check response-handle root", error))
 }
 
+#[hotpath::measure]
 fn validate_response_handle_path(path: &Path) -> Result<()> {
     reject_symlink_components(path, "response-handle cache")
         .map_err(|error| file_error(path, "validate response-handle path", error))
 }
 
+#[hotpath::measure]
 fn with_exclusive_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     validate_response_handle_path(root)?;
     let parent = root.parent().ok_or_else(|| TraceDecayError::File {
@@ -503,6 +528,7 @@ fn with_exclusive_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) ->
     }
 }
 
+#[hotpath::measure]
 fn publish_record_durable(root: &Path, path: &Path, payload: &[u8]) -> Result<()> {
     let temporary = tempfile::Builder::new()
         .prefix(STAGING_PREFIX)
@@ -529,6 +555,7 @@ fn publish_record_durable(root: &Path, path: &Path, payload: &[u8]) -> Result<()
     }
 }
 
+#[hotpath::measure]
 fn remove_failed_fresh_publish(path: &Path, expected: &StoredResponseHandleRecord) -> Result<()> {
     let Some(actual) = read_record(path)? else {
         return Ok(());
@@ -544,6 +571,7 @@ fn remove_failed_fresh_publish(path: &Path, expected: &StoredResponseHandleRecor
         .map_err(|error| file_error(path, "durably remove failed publication", error))
 }
 
+#[hotpath::measure]
 fn file_error(path: &Path, operation: &str, error: std::io::Error) -> TraceDecayError {
     TraceDecayError::File {
         message: format!("failed to {operation}: {error}"),
@@ -551,6 +579,7 @@ fn file_error(path: &Path, operation: &str, error: std::io::Error) -> TraceDecay
     }
 }
 
+#[hotpath::measure]
 fn corrupt_record_error(path: &Path, reason: &str) -> TraceDecayError {
     TraceDecayError::File {
         message: format!("corrupt response-handle record: {reason}"),
@@ -558,6 +587,7 @@ fn corrupt_record_error(path: &Path, reason: &str) -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 fn is_corrupt_record_error(error: &TraceDecayError) -> bool {
     matches!(
         error,

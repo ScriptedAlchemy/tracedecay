@@ -27,7 +27,9 @@ pub struct RegisteredObservabilityPortV1<'a> {
     db: &'a RegisteredGlobalDb,
 }
 
+#[hotpath::measure_all]
 impl<'a> RegisteredObservabilityPortV1<'a> {
+    #[hotpath::skip]
     pub const fn new(db: &'a RegisteredGlobalDb) -> Self {
         Self { db }
     }
@@ -290,7 +292,9 @@ impl ExecutionTopologyRollupQueryPort for RegisteredObservabilityPortV1<'_> {
     }
 }
 
+#[hotpath::measure]
 fn merge_coverage_state(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
+    #[hotpath::skip]
     const fn rank(state: CoverageStateV1) -> u8 {
         match state {
             CoverageStateV1::Known => 0,

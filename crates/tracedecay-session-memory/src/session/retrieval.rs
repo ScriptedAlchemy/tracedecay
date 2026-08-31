@@ -43,6 +43,7 @@ pub struct SessionRetrievalConfiguration {
     ranking_version: u32,
 }
 
+#[hotpath::measure_all]
 impl SessionRetrievalConfiguration {
     pub fn new(
         schema_version: u32,
@@ -60,10 +61,12 @@ impl SessionRetrievalConfiguration {
         })
     }
 
+    #[hotpath::skip]
     pub const fn schema_version(self) -> u32 {
         self.schema_version
     }
 
+    #[hotpath::skip]
     pub const fn ranking_version(self) -> u32 {
         self.ranking_version
     }
@@ -88,6 +91,7 @@ pub struct SessionTemporalQuery {
     freshness_policy: SessionFreshnessPolicy,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalQuery {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -208,18 +212,22 @@ impl SessionTemporalQuery {
         self.cursor.as_deref()
     }
 
+    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
+    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
+    #[hotpath::skip]
     pub const fn limit(&self) -> usize {
         self.limit
     }
 
+    #[hotpath::skip]
     pub const fn diversity(&self) -> DiversityLimits {
         self.diversity
     }
@@ -228,10 +236,12 @@ impl SessionTemporalQuery {
         &self.context_budget
     }
 
+    #[hotpath::skip]
     pub const fn execution_limits(&self) -> ExecutionLimits {
         self.execution_limits
     }
 
+    #[hotpath::skip]
     pub const fn freshness_policy(&self) -> SessionFreshnessPolicy {
         self.freshness_policy
     }
@@ -273,7 +283,9 @@ pub struct SessionRetrievalService<A, P, E> {
     configuration: SessionRetrievalConfiguration,
 }
 
+#[hotpath::measure_all]
 impl<A, P, E> SessionRetrievalService<A, P, E> {
+    #[hotpath::skip]
     pub const fn new(
         authorizer: A,
         execution: P,
@@ -336,6 +348,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn execution_deadline(context: &RequestContext) -> std::time::Instant {
     let terminal_at = context
         .deadline()
@@ -347,11 +360,13 @@ fn execution_deadline(context: &RequestContext) -> std::time::Instant {
     std::time::Instant::now() + std::time::Duration::from_micros(remaining_micros)
 }
 
+#[hotpath::measure]
 fn budget_exhausted<T>(stage: SessionRetrievalBudgetStageV1) -> SessionRetrievalOutcome<T> {
     crate::session::hotpath_observe::session_retrieval_budget_stage(stage);
     SessionRetrievalOutcome::BudgetExhausted { stage }
 }
 
+#[hotpath::measure]
 fn request_budget_refusal(
     binding: &SessionRequestBinding,
     query: &SessionTemporalQuery,
@@ -388,6 +403,7 @@ fn request_budget_refusal(
     None
 }
 
+#[hotpath::measure]
 fn temporal_retrieval_scope(scope: &SessionRetrievalScope) -> TemporalRetrievalScope {
     match scope {
         SessionRetrievalScope::Session(session_id) => {
@@ -399,6 +415,7 @@ fn temporal_retrieval_scope(scope: &SessionRetrievalScope) -> TemporalRetrievalS
     }
 }
 
+#[hotpath::measure]
 fn temporal_authorized_root(
     identity: &ResolvedSessionIdentity,
 ) -> Result<TemporalAuthorizedRoot, TemporalPortError> {
@@ -417,6 +434,7 @@ fn temporal_authorized_root(
     }
 }
 
+#[hotpath::measure]
 fn map_report(
     report: crate::session::ports::SessionTemporalExecutionReport,
     freshness_policy: SessionFreshnessPolicy,
@@ -544,6 +562,7 @@ fn map_report(
     }
 }
 
+#[hotpath::measure]
 fn map_execution_error(
     error: SessionTemporalExecutionError,
 ) -> SessionRetrievalOutcome<TemporalKernelResult> {
@@ -569,6 +588,7 @@ fn map_execution_error(
     }
 }
 
+#[hotpath::measure]
 fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<TemporalKernelResult> {
     match error {
         TemporalKernelError::InvalidLimit => {
@@ -690,6 +710,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
     }
 }
 
+#[hotpath::measure]
 fn context_budget_stage(resource: &'static str) -> SessionRetrievalBudgetStageV1 {
     match resource {
         "token" => SessionRetrievalBudgetStageV1::ContextTokens,
@@ -697,6 +718,7 @@ fn context_budget_stage(resource: &'static str) -> SessionRetrievalBudgetStageV1
     }
 }
 
+#[hotpath::measure]
 fn digest_root(identity: &ResolvedSessionIdentity) -> String {
     #[derive(Serialize)]
     struct RootBinding<'a> {
@@ -728,6 +750,7 @@ fn digest_root(identity: &ResolvedSessionIdentity) -> String {
     })
 }
 
+#[hotpath::measure]
 fn digest_grant(grant: &crate::session::types::SessionAuthorizationGrant) -> String {
     #[derive(Serialize)]
     struct AccessBinding<'a> {
@@ -778,10 +801,12 @@ fn digest_grant(grant: &crate::session::types::SessionAuthorizationGrant) -> Str
     })
 }
 
+#[hotpath::measure]
 fn digest_policy(policy_digest: PolicyDigest) -> String {
     encode_tagged_lowercase_hex("sha256:", policy_digest.as_bytes())
 }
 
+#[hotpath::measure]
 fn digest_request(
     context: &RequestContext,
     binding: &SessionRequestBinding,
@@ -894,6 +919,7 @@ fn digest_request(
     })
 }
 
+#[hotpath::measure]
 fn digest_filters(query: &SessionTemporalQuery) -> String {
     #[derive(Serialize)]
     struct FilterBinding<'a> {
@@ -928,6 +954,7 @@ fn digest_filters(query: &SessionTemporalQuery) -> String {
     })
 }
 
+#[hotpath::measure]
 fn sha256_json(value: &impl Serialize) -> String {
     // The canonical request binding is plain serializable data; encoding it cannot fail.
     #[allow(clippy::expect_used)]
@@ -935,6 +962,7 @@ fn sha256_json(value: &impl Serialize) -> String {
     sha256_binding(&encoded)
 }
 
+#[hotpath::measure]
 fn sha256_binding(bytes: &[u8]) -> String {
     encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
 }

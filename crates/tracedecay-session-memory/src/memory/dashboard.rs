@@ -13,6 +13,7 @@ use tracedecay_store::{
 use super::MemoryApplication;
 use super::error::MemoryApplicationError;
 
+#[hotpath::measure_all]
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     fn fact_identity(
         &self,
@@ -97,6 +98,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(detail)
     }
 
+    #[hotpath::skip]
     pub async fn dashboard_feedback_history(
         &self,
         fact_id: FactId,
@@ -114,6 +116,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn dashboard_memory_status(
         &self,
         read_control: &FactReadControl,

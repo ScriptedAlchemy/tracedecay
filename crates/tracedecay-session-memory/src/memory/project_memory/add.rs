@@ -63,6 +63,7 @@ pub struct ProjectMemoryFactAddEffectMaterialV1 {
     canonical_digest: String,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactAddEffectMaterialV1 {
     fn ready(canonical_digest: String) -> Self {
         Self {
@@ -100,6 +101,7 @@ pub enum ProjectMemoryFactAddPreflight {
     },
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactAddPreflight {
     pub fn effect_material(&self) -> &ProjectMemoryFactAddEffectMaterialV1 {
         match self {
@@ -169,6 +171,7 @@ pub fn automatic_fact_add_command(
     .map_err(MemoryApplicationError::Store)
 }
 
+#[hotpath::measure]
 fn fact_add_material(
     owner: FactOwnerV1,
     request: SanitizedAddFactRequest,
@@ -199,6 +202,7 @@ fn fact_add_material(
     .map_err(MemoryApplicationError::Store)
 }
 
+#[hotpath::measure]
 fn rejected_add_effect_material(
     request: &ProjectMemoryFactAddRequest,
 ) -> Result<ProjectMemoryFactAddEffectMaterialV1, MemoryApplicationError> {
@@ -211,6 +215,7 @@ fn rejected_add_effect_material(
     ))
 }
 
+#[hotpath::measure_all]
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Canonicalizes one retained add before any external effect identity is
     /// prepared. The accepted path and store command share the store-owned

@@ -12,6 +12,7 @@ use super::ApplicationScopeError;
 /// Resolves only an explicitly registered root or a proved linked worktree.
 pub struct RegisteredScopeResolver;
 
+#[hotpath::measure_all]
 impl RegisteredScopeResolver {
     /// Authorize and canonicalize the exact root an identity authority may
     /// resolve.
@@ -71,6 +72,7 @@ struct AuthorizedRoot {
     marker: Option<RepositoryIdentityMarker>,
 }
 
+#[hotpath::measure]
 fn resolve_authorized_root(
     registered_root: &Path,
     requested_root: &Path,
@@ -124,6 +126,7 @@ fn resolve_authorized_root(
 /// equal that deterministic identity keeps an arbitrary directory from
 /// becoming an application scope merely because a caller supplies a
 /// project id.
+#[hotpath::measure]
 fn resolve_non_git_scope(
     registered_root: &Path,
     scope_root: &Path,
@@ -139,6 +142,7 @@ fn resolve_non_git_scope(
         .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
 }
 
+#[hotpath::measure]
 fn validate_non_git_project_identity(
     registered_root: &Path,
     project_id: &ProjectId,
@@ -154,11 +158,13 @@ fn validate_non_git_project_identity(
     Ok(())
 }
 
+#[hotpath::measure]
 fn path_identity(prefix: &str, root: &Path) -> String {
     let digest = sha256_hex(root.to_string_lossy().as_bytes());
     format!("{prefix}.{digest}")
 }
 
+#[hotpath::measure]
 fn canonical_root(root: &Path, label: &str) -> Result<PathBuf, ApplicationScopeError> {
     if !root.is_absolute() {
         return Err(ApplicationScopeError::RelativeRoot {
@@ -173,6 +179,7 @@ fn canonical_root(root: &Path, label: &str) -> Result<PathBuf, ApplicationScopeE
     })
 }
 
+#[hotpath::measure]
 fn git_common_dir(root: &Path) -> Result<PathBuf, ApplicationScopeError> {
     tracedecay_runtime_core::worktree::git_common_dir(root)
         .ok_or_else(|| {

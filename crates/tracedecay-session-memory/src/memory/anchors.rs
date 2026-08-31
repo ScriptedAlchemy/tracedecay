@@ -20,6 +20,7 @@ pub struct ResolvedEvidenceAnchor {
     record: RetrievalAnchorRecordV2,
 }
 
+#[hotpath::measure_all]
 impl ResolvedEvidenceAnchor {
     pub fn new(record: RetrievalAnchorRecordV2) -> Result<Self, DomainError> {
         record.validate()?;
@@ -61,6 +62,7 @@ pub trait EvidenceAnchorResolver: Send + Sync {
     ) -> impl Future<Output = Result<ResolvedEvidenceAnchor, EvidenceAnchorResolutionError>> + Send;
 }
 
+#[hotpath::measure_all]
 impl<A: FactStore> MemoryApplication<A> {
     /// Resolves a daemon-authorized observation anchor before the caller
     /// materializes the returned record in `FactWriteBatch::new_anchors`.

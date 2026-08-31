@@ -49,6 +49,7 @@ pub enum MemoryMutationError<T: Debug> {
     },
 }
 
+#[hotpath::measure_all]
 impl<T: Debug> MemoryMutationError<T> {
     pub fn map_authority_result<U: Debug>(
         self,
@@ -76,6 +77,7 @@ impl<T: Debug> From<MemoryMutationError<T>> for MemoryApplicationError {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn settle_authority_result<T: Debug>(
     authority_result: T,
     validate: impl FnOnce(&T) -> Result<(), MemoryApplicationError>,

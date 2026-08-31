@@ -33,6 +33,7 @@ impl<D> GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
+    #[hotpath::skip]
     pub const fn new(db: D) -> Self {
         Self { db }
     }
@@ -82,6 +83,7 @@ where
         }
     }
 
+    #[hotpath::skip]
     async fn persist_batch(
         &self,
         batch: TranscriptWriteBatch,

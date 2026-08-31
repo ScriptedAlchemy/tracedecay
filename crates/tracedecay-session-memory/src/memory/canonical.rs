@@ -32,6 +32,7 @@ impl<A: FactStore> CommitFactPort for FactStoreWriteAdapter<'_, A> {
     type Error = FactStoreError;
     type Output = FactCommitOutcome;
 
+    #[hotpath::skip]
     async fn commit_fact(
         &self,
         command: Self::Command,
@@ -55,6 +56,7 @@ impl<A: FactStore> CurrentFactsPort for FactStoreAdapter<'_, A> {
     type Output = Vec<StoredFactV1>;
     type Query = CurrentFactsQuery;
 
+    #[hotpath::skip]
     async fn query_current_facts(
         &self,
         query: Self::Query,
@@ -70,6 +72,7 @@ impl<A: FactStore> FactAsOfPort for FactStoreAdapter<'_, A> {
     type Output = MemoryReadResult<Option<StoredFactV1>>;
     type Query = FactAsOfQuery;
 
+    #[hotpath::skip]
     async fn query_fact_as_of(
         &self,
         query: Self::Query,
@@ -89,6 +92,7 @@ impl<A: FactStore> FactCurrentPort for FactStoreAdapter<'_, A> {
     type Output = MemoryReadResult<Option<StoredFactV1>>;
     type Query = FactCurrentQuery;
 
+    #[hotpath::skip]
     async fn query_fact_current(
         &self,
         query: Self::Query,
@@ -108,6 +112,7 @@ impl<A: FactStore> FactLineagePort for FactStoreAdapter<'_, A> {
     type Output = MemoryReadResult<Vec<FactLineageEventV1>>;
     type Query = FactLineageQuery;
 
+    #[hotpath::skip]
     async fn query_fact_lineage(
         &self,
         query: Self::Query,
@@ -127,6 +132,7 @@ impl<A: FactStore> RetrievalAnchorPort for FactStoreAdapter<'_, A> {
     type Error = FactStoreError;
     type Query = RetrievalAnchorQuery;
 
+    #[hotpath::skip]
     async fn get_retrieval_anchor(
         &self,
         query: Self::Query,
@@ -135,6 +141,7 @@ impl<A: FactStore> RetrievalAnchorPort for FactStoreAdapter<'_, A> {
     }
 }
 
+#[hotpath::measure_all]
 impl<A: FactStore> MemoryApplication<A> {
     #[hotpath::measure(label = "usecases.memory.commit", future = true)]
     pub async fn commit_fact(
@@ -232,6 +239,7 @@ impl<A: FactStore> MemoryApplication<A> {
     }
 }
 
+#[hotpath::measure]
 fn canonical_application<'a, A>(
     owner: &FactOwnerV1,
     authority: &'a A,
@@ -240,6 +248,7 @@ fn canonical_application<'a, A>(
         .map_err(invariant_error)
 }
 
+#[hotpath::measure]
 fn canonical_write_application<'a, A>(
     owner: &FactOwnerV1,
     authority: &'a A,
@@ -255,6 +264,7 @@ fn canonical_write_application<'a, A>(
     .map_err(invariant_error)
 }
 
+#[hotpath::measure]
 fn fact_snapshot(fact: &StoredFactV1) -> MemoryFactSnapshot {
     MemoryFactSnapshot::new(
         fact.owner().clone(),
@@ -263,6 +273,7 @@ fn fact_snapshot(fact: &StoredFactV1) -> MemoryFactSnapshot {
     )
 }
 
+#[hotpath::measure]
 fn as_of_read_result(
     response: &FactAsOfResponseV1,
     fact: Option<StoredFactV1>,
@@ -274,6 +285,7 @@ fn as_of_read_result(
     )
 }
 
+#[hotpath::measure]
 fn current_read_result(
     response: &FactCurrentResponseV1,
     fact: Option<StoredFactV1>,
@@ -294,6 +306,7 @@ const fn read_coverage(coverage: &FactQueryCoverageV1) -> MemoryReadCoverage {
     )
 }
 
+#[hotpath::measure]
 fn contradiction_state(contradiction: &StoreFactContradictionStateV1) -> MemoryContradictionState {
     match contradiction {
         StoreFactContradictionStateV1::Unknown => MemoryContradictionState::Unknown,
@@ -306,6 +319,7 @@ fn contradiction_state(contradiction: &StoreFactContradictionStateV1) -> MemoryC
     }
 }
 
+#[hotpath::measure]
 fn commit_proof(
     outcome: &FactCommitOutcome,
 ) -> (
@@ -329,6 +343,7 @@ fn commit_proof(
     }
 }
 
+#[hotpath::measure]
 fn store_error(error: MemoryUseCaseError<FactStoreError>) -> MemoryApplicationError {
     match error {
         MemoryUseCaseError::Invariant(error) => invariant_error(error),
@@ -336,6 +351,7 @@ fn store_error(error: MemoryUseCaseError<FactStoreError>) -> MemoryApplicationEr
     }
 }
 
+#[hotpath::measure]
 fn invariant_error(error: MemoryApplicationInvariantError) -> MemoryApplicationError {
     match error {
         MemoryApplicationInvariantError::InvalidOwner(error) => {

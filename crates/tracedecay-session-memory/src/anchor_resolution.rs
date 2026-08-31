@@ -44,6 +44,7 @@ pub struct EvidenceAnchorResolutionReport {
     record: Option<RetrievalAnchorRecordV2>,
 }
 
+#[hotpath::measure_all]
 impl EvidenceAnchorResolutionReport {
     /// Compose a validated typed report from the store's observation. The
     /// `absent_authorization` bounds record-less resolutions (unavailable and

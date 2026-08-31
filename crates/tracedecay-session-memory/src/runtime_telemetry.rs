@@ -52,7 +52,9 @@ pub enum GenerationCensusUnavailableReason {
     SealedGenerationCensusInvalid,
 }
 
+#[hotpath::measure_all]
 impl GenerationCensusUnavailableReason {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AuthorityUnavailable => "authority_unavailable",
@@ -212,6 +214,7 @@ pub struct ReaderLaneOccupancy {
     pub waiting: u16,
 }
 
+#[hotpath::measure_all]
 impl ReaderPoolOccupancy {
     /// Projects the kernel reader-pool snapshot onto the wire shape.
     pub fn from_pool(snapshot: &tracedecay_runtime_core::db::engine::ReaderPoolSnapshot) -> Self {
@@ -271,6 +274,7 @@ pub struct DirtyMarkerSnapshot {
 /// Render a `RuntimeSnapshot` as a human-readable status block for
 /// terminals. Mirrors the structure of `tracedecay status` so it's
 /// familiar to users running the CLI manually.
+#[hotpath::measure]
 pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
     let process_block = process_text_block(&snap.process);
     let d = &snap.database;
@@ -406,6 +410,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
 
 /// One reader lane as a single terminal line. Waiters are the saturation
 /// signal, so they are always shown rather than elided when zero.
+#[hotpath::measure]
 fn lane_line(lane: &ReaderLaneOccupancy) -> String {
     format!(
         "{} workers ({} available, {} leased, {} limbo), {} waiting",
@@ -415,6 +420,7 @@ fn lane_line(lane: &ReaderLaneOccupancy) -> String {
 
 /// The process section of the text report, one line per field, matching the
 /// typed cache state instead of fabricating zeros before the first sample.
+#[hotpath::measure]
 fn process_text_block(process: &ProcessTelemetry) -> String {
     match process {
         ProcessTelemetry::Sampled {
@@ -456,6 +462,7 @@ fn process_text_block(process: &ProcessTelemetry) -> String {
 // Process sampling
 // ---------------------------------------------------------------------------
 
+#[hotpath::measure]
 pub fn unix_epoch_secs() -> Result<u64> {
     Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -499,10 +506,12 @@ struct ProcessSampler {
 /// The cache critical sections only move small values, so a poisoned lock
 /// (a panic on the sampler thread mid-store) leaves consistent data; recover
 /// the guard instead of propagating an untyped panic to the serving path.
+#[hotpath::measure]
 fn lock_cache(cache: &Mutex<ProcessSampleCache>) -> MutexGuard<'_, ProcessSampleCache> {
     cache.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+#[hotpath::measure_all]
 impl ProcessSampler {
     fn new(sample: ProcessSampleFn, refresh_interval: Duration) -> Self {
         Self {
@@ -576,6 +585,7 @@ impl ProcessSampler {
 
 /// Process-global sampler: the sample observes this process as a whole, so
 /// one cache serves every project route in the daemon.
+#[hotpath::measure]
 fn process_sampler() -> &'static ProcessSampler {
     static SAMPLER: OnceLock<ProcessSampler> = OnceLock::new();
     SAMPLER.get_or_init(|| {
@@ -585,10 +595,12 @@ fn process_sampler() -> &'static ProcessSampler {
 
 /// Reads the last completed background process sample without blocking on
 /// the CPU delta window, scheduling a background refresh when stale.
+#[hotpath::measure]
 pub fn read_cached_process_sample() -> ProcessTelemetry {
     process_sampler().read()
 }
 
+#[hotpath::measure]
 fn sample_process() -> Result<ProcessSnapshot> {
     sample_process_with_window(CPU_SAMPLE_WINDOW)
 }
@@ -597,6 +609,7 @@ fn sample_process() -> Result<ProcessSnapshot> {
 ///
 /// Shared with semantic evaluation so runtime and quality samples use one
 /// process-tick authority.
+#[hotpath::measure]
 pub fn read_linux_process_cpu_ticks() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -613,6 +626,7 @@ pub fn read_linux_process_cpu_ticks() -> Option<u64> {
     }
 }
 
+#[hotpath::measure]
 pub fn linux_clock_ticks_per_second() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -642,6 +656,7 @@ pub fn linux_clock_ticks_per_second() -> Option<u64> {
     }
 }
 
+#[hotpath::measure]
 fn cpu_percent_from_linux_ticks(
     start_ticks: u64,
     end_ticks: u64,
@@ -733,6 +748,7 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnap
 // ---------------------------------------------------------------------------
 
 /// Reads and parses a store dirty-marker file into its typed snapshot.
+#[hotpath::measure]
 pub fn read_dirty_marker(path: &Path) -> DirtyMarkerSnapshot {
     let Ok(contents) = std::fs::read(path) else {
         return DirtyMarkerSnapshot {
@@ -772,6 +788,7 @@ pub fn read_dirty_marker(path: &Path) -> DirtyMarkerSnapshot {
 }
 
 /// Size of a store file, treating a missing file as zero bytes.
+#[hotpath::measure]
 pub fn file_size(path: &Path) -> Result<u64> {
     match std::fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len()),
@@ -781,6 +798,7 @@ pub fn file_size(path: &Path) -> Result<u64> {
 }
 
 /// Appends a suffix (`-wal`, `-shm`, `.dirty`) to a database path.
+#[hotpath::measure]
 pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s: std::ffi::OsString = path.as_os_str().to_owned();
     s.push(suffix);
@@ -792,6 +810,7 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Format a byte count as a short human-readable string (`353.2 MB`).
+#[hotpath::measure]
 fn bytes_human(n: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;

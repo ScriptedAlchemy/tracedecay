@@ -4,6 +4,7 @@ use tracedecay_store::{
 
 use super::{MemoryApplication, MemoryApplicationError};
 
+#[hotpath::measure_all]
 impl<A: ProjectMemoryGraphStore> MemoryApplication<A> {
     /// Reads the rebuildable Grafeo topology, then returns facts hydrated by
     /// the canonical owner-bound fact authority. Graph nodes never carry fact

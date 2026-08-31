@@ -62,6 +62,7 @@ pub(crate) enum RuntimeSourceCaptureAuthorityV1 {
     Poll,
 }
 
+#[hotpath::measure_all]
 impl RuntimeSourceCaptureAuthorityV1 {
     fn canonical_refetch(&self) -> Option<&SourceCanonicalRefetchAuthorityV1> {
         match self {
@@ -84,6 +85,7 @@ pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
     pub(crate) request_digest: ManifestDigest,
 }
 
+#[hotpath::measure]
 fn prepare_sanitized_commit(
     capture: &SourceCaptureApplicationV1,
     request: RuntimeSourceCaptureRequestV1<'_>,
@@ -148,6 +150,7 @@ fn prepare_sanitized_commit(
     Ok((binding_identity, commit))
 }
 
+#[hotpath::measure]
 fn host_source_authority(
     receipt: &tracedecay_store::ObservationCommitReceipt,
     runtime: &tracedecay_store::StoreRuntimeBindingV1,
@@ -172,6 +175,7 @@ fn host_source_authority(
     Ok((definition, binding, identity))
 }
 
+#[hotpath::measure]
 fn prepare_host_source_commit(
     receipt: &tracedecay_store::ObservationCommitReceipt,
     current: Option<&SourceStoreStateV1>,
@@ -361,6 +365,7 @@ pub struct RuntimeExternalSourceStore {
     runtime: DatabaseRuntimeClientV1,
 }
 
+#[hotpath::measure_all]
 impl RuntimeExternalSourceStore {
     pub fn new(runtime: DatabaseRuntimeClientV1) -> Self {
         Self { runtime }
@@ -492,6 +497,7 @@ impl RuntimeExternalSourceStore {
             .collect()
     }
 
+    #[hotpath::skip]
     pub async fn capture_host_observation(
         &self,
         receipt: &tracedecay_store::ObservationCommitReceipt,
@@ -506,6 +512,7 @@ impl RuntimeExternalSourceStore {
     /// The daemon-owned host-admission drain invokes this bounded operation;
     /// capture never creates detached replay tasks. Restart resumes from the
     /// durable predecessor chain on the next admission drain.
+    #[hotpath::skip]
     pub async fn drain_host_projection_replay(
         &self,
         max: usize,
@@ -520,6 +527,7 @@ impl RuntimeExternalSourceStore {
         .await
     }
 
+    #[hotpath::skip]
     async fn drain_projection_replay_outcome(
         &self,
         binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
@@ -551,6 +559,7 @@ impl RuntimeExternalSourceStore {
         })
     }
 
+    #[hotpath::skip]
     async fn read_receipt(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
@@ -583,6 +592,7 @@ impl RuntimeExternalSourceStore {
         }
     }
 
+    #[hotpath::skip]
     async fn read_pending_projection(
         &self,
         binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
@@ -611,6 +621,7 @@ impl RuntimeExternalSourceStore {
         }
     }
 
+    #[hotpath::skip]
     async fn submit_projection(
         &self,
         projection: SourceProjectionCommitV1,
@@ -641,6 +652,7 @@ impl RuntimeExternalSourceStore {
         }
     }
 
+    #[hotpath::skip]
     pub(crate) async fn read_state(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
@@ -674,6 +686,7 @@ impl RuntimeExternalSourceStore {
     }
 }
 
+#[hotpath::measure]
 fn host_source_definition(
     provider: ProviderId,
 ) -> Result<SourceDefinitionV1, RuntimeExternalSourceErrorV1> {
@@ -698,6 +711,7 @@ fn host_source_definition(
     .map_err(invalid)
 }
 
+#[hotpath::measure]
 fn host_source_owner(
     scope: &ObservationScopeV1,
     profile_id: &tracedecay_domain::UserProfileId,
@@ -710,6 +724,7 @@ fn host_source_owner(
     }
 }
 
+#[hotpath::measure]
 fn host_source_binding(
     definition: &SourceDefinitionV1,
     observation: &tracedecay_domain::DurableObservationV1,
@@ -728,6 +743,7 @@ fn host_source_binding(
     Ok(binding)
 }
 
+#[hotpath::measure]
 fn host_native_root(
     observation: &tracedecay_domain::DurableObservationV1,
 ) -> Result<LocatorDigest, RuntimeExternalSourceErrorV1> {
@@ -743,6 +759,7 @@ fn host_native_root(
     .map_err(invalid)
 }
 
+#[hotpath::measure]
 fn validate_host_source_shard(
     binding: &SourceBindingV1,
     runtime: &tracedecay_store::StoreRuntimeBindingV1,
@@ -773,6 +790,7 @@ fn validate_host_source_shard(
     }
 }
 
+#[hotpath::measure]
 fn runtime_submit_request<T: serde::Serialize>(
     binding: &tracedecay_store::StoreRuntimeBindingV1,
     payload: RepositoryWritePayloadV1,
@@ -826,6 +844,7 @@ fn runtime_submit_request<T: serde::Serialize>(
     .map_err(invalid)
 }
 
+#[hotpath::measure]
 fn runtime_read_request(
     binding: &tracedecay_store::StoreRuntimeBindingV1,
     operation: ExternalSourceReadOperationV1,
@@ -846,6 +865,7 @@ fn runtime_read_request(
     .map_err(invalid)
 }
 
+#[hotpath::measure]
 fn runtime_control(
     suffix: &str,
     requested_at: UtcMicros,
@@ -868,6 +888,7 @@ fn runtime_control(
     })
 }
 
+#[hotpath::measure]
 fn digest_suffix(digest: &str) -> Result<&str, RuntimeExternalSourceErrorV1> {
     digest.strip_prefix("sha256:").ok_or_else(|| {
         RuntimeExternalSourceErrorV1::Invalid(
@@ -876,10 +897,12 @@ fn digest_suffix(digest: &str) -> Result<&str, RuntimeExternalSourceErrorV1> {
     })
 }
 
+#[hotpath::measure]
 fn runtime_now() -> Result<UtcMicros, RuntimeExternalSourceErrorV1> {
     try_now_micros().map_err(invalid)
 }
 
+#[hotpath::measure]
 fn serialized_len<T: serde::Serialize>(value: &T) -> Result<u64, RuntimeExternalSourceErrorV1> {
     serde_json::to_vec(value)
         .map_err(invalid)
@@ -893,6 +916,7 @@ struct ExternalSourceRuntimeProbe {
     commit_started: std::sync::atomic::AtomicBool,
 }
 
+#[hotpath::measure_all]
 impl ExternalSourceRuntimeProbe {
     fn from_control(control: &tracedecay_store::RuntimeRequestControlV1) -> Self {
         Self {
@@ -928,10 +952,12 @@ impl tracedecay_store::RuntimeRequestProbeV1 for ExternalSourceRuntimeProbe {
     }
 }
 
+#[hotpath::measure]
 fn invalid(error: impl std::fmt::Display) -> RuntimeExternalSourceErrorV1 {
     RuntimeExternalSourceErrorV1::Invalid(error.to_string())
 }
 
+#[hotpath::measure]
 fn host_external_source_projector() -> Result<ComponentVersion, RuntimeExternalSourceErrorV1> {
     ComponentVersion::new(HOST_EXTERNAL_SOURCE_PROJECTOR).map_err(invalid)
 }

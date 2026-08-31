@@ -37,6 +37,7 @@ pub struct CachedRead {
 /// Computes a stable hash of the per-call arguments that affect output. Used
 /// as the `args_hash` cache-key component so two calls with different `lines`
 /// or `limit` values map to distinct rows.
+#[hotpath::measure]
 pub fn args_hash(args: &serde_json::Value) -> Result<String> {
     let canonical = canonical_json_value(args).map_err(|error| TraceDecayError::Config {
         message: format!("cannot canonicalize read cache arguments: {error}"),
@@ -46,6 +47,7 @@ pub fn args_hash(args: &serde_json::Value) -> Result<String> {
 
 /// SHA-256 of arbitrary bytes, hex-encoded. Used as the body digest so callers
 /// can detect content changes even when only the cache layer changed.
+#[hotpath::measure]
 pub fn digest_bytes(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
@@ -214,12 +216,14 @@ pub(crate) async fn put_write(db: &Database, write: ReadCacheWrite<'_>) -> Resul
     transaction.commit().await
 }
 
+#[hotpath::measure]
 fn unix_seconds() -> i64 {
     now_micros().0 / 1_000_000
 }
 
 /// Reads a file's modification time, normalised to nanoseconds since the
 /// UNIX epoch. Used as the freshness key for cache lookups.
+#[hotpath::measure]
 pub fn file_mtime_ns(path: &std::path::Path) -> std::io::Result<i64> {
     let metadata = std::fs::metadata(path)?;
     let mtime = metadata.modified()?;

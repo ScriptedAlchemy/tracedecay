@@ -24,6 +24,7 @@ pub struct AuthorizedSessionRoot {
     identity: ResolvedSessionIdentity,
 }
 
+#[hotpath::measure_all]
 impl AuthorizedSessionRoot {
     pub fn from_identity(identity: &ResolvedSessionIdentity) -> Self {
         Self {
@@ -49,6 +50,7 @@ pub struct SessionRequestBinding {
     admitted_grant_digest: Option<ManifestDigest>,
 }
 
+#[hotpath::measure_all]
 impl SessionRequestBinding {
     pub fn new(
         identity: ResolvedSessionIdentity,
@@ -138,14 +140,17 @@ impl SessionRequestBinding {
         &self.identity
     }
 
+    #[hotpath::skip]
     pub const fn capability_digest(&self) -> CapabilityDigest {
         self.capability_digest
     }
 
+    #[hotpath::skip]
     pub const fn policy_digest(&self) -> PolicyDigest {
         self.policy_digest
     }
 
+    #[hotpath::skip]
     pub const fn configuration_digest(&self) -> ConfigurationDigest {
         self.configuration_digest
     }
@@ -154,6 +159,7 @@ impl SessionRequestBinding {
         &self.cancellation
     }
 
+    #[hotpath::skip]
     pub const fn budgets(&self) -> RequestBudgets {
         self.budgets
     }
@@ -186,6 +192,7 @@ pub struct SessionScopeAuthorizationRequest {
     access: SessionAccess,
 }
 
+#[hotpath::measure_all]
 impl SessionScopeAuthorizationRequest {
     pub fn new(
         actor_id: ActorId,
@@ -252,14 +259,17 @@ impl SessionScopeAuthorizationRequest {
         self.provider_scope.as_deref()
     }
 
+    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
+    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
+    #[hotpath::skip]
     pub const fn access(&self) -> SessionAccess {
         self.access
     }
@@ -278,6 +288,7 @@ pub struct AuthorizedSessionScope {
     access: SessionAccess,
 }
 
+#[hotpath::measure_all]
 impl AuthorizedSessionScope {
     fn from_request(request: &SessionScopeAuthorizationRequest) -> Self {
         Self {
@@ -317,14 +328,17 @@ impl AuthorizedSessionScope {
         self.provider_scope.as_deref()
     }
 
+    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
+    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
+    #[hotpath::skip]
     pub const fn access(&self) -> SessionAccess {
         self.access
     }
@@ -339,6 +353,7 @@ pub struct SessionAuthorizationGrant {
     binding: SessionRequestBinding,
 }
 
+#[hotpath::measure_all]
 impl SessionAuthorizationGrant {
     /// Issues a grant after an authorizer accepts the exact resolved scope.
     pub fn issue(
@@ -420,6 +435,7 @@ impl SessionAuthorizationGrant {
         &self.id
     }
 
+    #[hotpath::skip]
     pub const fn revision(&self) -> u64 {
         self.revision
     }
@@ -428,14 +444,17 @@ impl SessionAuthorizationGrant {
         &self.scope
     }
 
+    #[hotpath::skip]
     pub const fn capability_digest(&self) -> CapabilityDigest {
         self.binding.capability_digest()
     }
 
+    #[hotpath::skip]
     pub const fn policy_digest(&self) -> PolicyDigest {
         self.binding.policy_digest()
     }
 
+    #[hotpath::skip]
     pub const fn configuration_digest(&self) -> ConfigurationDigest {
         self.binding.configuration_digest()
     }
@@ -448,6 +467,7 @@ impl SessionAuthorizationGrant {
         self.binding.cancellation()
     }
 
+    #[hotpath::skip]
     pub const fn budgets(&self) -> RequestBudgets {
         self.binding.budgets()
     }
@@ -468,7 +488,9 @@ pub enum SessionFreshnessPolicy {
     RequireFresh,
 }
 
+#[hotpath::measure_all]
 impl SessionFreshnessPolicy {
+    #[hotpath::skip]
     pub const fn accepts(self, freshness: SessionDataFreshness) -> bool {
         matches!(
             (self, freshness),
@@ -491,6 +513,7 @@ pub struct SessionRetrievalRequest {
     limit: u64,
 }
 
+#[hotpath::measure_all]
 impl SessionRetrievalRequest {
     pub fn new(
         grant: SessionAuthorizationGrant,
@@ -533,10 +556,12 @@ impl SessionRetrievalRequest {
         &self.target
     }
 
+    #[hotpath::skip]
     pub const fn freshness_policy(&self) -> SessionFreshnessPolicy {
         self.freshness_policy
     }
 
+    #[hotpath::skip]
     pub const fn limit(&self) -> u64 {
         self.limit
     }
@@ -586,6 +611,7 @@ pub enum SessionRetrievalOutcome<T> {
     Cancelled,
 }
 
+#[hotpath::measure_all]
 impl<T> SessionRetrievalOutcome<T> {
     pub fn complete(
         items: Vec<T>,
