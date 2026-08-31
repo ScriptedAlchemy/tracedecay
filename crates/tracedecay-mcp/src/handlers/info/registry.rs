@@ -1,6 +1,25 @@
-//! `tracedecay_project_list`, `tracedecay_project_search`, and `tracedecay_project_context` over the profile project registry.
+//! `tracedecay_project_list`, `tracedecay_project_search`, and
+//! `tracedecay_project_context` over the profile project registry.
 
-use super::*;
+use std::fmt::Write as _;
+use std::path::Path;
+
+use serde_json::{Value, json};
+use tracedecay_application::{
+    ProjectRegistryContextCommand, ProjectRegistryContextOutcome, ProjectRegistryListingCommand,
+    ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryReadPort,
+    ProjectRegistrySelector, ProjectRegistryView, list_registered_projects,
+    read_registered_project_context,
+};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+
+use crate::ToolResult;
+use crate::rendered_tool_result;
+use crate::tools::render;
+
+fn display_path(path: &Path) -> String {
+    path.display().to_string()
+}
 
 fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
     args.get("limit")
@@ -9,8 +28,8 @@ fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
         .map_or(default, |value| value.clamp(1, max))
 }
 
-fn project_registry_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
-    render_registry_result(Some(cg.project_root()), args, payload)
+fn project_registry_result(project_root: &Path, args: &Value, payload: &Value) -> ToolResult {
+    render_registry_result(Some(project_root), args, payload)
 }
 
 fn registry_result(args: &Value, payload: &Value) -> ToolResult {
@@ -36,6 +55,54 @@ fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) ->
     })
 }
 
+/// Terminal/tool-output text for a registry view. Kept here so the portable
+/// handler does not take a dashboard-api (and therefore usecases/lsp) edge.
+fn render_project_registry_view(title: &str, view: &ProjectRegistryView) -> String {
+    if view.summary.project_count == 0 {
+        return format!("No {title} found.");
+    }
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Found {} {title} across {} repositories.\n\nRepositories:",
+        view.summary.project_count, view.summary.repo_count
+    );
+    for group in &view.project_tree {
+        let group_branches = if group.branches.is_empty() {
+            "-".to_string()
+        } else {
+            group.branches.join(", ")
+        };
+        let _ = writeln!(out, "- {} (branches: {})", group.label, group_branches);
+        for project in &group.projects {
+            let marker = if project.is_active == Some(true) {
+                " *"
+            } else {
+                ""
+            };
+            let branches = if project.branches.is_empty() {
+                "-".to_string()
+            } else {
+                project.branches.join(", ")
+            };
+            let _ = writeln!(
+                out,
+                "  - `{}`{} [{}] branches: {}; stores: {}; path: {}",
+                project.project_id,
+                marker,
+                project.kind,
+                branches,
+                project.store_count,
+                project.project_root
+            );
+        }
+    }
+    if view.summary.truncated {
+        out.push_str("\nResult truncated; increase limit for more projects.\n");
+    }
+    out
+}
+
 fn registry_missing_payload() -> Value {
     json!({
         "status": "unavailable",
@@ -46,8 +113,7 @@ fn registry_missing_payload() -> Value {
 
 /// Zeroed summary/tree keys for the missing-registry branch, mirroring the
 /// ok-shape's `summary`/`project_tree` so callers get a stable payload shape
-/// regardless of whether the registry is present (see
-/// `src/dashboard/projects.rs`'s missing-registry branch).
+/// regardless of whether the registry is present.
 fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
     (
         json!(title),
@@ -60,9 +126,23 @@ fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
     )
 }
 
+/// Whether a selector names a path rather than a bare project name. Pure
+/// syntax: it decides whether a selector may fall back to Git identity.
+/// Must stay aligned with
+/// `RegisteredGlobalDb::is_explicit_project_path_selector`.
+fn is_explicit_project_path_selector(selector: &str) -> bool {
+    let selector = selector.trim();
+    !selector.is_empty()
+        && (Path::new(selector).is_absolute()
+            || selector == "."
+            || selector == ".."
+            || selector.contains('/')
+            || selector.contains('\\'))
+}
+
 #[hotpath::measure(label = "mcp.info.project_list.total")]
-pub(crate) async fn handle_project_list(
-    cg: &TraceDecay,
+pub async fn handle_project_list(
+    project_root: &Path,
     args: Value,
     registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
@@ -71,7 +151,7 @@ pub(crate) async fn handle_project_list(
         list_registered_projects(
             registry,
             ProjectRegistryListingCommand {
-                active_project_root: cg.project_root().to_path_buf(),
+                active_project_root: project_root.to_path_buf(),
                 scope: ProjectRegistryListingScope::All,
                 limit,
             },
@@ -89,8 +169,8 @@ pub(crate) async fn handle_project_list(
 }
 
 #[hotpath::measure(label = "mcp.info.project_search.total")]
-pub(crate) async fn handle_project_search(
-    cg: &TraceDecay,
+pub async fn handle_project_search(
+    project_root: &Path,
     args: Value,
     registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
@@ -106,7 +186,7 @@ pub(crate) async fn handle_project_search(
         list_registered_projects(
             registry,
             ProjectRegistryListingCommand {
-                active_project_root: cg.project_root().to_path_buf(),
+                active_project_root: project_root.to_path_buf(),
                 scope: ProjectRegistryListingScope::Matching {
                     query: query.clone(),
                 },
@@ -167,7 +247,7 @@ fn registry_listing_result(
     }
 }
 
-fn project_context_selector(cg: &TraceDecay, args: &Value) -> ProjectRegistrySelector {
+fn project_context_selector(project_root: &Path, args: &Value) -> ProjectRegistrySelector {
     if let Some(project_id) = args
         .get("project_selector")
         .and_then(Value::as_object)
@@ -178,7 +258,7 @@ fn project_context_selector(cg: &TraceDecay, args: &Value) -> ProjectRegistrySel
     }
     let Some(path) = args.get("path").and_then(Value::as_str) else {
         return ProjectRegistrySelector::Path {
-            path: cg.project_root().to_path_buf(),
+            path: project_root.to_path_buf(),
             allow_git_identity: true,
         };
     };
@@ -192,8 +272,8 @@ fn project_context_selector(cg: &TraceDecay, args: &Value) -> ProjectRegistrySel
 }
 
 #[hotpath::measure(label = "mcp.info.project_context.total")]
-pub(crate) async fn handle_project_context(
-    cg: &TraceDecay,
+pub async fn handle_project_context(
+    project_root: &Path,
     args: Value,
     registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
@@ -201,8 +281,8 @@ pub(crate) async fn handle_project_context(
         read_registered_project_context(
             registry,
             ProjectRegistryContextCommand {
-                active_project_root: cg.project_root().to_path_buf(),
-                selector: project_context_selector(cg, &args),
+                active_project_root: project_root.to_path_buf(),
+                selector: project_context_selector(project_root, &args),
             },
         ),
         label = "mcp.info.project_context.read"
@@ -226,7 +306,7 @@ pub(crate) async fn handle_project_context(
             "stores": context.stores,
         }),
     };
-    Ok(project_registry_result(cg, &args, &payload))
+    Ok(project_registry_result(project_root, &args, &payload))
 }
 
 #[cfg(test)]
