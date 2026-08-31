@@ -125,5 +125,11 @@ name = "lcm_expansion"
 harness = false
 required-features = ["test-helpers"]
 
+# Exercises this crate's existing `#[hotpath::measure]` labels in both
+# feature modes; needs the registered-store harness, never `default`.
+[[test]]
+name = "hotpath_coverage"
+required-features = ["test-helpers"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
