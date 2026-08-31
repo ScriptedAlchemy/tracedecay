@@ -523,6 +523,32 @@ fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) {
     .unwrap();
 }
 
+/// The codex scope matcher resolves rollout membership through the cwd's
+/// git worktree, and post-ingest commit attribution scans `git log`, so
+/// rotation fixtures are real repositories with one commit.
+fn init_fixture_git_repo(project: &Path) {
+    let run = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .expect("git fixture command");
+        assert!(output.status.success(), "git {args:?} failed: {output:?}");
+    };
+    run(&["init", "-q"]);
+    run(&[
+        "-c",
+        "user.name=TraceDecay Tests",
+        "-c",
+        "user.email=tests@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "rotation fixture",
+    ]);
+}
+
 /// Claude Code transcript whose recorded `cwd` binds it to `project`.
 fn write_claude_transcript_fixture(home: &Path, project: &Path, session: &str) {
     let dir = home.join(".claude/projects/-rotation-fixture");
@@ -561,6 +587,10 @@ async fn run_bounded_project_pass(
     provider: Option<SessionProvider>,
     bounds: IngestPassBounds,
 ) -> TranscriptIngestOutcome {
+    // Observation capture refuses to run without the process background-CPU
+    // authority that daemon startup installs; the fixture installs the same
+    // one the production worker plan uses.
+    crate::host_admission::ensure_process_background_cpu_authority().unwrap();
     let authority = runtime.authority();
     let shard = runtime.database.binding().shard_id.clone();
     let cancellation = ObservationCancellation::default();
@@ -594,6 +624,7 @@ async fn bounded_project_catch_up_pass_persists_the_rotation_frontier() {
     let home = temp.path().join("home");
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    init_fixture_git_repo(&project);
     let project_id = scheduler_test_project_id();
     write_codex_rollout_fixture(&home, &project, "codex-rotation-bounded");
     write_claude_transcript_fixture(&home, &project, "claude-rotation-bounded");
@@ -610,8 +641,11 @@ async fn bounded_project_catch_up_pass_persists_the_rotation_frontier() {
     .await;
 
     assert_eq!(
-        outcome.stats.messages_upserted, 2,
-        "the first bounded pass covers only the codex slot"
+        outcome.stats.messages_upserted,
+        2,
+        "the first bounded pass covers only the codex slot; coverage {:?} failures {:?}",
+        outcome.coverage,
+        outcome.failures,
     );
     assert!(
         outcome.has_deferred_work(),
@@ -633,6 +667,7 @@ async fn project_catch_up_resumes_from_the_persisted_frontier_after_restart() {
     let profile_root = temp.path().join("profile");
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    init_fixture_git_repo(&project);
     let project_id = scheduler_test_project_id();
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
         &project,
@@ -667,7 +702,13 @@ async fn project_catch_up_resumes_from_the_persisted_frontier_after_restart() {
             ROTATION_TEST_BOUNDS,
         )
         .await;
-        assert_eq!(first.stats.messages_upserted, 2, "codex slot ingested");
+        assert_eq!(
+            first.stats.messages_upserted,
+            2,
+            "codex slot ingested; coverage {:?} failures {:?}",
+            first.coverage,
+            first.failures,
+        );
         assert_eq!(project_rotation_frontier(&runtime).await, Some(1));
     }
 
