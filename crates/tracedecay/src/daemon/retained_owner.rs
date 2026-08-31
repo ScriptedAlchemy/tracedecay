@@ -23,11 +23,11 @@ mod memory_mutation;
 mod memory_target;
 mod memory_tracking;
 mod profile;
-pub(crate) mod receipts;
 mod session;
 pub(crate) mod session_queries;
 pub(crate) mod session_refresh;
 
+pub(crate) use tracedecay_application::retained_receipts as receipts;
 pub(crate) use memory_mapping::search_page;
 pub(crate) use memory_target::{MemoryTargetAccessV1, open_project_retained_memory_target};
 
