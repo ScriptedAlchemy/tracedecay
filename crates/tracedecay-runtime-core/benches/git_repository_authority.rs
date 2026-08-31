@@ -1,10 +1,35 @@
+//! Criterion benchmarks for `GitRepositoryAuthority` history and status.
+//!
+//! Timing-only by default. The opt-in Hotpath lanes wrap the entire run in
+//! one process-boundary guard so per-probe attribution for the production
+//! `runtime_core.git.*` spans lands in the exit report when the run ends:
+//!
+//! ```sh
+//! cargo bench -p tracedecay-runtime-core --bench git_repository_authority
+//! cargo bench -p tracedecay-runtime-core --bench git_repository_authority \
+//!     --features hotpath
+//! cargo bench -p tracedecay-runtime-core --bench git_repository_authority \
+//!     --features hotpath-alloc
+//! ```
+//!
+//! The guard excludes the CPU section, so no `samply`/`hotpath-samply`
+//! autospawn: CPU sampling stays opt-in via an explicit `HOTPATH_REPORT`.
+//! Set `HOTPATH_METRICS_SERVER_OFF=1` when a live console is not wanted
+//! (CI does; see `.github/workflows/hotpath-runtime-core.yml`).
+
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group};
 use tempfile::TempDir;
 use tracedecay_runtime_core::git_repository::{GitHistoryOptions, GitRepositoryAuthority};
+
+// The alloc lane refuses to start without a counting global allocator; a
+// bench binary registers its own. Timing-only builds keep the system one.
+#[cfg(feature = "hotpath-alloc")]
+#[global_allocator]
+static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 struct RepositoryFixture {
     _directory: TempDir,
@@ -153,4 +178,14 @@ criterion_group! {
     config = criterion_config();
     targets = benchmark_authority
 }
-criterion_main!(benches);
+
+// Expanded `criterion_main!` so a Hotpath lane can hold one process-boundary
+// guard across the whole run and flush its exit report on drop.
+fn main() {
+    #[cfg(feature = "hotpath")]
+    let _hotpath = hotpath::HotpathGuardBuilder::new("git-repository-authority-bench")
+        .sections_exclude(vec![hotpath::Section::FunctionsCpu])
+        .build();
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+}
