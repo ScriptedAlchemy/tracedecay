@@ -89,6 +89,7 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "
 url = "2"
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
 # `runtime::vibe` and `runtime::workflow_ingest` tests backdate file mtimes.
 filetime = "0.2"
 tempfile = "3"
@@ -101,3 +102,7 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0", 
 # The live git-attribution test publishes evidence through the hermetic
 # in-memory verified snapshot (`VerifiedGraphSnapshot::memory`).
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+
+[[bench]]
+name = "host_transcript_io"
+harness = false

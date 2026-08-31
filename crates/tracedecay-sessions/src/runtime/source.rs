@@ -485,6 +485,23 @@ pub(crate) fn run_blocking_transcript_section<T>(work: impl FnOnce() -> T) -> T 
     }
 }
 
+/// Spawns a task on `handle` and waits for it from a blocking section.
+///
+/// On a one-worker multi-thread runtime this only succeeds when the caller
+/// is inside [`run_blocking_transcript_section`]: `block_in_place` hands the
+/// worker queue to another thread so the spawned task can run. An inline
+/// filesystem/JSONL section deadlocks until the receive timeout fails.
+#[cfg(test)]
+pub(crate) fn require_blocking_section_releases_worker(handle: tokio::runtime::Handle) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    handle.spawn(async move {
+        let _ = sender.send(());
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("host transcript filesystem work must release the only Tokio worker");
+}
+
 /// Fallible production boundary that drives a single source to completion
 /// against `store`, ingesting every transcript it locates for `project_root`.
 /// Source parse misses are skipped; authoritative store failures abort the
