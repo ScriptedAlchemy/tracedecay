@@ -36,6 +36,7 @@ pub fn sync_directory(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()>
     }
 }
 
+#[hotpath::measure]
 pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
     match path.parent() {
         Some(parent) => sync_directory(parent, policy),
@@ -43,6 +44,7 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
     }
 }
 
+#[hotpath::measure]
 pub fn file_len(path: &Path) -> io::Result<u64> {
     match fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len()),
@@ -51,6 +53,7 @@ pub fn file_len(path: &Path) -> io::Result<u64> {
     }
 }
 
+#[hotpath::measure]
 pub fn validate_regular_or_missing(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => Ok(true),
@@ -68,16 +71,19 @@ pub fn validate_regular_or_missing(path: &Path) -> io::Result<bool> {
 /// Call this on a path you just created. Prefer [`tighten_existing_file`]
 /// when the file may be missing (that helper no-ops on `NotFound`).
 #[cfg(unix)]
+#[hotpath::measure]
 pub fn set_owner_private_file_mode(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
+#[hotpath::measure]
 pub fn set_owner_private_file_mode(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn tighten_existing_file(path: &Path) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -119,6 +125,7 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
     Ok(Some(bytes))
 }
 
+#[hotpath::measure]
 fn temporary_path(path: &Path, kind: &str) -> PathBuf {
     static NONCE: AtomicU64 = AtomicU64::new(1);
     let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
@@ -134,16 +141,19 @@ fn temporary_path(path: &Path, kind: &str) -> PathBuf {
     ))
 }
 
+#[hotpath::measure]
 fn remove_owned_temp(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+#[hotpath::measure]
 fn remove_owned_temp_if_contents_match(path: &Path, owned_contents: &[u8]) {
     if fs::read(path).is_ok_and(|contents| contents == owned_contents) {
         remove_owned_temp(path);
     }
 }
 
+#[hotpath::measure]
 fn sync_owned_file(file: &File) -> io::Result<()> {
     hotpath::measure_block!("private_fs.framed_log.fsync", file.sync_all())
 }
@@ -197,6 +207,7 @@ pub fn with_owned_temp_publish<T>(
     result
 }
 
+#[hotpath::measure]
 pub fn replace_via_rename(temporary: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(temporary, destination)
 }
@@ -221,6 +232,7 @@ pub struct ConditionalPublishCallbacks<
     pub verify_published: VerifyPublished,
 }
 
+#[hotpath::measure]
 fn unused_temporary_path(destination: &Path, kind: &str) -> io::Result<PathBuf> {
     for _ in 0..64 {
         let path = temporary_path(destination, kind);
@@ -237,6 +249,7 @@ fn unused_temporary_path(destination: &Path, kind: &str) -> io::Result<PathBuf> 
 }
 
 #[cfg(target_os = "linux")]
+#[hotpath::measure]
 fn exchange_paths(first: &Path, second: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -262,6 +275,7 @@ fn exchange_paths(first: &Path, second: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 fn exchange_paths(first: &Path, second: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -279,6 +293,7 @@ fn exchange_paths(first: &Path, second: &Path) -> io::Result<()> {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[hotpath::measure]
 fn exchange_paths(_first: &Path, _second: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -287,6 +302,7 @@ fn exchange_paths(_first: &Path, _second: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn replace_existing_with_backup(
     replacement: &Path,
     destination: &Path,
@@ -322,6 +338,7 @@ fn replace_existing_with_backup(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn replace_existing_with_backup(
     replacement: &Path,
     destination: &Path,
@@ -332,6 +349,7 @@ fn replace_existing_with_backup(
 }
 
 #[cfg(target_os = "linux")]
+#[hotpath::measure]
 fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -357,6 +375,7 @@ fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -375,6 +394,7 @@ fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[hotpath::measure]
 fn rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -383,6 +403,7 @@ fn rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
@@ -409,6 +430,7 @@ fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     }
 }
 
+#[hotpath::measure]
 pub fn atomic_write(
     destination: &Path,
     kind: &str,
