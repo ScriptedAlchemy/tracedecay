@@ -24,19 +24,17 @@ use tracedecay_domain::{
     ManifestDigest, ProjectId, RetrieverKind, TaskId, TemporalModeV1, UtcMicros,
     VectorGenerationIdV1, WorkAttemptIdentityV1,
 };
-use tracedecay_global_db::configuration::semantic::{SemanticConfig, SemanticProfileSelection};
 use tracedecay_sdk::client::Client;
 use tracedecay_sdk::operations::{
     ApplicationConfigurationGet, ApplicationConfigurationObservedState,
     ApplicationConfigurationSet, WorkRetrieveEvidence,
 };
-use tracedecay_semantic::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1,
-    SemanticResourceCeilings,
+use tracedecay_semantic::SemanticModelLifecycleOwnerV1;
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticFallbackReasonV1,
+    SemanticModelLifecycleStateV1, SemanticProfileSelection, SemanticResourceCeilings,
 };
-use tracedecay_usecases::semantic_runtime::{
-    SemanticFallbackReasonV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
-};
+use tracedecay_usecases::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
 
 use super::{
     PROVIDER_SESSION_ID, advance_provider_transcript_participant_generation, common,

@@ -4,7 +4,7 @@ use super::*;
 
 use super::registrars::registry_registration_refusal;
 use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
-use tracedecay_global_db::configuration::semantic::{SemanticConfig, SemanticProfileSelection};
+use tracedecay_semantic_contracts::{SemanticConfig, SemanticProfileSelection};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod settlement;

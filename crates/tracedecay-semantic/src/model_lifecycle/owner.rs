@@ -315,7 +315,7 @@ impl SemanticModelLifecycleOwnerV1 {
             .strip_prefix("sha256:")
             .ok_or(ModelLifecycleErrorV1::VerificationFailed)
             .and_then(|digest| {
-                super::manifest::Sha256DigestHex::new(digest.to_owned())
+                Sha256DigestHex::new(digest.to_owned())
                     .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)
             })?;
         let artifact = self
@@ -677,7 +677,7 @@ impl SemanticModelLifecycleOwnerV1 {
                 }
             }));
         }
-        let digest = super::manifest::Sha256DigestHex::new(artifact_digest.clone())
+        let digest = Sha256DigestHex::new(artifact_digest.clone())
             .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
         let environment = RuntimeEnvironmentV1::detect_fastembed_process()
             .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
@@ -864,9 +864,8 @@ impl SemanticModelLifecycleOwnerV1 {
         if install_path_of(&previous).is_some_and(|path| {
             path.starts_with(self.root.join("verified-artifacts").join("artifacts"))
         }) {
-            let digest =
-                super::manifest::Sha256DigestHex::new(previous.artifact_digest().to_owned())
-                    .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+            let digest = Sha256DigestHex::new(previous.artifact_digest().to_owned())
+                .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
             self.artifact_store.activate_artifact_with_rollback(
                 &digest,
                 EMBEDDING_ACTIVE_LEASE_ID_V1,

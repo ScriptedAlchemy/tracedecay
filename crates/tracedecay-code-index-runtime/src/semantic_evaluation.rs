@@ -14,6 +14,7 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
 use crate::config::retrieval::RetrievalRuntimeCompatibilityV1;
 use crate::config::retrieval::{
@@ -397,7 +398,7 @@ fn record_vector_generation_failure(error: &VectorGenerationStoreErrorV1) {
 pub fn semantic_publication_generation(
     state: &tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1,
 ) -> Result<VectorGenerationIdV1, SemanticActivationCoordinationErrorV1> {
-    use tracedecay_usecases::semantic_runtime::{SemanticFallbackReasonV1, SemanticRuntimeStateV1};
+    use tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1;
 
     match state {
         SemanticRuntimeStateV1::Current { receipt } => Ok(receipt.activated_generation.clone()),

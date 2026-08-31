@@ -38,11 +38,12 @@ use crate::semantic_code::{
     production_fastembed_catalog,
 };
 #[cfg(feature = "semantic-fastembed")]
-use tracedecay_global_db::configuration::semantic::SemanticResourceCeilings;
-#[cfg(feature = "semantic-fastembed")]
 use tracedecay_graph_db::NeverCancelled;
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticFallbackReasonV1, SemanticResourceCeilings,
+};
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
@@ -1281,8 +1282,7 @@ fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
         (
             tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Degraded {
                 active_generation: None,
-                reason:
-                    tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::RuntimeFailure,
+                reason: SemanticFallbackReasonV1::RuntimeFailure,
             },
             "semantic_degraded",
         ),
@@ -8085,10 +8085,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         .expect("Jina lifecycle"),
     );
     lifecycle
-        .select_model(
-            Some(tracedecay_global_db::configuration::semantic::DEFAULT_FASTEMBED_MODEL_ID),
-            true,
-        )
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select configured Jina model");
     lifecycle
         .acquire_blocking_for_tests()

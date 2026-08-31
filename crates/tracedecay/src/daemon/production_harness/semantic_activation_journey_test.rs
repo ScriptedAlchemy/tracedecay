@@ -8,6 +8,10 @@ use serde_json::{Value, json};
 use tracedecay_application::ConfigurationSetRequestV1;
 use tracedecay_domain::configuration::{ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey};
 use tracedecay_domain::{ManifestDigest, VectorGenerationIdV1};
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticModelLifecycleStateV1,
+    SemanticProfileSelection, SemanticResourceCeilings,
+};
 use tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1;
 use tracedecay_usecases::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
@@ -49,7 +53,7 @@ pub(super) fn seed_distribution_fixture(
 ) {
     let model = owner
         .catalog()
-        .get(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID)
+        .get(DEFAULT_FASTEMBED_MODEL_ID)
         .expect("production catalog contains default model");
     let repository = format!("models--{}", model.model_code.replace('/', "--"));
     let repository_root = lifecycle_root.join("hf-hub-cache").join(repository);
@@ -73,12 +77,12 @@ pub(super) fn installed_selection_material(
     owner: &tracedecay_semantic::SemanticModelLifecycleOwnerV1,
 ) -> (String, PathBuf) {
     match owner.status().state.expect("installed model state") {
-        tracedecay_semantic::SemanticModelLifecycleStateV1::Installed {
+        SemanticModelLifecycleStateV1::Installed {
             artifact_digest,
             install_path,
             ..
         }
-        | tracedecay_semantic::SemanticModelLifecycleStateV1::Ready {
+        | SemanticModelLifecycleStateV1::Ready {
             artifact_digest,
             install_path,
             ..
@@ -223,7 +227,7 @@ pub(super) async fn evaluate_native_profile(
     project: &Path,
 ) -> ManifestDigest {
     let resources = harness.resources.as_ref().expect("live harness");
-    let evaluation_limits = crate::config::SemanticResourceCeilings::default();
+    let evaluation_limits = SemanticResourceCeilings::default();
     let observed_at = tracedecay_domain::UtcMicros(
         i64::try_from(
             std::time::SystemTime::now()
@@ -323,7 +327,7 @@ pub(super) async fn evaluate_native_profile(
                 tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle");
             let model = lifecycle
                 .catalog()
-                .get(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID)
+                .get(DEFAULT_FASTEMBED_MODEL_ID)
                 .expect("default model manifest");
             assert_eq!(
                 measured.model_bytes, model.members["model"].length,
@@ -365,8 +369,8 @@ pub(super) async fn evaluate_native_profile(
 pub(super) async fn set_semantic_profile(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
-    active: crate::config::SemanticProfileSelection,
-    rollback: Option<crate::config::SemanticProfileSelection>,
+    active: SemanticProfileSelection,
+    rollback: Option<SemanticProfileSelection>,
 ) {
     let graph = harness.server(project).expect("project server").cg().await;
     let project_id = graph
@@ -386,12 +390,12 @@ pub(super) async fn set_semantic_profile(
         key: SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
             .expect("semantic runtime setting key"),
         value: ConfigurationValueV1::Text(
-            serde_json::to_string(&crate::config::SemanticConfig {
-                selected_model: Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+            serde_json::to_string(&SemanticConfig {
+                selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
                 auto_download: false,
                 active_profile: Some(active),
                 rollback_profile: rollback,
-                resources: crate::config::SemanticResourceCeilings::default(),
+                resources: SemanticResourceCeilings::default(),
             })
             .expect("semantic runtime JSON"),
         ),
@@ -549,8 +553,8 @@ pub(super) fn selection(
     digest: ManifestDigest,
     artifact_digest: &str,
     artifact_path: &Path,
-) -> crate::config::SemanticProfileSelection {
-    crate::config::SemanticProfileSelection {
+) -> SemanticProfileSelection {
+    SemanticProfileSelection {
         profile_id: EVALUATED_PROFILE_ID.to_owned(),
         accepted_profile_digest: digest,
         artifact_digest: artifact_digest.to_owned(),
@@ -593,7 +597,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
     seed_distribution_fixture(&lifecycle_root, &fixture_root, &lifecycle);
     lifecycle
-        .select_model(Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID), true)
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select production semantic model");
     lifecycle
         .acquire_blocking_for_tests()

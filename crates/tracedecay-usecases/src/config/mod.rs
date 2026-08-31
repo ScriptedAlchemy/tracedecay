@@ -11,9 +11,6 @@ pub mod topology;
 pub mod work_executable_binding;
 
 pub use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
-pub use tracedecay_global_db::configuration::semantic::{
-    SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
-};
 pub use tracedecay_global_db::configuration::{registry, resolver};
 #[cfg(test)]
 pub use tracedecay_runtime_core::config::PinnedUserDataDir;
@@ -32,9 +29,10 @@ use tracedecay_domain::configuration::{
     INDEX_TRACK_CALL_SITES_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, TELEMETRY_TIMINGS_SETTING_KEY,
 };
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::storage::StoreLayout;
+use tracedecay_semantic_contracts::SemanticConfig;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceDecayConfig {
@@ -225,10 +223,12 @@ pub fn install_pinned_runtime_configuration_cache(
         .map_err(|_| config_error("pinned runtime configuration cache is already installed"))
 }
 
-fn pinned_runtime_configuration_cache() -> Result<&'static dyn PinnedRuntimeConfigurationCachePort> {
-    PINNED_RUNTIME_CONFIGURATION_CACHE.get().map(Arc::as_ref).ok_or_else(|| {
-        config_error("pinned runtime configuration cache is not installed")
-    })
+fn pinned_runtime_configuration_cache() -> Result<&'static dyn PinnedRuntimeConfigurationCachePort>
+{
+    PINNED_RUNTIME_CONFIGURATION_CACHE
+        .get()
+        .map(Arc::as_ref)
+        .ok_or_else(|| config_error("pinned runtime configuration cache is not installed"))
 }
 
 pub fn publish_pinned_runtime_configuration(

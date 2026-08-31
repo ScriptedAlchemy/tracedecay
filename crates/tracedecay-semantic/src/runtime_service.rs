@@ -15,9 +15,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
-use serde::Serialize;
 use tokio::task::JoinHandle;
-use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
+#[cfg(test)]
+use tracedecay_domain::VectorGenerationIdV1;
+use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1};
+use tracedecay_semantic_contracts::{
+    SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
+};
 
 use super::fastembed_adapter::FastEmbedEmbeddingRuntime;
 use super::fastembed_adapter::{

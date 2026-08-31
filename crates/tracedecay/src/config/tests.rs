@@ -9,6 +9,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection,
+};
 
 struct EnvRestore {
     key: &'static str,
@@ -277,10 +280,10 @@ fn sync_config_defaults_round_trip() {
 #[test]
 fn semantic_config_defaults_to_offline_healthy_baseline() {
     let config = TraceDecayConfig::default();
-    assert_eq!(config.semantic, super::SemanticConfig::default());
+    assert_eq!(config.semantic, SemanticConfig::default());
     assert_eq!(
         config.semantic.selected_model.as_deref(),
-        Some(super::DEFAULT_FASTEMBED_MODEL_ID)
+        Some(DEFAULT_FASTEMBED_MODEL_ID)
     );
     assert!(config.semantic.auto_download);
     assert!(config.semantic.active_profile.is_none());
@@ -288,7 +291,7 @@ fn semantic_config_defaults_to_offline_healthy_baseline() {
     assert!(config.semantic.validate().is_ok());
     let catalog = tracedecay_semantic::production_fastembed_catalog();
     let model = catalog
-        .get(super::DEFAULT_FASTEMBED_MODEL_ID)
+        .get(DEFAULT_FASTEMBED_MODEL_ID)
         .expect("default semantic model is cataloged");
     let model_bytes = model.members.get("model").expect("model member").length;
     assert!(config.semantic.resources.max_model_bytes >= model_bytes);
@@ -309,7 +312,7 @@ fn semantic_config_defaults_to_offline_healthy_baseline() {
 
 #[test]
 fn semantic_config_rejects_uncataloged_model_ids() {
-    let mut semantic = super::SemanticConfig {
+    let mut semantic = SemanticConfig {
         selected_model: Some("NotInCatalog".to_owned()),
         ..Default::default()
     };
@@ -320,7 +323,7 @@ fn semantic_config_rejects_uncataloged_model_ids() {
 
 #[test]
 fn semantic_config_accepts_only_explicit_local_installed_profiles() {
-    let local = super::SemanticProfileSelection {
+    let local = SemanticProfileSelection {
         profile_id: "code-embedding.v1".to_owned(),
         accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
             "sha256:{}",
@@ -330,9 +333,9 @@ fn semantic_config_accepts_only_explicit_local_installed_profiles() {
         artifact_digest: "a".repeat(64),
         artifact_path: std::path::PathBuf::from("/var/lib/tracedecay/models/code-embedding"),
     };
-    let mut semantic = super::SemanticConfig {
+    let mut semantic = SemanticConfig {
         active_profile: Some(local.clone()),
-        rollback_profile: Some(super::SemanticProfileSelection {
+        rollback_profile: Some(SemanticProfileSelection {
             profile_id: "code-embedding.previous".to_owned(),
             accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
                 "sha256:{}",
@@ -344,7 +347,7 @@ fn semantic_config_accepts_only_explicit_local_installed_profiles() {
                 "/var/lib/tracedecay/models/code-embedding-previous",
             ),
         }),
-        ..super::SemanticConfig::default()
+        ..SemanticConfig::default()
     };
     assert!(semantic.validate().is_ok());
 
@@ -364,11 +367,11 @@ fn semantic_config_accepts_only_explicit_local_installed_profiles() {
 
 #[test]
 fn semantic_resource_ceilings_reject_zero_or_incoherent_limits() {
-    let mut semantic = super::SemanticConfig::default();
+    let mut semantic = SemanticConfig::default();
     semantic.resources.max_threads = 0;
     assert!(semantic.validate().is_err());
 
-    semantic = super::SemanticConfig::default();
+    semantic = SemanticConfig::default();
     semantic.resources.max_model_bytes = semantic.resources.max_resident_bytes + 1;
     assert!(semantic.validate().is_err());
 }

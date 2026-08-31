@@ -72,7 +72,7 @@ pub use ports::{
     SemanticActivationRequestV1, SemanticConfigurationBackendErrorV1, SemanticConfigurationPinV1,
     SemanticConfigurationSnapshotSourceV1, SemanticConfigurationTransitionV1,
     SemanticCurrentLinkedActivationV1, SemanticExecutableGenerationLeaseV1,
-    SemanticExecutableGenerationV1, SemanticFallbackReasonV1, SemanticLinkedTransitionV1,
+    SemanticExecutableGenerationV1, SemanticLinkedTransitionV1,
     SemanticRetrievalConfigurationPortV1, SemanticRollbackCommandV1, SemanticRollbackReceiptV1,
     SemanticRollbackRequestV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1,
     SemanticRuntimeContractErrorV1, SemanticRuntimeControlErrorV1, SemanticRuntimeFuture,

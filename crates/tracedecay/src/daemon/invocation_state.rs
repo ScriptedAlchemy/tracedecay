@@ -14,6 +14,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
+use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use tracedecay_daemon_service::{
@@ -439,7 +440,7 @@ impl DaemonInvocationState {
         store_root: PathBuf,
         semantic_runtime: Option<&tracedecay_semantic::DaemonSemanticRuntimeHandleV1>,
         semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-        semantic_resources: Option<crate::config::SemanticResourceCeilings>,
+        semantic_resources: Option<SemanticResourceCeilings>,
         native_graph_activation: bool,
         graph_runtime: Arc<
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,

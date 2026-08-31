@@ -27,8 +27,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::ProjectionKeyV1;
-
-use crate::config::SemanticResourceCeilings;
+use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
 /// First suppression window after a terminal publish failure.
 pub const DEFAULT_PUBLISH_FAILURE_BACKOFF_BASE: Duration = Duration::from_secs(60);

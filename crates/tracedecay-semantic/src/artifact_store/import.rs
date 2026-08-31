@@ -1,6 +1,12 @@
 //! Resumable import, staging, and revoke/rollback-retain flows for
 //! ModelArtifactStore.
 
+#[cfg(test)]
+use tracedecay_semantic_contracts::Sha256DigestHex;
+use tracedecay_semantic_contracts::{
+    ArtifactMemberRoleV1, ArtifactPackageMemberV1, ModelArtifactManifestV1,
+};
+
 use super::*;
 
 impl ModelArtifactStore {
