@@ -1,3 +1,4 @@
+mod hotpath_observe;
 pub mod lcm;
 mod ports;
 mod refresh;

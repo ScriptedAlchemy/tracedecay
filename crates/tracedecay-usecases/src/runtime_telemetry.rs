@@ -62,13 +62,28 @@ impl GenerationCensusUnavailableReason {
     }
 }
 
+/// Aggregate facts from the exact sealed code-index generation, projected
+/// onto runtime telemetry's own wire shape.
+///
+/// The daemon route that owns the census reader converts from
+/// `tracedecay_code_index::production::CodeIndexGenerationStatisticsV1` at
+/// that boundary, so this module carries no code-index dependency. The field
+/// names are the wire contract (`#[serde(flatten)]` below) and must stay
+/// byte-identical to the code-index statistics they mirror.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerationCensusStatistics {
+    pub source_total_bytes: u64,
+    pub symbol_count: u64,
+    pub edge_count: u64,
+}
+
 /// Runtime telemetry's truthful view of code-index census availability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum GenerationCensusSnapshot {
     Observed {
         #[serde(flatten)]
-        statistics: tracedecay_code_index::production::CodeIndexGenerationStatisticsV1,
+        statistics: GenerationCensusStatistics,
     },
     Unavailable {
         reason: GenerationCensusUnavailableReason,

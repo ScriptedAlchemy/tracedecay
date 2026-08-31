@@ -348,7 +348,7 @@ fn execution_deadline(context: &RequestContext) -> std::time::Instant {
 }
 
 fn budget_exhausted<T>(stage: SessionRetrievalBudgetStageV1) -> SessionRetrievalOutcome<T> {
-    crate::hotpath_observe::session_retrieval_budget_stage(stage);
+    crate::session::hotpath_observe::session_retrieval_budget_stage(stage);
     SessionRetrievalOutcome::BudgetExhausted { stage }
 }
 
@@ -586,7 +586,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
             }
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
-                crate::hotpath_observe::session_retrieval_budget_stage(
+                crate::session::hotpath_observe::session_retrieval_budget_stage(
                     SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,
                 );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
@@ -596,7 +596,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 }
             }
             TemporalPortError::ParticipantManifestBytesExceeded { observed, maximum } => {
-                crate::hotpath_observe::session_retrieval_budget_stage(
+                crate::session::hotpath_observe::session_retrieval_budget_stage(
                     SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes,
                 );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
