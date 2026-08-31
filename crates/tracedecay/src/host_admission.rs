@@ -252,7 +252,7 @@ impl HostAdmissionTestRuntimeV1 {
             prepare_host_admission_test_project_root(project_root, project_id)?;
         }
 
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             identity.profile_root(),
             1,
@@ -920,7 +920,8 @@ impl HostAdmissionTestRuntimeV1 {
                 })?;
         let profile_database = self.profile_database.clone();
         let profile_sessions = self.profile_registered.clone();
-        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let profile_identity =
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let mut context =
             crate::mcp::server::McpServerConstructionContext::direct(cg, scope_prefix)
                 .with_direct_databases(

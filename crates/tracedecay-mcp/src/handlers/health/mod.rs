@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use crate::tools::render::{self, Md};
 use crate::{ToolResult, effective_path, generic_tool_result, rendered_tool_result};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::graph::VerifiedGraphQuery;
-use tracedecay_usecases::graph::health::{
+use tracedecay_graph_query::VerifiedGraphQuery;
+use tracedecay_graph_query::health::{
     dependency_depth, depth_score, dsm_clusters, gini_coefficient, gini_label,
 };
 

@@ -737,7 +737,7 @@ mod tests {
         let profile_root = root.join("profile");
         let project_root = root.join("project");
         std::fs::create_dir_all(&project_root).expect("project root");
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
             .expect("durable profile identity");
         let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,

@@ -9,7 +9,7 @@ use crate::{rendered_tool_result, require_node_id, unique_file_paths};
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
-use tracedecay_usecases::graph::VerifiedGraphQuery;
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::verified::{INFO_RELATION_LIMIT, info_graph_error, required_symbol_parts};
 

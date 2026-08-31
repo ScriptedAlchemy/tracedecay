@@ -1088,7 +1088,7 @@ mod doctor_runtime_route_tests {
             profile.join("registry.db"),
         );
         let store_administration = StoreAdministration::default().with_profile_identity(
-            crate::daemon::profile_identity::load_or_create(&profile)
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
                 .expect("load fixture profile identity"),
         );
         let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(

@@ -292,7 +292,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_graph_read_admission_port:
         Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     pub(crate) verified_graph_query_port:
-        Option<std::sync::Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>>,
+        Option<std::sync::Arc<dyn tracedecay_graph_query::VerifiedGraphQueryPort + 'static>>,
     pub(crate) code_index_ignored_dependency_admission:
         Option<crate::mcp::server::CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority for runtime telemetry.

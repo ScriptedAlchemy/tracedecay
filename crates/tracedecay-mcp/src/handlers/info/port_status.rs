@@ -11,7 +11,7 @@ use tracedecay_application::retrieval::{
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::graph::VerifiedGraphQuery;
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::PORT_DEFAULT_KINDS;
 use super::verified::{

@@ -1,7 +1,8 @@
 //! Leaf connection helpers for the daemon invocation client.
 //!
-//! Authority-record discovery stays in the composition root. This module owns
-//! endpoint connect, handshake preamble, and bounded response reads.
+//! Authority-record discovery lives in `tracedecay-daemon-identity`; this
+//! crate never performs it. This module owns endpoint connect, handshake
+//! preamble, and bounded response reads.
 
 use std::sync::Arc;
 use std::time::Duration;

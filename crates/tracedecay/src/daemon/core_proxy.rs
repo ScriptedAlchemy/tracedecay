@@ -18,10 +18,10 @@ use super::{
     next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
-use super::{
-    binary_version, connect_with_restart_grace, connection_for_socket_path, log_daemon_event,
-    version_skew_action,
-};
+use super::{binary_version, connect_with_restart_grace, log_daemon_event, version_skew_action};
+#[cfg(unix)]
+use tracedecay_daemon_identity::connection_for_socket_path;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
 #[cfg(not(unix))]
 use tracedecay_mcp::McpTransport;
@@ -30,7 +30,6 @@ use tracedecay_mcp::transport::StdioTransport;
 use tracedecay_mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
 #[cfg(unix)]
 use tracedecay_mcp::{ErrorCode, JsonRpcResponse};
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
 ///

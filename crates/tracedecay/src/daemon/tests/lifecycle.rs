@@ -801,8 +801,9 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
         super::super::DatabaseOwnerRegistry::default(),
     ));
     prepare_test_profile_root(&profile_root);
-    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-        .expect("load test profile identity");
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("load test profile identity");
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
         .with_profile_identity(profile_identity);
     // Daemon bootstrap installs the profile-scoped code-index worker plan

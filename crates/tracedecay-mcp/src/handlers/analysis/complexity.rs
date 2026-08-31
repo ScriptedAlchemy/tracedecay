@@ -4,7 +4,7 @@ use super::*;
 
 #[hotpath::measure(future = true, label = "mcp.analysis.complexity.total")]
 pub async fn handle_complexity(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -104,7 +104,7 @@ fn analysis_score(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.doc_coverage.total")]
 pub async fn handle_doc_coverage(
-    _graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    _graph: &tracedecay_graph_query::VerifiedGraphQuery,
     _args: Value,
     _scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -116,7 +116,7 @@ pub async fn handle_doc_coverage(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.god_class.total")]
 pub async fn handle_god_class(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {

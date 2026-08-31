@@ -3,7 +3,7 @@ use std::fs;
 
 use tempfile::TempDir;
 use tracedecay_usecases::git_intelligence::churn::file_churn;
-use tracedecay_usecases::graph::health::{
+use tracedecay_graph_query::health::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth,
     gini_coefficient, gini_label, modularity_score,
 };

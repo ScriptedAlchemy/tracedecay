@@ -11,7 +11,7 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
-use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest};
+use tracedecay_graph_query::{CodeGraphProjectionReadPort, CodeGraphReadRequest};
 
 /// Resolves feedback runtime state from the admitted evaluation input and the
 /// live graph watermark. It never invents scope/content identities; those come

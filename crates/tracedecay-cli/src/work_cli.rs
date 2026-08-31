@@ -379,7 +379,7 @@ pub async fn invoke_work_cli_with_delivery(
     );
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
-    let client = tracedecay::daemon::invocation_client_for_current(handshake)?;
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     let response = match client
         .invoke_controlled(
             request,

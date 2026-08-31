@@ -20,7 +20,7 @@ struct FixtureSourceReadRuntime {
     read_only: bool,
 }
 
-impl tracedecay_usecases::tracedecay::SourceReadRuntimePort for FixtureSourceReadRuntime {
+impl tracedecay_graph_query::SourceReadRuntimePort for FixtureSourceReadRuntime {
     fn project_root(&self) -> &Path {
         &self.project_root
     }
@@ -40,32 +40,32 @@ impl tracedecay_usecases::tracedecay::SourceReadRuntimePort for FixtureSourceRea
 
 #[derive(Clone)]
 struct FailingFixtureCodeGraphProjection {
-    error: tracedecay_usecases::graph::CodeGraphReadError,
+    error: tracedecay_graph_query::CodeGraphReadError,
 }
 
-impl tracedecay_usecases::graph::CodeGraphProjectionReadPort for FailingFixtureCodeGraphProjection {
+impl tracedecay_graph_query::CodeGraphProjectionReadPort for FailingFixtureCodeGraphProjection {
     fn open<'a>(
         &'a self,
-        _request: tracedecay_usecases::graph::CodeGraphReadRequest<'a>,
-    ) -> tracedecay_usecases::graph::CodeGraphReadFuture<'a> {
+        _request: tracedecay_graph_query::CodeGraphReadRequest<'a>,
+    ) -> tracedecay_graph_query::CodeGraphReadFuture<'a> {
         let error = self.error.clone();
         Box::pin(async move { Err(error) })
     }
 }
 
-impl tracedecay_usecases::graph::CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
+impl tracedecay_graph_query::CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
     fn open<'a>(
         &'a self,
-        request: tracedecay_usecases::graph::CodeGraphReadRequest<'a>,
-    ) -> tracedecay_usecases::graph::CodeGraphReadFuture<'a> {
+        request: tracedecay_graph_query::CodeGraphReadRequest<'a>,
+    ) -> tracedecay_graph_query::CodeGraphReadFuture<'a> {
         Box::pin(async move {
             if request.cancellation.is_cancelled() {
-                return Err(tracedecay_usecases::graph::CodeGraphReadError::Cancelled);
+                return Err(tracedecay_graph_query::CodeGraphReadError::Cancelled);
             }
             if request.context.scope() != &self.scope {
-                return Err(tracedecay_usecases::graph::CodeGraphReadError::Denied);
+                return Err(tracedecay_graph_query::CodeGraphReadError::Denied);
             }
-            tracedecay_usecases::graph::VerifiedCodeGraphRead::new(
+            tracedecay_graph_query::VerifiedCodeGraphRead::new(
                 self.scope.clone(),
                 Arc::clone(&self.store),
             )
@@ -78,17 +78,17 @@ struct FixtureCodeGraphAdmission {
     scope: tracedecay_application::ResolvedScope,
 }
 
-impl tracedecay_usecases::graph::CodeGraphReadAdmissionPort for FixtureCodeGraphAdmission {
+impl tracedecay_graph_query::CodeGraphReadAdmissionPort for FixtureCodeGraphAdmission {
     fn admit<'a>(
         &'a self,
-        request: tracedecay_usecases::graph::CodeGraphReadAdmissionRequest<'a>,
-    ) -> tracedecay_usecases::graph::CodeGraphReadAdmissionFuture<'a> {
+        request: tracedecay_graph_query::CodeGraphReadAdmissionRequest<'a>,
+    ) -> tracedecay_graph_query::CodeGraphReadAdmissionFuture<'a> {
         Box::pin(async move {
             if request.cancellation.is_cancelled() {
-                return Err(tracedecay_usecases::graph::CodeGraphReadError::Cancelled);
+                return Err(tracedecay_graph_query::CodeGraphReadError::Cancelled);
             }
             if request.deadline.is_elapsed_at(request.observed_at) {
-                return Err(tracedecay_usecases::graph::CodeGraphReadError::TimedOut);
+                return Err(tracedecay_graph_query::CodeGraphReadError::TimedOut);
             }
             let actor = tracedecay_domain::ActorId::new("actor.mcp-verified-graph-fixture")
                 .expect("graph fixture actor");
@@ -107,7 +107,7 @@ impl tracedecay_usecases::graph::CodeGraphReadAdmissionPort for FixtureCodeGraph
                 tracedecay_application::DisclosureClass::Evidence,
             )
             .map_err(|error| {
-                tracedecay_usecases::graph::CodeGraphReadError::InvalidRequest {
+                tracedecay_graph_query::CodeGraphReadError::InvalidRequest {
                     detail: error.to_string(),
                 }
             })?;
@@ -120,7 +120,7 @@ impl tracedecay_usecases::graph::CodeGraphReadAdmissionPort for FixtureCodeGraph
                 request.cancellation.context(),
             )
             .map_err(|error| {
-                tracedecay_usecases::graph::CodeGraphReadError::InvalidRequest {
+                tracedecay_graph_query::CodeGraphReadError::InvalidRequest {
                     detail: error.to_string(),
                 }
             })
@@ -219,7 +219,7 @@ pub(super) fn verified_graph_options<'a>(
 pub(super) fn verified_graph_error_options<'a>(
     cg: &TraceDecay,
     options: ToolCallRegistryOptions<'a>,
-    error: tracedecay_usecases::graph::CodeGraphReadError,
+    error: tracedecay_graph_query::CodeGraphReadError,
 ) -> ToolCallRegistryOptions<'a> {
     let mut options = verified_graph_options(cg, options);
     options.code_graph_projection_read_port =

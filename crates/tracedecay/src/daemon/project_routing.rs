@@ -5,6 +5,7 @@
 //! and the portable owner reconciler.
 
 use super::*;
+use tracedecay_daemon_identity::{authority, profile_identity};
 
 pub(super) fn project_server_capacity_error() -> TraceDecayError {
     TraceDecayError::Config {

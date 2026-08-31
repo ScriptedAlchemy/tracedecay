@@ -341,6 +341,7 @@ mod tests {
     use tracedecay_application::{
         ApplicationOutcome, ApplicationProblemKind, CancellationSignal, Deadline, RequestId,
     };
+    use tracedecay_daemon_identity::profile_identity;
     use tracedecay_domain::{
         BrainId, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
         CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
@@ -629,7 +630,7 @@ mod tests {
     async fn profile_retained_message_search_reads_the_profile_session_store() {
         let temporary = tempfile::tempdir().expect("temporary profile parent");
         let profile_root = temporary.path().join("profile");
-        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        let profile_identity = profile_identity::load_or_create(&profile_root)
             .expect("durable profile identity");
         let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
@@ -736,7 +737,7 @@ mod tests {
     async fn profile_retained_message_search_rejects_project_selection() {
         let temporary = tempfile::tempdir().expect("temporary profile parent");
         let profile_root = temporary.path().join("profile");
-        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        let profile_identity = profile_identity::load_or_create(&profile_root)
             .expect("durable profile identity");
         let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
@@ -796,7 +797,7 @@ mod tests {
     async fn profile_retained_sessions_for_remains_unsupported() {
         let temporary = tempfile::tempdir().expect("temporary profile parent");
         let profile_root = temporary.path().join("profile");
-        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        let profile_identity = profile_identity::load_or_create(&profile_root)
             .expect("durable profile identity");
         let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,

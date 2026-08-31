@@ -98,7 +98,7 @@ async fn seed_project_sessions_pending_convergence(
     project_root: &Path,
     project_id: &tracedecay_domain::ProjectId,
 ) {
-    let identity = crate::daemon::profile_identity::load_or_create(profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
         .expect("durable harness profile identity");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
         project_root,

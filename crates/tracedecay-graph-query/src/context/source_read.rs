@@ -213,7 +213,7 @@ pub fn resolve_indexed_source_file(
     if reader
         .symbols_in_logical_file(&display_file, 1, cancellation)
         .map_err(|error| {
-            crate::graph::map_code_graph_read_runtime_error(crate::graph::map_projection_error(
+            crate::map_code_graph_read_runtime_error(crate::map_projection_error(
                 error,
             ))
         })?

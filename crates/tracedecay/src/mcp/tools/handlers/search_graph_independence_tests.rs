@@ -16,11 +16,11 @@ use crate::config::lock_user_data_dir_test_env;
 
 struct PendingVerifiedGraphQueryPort;
 
-impl tracedecay_usecases::graph::VerifiedGraphQueryPort for PendingVerifiedGraphQueryPort {
+impl tracedecay_graph_query::VerifiedGraphQueryPort for PendingVerifiedGraphQueryPort {
     fn open<'a>(
         &'a self,
-        _request: tracedecay_usecases::graph::VerifiedGraphQueryRequest<'a>,
-    ) -> tracedecay_usecases::graph::VerifiedGraphQueryFuture<'a> {
+        _request: tracedecay_graph_query::VerifiedGraphQueryRequest<'a>,
+    ) -> tracedecay_graph_query::VerifiedGraphQueryFuture<'a> {
         Box::pin(std::future::pending())
     }
 }

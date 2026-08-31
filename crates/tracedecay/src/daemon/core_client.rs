@@ -1,13 +1,15 @@
-//! Daemon client side: connection discovery, restart-grace connects, and
-//! one-shot JSON-RPC tool calls against the daemon.
+//! Daemon client side: restart-grace connects and one-shot JSON-RPC tool
+//! calls against the daemon. Connection discovery — resolving the profile's
+//! authority record into an endpoint plus credential — lives in
+//! `tracedecay-daemon-identity`; this module only consumes the
+//! [`DaemonConnection`] it resolves.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
-use tracedecay_daemon_protocol::DaemonLivenessProbe;
+use tracedecay_daemon_identity::{DaemonConnection, client_connection};
 use tracedecay_daemon_protocol::wire::{
     WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
 };
@@ -21,9 +23,9 @@ pub use tracedecay_daemon_protocol::{
 #[cfg(unix)]
 use super::unavailable_error;
 use super::{
-    BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonEndpoint, DaemonHandshake,
-    JsonRpcRequest, JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
-    TraceDecayError, authority, default_socket_path, error_message_is_project_open_retryable,
+    BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonHandshake, JsonRpcRequest,
+    JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
+    TraceDecayError, default_socket_path, error_message_is_project_open_retryable,
 };
 
 pub(crate) const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -81,135 +83,12 @@ fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain:
 pub(crate) const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
 pub(crate) const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-#[derive(Clone)]
-pub(crate) struct DaemonConnection {
-    pub(crate) endpoint: DaemonEndpoint,
-    pub(crate) auth_token: Option<String>,
-    pub(super) authority_record: Option<authority::DaemonAuthorityRecord>,
-}
-
-impl DaemonConnection {
-    pub(crate) fn into_protocol(self) -> tracedecay_daemon_protocol::DaemonConnection {
-        let connection =
-            tracedecay_daemon_protocol::DaemonConnection::new(self.endpoint, self.auth_token);
-        match self.authority_record {
-            Some(record) => connection
-                .with_daemon_version(record.version.clone())
-                .with_liveness(Arc::new(AuthorityLivenessProbe { record })),
-            None => connection,
-        }
-    }
-}
-
-struct AuthorityLivenessProbe {
-    record: authority::DaemonAuthorityRecord,
-}
-
-impl DaemonLivenessProbe for AuthorityLivenessProbe {
-    fn ensure_live(&self, request_label: &str) -> Result<()> {
-        let current = authority::current_record(&self.record.profile_root)?;
-        let Some(current) = current else {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon authority disappeared while request '{request_label}' was awaiting a response; the request was already sent and was not retried"
-                ),
-            });
-        };
-        if current.epoch != self.record.epoch
-            || current.process_run_id != self.record.process_run_id
-        {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon restarted while request '{request_label}' was awaiting a response (expected epoch {}, current epoch {}); the request was already sent and was not retried",
-                    self.record.epoch, current.epoch
-                ),
-            });
-        }
-        Ok(())
-    }
-}
-
-/// Authenticated invocation client for this process's current daemon authority.
-pub fn invocation_client_for_current(
-    handshake: tracedecay_daemon_protocol::DaemonHandshake,
-) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
-    Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        current_daemon_connection()?.into_protocol(),
-        handshake,
-    ))
-}
-
-pub(crate) fn current_daemon_connection() -> Result<DaemonConnection> {
-    let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
-        message: "could not determine TraceDecay user data directory".to_string(),
-    })?;
-    let record =
-        authority::current_record(&profile_root)?.ok_or_else(|| TraceDecayError::Config {
-            message:
-                "TraceDecay daemon authority record is not available. Start or restart the daemon."
-                    .to_string(),
-        })?;
-    Ok(DaemonConnection {
-        endpoint: record.endpoint.clone(),
-        auth_token: Some(record.auth_token.clone()),
-        authority_record: Some(record),
-    })
-}
-
-#[cfg(unix)]
-pub(crate) fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection {
-    if let Ok(connection) = current_daemon_connection()
-        && let DaemonEndpoint::Unix(authority_path) = &connection.endpoint
-        && authority::canonical_identity_path(authority_path).ok()
-            == authority::canonical_identity_path(socket_path).ok()
-    {
-        return connection;
-    }
-    if let Some(profile_root) = socket_path.parent()
-        && let Ok(Some(record)) = authority::current_record(profile_root)
-        && let DaemonEndpoint::Unix(authority_path) = &record.endpoint
-        && authority::canonical_identity_path(authority_path).ok()
-            == authority::canonical_identity_path(socket_path).ok()
-    {
-        return DaemonConnection {
-            endpoint: record.endpoint.clone(),
-            auth_token: Some(record.auth_token.clone()),
-            authority_record: Some(record),
-        };
-    }
-    // Explicit paths are retained for test harnesses and legacy one-shot
-    // callers without a discoverable authority record. Default production
-    // routing always uses the authority record.
-    DaemonConnection {
-        endpoint: DaemonEndpoint::Unix(socket_path.to_path_buf()),
-        auth_token: None,
-        authority_record: None,
-    }
-}
-
 #[hotpath::measure(label = "daemon.core.ensure_connection_live", future = true)]
 pub(crate) async fn ensure_daemon_connection_live(
     connection: &DaemonConnection,
     request_label: &str,
 ) -> Result<()> {
-    if let Some(expected) = connection.authority_record.as_ref() {
-        let current = authority::current_record(&expected.profile_root)?;
-        let Some(current) = current else {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon authority disappeared while request '{request_label}' was awaiting a response; the request was already sent and was not retried"
-                ),
-            });
-        };
-        if current.epoch != expected.epoch || current.process_run_id != expected.process_run_id {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon restarted while request '{request_label}' was awaiting a response (expected epoch {}, current epoch {}); the request was already sent and was not retried",
-                    expected.epoch, current.epoch
-                ),
-            });
-        }
-    }
+    connection.ensure_authority_current(request_label)?;
 
     timeout(
         DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
@@ -265,21 +144,6 @@ where
                 ensure_daemon_connection_live(connection, request_label).await?;
             }
         }
-    }
-}
-
-// Windows discovers the current daemon through a fallible endpoint lookup;
-// Unix keeps the same cross-platform contract even though its path is infallible.
-#[allow(clippy::unnecessary_wraps)]
-pub(crate) fn client_connection(socket_path: &Path) -> Result<DaemonConnection> {
-    #[cfg(unix)]
-    {
-        Ok(connection_for_socket_path(socket_path))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = socket_path;
-        current_daemon_connection()
     }
 }
 

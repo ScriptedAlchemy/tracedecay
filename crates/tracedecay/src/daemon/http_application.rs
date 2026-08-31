@@ -432,7 +432,7 @@ const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// The CLI must not open a local store or construct a fresh in-process
 /// registry; this is the daemon's live mounted operational state.
 pub fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1> {
-    let connection = super::current_daemon_connection()?;
+    let connection = tracedecay_daemon_identity::current_daemon_connection()?;
     let Some(record) = connection.authority_record.as_ref() else {
         return Err(missing_daemon_authority());
     };

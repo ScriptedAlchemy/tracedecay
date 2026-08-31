@@ -27,7 +27,7 @@ use super::{
 use tracedecay_session_memory::context::read_cache::{self, GLOBAL_SESSION};
 use crate::context::read_modes::ReadMode;
 use crate::context::source_read::SourceReadRequest;
-use crate::tracedecay::SourceReadRuntimePort;
+use crate::SourceReadRuntimePort;
 
 /// Identity-only runtime: bind-time denial must refuse it before consulting
 /// any other surface, so touching the database is a test failure.

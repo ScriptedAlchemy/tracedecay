@@ -256,9 +256,7 @@ fn fetch_nodes(
     reader
         .symbols_in_logical_file(file_path, MAX_FILE_SYMBOLS, cancellation)
         .map_err(|error| {
-            super::super::graph::map_code_graph_read_runtime_error(
-                super::super::graph::map_projection_error(error),
-            )
+            crate::map_code_graph_read_runtime_error(crate::map_projection_error(error))
         })
 }
 

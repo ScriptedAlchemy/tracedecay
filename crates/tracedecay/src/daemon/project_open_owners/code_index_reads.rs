@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_application::{Deadline, ResolvedScope, now_micros};
-use tracedecay_usecases::graph::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
+use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
 
 fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), CodeGraphReadError> {
     if request.cancellation.is_cancelled()
@@ -52,13 +52,13 @@ struct ProjectCodeGraphProjectionReadPortV1 {
     scope: ResolvedScope,
 }
 
-impl tracedecay_usecases::graph::CodeGraphProjectionReadPort
+impl tracedecay_graph_query::CodeGraphProjectionReadPort
     for ProjectCodeGraphProjectionReadPortV1
 {
     fn open<'a>(
         &'a self,
-        request: tracedecay_usecases::graph::CodeGraphReadRequest<'a>,
-    ) -> tracedecay_usecases::graph::CodeGraphReadFuture<'a> {
+        request: tracedecay_graph_query::CodeGraphReadRequest<'a>,
+    ) -> tracedecay_graph_query::CodeGraphReadFuture<'a> {
         Box::pin(async move {
             request
                 .context
@@ -126,7 +126,7 @@ pub(crate) fn project_code_graph_projection_read_port(
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
-) -> Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort> {
+) -> Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort> {
     Arc::new(ProjectCodeGraphProjectionReadPortV1 {
         schedulers,
         project_root,

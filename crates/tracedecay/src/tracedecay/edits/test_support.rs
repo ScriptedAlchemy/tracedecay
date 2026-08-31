@@ -29,7 +29,7 @@ use tracedecay_domain::{
     SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_usecases::graph::{
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
@@ -240,7 +240,8 @@ pub(super) async fn fixture_graph(
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(profile_root.join("global.db")),
     };
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+    let identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root).unwrap();
     let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,

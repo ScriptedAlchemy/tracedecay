@@ -21,7 +21,7 @@ use tracedecay_store::{
 
 use super::DaemonSessionRuntimeRegistryV1;
 use super::code_graph::inline_graph_publication_input_digest;
-use crate::daemon::profile_identity;
+use tracedecay_daemon_identity::profile_identity;
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 
 mod concurrency;

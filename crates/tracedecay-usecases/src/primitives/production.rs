@@ -59,16 +59,16 @@ use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{
     DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
 };
-use crate::graph::health_delta::compute_verified_health_delta;
-use crate::graph::queries::{GraphQueryManager, is_test_marker};
-use crate::graph::{
+use crate::graph_health_delta::compute_verified_health_delta;
+use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
     request_graph_cancellation,
 };
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use crate::operation_stream::OperationEventAuthority;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
-use crate::tracedecay::SourceReadRuntime;
+use tracedecay_graph_query::SourceReadRuntime;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
@@ -2673,7 +2673,7 @@ fn affected_tests_evidence(
 /// Owned authorities and admitted project state required to open the complete
 /// application primitive runtime.
 pub struct ProductionPrimitiveCodeAuthoritiesV1 {
-    pub code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    pub code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     pub ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     pub code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     pub diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
@@ -2681,7 +2681,7 @@ pub struct ProductionPrimitiveCodeAuthoritiesV1 {
 
 pub struct ProductionPrimitiveOpenRequestV1 {
     source_runtime: Arc<SourceReadRuntime>,
-    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     session_db: RegisteredGlobalDbLeaseV1,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,

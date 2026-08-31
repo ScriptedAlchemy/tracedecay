@@ -19,7 +19,7 @@ use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_runtime_core::db::Database;
 
 use super::CodeGraphReadError;
-use crate::tracedecay::SourceReadRuntimePort;
+use crate::SourceReadRuntimePort;
 
 /// Inputs handed to the source authority when one admitted graph query binds
 /// its exact project source. The context is the admitted context returned by

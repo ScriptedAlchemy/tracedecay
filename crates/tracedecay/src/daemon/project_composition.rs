@@ -6,6 +6,7 @@
 
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
+use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::DaemonSemanticRuntimeRegistrationError;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
@@ -559,7 +560,7 @@ async fn production_project_server_inner(
         crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
             Arc::clone(&code_graph_read_admission_port),
             Arc::clone(&code_graph_projection_read_port),
-            Some(Arc::clone(&cg) as Arc<dyn tracedecay_usecases::tracedecay::SourceReadRuntimePort>),
+            Some(Arc::clone(&cg) as Arc<dyn tracedecay_graph_query::SourceReadRuntimePort>),
         ),
     )
     .with_code_index_search_authority(code_search_authority.clone())
@@ -954,7 +955,7 @@ async fn production_project_server_inner(
                 crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
                     Arc::clone(&code_graph_read_admission_port),
                     Arc::clone(&code_graph_projection_read_port),
-                    Some(Arc::clone(&cg) as Arc<dyn tracedecay_usecases::tracedecay::SourceReadRuntimePort>),
+                    Some(Arc::clone(&cg) as Arc<dyn tracedecay_graph_query::SourceReadRuntimePort>),
                 ),
             )
             .with_code_index_search_authority(code_search_authority)
@@ -1318,7 +1319,7 @@ struct ProjectCodeIndexAuthorities {
     publication_identity: crate::mcp::server::CodeIndexPublicationIdentityResolver,
     project_id: tracedecay_domain::ProjectId,
     scope: tracedecay_application::ResolvedScope,
-    graph_projection_read_port: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
+    graph_projection_read_port: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     ignored_dependency_admission:
         Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1>,
     generation_census_reader: tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
@@ -1335,7 +1336,7 @@ fn project_code_index_authorities(
     cg: &Arc<crate::tracedecay::TraceDecay>,
     canonical_project_path: &Path,
     authoritative_project_id: &str,
-    profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    profile_identity: &profile_identity::LocalProfileIdentityAuthorityV1,
     route_registered: &Arc<AtomicBool>,
     project_database_is_read_only: bool,
 ) -> Result<ProjectCodeIndexAuthorities> {

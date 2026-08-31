@@ -43,7 +43,7 @@ use tracedecay_lsp::{
 use tracedecay_policy::CapabilityRoutingDecisionV1;
 
 use crate::diagnostics_publication::{CodeIndexPublicationIdentityPortV1, code_index_logical_path};
-use crate::graph::{
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest, map_projection_error,
     request_graph_cancellation,
 };

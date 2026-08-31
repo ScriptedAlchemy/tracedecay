@@ -3,7 +3,7 @@
 //! This crate sits beside the usecases spine: only the composition root
 //! consumes it. Plan capture and apply still go through
 //! `tracedecay_usecases::tracedecay`; graph reads go through
-//! `tracedecay_usecases::graph`.
+//! `tracedecay_graph_query`.
 //!
 //! Hotpath labels stay `usecases.edit.*` for dashboard continuity. A later
 //! dual-rename to `source_edit.*` can land with the dashboard cutover.
@@ -49,7 +49,7 @@ use verify::config_error;
 /// preview and recaptures state under its edit lock.
 pub async fn preview_source_edit_expected_state(
     graph: &SourceEditRuntime,
-    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_graph_query::CodeGraphProjectionReadPort,
     context: &tracedecay_application::RequestContext,
     observed_at: tracedecay_domain::UtcMicros,
     edit: SourceEditRequest,
@@ -59,7 +59,7 @@ pub async fn preview_source_edit_expected_state(
         code_graph,
         context,
         observed_at,
-        tracedecay_usecases::graph::request_graph_cancellation(context),
+        tracedecay_graph_query::request_graph_cancellation(context),
         edit,
     )
     .await?;
@@ -73,7 +73,7 @@ pub async fn preview_source_edit_expected_state(
 
 pub async fn execute_source_edit<A>(
     graph: &SourceEditRuntime,
-    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_graph_query::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
     authorization: &A,
@@ -86,7 +86,7 @@ where
 
 pub async fn execute_source_edit_with_control<A>(
     graph: &SourceEditRuntime,
-    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_graph_query::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
     authorization: &A,
