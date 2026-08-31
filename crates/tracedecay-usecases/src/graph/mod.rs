@@ -17,9 +17,10 @@ pub use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 
 pub use projection::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
-    CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
-    VerifiedCodeGraphRead, application_graph_cancellation, map_code_graph_read_runtime_error,
-    map_projection_error, request_graph_cancellation,
+    CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFreshnessV1,
+    CodeGraphReadFuture, CodeGraphReadRequest, VerifiedCodeGraphRead,
+    application_graph_cancellation, map_code_graph_read_runtime_error, map_projection_error,
+    request_graph_cancellation,
 };
 pub use queries::{FileAdjacencyScan, GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1};
 pub use source_authority::{

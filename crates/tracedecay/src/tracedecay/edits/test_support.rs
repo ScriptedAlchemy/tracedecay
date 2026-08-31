@@ -106,7 +106,11 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphReadPort {
                 .as_ref()
                 .map(Arc::clone)
                 .ok_or(CodeGraphReadError::MissingRegistry)?;
-            VerifiedCodeGraphRead::new(self.scope.clone(), store)
+            VerifiedCodeGraphRead::new(
+                self.scope.clone(),
+                store,
+                tracedecay_usecases::graph::CodeGraphReadFreshnessV1::Current,
+            )
         })
     }
 }

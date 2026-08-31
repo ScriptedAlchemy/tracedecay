@@ -55,7 +55,11 @@ impl CodeGraphProjectionReadPort for HermeticAdvisoryCodeGraphV1 {
                 RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
             }
-            VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store))
+            VerifiedCodeGraphRead::new(
+                self.scope.clone(),
+                Arc::clone(&self.store),
+                tracedecay_usecases::graph::CodeGraphReadFreshnessV1::Current,
+            )
         })
     }
 }

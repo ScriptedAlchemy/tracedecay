@@ -49,7 +49,11 @@ impl CodeGraphProjectionReadPort for DashboardTestCodeGraphProjectionV1 {
             }
             match request.context.admission_at(request.observed_at) {
                 RequestAdmission::Admitted => {
-                    VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store))
+                    VerifiedCodeGraphRead::new(
+                        self.scope.clone(),
+                        Arc::clone(&self.store),
+                        tracedecay_usecases::graph::CodeGraphReadFreshnessV1::Current,
+                    )
                 }
                 RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
