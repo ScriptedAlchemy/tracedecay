@@ -688,6 +688,11 @@ pub fn integration_id_for_host(host: host_bundle_v2::HostKindV1) -> &'static str
     }
 }
 
+/// 40-hex generator-commit fixture for this crate's unit tests. Production
+/// callers pass the registered product runtime's commit SHA instead.
+#[cfg(test)]
+pub(crate) const TEST_GENERATOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
 struct AgentRegistrationInspector<'a> {
     context: &'a HealthcheckContext,
 }
@@ -715,12 +720,14 @@ impl host_bundle_v2::HostBundleRegistrationInspectorV1 for AgentRegistrationInsp
 pub fn inspect_receipt_backed_host_components(
     context: &HealthcheckContext,
     lifecycle_root: &Path,
+    generator_commit: &str,
 ) -> std::result::Result<host_bundle_v2::HostBundleDoctorReportV1, host_bundle_v2::HostBundleError>
 {
     host_bundle_v2::inspect_installed_host_bundle_components_at(
         &context.home,
         lifecycle_root,
         &AgentRegistrationInspector { context },
+        generator_commit,
     )
 }
 

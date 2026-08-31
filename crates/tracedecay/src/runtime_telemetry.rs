@@ -45,7 +45,7 @@ pub(crate) async fn collect_with_integrity_and_generation_census(
     let captured_at = unix_epoch_secs()?;
     Ok(RuntimeSnapshot {
         captured_at,
-        tracedecay_version: crate::version::build_version().to_owned(),
+        tracedecay_version: crate::version::build_version()?.to_owned(),
         host_os: std::env::consts::OS.to_owned(),
         process,
         database,

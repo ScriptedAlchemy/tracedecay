@@ -47,6 +47,7 @@ pub struct WatchCancellation {
     repository: CancellationToken,
 }
 
+#[hotpath::measure_all]
 impl WatchCancellation {
     pub fn is_cancelled(&self) -> bool {
         self.daemon.is_cancelled() || self.repository.is_cancelled()

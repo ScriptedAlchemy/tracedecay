@@ -78,7 +78,8 @@ pub use external_source::{
     SourceObservationEvidenceV1, SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1,
     SourceProjectionCommitV1, SourceProjectionEffectV1, SourceScheduledRefetchV1,
     SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1, apply_source_authority_publication,
-    apply_source_commit, apply_source_projection, build_source_projection,
+    apply_source_authority_publication_owned, apply_source_commit, apply_source_commit_owned,
+    apply_source_projection, apply_source_projection_owned, build_source_projection,
 };
 pub use git_index_transactions::{
     GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,

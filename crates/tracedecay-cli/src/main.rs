@@ -30,6 +30,7 @@ mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
 mod monitor_cmd;
+mod product_runtime;
 mod project_cmd;
 mod remote_command;
 mod semantic_cmd;
@@ -472,6 +473,10 @@ fn main() -> ExitCode {
 }
 
 fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
+    // This binary is the sole generator of source provenance and the embedded
+    // dashboard bundle; the composition library reads both through this
+    // set-once registration.
+    tracedecay::register_product_runtime(crate::product_runtime::provider())?;
     // Every process-global runtime port the extracted crates invert back into
     // the composition root. Must precede argument parsing: hook, install, and
     // ingest paths all read these slots, and an unregistered slot fails quietly
@@ -1268,7 +1273,7 @@ async fn dispatch_daemon_command(
                 tracedecay_daemon_control::install_service(
                     &spec,
                     !no_start,
-                    tracedecay::version::build_version(),
+                    crate::product_runtime::PRODUCT_BUILD_VERSION,
                 )
             )?;
             eprintln!(
@@ -1295,7 +1300,7 @@ async fn dispatch_daemon_command(
                 "cli.daemon.uninstall_service",
                 tracedecay_daemon_control::uninstall_service(
                     !no_stop,
-                    tracedecay::version::build_version(),
+                    crate::product_runtime::PRODUCT_BUILD_VERSION,
                 )
             )?;
             eprintln!(
@@ -1306,14 +1311,14 @@ async fn dispatch_daemon_command(
         DaemonAction::Start => {
             hotpath::measure_block!(
                 "cli.daemon.start",
-                tracedecay_daemon_control::start_service(tracedecay::version::build_version())
+                tracedecay_daemon_control::start_service(crate::product_runtime::PRODUCT_BUILD_VERSION)
             )?;
             eprintln!("Started TraceDecay daemon service");
         }
         DaemonAction::Stop => {
             hotpath::measure_block!(
                 "cli.daemon.stop",
-                tracedecay_daemon_control::stop_service(tracedecay::version::build_version())
+                tracedecay_daemon_control::stop_service(crate::product_runtime::PRODUCT_BUILD_VERSION)
             )?;
             eprintln!("Stopped TraceDecay daemon service");
         }
@@ -1576,7 +1581,7 @@ async fn dispatch_update_command(command: Commands) -> tracedecay_domain::errors
                     tracedecay_daemon_control::prepare_scoop_package_service(
                         &package_id,
                         &state_file,
-                        tracedecay::version::build_version(),
+                        crate::product_runtime::PRODUCT_BUILD_VERSION,
                     )
                 )?;
             }
@@ -1589,7 +1594,7 @@ async fn dispatch_update_command(command: Commands) -> tracedecay_domain::errors
                     tracedecay_daemon_control::restore_scoop_package_service(
                         &package_id,
                         &state_file,
-                        tracedecay::version::build_version(),
+                        crate::product_runtime::PRODUCT_BUILD_VERSION,
                     )
                 )?;
             }

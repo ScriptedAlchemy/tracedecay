@@ -6,6 +6,15 @@ use super::*;
 
 use crate::{LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS};
 
+/// Shallow payload census, covered by `idx_lcm_external_payloads_owner_bytes`
+/// so the status probe never reads payload metadata records.
+pub(super) const PAYLOAD_SUMMARY_SQL: &str = "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN byte_count > 0 THEN byte_count ELSE 0 END), 0)
+             FROM lcm_external_payloads
+             WHERE (?1 = 'all' OR provider = ?1)
+               AND (?2 IS NULL OR session_id = ?2)";
+
+#[hotpath::measure(label = "sessions.lcm.status.payload_summary", future = true)]
 pub async fn payload_health_summary(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -15,14 +24,7 @@ pub async fn payload_health_summary(
 ) -> Result<PayloadHealthDetail, LcmError> {
     let gc_config = gc_config.clone().normalized();
     let mut rows = conn
-        .query(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(CASE WHEN byte_count > 0 THEN byte_count ELSE 0 END), 0)
-             FROM lcm_external_payloads
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, session_id],
-        )
+        .query(PAYLOAD_SUMMARY_SQL, params![provider, session_id])
         .await?;
     let row = rows
         .next()
@@ -76,6 +78,7 @@ pub async fn payload_health_summary(
     })
 }
 
+#[hotpath::measure(label = "sessions.lcm.status.payload_detail", future = true)]
 pub async fn payload_health_detail(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,

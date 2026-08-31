@@ -122,6 +122,7 @@ PY
 
 assert_required_assets() {
   local root_package=$1
+  local cli_package=$2
   local required
   local -a root_assets=(
     "plugin/.lsp.json"
@@ -133,7 +134,6 @@ assert_required_assets() {
     "plugin/opencode/tracedecay-mcp.ts"
     "plugin/opencode/opencode.registration.json"
     "plugin/cursor-native-extension/embedded/extension.js"
-    "dashboard/app-dist/index.html"
     "tests/fixtures/packaged_host_events/claude.json"
     "tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
     "tests/fixtures/packaged_host_events/cline-family.json"
@@ -158,8 +158,13 @@ assert_required_assets() {
     [[ -f "$root_package/$required" ]] ||
       die "packaged tracedecay crate is missing $required"
   done
+  # The dashboard bundle ships in the CLI package (its build.rs embeds the
+  # package-local dashboard/app-dist); the root library package must not
+  # carry a second copy that could drift from the one the binary serves.
   python3 "$repo/scripts/check-dashboard-bundle.py" \
-    "$root_package/dashboard/app-dist"
+    "$cli_package/dashboard/app-dist"
+  [[ ! -e "$root_package/dashboard/app-dist" ]] ||
+    die "packaged tracedecay crate must not carry dashboard/app-dist; the CLI package owns the bundle"
 
   python3 - "$root_package/plugin/.lsp.json" <<'PY'
 import json
@@ -323,17 +328,18 @@ cargo build \
   --bins
 
 echo "distribution acceptance: staging the product package tree"
-# `tracedecay` is `crates/tracedecay`, but the assets it ships — the dashboard
-# bundle, host plugins, vendored payloads, benchmark corpora, and the packaged
-# fixtures — are repository-root directories shared with the whole workspace.
-# Cargo packs only what lives inside the package directory, so packaging the
-# checkout as-is yields a `tracedecay` archive with none of them, and the
-# `include` whitelist in `crates/tracedecay/Cargo.toml` silently matches
-# nothing. Stage a copy of the workspace, place exactly those root assets
-# beside the product manifest, and pack from the staged tree. `build.rs`
-# already recognises this shape: a manifest directory with `dashboard` and
-# `plugin` beside it *is* the repository root, and it embeds the prebuilt
-# app-dist rather than rebuilding the frontend.
+# `tracedecay` is `crates/tracedecay`, but the assets it ships — host plugins,
+# vendored payloads, benchmark corpora, and the packaged fixtures — are
+# repository-root directories shared with the whole workspace. Cargo packs
+# only what lives inside the package directory, so packaging the checkout
+# as-is yields a `tracedecay` archive with none of them, and the `include`
+# whitelist in `crates/tracedecay/Cargo.toml` silently matches nothing. Stage
+# a copy of the workspace, place exactly those root assets beside the product
+# manifest, and pack from the staged tree. The dashboard bundle is different:
+# it ships in the CLI package (`crates/tracedecay-cli`, whose `include` names
+# `/dashboard/app-dist/**`), and its build.rs embeds a package-local
+# `dashboard/app-dist` when one exists, so the bundle is staged beside the
+# CLI manifest below rather than beside the library manifest.
 staged="$work/staged"
 mkdir -p -- "$staged"
 tar -C "$repo" \
@@ -361,7 +367,6 @@ declare -a staged_root_assets=(
   "plugin"
   "vendor"
   "benchmark_data"
-  "dashboard/app-dist"
   "dashboard/hermes-wrapper"
   "tests/fixtures"
   "scripts/run-session-temporal-benchmark.sh"
@@ -371,6 +376,22 @@ for asset in "${staged_root_assets[@]}"; do
     die "product package asset is missing from the source tree: $asset"
   mkdir -p -- "$staged_product/$(dirname -- "$asset")"
   cp -a -- "$repo/$asset" "$staged_product/$(dirname -- "$asset")/"
+done
+
+# The CLI package carries the prebuilt dashboard bundle; its `include`
+# whitelist names `/dashboard/app-dist/**` and its build.rs embeds the
+# package-local copy in packaged-crate mode.
+staged_cli_crate="$staged/crates/tracedecay-cli"
+[[ -f "$staged_cli_crate/Cargo.toml" ]] ||
+  die "staged workspace is missing the CLI manifest at crates/tracedecay-cli"
+declare -a staged_cli_assets=(
+  "dashboard/app-dist"
+)
+for asset in "${staged_cli_assets[@]}"; do
+  [[ -e "$repo/$asset" ]] ||
+    die "CLI package asset is missing from the source tree: $asset"
+  mkdir -p -- "$staged_cli_crate/$(dirname -- "$asset")"
+  cp -a -- "$repo/$asset" "$staged_cli_crate/$(dirname -- "$asset")/"
 done
 
 # The manifest reads its readme from the workspace root, which is outside the
@@ -395,7 +416,10 @@ PY
 
 # Prove the staged assets are byte-identical to the source tree, so the archive
 # below ships what the repository actually holds.
-python3 - "$repo" "$staged_product" "${staged_root_assets[@]}" <<'PY'
+assert_staged_assets_identical() {
+  local staged_dir=$1
+  shift
+  python3 - "$repo" "$staged_dir" "$@" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -422,8 +446,11 @@ for asset in sys.argv[3:]:
         raise SystemExit(
             f"distribution acceptance: staged asset differs from its source: {asset}"
         )
-print(f"distribution acceptance: staged {len(sys.argv) - 3} product asset entries")
+print(f"distribution acceptance: staged {len(sys.argv) - 3} package asset entries")
 PY
+}
+assert_staged_assets_identical "$staged_product" "${staged_root_assets[@]}"
+assert_staged_assets_identical "$staged_cli_crate" "${staged_cli_assets[@]}"
 
 echo "distribution acceptance: packaging every workspace crate"
 # Every workspace member is publish = false: releases ship GitHub-release
@@ -535,12 +562,12 @@ while IFS=$'\t' read -r name version; do
     die "package archive did not contain $name-$version/Cargo.toml"
   package_dirs["$name"]=$directory
   # Extracted archives are named `<name>-<version>`, but in the workspace every
-  # crate sits at `crates/<name>`. Build scripts that reach a sibling crate by
-  # relative path — `tracedecay-agent-hosts/build.rs` shares
-  # `tracedecay/src/version/build_identity.rs` through `#[path]` — resolve
-  # against that unversioned shape. `cargo package` cannot carry a file from
-  # outside the package, so give the battery the same sibling layout the
-  # workspace has rather than a copy that could drift from it.
+  # crate sits at `crates/<name>`. Sources that reach a sibling crate by
+  # relative `#[path]` — e.g. `tracedecay/src/daemon.rs` includes scheduler
+  # test modules from `tracedecay-code-index-runtime` — resolve against that
+  # unversioned shape. `cargo package` cannot carry a file from outside the
+  # package, so give the battery the same sibling layout the workspace has
+  # rather than a copy that could drift from it.
   ln -sfn -- "$name-$version" "$packages/$name"
 done <"$package_table"
 
@@ -568,7 +595,7 @@ query_package=${package_dirs[tracedecay-query]}
 semantic_package=${package_dirs[tracedecay-semantic]}
 catalog_package=${package_dirs[tracedecay-tool-catalog]}
 
-assert_required_assets "$root_package"
+assert_required_assets "$root_package" "$cli_package"
 
 patch_config="$work/packaged-crates.toml"
 python3 - "$metadata" "$packages" "$staged/Cargo.toml" >"$patch_config" <<'PY'

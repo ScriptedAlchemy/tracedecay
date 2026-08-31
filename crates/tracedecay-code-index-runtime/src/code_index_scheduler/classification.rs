@@ -44,6 +44,7 @@ pub enum WorktreeChangeClassV1 {
     Conflicted,
 }
 
+#[hotpath::measure_all]
 impl WorktreeChangeClassV1 {
     /// Whether this class removes a path (so its prior chunks become tombstones)
     /// rather than presenting current content to index.
@@ -74,6 +75,7 @@ pub struct WorktreeChangeClassificationV1 {
     changes: Vec<ClassifiedChangeV1>,
 }
 
+#[hotpath::measure_all]
 impl WorktreeChangeClassificationV1 {
     /// Classify the current status of `repository` truthfully.
     #[hotpath::measure(label = "daemon.code_index.capture.classify")]
@@ -200,6 +202,7 @@ impl WorktreeChangeClassificationV1 {
 /// (`crate::tracedecay::indexing::is_tracedecay_state_path`); it is private to
 /// that module, so the code-index classifier states it independently rather
 /// than widening a legacy surface.
+#[hotpath::measure]
 fn is_tracedecay_owned_state_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized == crate::config::TRACEDECAY_DIR
@@ -215,6 +218,7 @@ fn is_tracedecay_owned_state_path(path: &str) -> bool {
 /// reports a move as an independent deletion of the source plus an addition of
 /// the destination. The `Rewrite` variants therefore cannot occur here; they
 /// are mapped to `None` defensively rather than fabricating a rename class.
+#[hotpath::measure]
 fn classify_item(item: &gix::status::Item) -> Option<WorktreeChangeClassV1> {
     use gix::diff::index::ChangeRef;
     use gix::status::Item;

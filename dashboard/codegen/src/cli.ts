@@ -40,7 +40,6 @@ function exportRustBundle(): { bundle: JsonSchema; source: string } {
         cwd: REPOSITORY_ROOT,
         env: {
           ...process.env,
-          TRACEDECAY_SKIP_DASHBOARD_BUILD: "1",
           [SCHEMA_OUTPUT_ENV]: output,
         },
         stdio: "inherit",

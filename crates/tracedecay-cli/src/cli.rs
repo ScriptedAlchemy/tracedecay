@@ -183,7 +183,7 @@ pub enum HostBundleAction {
     name = "tracedecay",
     about = "Code intelligence for 34 languages — semantic graph queries instead of file reads",
     after_help = TOP_LEVEL_AFTER_HELP,
-    version = tracedecay::version::build_version()
+    version = crate::product_runtime::PRODUCT_BUILD_VERSION
 )]
 pub struct Cli {
     /// Select one compiled first-party host component; without it, lifecycle commands apply

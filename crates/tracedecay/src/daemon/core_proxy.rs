@@ -531,7 +531,8 @@ async fn write_proxy_request_result(
     match result {
         Ok(responses) => {
             let metadata = proxy_initialize_metadata(line, &responses);
-            if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()) {
+            if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()?)
+            {
                 eprintln!("[tracedecay] warning: {warning}");
             }
             for response in responses {

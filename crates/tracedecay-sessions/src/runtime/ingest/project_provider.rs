@@ -12,6 +12,7 @@ use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{
     HostProviderCoverage, TranscriptDiscoveryBounds, persist_codex_history_frontier,
     persist_host_provider_coverage, read_codex_history_frontier, read_host_provider_coverage,
+    run_blocking_transcript_section,
 };
 use crate::runtime::{
     SessionProvider, claude, claude_observation, cline_like, codex, cursor, cursor_composer,
@@ -230,12 +231,14 @@ impl<'a> ProjectProviderRun<'a> {
                 }
                 Err(error) => Err(error),
             },
-            None => source
-                .discover_transcript_paths_with_frontier(
-                    TranscriptDiscoveryBounds::default_walk(),
-                    frontier,
-                )
-                .map(Arc::new),
+            None => run_blocking_transcript_section(|| {
+                source
+                    .discover_transcript_paths_with_frontier(
+                        TranscriptDiscoveryBounds::default_walk(),
+                        frontier,
+                    )
+                    .map(Arc::new)
+            }),
         };
         let pass = match discovered {
             Ok(pass) => pass,

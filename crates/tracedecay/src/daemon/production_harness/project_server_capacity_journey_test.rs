@@ -17,7 +17,7 @@ async fn open_project_composition(
             message: "production harness is shut down".to_owned(),
         })?;
     let handshake = DaemonHandshake {
-        client_version: binary_version().to_owned(),
+        client_version: binary_version()?.to_owned(),
         client_instance_id: instance.to_owned(),
         client_identity: DaemonClientIdentity {
             profile_root: harness.profile_root.clone(),

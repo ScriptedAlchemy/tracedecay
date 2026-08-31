@@ -21,7 +21,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::{
-    GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationDependency,
+    GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
+    GraphGenerationDependency,
     GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
     GraphWatermark, SourceGeneration, VerifiedGraphSnapshot,
@@ -990,6 +991,22 @@ fn copy_crash_image(from_root: &std::path::Path, to_root: &std::path::Path) {
     }
 }
 
+/// A cancellation that fires once the sidecar WAL carries staged history
+/// past `baseline_segment` — the durable stage-page boundary a process
+/// killed mid-rebuild leaves behind. Staging observes it at the first
+/// check after a durable page commit, before the close/reopen digest proof
+/// can collapse that history.
+struct StagedWalDebtCancellation {
+    sidecar: std::path::PathBuf,
+    baseline_segment: Option<u64>,
+}
+
+impl GraphCancellation for StagedWalDebtCancellation {
+    fn is_cancelled(&self) -> bool {
+        newest_wal_segment(&self.sidecar) > self.baseline_segment
+    }
+}
+
 /// Highest sequence among non-empty `wal_<sequence>.log` segments — the same
 /// replay-debt signal the open-time collapse gates on.
 fn newest_wal_segment(sidecar: &std::path::Path) -> Option<u64> {
@@ -1044,10 +1061,10 @@ fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
     drop(first);
     let projection_key = g1_record.publication.key.projection.clone();
 
-    // Stage g2 durably but stop at the stage boundary, before the durable
-    // generation proof: the sidecar WAL now carries g2's staged history with
-    // no checkpoint metadata covering it — exactly the debt an interrupted
-    // full rebuild leaves behind.
+    // Stage g2 durably but kill the publisher at the durable page boundary,
+    // before the close/reopen digest proof: the sidecar WAL now carries g2's
+    // staged history with no checkpoint metadata covering it — exactly the
+    // debt an interrupted full rebuild leaves behind.
     let g2 = manifest(identity.clone(), "g2", "g2");
     let g2_record = stage_manifest(
         &mut authority,
@@ -1057,17 +1074,27 @@ fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
         Some(g1_head.clone()),
         'b',
     );
-    let boundary = registered
+    let live_sidecar = sidecar_wal_path(&graph_path(temp.path()));
+    let mut interrupted_registration = registration(registered.binding.clone(), temp.path());
+    interrupted_registration.cancellation = Arc::new(StagedWalDebtCancellation {
+        sidecar: live_sidecar.clone(),
+        baseline_segment: newest_wal_segment(&live_sidecar),
+    });
+    let interrupted = registered
         .registry
-        .publish_verified_with_durable_stage_boundary(
-            registration(registered.binding.clone(), temp.path()),
+        .publish_verified(
+            interrupted_registration,
             &mut authority,
             &context,
             &g2_record.publication.key,
             None,
         )
         .unwrap_err();
-    assert_eq!(boundary, GraphDbError::DeadlineExceeded);
+    assert_eq!(
+        interrupted,
+        GraphDbError::Cancelled,
+        "the interruption must land after a durable staged page and before the proof"
+    );
 
     // Copy the live store without closing it: the crash image of a process
     // killed mid-rebuild.
@@ -1129,22 +1156,20 @@ fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
     assert_eq!(marker_of(&recovered, &identity), "g1");
 }
 
-/// A deadline that fires at the durable stage boundary must not make the
-/// retry redo the projection: the staged pages and the finalized commit are
-/// already durable, so the retry reseats them and pays only verification and
-/// lease seating. The boundary variant is its own probe — it fails with
-/// `DeadlineExceeded` exactly when staging (re)applied work — so a retry
-/// through the same boundary succeeding proves nothing was restaged. A retry
-/// that redid the staging would trip the boundary on every attempt and the
-/// publication would never converge.
+/// A publication interrupted at the relational linearization point leaves a
+/// fully staged, durably receipted and proven generation behind. The retry
+/// must not redo the projection: it reseats those durable pages and pays
+/// only verification and lease seating before advancing the head. Restaged
+/// pages would append new sidecar-WAL history, so an unchanged newest WAL
+/// segment across the retry proves nothing was restaged.
 #[test]
-fn retry_after_durable_stage_boundary_reseats_without_restaging() {
+fn retry_after_interrupted_publication_reseats_without_restaging() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     let mut authority = RelationalAuthority::default();
-    let identity = projection("crash", "boundary-resume");
+    let identity = projection("crash", "reseat-resume");
 
     let manifest = manifest(identity.clone(), "g1", "g1");
     let record = stage_manifest(
@@ -1156,11 +1181,12 @@ fn retry_after_durable_stage_boundary_reseats_without_restaging() {
         'a',
     );
 
-    // First attempt: staging applies pages and finalizes durably, then the
-    // deadline fires at the stage boundary before verification.
-    let boundary = registered
+    // First attempt: staging and the durable digest proof complete, then the
+    // relational authority dies exactly at the verified-head CAS.
+    authority.fail_next_cas = true;
+    let interrupted = registered
         .registry
-        .publish_verified_with_durable_stage_boundary(
+        .publish_verified(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
             &context,
@@ -1168,18 +1194,18 @@ fn retry_after_durable_stage_boundary_reseats_without_restaging() {
             None,
         )
         .unwrap_err();
-    assert_eq!(
-        boundary,
-        GraphDbError::DeadlineExceeded,
-        "the first attempt must actually apply the staged generation"
+    assert!(
+        matches!(interrupted, GraphDbError::Unavailable { .. }),
+        "a relational authority failure at CAS is an availability fault, got {interrupted:?}"
     );
 
-    // Retry through the same boundary: a resuming retry reseats the durable
-    // generation (`was_applied` is false) and completes; a redoing retry
-    // would return `DeadlineExceeded` again here.
+    let sidecar = sidecar_wal_path(&graph_path(temp.path()));
+    let staged_segment = newest_wal_segment(&sidecar);
+
+    // The retry reseats the durable staged generation and completes.
     let retried = registered
         .registry
-        .publish_verified_with_durable_stage_boundary(
+        .publish_verified(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
             &context,
@@ -1188,6 +1214,11 @@ fn retry_after_durable_stage_boundary_reseats_without_restaging() {
         )
         .expect("the retry must resume from the durable staged generation");
     assert_eq!(retried.head.key.generation.as_str(), "g1");
+    assert_eq!(
+        newest_wal_segment(&sidecar),
+        staged_segment,
+        "a resuming retry must not append staged history to the sidecar WAL"
+    );
 
     // The resumed publication serves the generation it staged once.
     let recovered = registered

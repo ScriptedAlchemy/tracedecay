@@ -628,7 +628,7 @@ async fn settings_envelope(
             savings_db: state.savings_db_path.clone(),
         },
         version: VersionSettingsPayloadV1 {
-            version: crate::version::build_version().to_owned(),
+            version: state.build_version.to_owned(),
             channel: if crate::cloud::is_beta() {
                 "beta".to_owned()
             } else {

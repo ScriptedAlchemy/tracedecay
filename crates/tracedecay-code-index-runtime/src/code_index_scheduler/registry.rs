@@ -108,7 +108,9 @@ pub enum GraphSeatGateV1 {
     RetainedTextOwnerWarming,
 }
 
+#[hotpath::measure_all]
 impl GraphSeatGateV1 {
+    #[hotpath::skip]
     pub const fn decide(
         activation_enabled: bool,
         activation_deferred: bool,
@@ -145,6 +147,7 @@ impl GraphSeatGateV1 {
     ///
     /// `Disabled` is not a skip: a worktree with graph activation off is not
     /// waiting for a seat, and logging one per pass would be noise.
+    #[hotpath::skip]
     pub const fn skip_reason(self) -> Option<&'static str> {
         match self {
             Self::Prepare | Self::Disabled => None,
@@ -176,6 +179,7 @@ pub enum ServingSwapOutcomeV1 {
     Offered,
 }
 
+#[hotpath::measure_all]
 impl ServingSwapOutcomeV1 {
     /// Decide what the swap does with a generation that finished activating.
     ///
@@ -183,6 +187,7 @@ impl ServingSwapOutcomeV1 {
     /// arm exists because activation of a large generation outlives the
     /// checkout it sealed from, and refusing that seat left the graph route
     /// serving nothing at all rather than serving something stale.
+    #[hotpath::skip]
     pub const fn decide(publication_matches: bool, serving_is_seated: bool, replace: bool) -> Self {
         if !publication_matches {
             if serving_is_seated {
@@ -196,6 +201,7 @@ impl ServingSwapOutcomeV1 {
     }
 
     /// Whether this outcome writes the serving slot.
+    #[hotpath::skip]
     pub const fn installs(self) -> bool {
         matches!(self, Self::Seated | Self::SeatedStale)
     }
@@ -257,6 +263,7 @@ pub mod watch_ingress;
 /// never overlap two reconciles for the same worktree/store.
 const MAX_CONCURRENT_RECONCILE_WORKTREES: usize = 2;
 
+#[hotpath::measure]
 fn bounded_daemon_admission_permits() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| {
         cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES)
@@ -624,6 +631,7 @@ const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon l
 /// worktree's park slot. The first observation stamps the park, an identical
 /// reason increments the pass counter, and a different reason replaces the
 /// park so the surfaced state always names the current obstacle.
+#[hotpath::measure]
 fn park_convergence(
     slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
     reason: String,
@@ -651,6 +659,7 @@ fn park_convergence(
 
 /// Whether the current park re-checks on every wake (a contract violation an
 /// operator fix clears in place), as opposed to a terminal task failure.
+#[hotpath::measure]
 fn convergence_park_retries_on_wake(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) -> bool {
     slot.read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -660,6 +669,7 @@ fn convergence_park_retries_on_wake(slot: &RwLock<Option<CodeIndexConvergencePar
 
 /// Clear the park after a pass progressed or completed: the previously parked
 /// violation is no longer the current convergence obstacle.
+#[hotpath::measure]
 fn clear_convergence_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
     if slot
         .read()
@@ -677,6 +687,7 @@ fn clear_convergence_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
 /// field is left at its default so callers can fill in the observation half
 /// with struct-update syntax, which keeps these seven — six of them
 /// `Option<String>` — matched by name rather than by position.
+#[hotpath::measure]
 fn dashboard_freshness_identity(
     latest: Option<&LatestCompleteCodeIndexV1>,
 ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
@@ -733,6 +744,7 @@ pub(super) fn dashboard_code_graph_serving(
 /// Refused graph activation remains terminal for text serving, preserving the
 /// existing status behavior; strict dogfood can distinguish it from Ready via
 /// the separate typed projection.
+#[hotpath::measure]
 fn dashboard_generation_is_ready(
     latest: Option<&LatestCompleteCodeIndexV1>,
     text_ready: bool,
@@ -754,6 +766,7 @@ fn dashboard_generation_is_ready(
     }
 }
 
+#[hotpath::measure]
 fn dashboard_text_freshness_identity(
     latest: Option<&LatestCodeTextGenerationV1>,
 ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
@@ -797,6 +810,7 @@ struct ColdMountReservationSlotV1 {
     completed: AtomicBool,
 }
 
+#[hotpath::measure_all]
 impl ColdMountReservationSlotV1 {
     fn cancel(&self, retiring: bool) {
         if retiring {
@@ -934,6 +948,7 @@ impl Default for PendingWakeStateV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl PendingWakeStateV1 {
     fn next_owner(&mut self) -> u64 {
         let owner = self.next_owner;
@@ -955,6 +970,7 @@ struct PendingWakeClaimV1 {
     settled: bool,
 }
 
+#[hotpath::measure_all]
 impl PendingWakeClaimV1 {
     fn claim(pending_wake: Arc<PendingWakeV1>) -> Option<Self> {
         let mut state = pending_wake
@@ -1047,6 +1063,7 @@ pub struct CodeIndexSchedulerRegistryV1 {
     >,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexSchedulerRegistryV1 {
     fn incomplete_text_slice_may_continue(pending_wake: &PendingWakeV1) -> bool {
         !pending_wake.has_pending_arrival()
@@ -5982,6 +5999,7 @@ impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
     }
 }
 
+#[hotpath::measure]
 fn feedback_document_logical_path(
     project_root: &Path,
     document_uri: &str,

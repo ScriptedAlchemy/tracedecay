@@ -312,6 +312,9 @@ async fn initialize_test_project(
 }
 
 fn test_handshake_defaults() -> DaemonHandshake {
+    // Test processes only ever register the fixture product runtime, so every
+    // handshake in the suite advertises one identical fixture version.
+    let build_version = crate::product_runtime::register_fixture_product_runtime().build_version();
     DaemonHandshake {
         project_path: None,
         scope_prefix: None,
@@ -319,7 +322,7 @@ fn test_handshake_defaults() -> DaemonHandshake {
         allow_init: false,
         allow_initialize_root_routing: false,
         client_identity: test_client_identity(),
-        client_version: super::binary_version().to_string(),
+        client_version: build_version.to_string(),
         client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),

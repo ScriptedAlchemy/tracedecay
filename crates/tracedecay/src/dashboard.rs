@@ -1,12 +1,13 @@
-//! Root-side dashboard composition: the embedded-asset bridge plus the
+//! Root-side dashboard composition: the SPA-router seam plus the
 //! daemon-coupled integration fixtures.
 //!
 //! The dashboard API — routes, read models, services and their tests — lives
 //! in `crates/tracedecay-dashboard-api`; callers import it directly.
 //!
-//! [`assets`] retains only the root build-script bridge: the embedded
-//! single-app dist is generated into this crate's `OUT_DIR`. The canonical API
-//! crate owns the resulting HTTP router and transport policy.
+//! The embedded asset bundle is not generated here: the shipping binary crate
+//! embeds it and hands it to this library through the registered product
+//! runtime ([`crate::product_runtime`]). The canonical API crate owns the
+//! resulting HTTP router and transport policy.
 
 #[cfg(feature = "test-transport")]
 use tracedecay_daemon_service::DaemonInvocationService;
@@ -31,24 +32,19 @@ pub use tracedecay_dashboard_api::{
     run_until_shutdown_for_tests_with_host_admission,
 };
 
-pub(crate) mod assets;
-
 /// Canonical observation-capture seeding for dashboard integration fixtures.
 #[cfg(any(test, feature = "test-transport"))]
 #[doc(hidden)]
 pub mod observation_seed;
 
-/// Installs root-owned values consumed by the extracted dashboard crate.
-pub(crate) fn register_runtime_ports() {
-    tracedecay_dashboard_api::install_build_version(crate::version::build_version);
-}
-
 /// Embedded single-page-app routes shared by production and integration
-/// servers. The root supplies build-script-owned bytes; `tracedecay-api`
-/// owns route matching, cache policy, and the API fallback boundary.
+/// servers. The caller supplies the registered product runtime's bundle;
+/// `tracedecay-api` owns route matching, cache policy, and the API fallback
+/// boundary.
 #[doc(hidden)]
-pub fn spa_router() -> axum::Router {
-    assets::spa_router()
+#[hotpath::measure(label = "dashboard.spa")]
+pub fn spa_router(assets: tracedecay_api::StaticDashboardAssets) -> axum::Router {
+    tracedecay_api::static_dashboard_router(std::sync::Arc::new(assets))
 }
 
 /// Installs the canonical root-owned registered schema port before dashboard
@@ -454,7 +450,7 @@ mod spa_router_tests {
 
     #[tokio::test]
     async fn unknown_api_paths_never_receive_the_single_page_app() {
-        let response = super::spa_router()
+        let response = super::spa_router(crate::product_runtime::FIXTURE_DASHBOARD_ASSETS)
             .oneshot(
                 Request::builder()
                     .uri("/api/not-a-real-route")

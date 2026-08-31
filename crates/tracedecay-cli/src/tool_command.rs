@@ -692,7 +692,7 @@ fn print_tool_list(defs: &[ToolDefinition]) {
     println!(
         "Available tools ({}; TraceDecay {}) — run `tracedecay tool <name> --help` for parameters, then",
         defs.len(),
-        tracedecay::version::build_version()
+        crate::product_runtime::PRODUCT_BUILD_VERSION
     );
     println!("invoke with `tracedecay tool <name> --args '<json>'` (the same JSON arguments");
     println!("object as the MCP tool; `--args -` reads a heredoc from stdin) or, for quick");

@@ -177,6 +177,15 @@ jobs:
       - name: Validate downloaded dashboard bundle
         run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
 
+      # Skip-mode cargo builds require the expected digest of the validated
+      # prebuilt bundle; the CLI build script refuses to skip without it.
+      - name: Export dashboard bundle digest for skip-mode builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
       - name: Validate portable distribution harnesses
         run: |
           python3 .release-automation/scripts/test-check-packaged-lsp-bridge.py
@@ -891,6 +900,14 @@ jobs:
         run: |
           npm ci
           npm run build
+
+      # The workflow-global skip flag applies here too, so the freshly built
+      # bundle's digest must accompany it for the CLI build script.
+      - name: Export dashboard bundle digest for skip-mode builds
+        run: |
+          set -euo pipefail
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
 
       - name: Build the real production daemon for conformance
         run: cargo build -p tracedecay-cli --bin tracedecay

@@ -64,10 +64,15 @@ compiles.
   reason to ossify CI or test names. Otherwise pass the full path
   (`module::path::test_name`) and confirm the reported count is non-zero before
   treating a run as evidence.
-- `dashboard/app-dist/` is gitignored build output but required by `build.rs`;
-  a fresh checkout/worktree must build the dashboard (or seed the directory)
-  before Rust compiles. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` only skips a
-  stale rebuild. Create linked worktrees with `scripts/agent-worktree.sh`
+- `dashboard/app-dist/` is gitignored build output; only the CLI build script
+  (`crates/tracedecay-cli/build.rs`) embeds it, so a fresh checkout/worktree
+  must build the dashboard (or seed the directory) before building
+  `tracedecay-cli` — library crates no longer touch it.
+  `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` skips the npm rebuild only when
+  `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` carries the existing bundle's digest
+  (`python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+  --print-digest`); a missing or mismatched digest fails the build.
+  Create linked worktrees with `scripts/agent-worktree.sh`
   (it locks the lane). Clean up only via `scripts/worktree-gc.sh` or by the
   owning lane unlocking and removing its own exact absolute path; never
   `git worktree remove` / `git branch -D` another lane's tree or any path

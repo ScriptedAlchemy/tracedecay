@@ -771,11 +771,15 @@ pub fn tracedecay_bin() -> PathBuf {
         output.status
     );
     let actual = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let expected = format!("tracedecay {}", tracedecay::version::build_version());
-    assert_eq!(
-        actual,
-        expected,
-        "{} is not the CLI built from the current checkout; rebuild it with `cargo build -p tracedecay-cli --bin tracedecay` or set TRACEDECAY_TEST_BIN",
+    // The spawned CLI reports its own registered provenance
+    // (`<release>+<full sha>[.dirty]`), which an in-process test cannot know:
+    // this test process only ever registers the fixture product runtime. The
+    // released version is the strongest in-process comparison left, so pin
+    // the release and accept any build-metadata suffix.
+    let expected_release = format!("tracedecay {}", tracedecay::version::PACKAGE_VERSION);
+    assert!(
+        actual == expected_release || actual.starts_with(&format!("{expected_release}+")),
+        "{} reported `{actual}`, not release {expected_release}; rebuild it with `cargo build -p tracedecay-cli --bin tracedecay` or set TRACEDECAY_TEST_BIN",
         binary.display()
     );
     binary
