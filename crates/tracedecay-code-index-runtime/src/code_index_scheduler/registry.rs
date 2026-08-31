@@ -5406,6 +5406,38 @@ impl CodeIndexSchedulerRegistryV1 {
         latest_matches_scope_identity(&latest, scope).then_some(latest)
     }
 
+    /// [`Self::latest_complete_serving_for_scope`] keyed by the exact mounted
+    /// root, mirroring [`Self::latest_complete_ready_decoded_for_root_scope`]:
+    /// the stale-while-revalidate arm behind the daemon's exact-scope graph
+    /// reads. The seat is O(1), never joins the scheduler mutex, and holds the
+    /// last complete generation for the whole rebuild window; a caller that
+    /// serves it must type the answer as the last complete generation rather
+    /// than current.
+    pub async fn latest_complete_serving_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let serving_generation = {
+            let mounted = self.mounted.lock().await;
+            let worktree = mounted.get(&project_root)?;
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                return None;
+            }
+            Arc::clone(&worktree.serving_generation)
+        };
+        let latest = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        // Relaxed identity gate: this arm is stale by construction, so a moved
+        // reference is exactly the condition it exists to survive.
+        latest_matches_scope_identity(&latest, scope).then_some(latest)
+    }
+
     /// Whether an exact mounted route has no admissible generation because its
     /// retained owner is still verifying or rebuilding it.
     pub async fn generation_is_unverified_for_scope(

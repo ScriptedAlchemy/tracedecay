@@ -65,7 +65,7 @@ impl CodeGraphProjectionReadPort for DelayedProjection {
         let delay = self.delay;
         Box::pin(async move {
             tokio::time::sleep(delay).await;
-            VerifiedCodeGraphRead::new(scope, store)
+            VerifiedCodeGraphRead::new(scope, store, super::CodeGraphReadFreshnessV1::Current)
         })
     }
 }
@@ -115,7 +115,7 @@ impl CodeGraphProjectionReadPort for CancelWaitingProjection {
             } else {
                 std::future::pending::<()>().await;
             }
-            VerifiedCodeGraphRead::new(scope, store)
+            VerifiedCodeGraphRead::new(scope, store, super::CodeGraphReadFreshnessV1::Current)
         })
     }
 }
