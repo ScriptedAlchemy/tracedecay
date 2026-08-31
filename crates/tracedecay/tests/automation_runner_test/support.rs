@@ -84,7 +84,7 @@ impl AutomationSessionRetrieval for FixtureAutomationSessionRetrieval {
 
     fn retrieve<'a>(
         &'a self,
-        query: tracedecay_usecases::session::SessionTemporalQuery,
+        query: tracedecay_session_memory::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'a> {
         assert_eq!(
             query.temporal_mode(),
@@ -92,15 +92,15 @@ impl AutomationSessionRetrieval for FixtureAutomationSessionRetrieval {
         );
         assert_eq!(
             query.freshness_policy(),
-            tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh
+            tracedecay_session_memory::session::SessionFreshnessPolicy::RequireFresh
         );
         Box::pin(async move {
             let provider = query.provider().unwrap_or("cursor").to_string();
             let session_id = match query.retrieval_scope() {
-                tracedecay_usecases::session::SessionRetrievalScope::Session(session_id) => {
+                tracedecay_session_memory::session::SessionRetrievalScope::Session(session_id) => {
                     session_id.as_str().to_string()
                 }
-                tracedecay_usecases::session::SessionRetrievalScope::AllSessionsInAuthorizedRoot => {
+                tracedecay_session_memory::session::SessionRetrievalScope::AllSessionsInAuthorizedRoot => {
                     "session-reflect-1".to_string()
                 }
             };
@@ -189,7 +189,7 @@ impl AutomationSessionRetrieval for StaticAutomationSessionRetrieval {
 
     fn retrieve<'a>(
         &'a self,
-        query: tracedecay_usecases::session::SessionTemporalQuery,
+        query: tracedecay_session_memory::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'a> {
         assert_eq!(
             query.temporal_mode(),
@@ -197,7 +197,7 @@ impl AutomationSessionRetrieval for StaticAutomationSessionRetrieval {
         );
         assert_eq!(
             query.freshness_policy(),
-            tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh
+            tracedecay_session_memory::session::SessionFreshnessPolicy::RequireFresh
         );
         Box::pin(async move {
             AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
@@ -237,7 +237,7 @@ impl AutomationSessionRetrieval for EmptyAutomationSessionRetrieval {
 
     fn retrieve<'a>(
         &'a self,
-        _query: tracedecay_usecases::session::SessionTemporalQuery,
+        _query: tracedecay_session_memory::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'a> {
         Box::pin(async { AutomationTemporalRetrieval::CompleteZero })
     }
@@ -259,7 +259,7 @@ impl AutomationSessionRetrieval for RejectedAutomationSessionRetrieval {
 
     fn retrieve<'a>(
         &'a self,
-        query: tracedecay_usecases::session::SessionTemporalQuery,
+        query: tracedecay_session_memory::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'a> {
         assert_eq!(
             query.temporal_mode(),
@@ -267,7 +267,7 @@ impl AutomationSessionRetrieval for RejectedAutomationSessionRetrieval {
         );
         assert_eq!(
             query.freshness_policy(),
-            tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh
+            tracedecay_session_memory::session::SessionFreshnessPolicy::RequireFresh
         );
         Box::pin(async move { AutomationTemporalRetrieval::Rejected(self.reason) })
     }

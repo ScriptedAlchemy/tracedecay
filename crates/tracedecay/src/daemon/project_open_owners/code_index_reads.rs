@@ -141,7 +141,7 @@ pub(crate) fn project_code_index_generation_census_reader(
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
-) -> tracedecay_usecases::runtime_telemetry::GenerationCensusReader {
+) -> tracedecay_session_memory::runtime_telemetry::GenerationCensusReader {
     Arc::new(move || {
         let schedulers = schedulers.clone();
         let project_root = project_root.clone();
@@ -151,23 +151,23 @@ pub(crate) fn project_code_index_generation_census_reader(
                 .latest_complete_ready_decoded_for_root_scope(&project_root, &scope)
                 .await
             else {
-                return tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
-                    reason: tracedecay_usecases::runtime_telemetry::GenerationCensusUnavailableReason::ExactScopeGenerationNotReady,
+                return tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                    reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::ExactScopeGenerationNotReady,
                 };
             };
             match latest.generation().generation_statistics() {
                 Ok(statistics) => {
-                    tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot::Observed {
+                    tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Observed {
                         statistics:
-                            tracedecay_usecases::runtime_telemetry::GenerationCensusStatistics {
+                            tracedecay_session_memory::runtime_telemetry::GenerationCensusStatistics {
                                 source_total_bytes: statistics.source_total_bytes,
                                 symbol_count: statistics.symbol_count,
                                 edge_count: statistics.edge_count,
                             },
                     }
                 }
-                Err(_) => tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
-                    reason: tracedecay_usecases::runtime_telemetry::GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
+                Err(_) => tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                    reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
                 },
             }
         })

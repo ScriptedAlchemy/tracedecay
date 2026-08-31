@@ -24,7 +24,7 @@ use super::{
     CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
     VerifiedGraphQuery, VerifiedGraphQueryRequest, open_verified_graph_query,
 };
-use crate::context::read_cache::{self, GLOBAL_SESSION};
+use tracedecay_session_memory::context::read_cache::{self, GLOBAL_SESSION};
 use crate::context::read_modes::ReadMode;
 use crate::context::source_read::SourceReadRequest;
 use crate::tracedecay::SourceReadRuntimePort;

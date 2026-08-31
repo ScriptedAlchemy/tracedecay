@@ -38,7 +38,7 @@ use tracedecay_session_temporal_store::execution::{
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_usecases::session::{
+use tracedecay_session_memory::session::{
     SessionDataFreshness, SessionRetrievalScope, SessionTemporalQuery,
     TaskSessionRetrievalOutcomeV1,
 };
@@ -555,7 +555,7 @@ const fn cursor_manifest_hydration_refusal(
 }
 
 const fn budget_hydration_refusal(
-    stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1,
+    stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1,
 ) -> WorkEvidenceHydrationErrorV1 {
     WorkEvidenceHydrationErrorV1::StructuralRefusal(
         SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage },
@@ -673,12 +673,12 @@ pub(crate) mod tests {
         );
         assert_eq!(
             budget_hydration_refusal(
-                tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ContextTokens
+                tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ContextTokens
             ),
             WorkEvidenceHydrationErrorV1::StructuralRefusal(
                 SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                     stage:
-                        tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ContextTokens,
+                        tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ContextTokens,
                 }
             )
         );

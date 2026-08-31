@@ -24,7 +24,7 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     SessionRefreshReceiptRequestV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
 };
-use tracedecay_usecases::context::{SessionRootId, SessionStoreId};
+use tracedecay_session_memory::context::{SessionRootId, SessionStoreId};
 
 use super::{DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1};
 use crate::daemon::StoreOwnerKey;

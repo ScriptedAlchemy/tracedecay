@@ -34,8 +34,8 @@ use tracedecay_temporal_query::ports::{
     TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_usecases::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
-use tracedecay_usecases::session::{
+use tracedecay_session_memory::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
+use tracedecay_session_memory::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
 };
 

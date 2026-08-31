@@ -45,7 +45,7 @@ use tracedecay_domain::{
     SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_usecases::context::RegisteredScopeResolver;
+use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_usecases::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,

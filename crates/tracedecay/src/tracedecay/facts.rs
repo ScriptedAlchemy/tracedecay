@@ -1,7 +1,7 @@
 //! Session-memory (holographic fact store) surface of [`TraceDecay`].
 
-use tracedecay_usecases::memory::MemoryApplication;
-// The shared resolvers live in `tracedecay_usecases::memory` (the crate that
+use tracedecay_session_memory::memory::MemoryApplication;
+// The shared resolvers live in `tracedecay_session_memory::memory` (the crate that
 // owns `MemoryApplication`/`MemoryApplicationError`) rather than in
 // `tracedecay-runtime-core` — that crate is a *dependency* of
 // `tracedecay-usecases`, so hosting these there would require a circular
@@ -11,7 +11,7 @@ use tracedecay_usecases::memory::MemoryApplication;
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::store::memory::{ProjectFactStore, ProjectMemoryDbHandle};
-use tracedecay_usecases::memory::memory_application_error;
+use tracedecay_session_memory::memory::memory_application_error;
 
 use super::TraceDecay;
 

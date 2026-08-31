@@ -15,7 +15,7 @@ use super::health::ProjectHealth;
 use crate::ports::{
     GitWatchMaintenanceWakeV1 as MaintenanceCoordinator, GitWatchSyncConfigV1 as SyncConfig,
 };
-use tracedecay_usecases::context::CancellationToken;
+use tracedecay_session_memory::context::CancellationToken;
 
 pub enum WorktreeRegistration {
     Ready,

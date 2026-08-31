@@ -33,8 +33,8 @@ impl McpServer {
 
     pub(crate) fn install_generation_census_reader(
         &self,
-        reader: tracedecay_usecases::runtime_telemetry::GenerationCensusReader,
-    ) -> std::result::Result<(), tracedecay_usecases::runtime_telemetry::GenerationCensusReader>
+        reader: tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
+    ) -> std::result::Result<(), tracedecay_session_memory::runtime_telemetry::GenerationCensusReader>
     {
         self.generation_census_reader
             .set(reader)
@@ -46,7 +46,7 @@ impl McpServer {
 
     pub(crate) fn generation_census_reader(
         &self,
-    ) -> Option<tracedecay_usecases::runtime_telemetry::GenerationCensusReader> {
+    ) -> Option<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader> {
         self.generation_census_reader.get().cloned()
     }
 

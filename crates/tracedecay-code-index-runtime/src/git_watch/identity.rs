@@ -42,7 +42,7 @@ pub fn identity_discovery_disposition(
 #[hotpath::measure(label = "daemon.git.watch.identity", future = true)]
 pub async fn resolve_watch_identity(
     project_root: PathBuf,
-    cancellation: tracedecay_usecases::context::CancellationToken,
+    cancellation: tracedecay_session_memory::context::CancellationToken,
 ) -> WatchIdentityResolution {
     let resolution = discover_watch_identity(project_root, cancellation).await;
     record_identity_resolution(&resolution);
@@ -71,7 +71,7 @@ fn record_identity_resolution(resolution: &WatchIdentityResolution) {
 
 async fn discover_watch_identity(
     project_root: PathBuf,
-    cancellation: tracedecay_usecases::context::CancellationToken,
+    cancellation: tracedecay_session_memory::context::CancellationToken,
 ) -> WatchIdentityResolution {
     let Some(deadline) = Instant::now().checked_add(GIT_OBSERVATION_BUDGET) else {
         return WatchIdentityResolution::Unknown;

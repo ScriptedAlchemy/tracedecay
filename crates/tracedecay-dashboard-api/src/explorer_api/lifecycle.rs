@@ -24,7 +24,7 @@ impl ExplorerSourceProgressV1 {
 }
 
 pub(super) async fn admitted_deadline_elapsed(deadline: Deadline) {
-    let observed_at = crate::application::context::application_observed_at();
+    let observed_at = tracedecay_session_memory::context::application_observed_at();
     let remaining_micros = deadline.expires_at.0.saturating_sub(observed_at.0).max(0) as u64;
     tokio::time::sleep(Duration::from_micros(remaining_micros)).await;
 }

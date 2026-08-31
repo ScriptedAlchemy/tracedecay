@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_application::CostsReadModelV1;
 use tracedecay_domain::{CoverageStateV1, ObservationScopeV1};
-use tracedecay_usecases::provider_usage::{
+use tracedecay_session_memory::provider_usage::{
     AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
     ProviderUsageDeltaV1, price_provider_usage, provider_usage_aggregate,
     provider_usage_range_start,
@@ -341,8 +341,8 @@ fn actual_for_deltas<'a>(
 
 fn price_deltas<'a>(
     deltas: impl Iterator<Item = &'a ProviderUsageDeltaV1>,
-    prices: &tracedecay_usecases::provider_pricing::PriceTable,
-) -> tracedecay_usecases::provider_usage::ProviderUsageCostSummaryV1 {
+    prices: &tracedecay_session_memory::provider_pricing::PriceTable,
+) -> tracedecay_session_memory::provider_usage::ProviderUsageCostSummaryV1 {
     let deltas = deltas.cloned().collect::<Vec<_>>();
     let observations_seen = deltas.len() as u64;
     let aggregate = ProviderUsageAggregateV1 {
@@ -1405,7 +1405,7 @@ pub async fn pricing() -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_usecases::provider_usage::{
+    use tracedecay_session_memory::provider_usage::{
         AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
     };
 

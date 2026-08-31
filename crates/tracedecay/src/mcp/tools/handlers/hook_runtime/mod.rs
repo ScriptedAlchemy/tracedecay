@@ -131,9 +131,9 @@ async fn opencode_lsp_updated(
         .map_err(|error| config_error(format!("invalid OpenCode LSP event: {error}")))?;
     tracedecay_hooks::decode_opencode_lsp_event(&payload)
         .map_err(|error| config_error(format!("invalid OpenCode LSP event: {error}")))?;
-    tracedecay_usecases::event_lane::publish(
+    tracedecay_session_memory::event_lane::publish(
         project_sessions,
-        tracedecay_usecases::event_lane::ActivityFamilyV1::Hook,
+        tracedecay_session_memory::event_lane::ActivityFamilyV1::Hook,
         cg.project_root(),
         None,
         1,

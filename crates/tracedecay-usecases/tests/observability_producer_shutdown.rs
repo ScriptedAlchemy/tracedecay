@@ -17,7 +17,7 @@ use tracedecay_usecases::observability::{
     ObservabilityProducerIdentityV1, RegisteredAggregateShareExporterV1,
     RegisteredObservabilityPortV1, provider_latency_read_model,
 };
-use tracedecay_usecases::provider_usage::{
+use tracedecay_session_memory::provider_usage::{
     AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
 };
 

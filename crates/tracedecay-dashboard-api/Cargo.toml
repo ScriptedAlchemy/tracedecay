@@ -31,6 +31,7 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
@@ -52,6 +53,7 @@ hotpath = [
     "tracedecay-hooks/hotpath",
     "tracedecay-lsp/hotpath",
     "tracedecay-runtime-core/hotpath",
+    "tracedecay-session-memory/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-store/hotpath",
     "tracedecay-tool-catalog/hotpath",
@@ -71,6 +73,7 @@ hotpath-alloc = [
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
@@ -90,6 +93,7 @@ hotpath-cpu = [
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",

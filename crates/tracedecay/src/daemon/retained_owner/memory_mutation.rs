@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_domain::ManifestDigest;
-use tracedecay_usecases::memory::MemoryMutationError;
+use tracedecay_session_memory::memory::MemoryMutationError;
 
 use super::memory_mapping;
 use super::receipts::PreparedRetainedEffect;

@@ -53,7 +53,7 @@ use tracedecay_usecases::advisory::{
     discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
     register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
 };
-use tracedecay_usecases::context::MonotonicDeadline;
+use tracedecay_session_memory::context::MonotonicDeadline;
 use tracedecay_usecases::delivery::{
     ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
     ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,

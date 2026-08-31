@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Command;
 
 use tracedecay_domain::ProjectId;
-use tracedecay_usecases::context::RegisteredScopeResolver;
+use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")

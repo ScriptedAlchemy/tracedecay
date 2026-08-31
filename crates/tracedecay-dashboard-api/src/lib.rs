@@ -13,8 +13,9 @@
 //! mounted for the selected project.
 
 pub use tracedecay_application::request_identity;
+pub use tracedecay_session_memory::user_config;
 pub use tracedecay_usecases as application;
-pub use tracedecay_usecases::{git_query, graph, user_config};
+pub use tracedecay_usecases::{git_query, graph};
 pub mod tracedecay;
 // Crate-root re-exports the composition root reaches through its
 // `crate::dashboard::*` shim: the application-surface injection contract and
@@ -116,7 +117,7 @@ mod projects;
 mod read_model;
 mod request_deadline;
 mod savings_api;
-use tracedecay_usecases::provider_pricing as savings_pricing;
+use tracedecay_session_memory::provider_pricing as savings_pricing;
 pub mod scope;
 mod settings_api;
 pub use settings_api::{
@@ -1119,7 +1120,7 @@ impl Drop for DashboardHttpCancellationGuard {
         if !self.completed {
             let _ = self
                 .cancellation
-                .cancel(crate::application::context::application_observed_at());
+                .cancel(tracedecay_session_memory::context::application_observed_at());
         }
     }
 }
@@ -1209,7 +1210,7 @@ fn admit_dashboard_http_control(
         }
     }
 
-    let observed_at = crate::application::context::application_observed_at();
+    let observed_at = tracedecay_session_memory::context::application_observed_at();
     let sequence = DASHBOARD_HTTP_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let identity = format!("dashboard.http.{}.{}", observed_at.0, sequence);
     let request_id = match tracedecay_application::RequestId::new(format!("request.{identity}")) {
@@ -2347,7 +2348,7 @@ mod authority_tests {
                 .expect("registered project id"),
         )
         .expect("valid project id");
-        let expected = crate::application::context::RegisteredScopeResolver::resolve(
+        let expected = tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
             &fixture.layout.project_root,
             &fixture.layout.project_root,
             &project_id,

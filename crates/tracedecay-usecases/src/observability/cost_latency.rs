@@ -24,7 +24,7 @@ use super::{
     measurement,
 };
 use crate::observability::RegisteredObservabilityPortV1;
-use crate::provider_usage::{
+use tracedecay_session_memory::provider_usage::{
     ProviderUsageAggregateV1, ProviderUsageCoverageV1, ProviderUsageDeltaV1,
 };
 use tracedecay_application::{ObservabilityQueryPort, ObservabilityQueryV1};
@@ -593,7 +593,7 @@ fn unknown_metric_with_coverage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider_usage::{
+    use tracedecay_session_memory::provider_usage::{
         AggregatedProviderUsageCountersV1, ProviderUsageDeltaDerivationV1,
     };
 

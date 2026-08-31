@@ -25,7 +25,7 @@ use tracedecay_session_temporal_store::{
 use tracedecay_lcm::LcmStatus;
 use tracedecay_lcm::types::LcmPayloadCoverageState;
 use tracedecay_sessions::runtime::{SessionMessageType, SessionSearchScope};
-use tracedecay_usecases::session::lcm::{
+use tracedecay_session_memory::session::lcm::{
     LcmAuthorityOperation, LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest,
     LcmAuthorityResponse, LcmAuthorityUnavailableReason, LcmDoctorQuery, LcmStatusQuery,
 };
@@ -39,8 +39,8 @@ use crate::daemon::session_retrieval::{
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_runtime_core::timeutil::SearchTimeBound;
-use tracedecay_usecases::context::ResolvedSessionIdentity;
-use tracedecay_usecases::session::SessionTemporalQuery;
+use tracedecay_session_memory::context::ResolvedSessionIdentity;
+use tracedecay_session_memory::session::SessionTemporalQuery;
 
 mod output;
 mod retrieval;

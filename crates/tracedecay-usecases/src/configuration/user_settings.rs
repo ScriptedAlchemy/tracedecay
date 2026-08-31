@@ -17,7 +17,7 @@ use tracedecay_domain::configuration::{
 };
 
 use super::{DirectConfigurationMutation, ProductionConfigurationDaemonClient};
-use crate::user_config::UserConfig;
+use tracedecay_session_memory::user_config::UserConfig;
 
 pub type UserSettingsFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, UserSettingsAuthorityError>> + Send + 'a>>;
@@ -117,7 +117,7 @@ struct LegacyUserMetadata {
 }
 
 fn read_legacy_user_metadata() -> Result<LegacyUserMetadata, UserSettingsAuthorityError> {
-    let path = crate::user_config::config_path()
+    let path = tracedecay_session_memory::user_config::config_path()
         .ok_or_else(|| unavailable("legacy user configuration path"))?;
     let config = UserConfig::load_strict()
         .map_err(|error| unavailable(format!("legacy user configuration metadata: {error}")))?;
@@ -228,7 +228,7 @@ pub fn plan_user_settings_mutation(
 }
 
 pub fn parse_duration_millis(value: &str) -> Option<u64> {
-    let millis = crate::user_config::parse_duration(value)?.as_millis();
+    let millis = tracedecay_session_memory::user_config::parse_duration(value)?.as_millis();
     u64::try_from(millis).ok().filter(|millis| *millis > 0)
 }
 

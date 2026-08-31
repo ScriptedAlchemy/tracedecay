@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tracedecay_application::{ApplicationProblem, Deadline, RetryDirective, SafeDiagnostic};
 use tracedecay_domain::UtcMicros;
 use tracedecay_lsp::analyzer::broker::{DiagnosticBroker, MountedLspProvider};
-use tracedecay_usecases::context::MonotonicDeadline;
+use tracedecay_session_memory::context::MonotonicDeadline;
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 
 /// State retained after independent owners publish and consumed only after the

@@ -286,8 +286,8 @@ pub struct McpServer {
     /// Exact registered session-store coordinates retained with the project
     /// refresh authority. V2 refresh requests must match these values; caller
     /// selectors never rename the mounted store in receipts or digest inputs.
-    project_session_store_id: Option<tracedecay_usecases::context::SessionStoreId>,
-    project_session_root_id: Option<tracedecay_usecases::context::SessionRootId>,
+    project_session_store_id: Option<tracedecay_session_memory::context::SessionStoreId>,
+    project_session_root_id: Option<tracedecay_session_memory::context::SessionRootId>,
     session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     project_application_retrieval: Option<MountedProjectApplicationRetrievalV1>,
@@ -339,7 +339,7 @@ pub struct McpServer {
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
     generation_census_reader:
-        tokio::sync::OnceCell<tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
+        tokio::sync::OnceCell<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -461,7 +461,7 @@ pub struct McpServer {
 
 #[derive(Clone)]
 struct MountedProjectApplicationRetrievalV1 {
-    identity: tracedecay_usecases::context::ResolvedSessionIdentity,
+    identity: tracedecay_session_memory::context::ResolvedSessionIdentity,
     service: Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>,
 }
 

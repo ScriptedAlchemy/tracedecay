@@ -119,6 +119,7 @@ hotpath = [
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
+    "tracedecay-session-memory/hotpath",
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-lcm/hotpath",
     "tracedecay-sessions/hotpath",
@@ -158,6 +159,7 @@ hotpath-alloc = [
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
     "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-lcm/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
@@ -197,6 +199,7 @@ hotpath-cpu = [
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
     "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-lcm/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
@@ -408,6 +411,7 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }

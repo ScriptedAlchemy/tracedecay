@@ -21,7 +21,7 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
         let missing_codex_bin = tmp_root.join("missing-codex");
         let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &missing_codex_bin);
 
-        let mut global_config = tracedecay_usecases::user_config::UserConfig::default();
+        let mut global_config = tracedecay_session_memory::user_config::UserConfig::default();
         global_config.automation.enabled = true;
         global_config.automation.backend =
             tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer;

@@ -41,12 +41,12 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_domain::errors::Result<
-        tracedecay_usecases::store::transcript::GlobalDbTranscriptStore<
+        tracedecay_session_memory::transcript::GlobalDbTranscriptStore<
             &'_ tracedecay_global_db::RegisteredGlobalDb,
         >,
     > {
         Ok(
-            tracedecay_usecases::store::transcript::GlobalDbTranscriptStore::new(
+            tracedecay_session_memory::transcript::GlobalDbTranscriptStore::new(
                 self.session_database_for_test(scope)?,
             ),
         )
@@ -184,7 +184,7 @@ impl HostAdmissionTestRuntimeV1 {
                     source: std::io::Error::other(error.to_string()),
                 }
             })?;
-        let store = tracedecay_usecases::store::transcript::GlobalDbTranscriptStore::new(database);
+        let store = tracedecay_session_memory::transcript::GlobalDbTranscriptStore::new(database);
         tracedecay_sessions::runtime::source::try_ingest_source(
             &store,
             source,
@@ -368,7 +368,7 @@ impl HostAdmissionTestRuntimeV1 {
                 source: std::io::Error::other(error.to_string()),
             }
         })?;
-        let store = tracedecay_usecases::store::transcript::GlobalDbTranscriptStore::new(database);
+        let store = tracedecay_session_memory::transcript::GlobalDbTranscriptStore::new(database);
         tracedecay_sessions::runtime::source::try_ingest_source(
             &store,
             source,

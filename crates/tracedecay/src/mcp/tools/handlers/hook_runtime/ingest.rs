@@ -12,7 +12,7 @@ use tracedecay_sessions::admission::{
 };
 use tracedecay_sessions::runtime::source::TranscriptSource;
 use tracedecay_usecases::observation::ObservationCancellation;
-use tracedecay_usecases::session::lcm::{
+use tracedecay_session_memory::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,
     LcmCompactionCommand, LcmCompressionEvidence, LcmHostProtocol,
 };
@@ -416,7 +416,7 @@ fn compaction_authority_unavailable(action: &str) -> Value {
 
 fn compaction_response_json(
     action: &str,
-    response: &tracedecay_usecases::session::lcm::LcmAuthorityResponse,
+    response: &tracedecay_session_memory::session::lcm::LcmAuthorityResponse,
 ) -> Value {
     if let (LcmAuthorityOutcome::Ready, Some(LcmAuthorityPayload::Compaction(compression))) =
         (&response.outcome, &response.payload)
@@ -528,17 +528,17 @@ pub(super) async fn accounting_receipt(
     let scope = ObservationScopeV1::Project {
         project_id: project_observation_id(cg)?,
     };
-    let usage = tracedecay_usecases::provider_usage::provider_usage_aggregate(
+    let usage = tracedecay_session_memory::provider_usage::provider_usage_aggregate(
         provider_usage_db,
         &scope,
         None,
         None,
     )
     .await;
-    let prices = tracedecay_usecases::provider_pricing::load_table();
-    let priced = tracedecay_usecases::provider_usage::price_provider_usage(&usage, prices, 0);
+    let prices = tracedecay_session_memory::provider_pricing::load_table();
+    let priced = tracedecay_session_memory::provider_usage::price_provider_usage(&usage, prices, 0);
     let complete =
-        priced.coverage == tracedecay_usecases::provider_usage::ProviderUsageCoverageV1::Complete;
+        priced.coverage == tracedecay_session_memory::provider_usage::ProviderUsageCoverageV1::Complete;
     let tokens_consumed = complete
         .then(|| {
             priced

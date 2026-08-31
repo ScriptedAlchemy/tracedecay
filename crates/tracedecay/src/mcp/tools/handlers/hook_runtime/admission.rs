@@ -363,9 +363,9 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     // host. Publish it here, where the project scope is already resolved; the
     // application lane retains it across dashboard disconnects and restarts.
     if first_admission && let Some(project_sessions) = project_sessions {
-        tracedecay_usecases::event_lane::publish(
+        tracedecay_session_memory::event_lane::publish(
             project_sessions,
-            tracedecay_usecases::event_lane::ActivityFamilyV1::Hook,
+            tracedecay_session_memory::event_lane::ActivityFamilyV1::Hook,
             cg.project_root(),
             cg.store_layout().identity.project_id.as_deref(),
             1,

@@ -19,14 +19,14 @@ use tracedecay_domain::ProjectId;
 /// `project_id` must be the registered identity validated from the store
 /// layout; `None` (missing registry) or a non-canonical id fails closed. The
 /// resolution itself is the single consolidated canonical path
-/// (`crate::application::context::RegisteredScopeResolver`), so the
+/// (`tracedecay_session_memory::context::RegisteredScopeResolver`), so the
 /// dashboard never re-derives repository/worktree identity from paths.
 pub fn resolve_dashboard_scope(
     project_root: &Path,
     project_id: Option<&str>,
 ) -> Option<tracedecay_application::ResolvedScope> {
     let project_id = ProjectId::new(project_id?).ok()?;
-    let scope = crate::application::context::RegisteredScopeResolver::resolve(
+    let scope = tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
         project_root,
         project_root,
         &project_id,

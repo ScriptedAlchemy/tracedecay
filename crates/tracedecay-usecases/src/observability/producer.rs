@@ -19,7 +19,7 @@ use tracedecay_global_db::{
     RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
 };
 
-use crate::event_lane::record_observability;
+use tracedecay_session_memory::event_lane::record_observability;
 
 mod outbox;
 mod rollup_rebuild;

@@ -1323,7 +1323,7 @@ mod tests {
 
         fn retrieve(
             &self,
-            _query: tracedecay_usecases::session::SessionTemporalQuery,
+            _query: tracedecay_session_memory::session::SessionTemporalQuery,
         ) -> AutomationSessionRetrievalFuture<'_> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { AutomationTemporalRetrieval::CompleteZero })

@@ -93,9 +93,9 @@ pub async fn execute_work_application(
         )
         && let Some(project_root) = activity_root.as_deref()
     {
-        tracedecay_usecases::event_lane::publish(
+        tracedecay_session_memory::event_lane::publish(
             &activity_database,
-            tracedecay_usecases::event_lane::ActivityFamilyV1::Task,
+            tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
             project_root,
             None,
             1,
@@ -112,9 +112,9 @@ fn publish_committed_task_activity_in_background(
     detail: Option<String>,
 ) {
     tokio::spawn(async move {
-        tracedecay_usecases::event_lane::publish(
+        tracedecay_session_memory::event_lane::publish(
             &database,
-            tracedecay_usecases::event_lane::ActivityFamilyV1::Task,
+            tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
             &project_root,
             None,
             1,

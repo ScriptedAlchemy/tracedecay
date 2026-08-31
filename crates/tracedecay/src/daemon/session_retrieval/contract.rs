@@ -24,7 +24,7 @@ use tracedecay_lcm::{
 use tracedecay_sessions::runtime::{
     SessionMessageSearchResult, SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
 };
-use tracedecay_usecases::session::{SessionDataFreshness, SessionTemporalQuery};
+use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -477,7 +477,7 @@ pub(crate) enum SessionRetrievalServiceOutcome {
         maximum: usize,
     },
     BudgetExhausted {
-        stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1,
+        stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1,
     },
     TimedOut,
     Cancelled,

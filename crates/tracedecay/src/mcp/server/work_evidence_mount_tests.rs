@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use tracedecay_application::{RequestContext, ResolvedScope};
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
-use tracedecay_usecases::context::{
+use tracedecay_session_memory::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
-use tracedecay_usecases::session::SessionTemporalQuery;
+use tracedecay_session_memory::session::SessionTemporalQuery;
 
 use super::MountedProjectApplicationRetrievalV1;
 

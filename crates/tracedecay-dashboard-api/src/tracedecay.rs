@@ -26,9 +26,9 @@ pub trait DashboardProjectRuntime: Send + Sync {
 pub type TraceDecay = dyn DashboardProjectRuntime;
 
 pub mod facts {
-    // The shared resolvers live in `tracedecay_usecases::memory` — the crate
+    // The shared resolvers live in `tracedecay_session_memory::memory` — the crate
     // that owns `MemoryApplication`/`MemoryApplicationError` — rather than a
     // copy kept in sync by hand here. `tracedecay::facts::memory_application_for_db`
     // remains the stable call-site path for this crate's ~20 dashboard routes.
-    pub use tracedecay_usecases::memory::memory_application_for_db;
+    pub use tracedecay_session_memory::memory::memory_application_for_db;
 }

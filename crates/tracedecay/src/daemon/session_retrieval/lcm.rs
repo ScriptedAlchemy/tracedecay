@@ -14,7 +14,7 @@ use tracedecay_lcm::{
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_usecases::session::{
+use tracedecay_session_memory::session::{
     SessionDataFreshness, SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionTemporalExecutionError, SessionTemporalQuery,
 };

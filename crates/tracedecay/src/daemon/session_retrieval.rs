@@ -16,10 +16,10 @@ use tracedecay_domain::{
 use tracedecay_domain::{RepositoryId, WorktreeId};
 use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
 use tracedecay_store::StoreShardIdV1;
-use tracedecay_usecases::context::{
+use tracedecay_session_memory::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
-use tracedecay_usecases::session::{
+use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
     SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
@@ -608,7 +608,7 @@ impl DaemonSessionRetrievalService {
             }
             SessionTemporalExecutionError::BudgetExhausted => {
                 SessionRetrievalServiceOutcome::BudgetExhausted {
-                    stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+                    stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
                 }
             }
             SessionTemporalExecutionError::Cancelled => SessionRetrievalServiceOutcome::Cancelled,

@@ -13,7 +13,7 @@ use std::sync::{
 use tracedecay_application::RequestContext;
 use tracedecay_domain::CodeGenerationId;
 
-use crate::context::{CancellationToken, RequestInterruption, application_request_interruption};
+use tracedecay_session_memory::context::{CancellationToken, RequestInterruption, application_request_interruption};
 use tracedecay_code_index::{
     chunks::CodeIndexImportEvidenceV1,
     production::{

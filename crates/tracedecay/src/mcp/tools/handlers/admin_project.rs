@@ -11,7 +11,7 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
-use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
+use tracedecay_session_memory::memory::{MemoryApplication, MemoryApplicationError};
 
 use super::json_result;
 use tracedecay_mcp::ToolResult;
@@ -307,13 +307,13 @@ mod tests {
         content: &str,
     ) -> ProjectMemoryAutomaticFactReceiptV1 {
         use tracedecay_domain::{ActorId, Confidence, FactCategoryV1};
-        use tracedecay_usecases::memory::ProjectMemoryFactAddRequest;
+        use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
 
         let owner = cg.project_memory_owner().unwrap();
         let db = cg.open_project_store_db().await.unwrap();
         let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
         let actor = ActorId::new("automation.session-reflector".to_owned()).unwrap();
-        let request = tracedecay_usecases::memory::automatic_fact_add_command(
+        let request = tracedecay_session_memory::memory::automatic_fact_add_command(
             owner,
             ProjectMemoryFactAddRequest {
                 content: content.to_owned(),

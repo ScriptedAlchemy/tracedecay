@@ -363,7 +363,7 @@ impl McpServer {
         &self,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
         output: &str,
-        response_revoked: Option<&tracedecay_usecases::context::CancellationToken>,
+        response_revoked: Option<&tracedecay_session_memory::context::CancellationToken>,
     ) -> std::io::Result<bool> {
         hotpath::gauge!("mcp.server.response.bytes").set(output.len());
         let write = async {
@@ -1033,7 +1033,7 @@ impl McpServer {
                     let delta = tokens_saved - last_flushed;
                     match self.canonical_upload_enabled().await {
                         Ok(upload_enabled) => {
-                            let mut config = tracedecay_usecases::user_config::UserConfig::load();
+                            let mut config = tracedecay_session_memory::user_config::UserConfig::load();
                             config.pending_upload += delta;
                             if upload_enabled
                                 && let Some(_total) =

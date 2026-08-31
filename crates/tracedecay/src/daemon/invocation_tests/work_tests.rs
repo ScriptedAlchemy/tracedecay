@@ -630,7 +630,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     };
     let prepared = packet.payload.expect("prepared product task mutation");
     assert!(
-        tracedecay_usecases::event_lane::replay_after(&database, project_id.as_str(), None)
+        tracedecay_session_memory::event_lane::replay_after(&database, project_id.as_str(), None)
             .await
             .expect("activity replay")
             .records
@@ -654,7 +654,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     );
 
     let replay =
-        tracedecay_usecases::event_lane::replay_after(&database, project_id.as_str(), None)
+        tracedecay_session_memory::event_lane::replay_after(&database, project_id.as_str(), None)
             .await
             .expect("activity replay");
     assert_eq!(
@@ -665,7 +665,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     let pulse = &replay.records[0].pulse;
     assert_eq!(
         pulse.family,
-        tracedecay_usecases::event_lane::ActivityFamilyV1::Task
+        tracedecay_session_memory::event_lane::ActivityFamilyV1::Task
     );
     assert_eq!(pulse.project_id.as_deref(), Some(project_id.as_str()));
     assert_eq!(pulse.units, 1);
@@ -692,7 +692,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
         "product graph view must return Work evidence: {view_after:?}"
     );
     assert_eq!(
-        tracedecay_usecases::event_lane::replay_after(&database, project_id.as_str(), None)
+        tracedecay_session_memory::event_lane::replay_after(&database, project_id.as_str(), None)
             .await
             .expect("activity replay")
             .records

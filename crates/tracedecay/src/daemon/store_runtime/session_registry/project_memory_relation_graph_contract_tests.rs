@@ -15,7 +15,7 @@ use tracedecay_store::{
     ProjectMemoryFactProjectionV1, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
     ProjectMemoryGraphTargetV1,
 };
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryApplicationError, MemoryOperationContext,
     ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
     ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,

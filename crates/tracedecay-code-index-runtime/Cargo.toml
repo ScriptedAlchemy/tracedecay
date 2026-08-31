@@ -31,6 +31,7 @@ hotpath = [
     "tracedecay-runtime-core/hotpath",
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
+    "tracedecay-session-memory/hotpath",
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-store/hotpath",
     "tracedecay-tool-catalog/hotpath",
@@ -54,6 +55,7 @@ hotpath-alloc = [
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
     "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
@@ -77,6 +79,7 @@ hotpath-cpu = [
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
     "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
@@ -149,6 +152,7 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }

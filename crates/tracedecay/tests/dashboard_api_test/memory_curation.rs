@@ -310,7 +310,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
     };
     use tracedecay_runtime_core::store::memory::DatabaseFactStore;
     use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddMaterialV1};
-    use tracedecay_usecases::memory::{
+    use tracedecay_session_memory::memory::{
         MemoryApplication, ProjectMemoryFactAddRequest, automatic_fact_add_command,
     };
 

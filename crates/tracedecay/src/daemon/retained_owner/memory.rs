@@ -23,7 +23,7 @@ use tracedecay_store::{
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactListQueryV1,
     ProjectMemoryFactSearchKindV1,
 };
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryOperationContext, ProjectMemoryFactAddRequestOutcome,
 };
 

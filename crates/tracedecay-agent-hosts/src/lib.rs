@@ -66,7 +66,7 @@ pub mod tool_name;
 pub use tracedecay_automation_runtime as automation_runtime;
 
 pub use product_version::PRODUCT_VERSION;
-pub(crate) use tracedecay_usecases::user_config;
+pub(crate) use tracedecay_session_memory::user_config;
 
 // Kernel shims. `tracedecay-runtime-core` owns the substrate these two
 // subsystems were extracted alongside; aliasing the kernel modules into this

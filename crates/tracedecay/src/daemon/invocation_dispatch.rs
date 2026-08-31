@@ -512,7 +512,7 @@ pub(super) async fn resolve_multi_root_projects(
             .root
             .canonicalize()
             .map_err(|_| DaemonInvocationProblem::Unavailable)?;
-        tracedecay_usecases::context::RegisteredScopeResolver::resolve(
+        tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
             &registered_root,
             &root,
             &selector.project_id,

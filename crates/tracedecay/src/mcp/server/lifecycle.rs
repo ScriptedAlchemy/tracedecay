@@ -262,16 +262,16 @@ pub(crate) struct VersionCheckState {
 #[derive(Clone)]
 pub(crate) struct ProjectServerResponseLifecycle {
     response_gate: Arc<tokio::sync::RwLock<()>>,
-    response_revoked: tracedecay_usecases::context::CancellationToken,
-    request_abort: tracedecay_usecases::context::CancellationToken,
+    response_revoked: tracedecay_session_memory::context::CancellationToken,
+    request_abort: tracedecay_session_memory::context::CancellationToken,
 }
 
 impl Default for ProjectServerResponseLifecycle {
     fn default() -> Self {
         Self {
             response_gate: Arc::new(tokio::sync::RwLock::new(())),
-            response_revoked: tracedecay_usecases::context::CancellationToken::new(),
-            request_abort: tracedecay_usecases::context::CancellationToken::new(),
+            response_revoked: tracedecay_session_memory::context::CancellationToken::new(),
+            request_abort: tracedecay_session_memory::context::CancellationToken::new(),
         }
     }
 }
@@ -302,7 +302,7 @@ impl ProjectServerResponseLifecycle {
         &self.response_gate
     }
 
-    pub(crate) fn response_revoked(&self) -> &tracedecay_usecases::context::CancellationToken {
+    pub(crate) fn response_revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
         &self.response_revoked
     }
 }

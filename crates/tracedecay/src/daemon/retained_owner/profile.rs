@@ -17,7 +17,7 @@ use tracedecay_application::{
 use tracedecay_domain::{
     ActorId, BrainId, ManifestDigest, UserProfileId, UtcMicros, canonical_sha256,
 };
-use tracedecay_usecases::context::ResolvedSessionIdentity;
+use tracedecay_session_memory::context::ResolvedSessionIdentity;
 
 use super::lcm::DirectRetainedLcmPortV1;
 use super::memory::DirectRetainedMemoryPortV1;
@@ -358,7 +358,7 @@ mod tests {
         SessionTemporalSnapshotRequestV1, build_observation_resolution_authorization_v1,
         build_observation_retrieval_anchor_v2,
     };
-    use tracedecay_usecases::context::{
+    use tracedecay_session_memory::context::{
         ProfileId, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     };
 

@@ -12,10 +12,10 @@ use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
 use tracedecay_store::StoreShardScopeV1;
-use tracedecay_usecases::context::{
+use tracedecay_session_memory::context::{
     CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets, ResolvedSessionIdentity,
 };
-use tracedecay_usecases::session::{
+use tracedecay_session_memory::session::{
     SessionRequestBinding, SessionRetrievalConfiguration, SessionTemporalQuery,
     TaskSessionRetrievalOutcomeV1,
 };
@@ -271,7 +271,7 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             let Ok(execution) = self.registered_execution() else {
                 return TaskSessionRetrievalOutcomeV1::Unavailable;
             };
-            tracedecay_usecases::session::SessionRetrievalService::new(
+            tracedecay_session_memory::session::SessionRetrievalService::new(
                 authorizer,
                 execution,
                 super::MessageSearchWordEstimator,
@@ -597,7 +597,7 @@ mod tests {
         ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-    use tracedecay_usecases::context::{
+    use tracedecay_session_memory::context::{
         BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
         SessionStoreId,
     };

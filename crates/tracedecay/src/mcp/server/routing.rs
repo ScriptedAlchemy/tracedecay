@@ -15,7 +15,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 /// wire contract or a second routing identity.
 pub(crate) struct SelectedProjectResponseLease {
     _guard: tokio::sync::OwnedRwLockReadGuard<()>,
-    revoked: tracedecay_usecases::context::CancellationToken,
+    revoked: tracedecay_session_memory::context::CancellationToken,
     _active: ResponseLeaseGaugeGuard,
 }
 
@@ -37,7 +37,7 @@ impl Drop for ResponseLeaseGaugeGuard {
 impl SelectedProjectResponseLease {
     pub(crate) fn new(
         guard: tokio::sync::OwnedRwLockReadGuard<()>,
-        revoked: tracedecay_usecases::context::CancellationToken,
+        revoked: tracedecay_session_memory::context::CancellationToken,
     ) -> Self {
         Self {
             _guard: guard,
@@ -46,7 +46,7 @@ impl SelectedProjectResponseLease {
         }
     }
 
-    pub(crate) fn revoked(&self) -> &tracedecay_usecases::context::CancellationToken {
+    pub(crate) fn revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
         &self.revoked
     }
 

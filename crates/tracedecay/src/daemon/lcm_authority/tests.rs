@@ -10,12 +10,12 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::context::{
+use tracedecay_session_memory::context::{
     BranchId, ProfileId, RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
     SessionStoreId, session_application_grant_digest,
 };
-use tracedecay_usecases::session::SessionRequestBinding;
-use tracedecay_usecases::session::lcm::{
+use tracedecay_session_memory::session::SessionRequestBinding;
+use tracedecay_session_memory::session::lcm::{
     LcmAuthorityTarget, LcmCompressionEvidence, LcmHostProtocol,
 };
 
