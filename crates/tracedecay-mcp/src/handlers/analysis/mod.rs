@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
-use tracedecay_usecases::graph::{
+use tracedecay_graph_query::{
     CodeGraphSemanticEdgeV1, LineageSymbolRecordV1, VerifiedGraphQuery,
 };
 

@@ -8,7 +8,7 @@ const MAX_GINI_RELATIONS: usize = 2_000_000;
 
 #[hotpath::measure(label = "mcp.health.gini.total")]
 pub async fn handle_gini(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -79,7 +79,7 @@ pub async fn handle_gini(
 }
 
 fn verified_gini_values(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     metric: &str,
     scope: &str,
     path_prefix: Option<&str>,
@@ -158,11 +158,11 @@ fn verified_gini_values(
 }
 
 fn verified_gini_fan_values(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     symbols: &[(
         tracedecay_domain::SymbolOccurrenceId,
         String,
-        tracedecay_usecases::graph::LineageSymbolRecordV1,
+        tracedecay_graph_query::LineageSymbolRecordV1,
     )],
     fan_in: bool,
 ) -> Result<Vec<(String, f64)>> {
@@ -199,11 +199,11 @@ fn verified_gini_fan_values(
 }
 
 fn verified_gini_member_values(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     symbols: &[(
         tracedecay_domain::SymbolOccurrenceId,
         String,
-        tracedecay_usecases::graph::LineageSymbolRecordV1,
+        tracedecay_graph_query::LineageSymbolRecordV1,
     )],
 ) -> Result<Vec<(String, f64)>> {
     let containers = symbols
@@ -234,7 +234,7 @@ fn verified_gini_member_values(
 
 #[hotpath::measure(label = "mcp.health.dependency_depth.total")]
 pub async fn handle_dependency_depth(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {

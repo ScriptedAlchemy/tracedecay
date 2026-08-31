@@ -10,7 +10,7 @@ use tracedecay_application::retrieval::{
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::graph::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
+use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
 
 use crate::{
     ToolResult, decode_primitive_request, generic_tool_result, require_node_id, text_tool_result,

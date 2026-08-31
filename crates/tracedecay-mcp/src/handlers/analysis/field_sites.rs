@@ -4,7 +4,7 @@ use super::*;
 
 #[hotpath::measure(future = true, label = "mcp.analysis.field_sites.total")]
 pub async fn handle_field_sites(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {

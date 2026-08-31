@@ -5,7 +5,7 @@ use crate::generic_tool_result;
 use serde_json::{Value, json};
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::graph::VerifiedGraphQuery;
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::verified::{all_symbols, info_graph_error, required_symbol_parts};
 

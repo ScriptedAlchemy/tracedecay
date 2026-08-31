@@ -6,7 +6,7 @@ use super::*;
 /// edge subgraph. Each cycle is a vec of node IDs forming the loop.
 #[hotpath::measure(future = true, label = "mcp.analysis.recursion.total")]
 pub async fn handle_recursion(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -40,9 +40,9 @@ pub async fn handle_recursion(
         // shorter / more interesting cycles when the cap kicks in. We still need
         // every cyclic SCC enumerated before sorting (truncating early would bias
         // toward Tarjan emission order), but we cap the per-SCC path search.
-        let mut cyclic_sccs: Vec<Vec<String>> = tracedecay_usecases::graph::scc::tarjan_scc(&adj)
+        let mut cyclic_sccs: Vec<Vec<String>> = tracedecay_graph_query::scc::tarjan_scc(&adj)
             .into_iter()
-            .filter(|scc| tracedecay_usecases::graph::scc::is_cyclic_scc(scc, &adj))
+            .filter(|scc| tracedecay_graph_query::scc::is_cyclic_scc(scc, &adj))
             .collect();
         cyclic_sccs.sort_by_key(Vec::len);
 
