@@ -370,6 +370,7 @@ async fn validate_temporal_namespace_tables(
     Ok(())
 }
 
+#[hotpath::measure]
 fn belongs_to_temporal_namespace(name: &str) -> bool {
     [
         "session_agent_",
@@ -394,6 +395,7 @@ fn belongs_to_temporal_namespace(name: &str) -> bool {
     .any(|prefix| starts_with_ignore_ascii_case(name, prefix))
 }
 
+#[hotpath::measure]
 pub(super) fn session_temporal_reset_required(
     reason: impl Into<String>,
 ) -> tracedecay_domain::errors::TraceDecayError {
@@ -434,10 +436,12 @@ pub(super) async fn validate_temporal_fts_contracts(
     Ok(())
 }
 
+#[hotpath::measure]
 fn normalize_fts_sql(sql: &str) -> String {
     normalize_schema_sql(sql)
 }
 
+#[hotpath::measure]
 fn normalize_schema_sql(sql: &str) -> String {
     sql.chars()
         .filter(|character| !character.is_whitespace() && *character != ';')

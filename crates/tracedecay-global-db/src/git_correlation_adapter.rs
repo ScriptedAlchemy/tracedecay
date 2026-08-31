@@ -39,6 +39,7 @@ static GIT_EVIDENCE_PUBLICATION_LOCKS: OnceLock<
     Mutex<BTreeMap<String, Weak<GitEvidencePublicationLock>>>,
 > = OnceLock::new();
 
+#[hotpath::measure]
 fn shared_git_evidence_publication_lock(
     runtime: &VerifiedGraphRuntimeWeakProxyV1,
 ) -> Result<Arc<GitEvidencePublicationLock>, String> {
@@ -50,6 +51,7 @@ fn shared_git_evidence_publication_lock(
     shared_git_evidence_publication_lock_for_identity(identity)
 }
 
+#[hotpath::measure]
 fn shared_git_evidence_publication_lock_for_identity(
     identity: String,
 ) -> Result<Arc<GitEvidencePublicationLock>, String> {
@@ -295,10 +297,12 @@ where
         GlobalDbGitCorrelationStore::require_project_sessions_authority(self)
     }
 
+    #[hotpath::skip]
     async fn read_snapshot(&self) -> Result<Self::ReadSnapshot, GitCorrelationError> {
         GlobalDbGitCorrelationStore::read_snapshot(self).await
     }
 
+    #[hotpath::skip]
     async fn open_write_transaction(&self) -> Result<Self::WriteTxn<'_>, GitCorrelationError> {
         GlobalDbGitCorrelationStore::open_write_transaction(self).await
     }

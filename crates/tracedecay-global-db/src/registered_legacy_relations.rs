@@ -44,6 +44,7 @@ pub(crate) async fn reject_legacy_session_relation_shape(
     Ok(())
 }
 
+#[hotpath::measure]
 fn inspection_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         operation: "inspect legacy session relation shape".to_owned(),

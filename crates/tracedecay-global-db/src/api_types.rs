@@ -82,6 +82,7 @@ pub enum ObservabilityEmissionClaimV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl ObservabilityEmissionClaimV1 {
     pub fn delivery_envelope_json(&self) -> &str {
         match self {
@@ -190,6 +191,7 @@ pub struct StoreInstanceRecord {
     pub last_write_at: Option<i64>,
 }
 
+#[hotpath::measure_all]
 impl StoreInstanceRecord {
     /// Classifies this registry-recorded store instance against a profile root.
     pub fn classify_storage(

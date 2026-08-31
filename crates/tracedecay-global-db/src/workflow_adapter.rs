@@ -35,6 +35,7 @@ impl<D> GlobalDbWorkflowStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
+    #[hotpath::skip]
     pub const fn new(db: D) -> Self {
         Self { db }
     }
@@ -129,6 +130,7 @@ where
     /// that already resolved (or must isolate) that root do not re-derive it
     /// from the operator's real home.
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn ingest_workflow_runs_from(
         &self,
         project_id: &ProjectId,
@@ -161,14 +163,17 @@ where
         GlobalDbWorkflowStore::matches_project_sessions_authority(self, project_id)
     }
 
+    #[hotpath::skip]
     async fn read_ingest_watermark(&self) -> Option<i64> {
         GlobalDbWorkflowStore::read_ingest_watermark(self).await
     }
 
+    #[hotpath::skip]
     async fn bump_ingest_watermark(&self, value: i64) {
         GlobalDbWorkflowStore::bump_ingest_watermark(self, value).await;
     }
 
+    #[hotpath::skip]
     async fn upsert_workflow_run(
         &self,
         run: &WorkflowRun,

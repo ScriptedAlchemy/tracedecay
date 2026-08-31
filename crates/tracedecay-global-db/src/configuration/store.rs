@@ -103,6 +103,7 @@ impl<'a> ConfigurationSqlStore<'a> {
 
 #[cfg(test)]
 impl ConfigurationSqlStore<'_> {
+    #[hotpath::skip]
     pub async fn current_revision(
         &self,
     ) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
@@ -112,6 +113,7 @@ impl ConfigurationSqlStore<'_> {
             .ok_or_else(|| invalid_store_data("current configuration revision disappeared"))
     }
 
+    #[hotpath::skip]
     pub async fn read_revision(
         &self,
         revision_id: &ConfigurationRevisionId,
@@ -122,6 +124,7 @@ impl ConfigurationSqlStore<'_> {
         read_revision_from_executor(self.connection, revision_id).await
     }
 
+    #[hotpath::skip]
     pub async fn save_change_plan(
         &self,
         plan: &ConfigurationProtectedPlanRecordV1,
@@ -148,6 +151,7 @@ impl ConfigurationSqlStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn read_change_plan(
         &self,
         plan_id: &ChangePlanId,
@@ -156,6 +160,7 @@ impl ConfigurationSqlStore<'_> {
         read_change_plan_from_executor(self.connection, plan_id).await
     }
 
+    #[hotpath::skip]
     pub async fn commit(
         &self,
         commit: ConfigurationCommitV1,
@@ -175,6 +180,7 @@ impl ConfigurationSqlStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn audit(
         &self,
         after: Option<&ConfigurationAuditEventId>,
@@ -255,10 +261,12 @@ impl ConfigurationSqlStore<'_> {
 
 #[cfg(test)]
 impl ConfigurationRevisionStore for ConfigurationSqlStore<'_> {
+    #[hotpath::skip]
     async fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
         ConfigurationSqlStore::current_revision(self).await
     }
 
+    #[hotpath::skip]
     async fn read_revision(
         &self,
         revision_id: &ConfigurationRevisionId,
@@ -266,6 +274,7 @@ impl ConfigurationRevisionStore for ConfigurationSqlStore<'_> {
         ConfigurationSqlStore::read_revision(self, revision_id).await
     }
 
+    #[hotpath::skip]
     async fn save_change_plan(
         &self,
         plan: &ConfigurationProtectedPlanRecordV1,
@@ -273,6 +282,7 @@ impl ConfigurationRevisionStore for ConfigurationSqlStore<'_> {
         ConfigurationSqlStore::save_change_plan(self, plan).await
     }
 
+    #[hotpath::skip]
     async fn read_change_plan(
         &self,
         plan_id: &ChangePlanId,
@@ -280,6 +290,7 @@ impl ConfigurationRevisionStore for ConfigurationSqlStore<'_> {
         ConfigurationSqlStore::read_change_plan(self, plan_id).await
     }
 
+    #[hotpath::skip]
     async fn commit(
         &self,
         commit: ConfigurationCommitV1,
@@ -287,6 +298,7 @@ impl ConfigurationRevisionStore for ConfigurationSqlStore<'_> {
         ConfigurationSqlStore::commit(self, commit).await
     }
 
+    #[hotpath::skip]
     async fn audit(
         &self,
         after: Option<&ConfigurationAuditEventId>,
@@ -304,7 +316,9 @@ pub struct GlobalDbConfigurationControlStore<'db> {
     db: &'db RegisteredGlobalDb,
 }
 
+#[hotpath::measure_all]
 impl<'db> GlobalDbConfigurationControlStore<'db> {
+    #[hotpath::skip]
     pub const fn new_registered(db: &'db RegisteredGlobalDb) -> Self {
         Self { db }
     }
@@ -381,6 +395,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
 
     /// Publishes the sole canonical first revision into an empty final-shape
     /// store. No legacy input, path, environment, or fallback value is read.
+    #[hotpath::skip]
     pub async fn initialize_canonical(
         &self,
         revision_id: &ConfigurationRevisionId,
@@ -787,6 +802,7 @@ pub struct ProfileCodeIndexWorkerConfigurationStore<'db> {
     profile_id: UserProfileId,
 }
 
+#[hotpath::measure_all]
 impl<'db> ProfileCodeIndexWorkerConfigurationStore<'db> {
     pub fn new_registered(
         db: &'db RegisteredGlobalDb,
@@ -806,6 +822,7 @@ impl<'db> ProfileCodeIndexWorkerConfigurationStore<'db> {
         })
     }
 
+    #[hotpath::skip]
     pub async fn read_or_initialize(
         &self,
         occurred_at: UtcMicros,
@@ -973,6 +990,7 @@ pub struct OwnedGlobalDbConfigurationControlStore {
     db: RegisteredGlobalDbLeaseV1,
 }
 
+#[hotpath::measure_all]
 impl OwnedGlobalDbConfigurationControlStore {
     pub fn from_registered_project_runtime_db(db: RegisteredGlobalDbLeaseV1) -> Self {
         Self { db }
@@ -985,6 +1003,7 @@ impl OwnedGlobalDbConfigurationControlStore {
     /// Revalidate mutation access by acquiring the exact guarded writer
     /// transaction. The capability carries the client-bound authority, so no
     /// path-derived authority can be substituted here.
+    #[hotpath::skip]
     async fn require_active_mutation_scope(
         db: &RegisteredGlobalDb,
     ) -> Result<(), ConfigurationError> {

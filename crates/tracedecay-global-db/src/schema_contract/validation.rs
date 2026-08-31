@@ -29,6 +29,7 @@ type GraphPublicationSchemaBuildResult =
 static EXPECTED_GRAPH_PUBLICATION_SCHEMA: LazyLock<GraphPublicationSchemaBuildResult> =
     LazyLock::new(build_expected_graph_publication_schema);
 
+#[hotpath::measure]
 fn build_expected_graph_publication_schema() -> GraphPublicationSchemaBuildResult {
     let connection = rusqlite::Connection::open_in_memory()
         .map_err(|error| format!("failed to open canonical graph publication schema: {error}"))?;
@@ -40,6 +41,7 @@ fn build_expected_graph_publication_schema() -> GraphPublicationSchemaBuildResul
     read_rusqlite_graph_publication_inventory(&connection)
 }
 
+#[hotpath::measure]
 fn read_rusqlite_graph_publication_inventory(
     connection: &rusqlite::Connection,
 ) -> std::result::Result<GraphPublicationSchemaInventory, String> {
@@ -85,6 +87,7 @@ fn read_rusqlite_graph_publication_inventory(
     Ok(inventory)
 }
 
+#[hotpath::measure]
 fn outer_parentheses_enclose_value(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
@@ -124,6 +127,7 @@ fn outer_parentheses_enclose_value(value: &str) -> bool {
     depth == 0 && quote.is_none()
 }
 
+#[hotpath::measure]
 fn normalize_default(value: Option<&str>) -> Option<String> {
     value.map(|value| {
         let mut value = value.trim();
@@ -177,6 +181,7 @@ fn validate_table(
     Ok(())
 }
 
+#[hotpath::measure]
 fn column_metadata_matches(actual: &ActualColumn, expected: &Column) -> bool {
     actual.hidden == 0
         && actual
@@ -188,6 +193,7 @@ fn column_metadata_matches(actual: &ActualColumn, expected: &Column) -> bool {
         && actual.primary_key_ordinal == expected.primary_key_ordinal
 }
 
+#[hotpath::measure]
 fn foreign_keys_match(actual: &[ActualForeignKey], contract: &Table) -> bool {
     actual.len() == contract.foreign_keys.len()
         && contract.foreign_keys.iter().all(|expected| {
@@ -207,6 +213,7 @@ fn foreign_keys_match(actual: &[ActualForeignKey], contract: &Table) -> bool {
         })
 }
 
+#[hotpath::measure]
 fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
     let expected_partial = expected.name.is_some_and(|name| {
         name.eq_ignore_ascii_case("idx_session_temporal_generations_one_active")
@@ -231,6 +238,7 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
             })
 }
 
+#[hotpath::measure]
 fn primary_key_index_columns(contract: &Table) -> Option<Vec<&str>> {
     let mut columns = contract
         .columns
@@ -246,6 +254,7 @@ fn primary_key_index_columns(contract: &Table) -> Option<Vec<&str>> {
     Some(columns.into_iter().map(|column| column.name).collect())
 }
 
+#[hotpath::measure]
 fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) -> bool {
     actual.unique
         && actual.origin.eq_ignore_ascii_case("pk")
@@ -565,6 +574,7 @@ async fn read_graph_publication_inventory(
     Ok(inventory)
 }
 
+#[hotpath::measure]
 fn belongs_to_graph_publication_namespace(name: &str, table: &str) -> bool {
     [name, table].iter().any(|value| {
         starts_with_ignore_ascii_case(value, "graph_publication_")

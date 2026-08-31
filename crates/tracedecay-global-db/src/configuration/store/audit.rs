@@ -17,6 +17,7 @@ use serde::Serialize;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+#[hotpath::measure]
 pub(super) fn encode_audit_payload(
     event: &ConfigurationAuditEvent,
 ) -> ConfigurationStoreResult<String> {
@@ -75,6 +76,7 @@ pub(super) async fn ensure_audit_redaction_key(
     Ok(material)
 }
 
+#[hotpath::measure]
 pub(super) fn audit_target_commitment(
     key: &[u8],
     event_id: &ConfigurationAuditEventId,
@@ -181,6 +183,7 @@ pub(super) async fn insert_dry_run_audit_event(
     .await
 }
 
+#[hotpath::measure]
 pub(super) fn decode_audit_row(
     row: &Row,
 ) -> ConfigurationStoreResult<(ConfigurationAuditEvent, Option<Vec<u8>>)> {
@@ -340,6 +343,7 @@ pub(super) async fn insert_audit_event_with_receipt_digest(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn terminal_plan_event_kind(
     event_kind: ConfigurationAuditEventKindV1,
 ) -> Option<&'static str> {
@@ -350,6 +354,7 @@ pub(super) fn terminal_plan_event_kind(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn is_terminal_plan_event(event_kind: &str) -> bool {
     matches!(event_kind, "applied" | "rollback_applied")
 }

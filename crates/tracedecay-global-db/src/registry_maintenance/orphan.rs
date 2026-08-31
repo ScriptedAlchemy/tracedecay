@@ -1,5 +1,6 @@
 use super::*;
 
+#[hotpath::measure]
 pub fn inspect_profile_store_orphans(
     profile_root: &Path,
     verified_at: i64,
@@ -33,6 +34,7 @@ pub fn inspect_profile_store_orphans(
     report
 }
 
+#[hotpath::measure]
 pub fn inspect_registry_orphan_manifest(
     manifest_path: &Path,
     profile_root: &Path,
@@ -41,6 +43,7 @@ pub fn inspect_registry_orphan_manifest(
     inspect_registry_orphan_manifest_inner(manifest_path, profile_root, verified_at, false)
 }
 
+#[hotpath::measure]
 fn inspect_registry_orphan_manifest_inner(
     manifest_path: &Path,
     profile_root: &Path,
@@ -184,6 +187,7 @@ fn inspect_registry_orphan_manifest_inner(
     report
 }
 
+#[hotpath::measure]
 fn classify_project_root(
     project_root: &Path,
     project_id: &str,
@@ -282,6 +286,7 @@ fn classify_project_root(
     (identity.0, identity.1, canonical_root)
 }
 
+#[hotpath::measure]
 fn validate_manifest_shape(
     manifest_path: &Path,
     profile_root: &Path,
@@ -330,6 +335,7 @@ fn validate_manifest_shape(
     issues
 }
 
+#[hotpath::measure]
 fn reconstruct_graph_scopes(
     branch_meta_path: &Path,
     store_id: &str,
@@ -413,10 +419,12 @@ fn reconstruct_graph_scopes(
     (Some(meta.default_branch), scopes, issues)
 }
 
+#[hotpath::measure]
 fn graph_scope_id(store_id: &str, branch_name: &str) -> String {
     format!("{store_id}:branch:{branch_name}")
 }
 
+#[hotpath::measure]
 fn push_artifact_if_present(
     artifacts: &mut Vec<StoreArtifactUpsert>,
     store_id: &str,
@@ -442,12 +450,14 @@ fn push_artifact_if_present(
     });
 }
 
+#[hotpath::measure]
 fn strip_profile_root(profile_root: &Path, path: &Path) -> Option<PathBuf> {
     let profile_root = profile_root.canonicalize().ok()?;
     let path = path.canonicalize().ok()?;
     path.strip_prefix(profile_root).ok().map(PathBuf::from)
 }
 
+#[hotpath::measure]
 fn is_safe_relpath(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && !path.is_absolute()
@@ -456,6 +466,7 @@ fn is_safe_relpath(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+#[hotpath::measure]
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }

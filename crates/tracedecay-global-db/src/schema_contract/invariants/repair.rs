@@ -274,6 +274,7 @@ async fn latest_committed_source_cursors(
     }
 }
 
+#[hotpath::measure]
 fn is_new_generation_frontier(
     stored: &ObservationSourceCursorV1,
     committed: &ObservationSourceCursorV1,

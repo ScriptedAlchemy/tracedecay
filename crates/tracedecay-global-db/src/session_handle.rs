@@ -90,6 +90,7 @@ impl SessionExec for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
+    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -103,6 +104,7 @@ impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl Executor for RegisteredGlobalDbWriterConnection<'_> {
+    #[hotpath::skip]
     async fn execute<P>(
         &self,
         sql: &str,
@@ -114,6 +116,7 @@ impl Executor for RegisteredGlobalDbWriterConnection<'_> {
         RegisteredGlobalDbWriterConnection::execute(self, sql, params).await
     }
 
+    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriterConnection::execute_batch(self, sql).await
     }

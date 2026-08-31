@@ -17,6 +17,7 @@ pub struct ProjectObservationStoreResolution {
     database_path: PathBuf,
 }
 
+#[hotpath::measure_all]
 impl ProjectObservationStoreResolution {
     pub fn project(&self) -> &CodeProjectRecord {
         &self.project
@@ -134,6 +135,7 @@ impl fmt::Display for ProjectObservationStoreError {
 
 impl Error for ProjectObservationStoreError {}
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Resolve the sole existing store authorized for project observations.
     ///
@@ -197,6 +199,7 @@ impl RegisteredGlobalDb {
         self.validate_project_observation_store(project, store)
     }
 
+    #[hotpath::skip]
     async fn observation_project_ids(
         &self,
         project_root: &Path,
@@ -292,6 +295,7 @@ impl RegisteredGlobalDb {
     }
 }
 
+#[hotpath::measure]
 fn canonical_project_directory(
     project_root: &Path,
 ) -> Result<PathBuf, ProjectObservationStoreError> {

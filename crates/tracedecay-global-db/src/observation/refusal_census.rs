@@ -37,6 +37,7 @@ pub enum ObservationRefusalCensusV1 {
     Unavailable,
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Read-only census of durably refused source records.
     ///
@@ -45,6 +46,7 @@ impl RegisteredGlobalDb {
     /// string this binary does not recognize is counted conservatively — an
     /// unknown disposition must stay visible, never silently classified as
     /// benign.
+    #[hotpath::skip]
     pub async fn observation_refusal_census(&self) -> ObservationRefusalCensusV1 {
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,

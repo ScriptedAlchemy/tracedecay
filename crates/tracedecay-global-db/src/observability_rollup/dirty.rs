@@ -4,6 +4,7 @@ use crate::RegisteredGlobalDb;
 
 use super::{ObservabilityRollupDirtyDayClaimV1, validate_day, validate_identifier};
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Leases the oldest dirty execution-topology day for one exact scope.
     /// At most one bounded day is returned; expired leases are retryable and
@@ -116,6 +117,7 @@ impl RegisteredGlobalDb {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_dirty_claim(
     claim: &ObservabilityRollupDirtyDayClaimV1,
 ) -> Result<(), String> {

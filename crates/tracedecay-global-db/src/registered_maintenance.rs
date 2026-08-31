@@ -47,6 +47,7 @@ pub enum RegisteredWalReclaimV1 {
     RequiresExclusiveMaintenance { trigger_bytes: u64 },
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Runs one WAL checkpoint/compaction pass through this store's
     /// authorized writer and reports the measured result.
@@ -91,6 +92,7 @@ impl RegisteredGlobalDb {
         })
     }
 
+    #[hotpath::skip]
     pub async fn checkpoint(&self) {
         if let Err(error) = self.checkpoint_result().await {
             eprintln!("[tracedecay] registered database WAL checkpoint failed: {error}");
@@ -125,6 +127,7 @@ const fn wal_reclaim_plan(wal_bytes_before: u64, role: DatabaseAuthorityRole) ->
 
 /// The SQLite WAL sidecar for a database path: the full database file name
 /// with `-wal` appended.
+#[hotpath::measure]
 fn registered_wal_path(database_path: &Path) -> PathBuf {
     let mut wal = database_path.as_os_str().to_owned();
     wal.push("-wal");
@@ -134,6 +137,7 @@ fn registered_wal_path(database_path: &Path) -> PathBuf {
 /// File-level size of the WAL sidecar. A missing sidecar is the typed
 /// "no WAL exists" state and measures zero; any other filesystem failure
 /// propagates instead of degrading to a fabricated figure.
+#[hotpath::measure]
 fn wal_file_bytes(wal_path: &Path) -> Result<u64, TraceDecayError> {
     match std::fs::metadata(wal_path) {
         Ok(metadata) => Ok(metadata.len()),

@@ -90,6 +90,7 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDb {
 
 /// Composition wrappers so existing `RegisteredGlobalDb` call sites keep
 /// working. This is not a module re-export of the temporal crate.
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     pub fn git_scope_session_ids(
         &self,
@@ -101,6 +102,7 @@ impl RegisteredGlobalDb {
         SessionTemporalAccess::new(self).git_scope_session_ids(filter)
     }
 
+    #[hotpath::skip]
     pub async fn session_temporal_doctor_health(
         &self,
     ) -> tracedecay_session_temporal_store::SessionTemporalHealthReport {
@@ -109,6 +111,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn ensure_active_session_cursor_key_result(
         &self,
     ) -> tracedecay_store::SessionStoreResult<tracedecay_domain::SignedCursorKeyRefV1> {
@@ -117,6 +120,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn load_session_cursor_key_provider_result(
         &self,
     ) -> Result<
@@ -128,6 +132,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn load_preprovisioned_session_cursor_key_provider_result(
         &self,
     ) -> Result<
@@ -139,6 +144,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn pending_session_temporal_refresh_page_result(
         &self,
         limit: usize,
@@ -152,6 +158,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
         recovery: &tracedecay_session_temporal_store::SessionRefreshRecoveryV1,
@@ -166,6 +173,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn freeze_session_temporal_snapshot_result(
         &self,
         request: tracedecay_store::SessionTemporalSnapshotRequestV1,
@@ -175,6 +183,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn active_session_summary_relations(
         &self,
         session_id: &tracedecay_domain::SessionId,
@@ -190,6 +199,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn apply_active_session_relation_projection(
         &self,
         session_id: &tracedecay_domain::SessionId,
@@ -200,6 +210,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,
@@ -210,6 +221,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn session_refresh_recovery_result(
         &self,
         session_id: &tracedecay_domain::SessionId,
@@ -221,6 +233,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn complete_session_refresh_result(
         &self,
         request: tracedecay_store::SessionRefreshCompletionRequestV1,

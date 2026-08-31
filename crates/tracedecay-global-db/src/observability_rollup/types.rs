@@ -147,6 +147,7 @@ pub(super) struct PublishedGeneration {
     pub(super) content_digest: String,
 }
 
+#[hotpath::measure]
 pub(super) fn validate_identifier(field: &str, value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > MAX_IDENTIFIER_BYTES
@@ -158,6 +159,7 @@ pub(super) fn validate_identifier(field: &str, value: &str) -> Result<(), String
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_day(day_start_seconds: i64) -> Result<(), String> {
     if day_start_seconds < 0 || day_start_seconds % SECONDS_PER_DAY != 0 {
         return Err("observability rollup day must be a UTC day boundary".to_owned());
@@ -165,7 +167,9 @@ pub(super) fn validate_day(day_start_seconds: i64) -> Result<(), String> {
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn merge_coverage(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
+    #[hotpath::skip]
     const fn rank(state: CoverageStateV1) -> u8 {
         match state {
             CoverageStateV1::Known => 0,

@@ -50,6 +50,7 @@ pub(super) struct MessageTransitionState {
     projector_owned: bool,
 }
 
+#[hotpath::measure_all]
 impl MessageTransitionState {
     pub(super) fn new(
         observation: &DurableObservationV1,
@@ -81,6 +82,7 @@ pub(super) enum WorkflowFactTarget<'a> {
     Staged { generation: &'a str },
 }
 
+#[hotpath::measure_all]
 impl<'a> WorkflowFactTarget<'a> {
     fn sql(self) -> &'static str {
         match self {
@@ -111,6 +113,7 @@ impl<'a> WorkflowFactTarget<'a> {
     }
 }
 
+#[hotpath::measure_all]
 impl<'a> WorkflowFactTransition<'a> {
     pub(super) fn new(
         sequence: u64,
@@ -152,6 +155,7 @@ impl<'a> WorkflowFactTransition<'a> {
     }
 }
 
+#[hotpath::measure]
 fn optional_sequence(sequence: Option<u64>) -> ProjectionStoreResult<Option<i64>> {
     sequence
         .map(|value| {
@@ -233,6 +237,7 @@ pub(super) async fn message_transition(
     Ok((transition, protected_compatibility))
 }
 
+#[hotpath::measure]
 fn classify_message_transition(
     sequence: u64,
     message: &SessionMessageRecord,
@@ -266,6 +271,7 @@ fn classify_message_transition(
     }
 }
 
+#[hotpath::measure]
 fn output_collision(message: &SessionMessageRecord) -> ProjectionStoreError {
     ProjectionStoreError::OutputCollision {
         provider: message.provider.clone(),

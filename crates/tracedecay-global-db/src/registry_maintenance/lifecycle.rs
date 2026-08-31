@@ -25,6 +25,7 @@ pub enum RootLivenessV1 {
     Unverifiable,
 }
 
+#[hotpath::measure_all]
 impl RootLivenessV1 {
     /// Whether this liveness permits retiring the identity that owns the root.
     /// Only proven absence does.
@@ -46,6 +47,7 @@ impl RootLivenessV1 {
 
 /// Probe one root with typed existence, so a permission or I/O failure is
 /// reported as unverifiable rather than silently read as "gone".
+#[hotpath::measure]
 pub fn probe_root(root: &Path) -> RootLivenessV1 {
     match root.try_exists() {
         Ok(true) => RootLivenessV1::Live,
@@ -58,6 +60,7 @@ pub fn probe_root(root: &Path) -> RootLivenessV1 {
 /// the git common directory. A linked worktree shares its common directory with
 /// the primary checkout, so a live common directory means the repository
 /// identity is still in use even when this row's working tree is gone.
+#[hotpath::measure]
 pub fn code_project_root_liveness(project: &CodeProjectRecord) -> RootLivenessV1 {
     let mut liveness = probe_root(Path::new(&project.canonical_root))
         .merge(probe_root(Path::new(&project.display_root)));
@@ -68,6 +71,7 @@ pub fn code_project_root_liveness(project: &CodeProjectRecord) -> RootLivenessV1
 }
 
 /// Returns true unless every root this row records was *proven* absent.
+#[hotpath::measure]
 pub fn code_project_root_exists(project: &CodeProjectRecord) -> bool {
     !code_project_root_liveness(project).permits_retirement()
 }
@@ -78,6 +82,7 @@ pub fn code_project_root_exists(project: &CodeProjectRecord) -> bool {
 /// A registered store instance keeps the identity live on its own. Deleting the
 /// `code_projects` row cascades its aliases and store instances away, so a row
 /// that still owns a store must never be retired by an unreviewed pass.
+#[hotpath::measure]
 pub fn project_context_liveness(context: &ProjectRegistryContext) -> RootLivenessV1 {
     if !context.stores.is_empty() {
         return RootLivenessV1::Live;
@@ -94,6 +99,7 @@ pub fn project_context_liveness(context: &ProjectRegistryContext) -> RootLivenes
 /// This is the context-aware counterpart of [`stale_code_projects`]: an
 /// unreviewed pass must resolve aliases and store instances before retiring an
 /// identity, or it will retire a project another checkout is still using.
+#[hotpath::measure]
 pub fn stale_project_contexts<'a>(
     contexts: &'a [ProjectRegistryContext],
     prefixes: &[PathBuf],
@@ -124,6 +130,7 @@ pub fn stale_project_contexts<'a>(
 /// canonical roots under one of `prefixes` (an empty slice means no
 /// restriction). Shared by explicit registry cleanup and the
 /// post-update health pass so both agree on what counts as a GC candidate.
+#[hotpath::measure]
 pub fn stale_code_projects<'a>(
     projects: &'a [CodeProjectRecord],
     prefixes: &[PathBuf],

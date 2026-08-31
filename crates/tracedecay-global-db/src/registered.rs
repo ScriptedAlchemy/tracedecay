@@ -44,6 +44,7 @@ pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDbOwnerV1 {
     /// Validates the final schema installed during physical Store open before
     /// the owner becomes visible to any caller. The temporary issuance is
@@ -151,6 +152,7 @@ impl RegisteredGlobalDbOwnerV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDbWeakLeaseIssuerV1 {
     /// Issues one fresh registered-database lease while the exact map owner
     /// remains ready. The returned lease retains schema authority only through
@@ -212,6 +214,7 @@ impl std::borrow::Borrow<RegisteredGlobalDb> for RegisteredGlobalDbLeaseV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDbLeaseV1 {
     fn from_database(database: RegisteredGlobalDb) -> Self {
         Self {
@@ -236,6 +239,7 @@ pub struct RegisteredGlobalDb {
     )>,
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.registered.schema")]
     pub async fn converge_schema(
@@ -249,6 +253,7 @@ impl RegisteredGlobalDb {
         self.database.release_connection_memory().await
     }
 
+    #[hotpath::skip]
     pub(crate) async fn checkpoint_database(&self) -> tracedecay_domain::errors::Result<()> {
         self.database.checkpoint().await
     }
@@ -264,6 +269,7 @@ impl RegisteredGlobalDb {
 
     /// Truncates the drained WAL file through the runtime's exclusive
     /// maintenance facade.
+    #[hotpath::skip]
     pub(crate) async fn truncate_database_wal(&self) -> tracedecay_domain::errors::Result<()> {
         self.database.truncate_wal_for_offline_maintenance().await
     }
@@ -437,6 +443,7 @@ impl RegisteredGlobalDb {
         Ok(())
     }
 
+    #[hotpath::skip]
     async fn rearm_queued_projection_retries(&self) -> tracedecay_domain::errors::Result<()> {
         let transaction = self
             .database
@@ -452,6 +459,7 @@ impl RegisteredGlobalDb {
 
     /// Rebuilds the registered observation projection through this client's
     /// guarded database capability.
+    #[hotpath::skip]
     pub async fn rebuild_observation_projection(
         &self,
         frontier_sequence: u64,
@@ -460,6 +468,7 @@ impl RegisteredGlobalDb {
     }
 
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn validate_registry_schema_contract_for_test(
         &self,
     ) -> tracedecay_domain::errors::Result<()> {
@@ -551,6 +560,7 @@ impl RegisteredGlobalDb {
         self.database.storage_telemetry_handle()
     }
 
+    #[hotpath::skip]
     pub async fn storage_page_counts(&self) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
         self.database.storage_page_counts().await
     }
@@ -630,6 +640,7 @@ pub struct RegisteredGlobalDbWriterConnection<'a> {
     database: &'a Database,
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDbWriterConnection<'_> {
     pub async fn execute<P>(
         &self,
@@ -645,6 +656,7 @@ impl RegisteredGlobalDbWriterConnection<'_> {
             .map_err(engine_error)
     }
 
+    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -656,6 +668,7 @@ impl RegisteredGlobalDbWriterConnection<'_> {
         self.database.read_connection().query(sql, params).await
     }
 
+    #[hotpath::skip]
     pub async fn execute_batch(
         &self,
         sql: &str,
@@ -673,6 +686,7 @@ pub struct RegisteredGlobalDbWriteTransaction<'a> {
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriteTransaction<'_> {
+    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -686,6 +700,7 @@ impl QueryExecutor for RegisteredGlobalDbWriteTransaction<'_> {
 }
 
 impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
+    #[hotpath::skip]
     async fn execute<P>(
         &self,
         sql: &str,
@@ -697,6 +712,7 @@ impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
         RegisteredGlobalDbWriteTransaction::execute(self, sql, params).await
     }
 
+    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriteTransaction::execute_batch(self, sql).await
     }
@@ -762,6 +778,7 @@ impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
     }
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDbWriteTransaction<'_> {
     pub async fn execute<P>(
         &self,
@@ -774,6 +791,7 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.execute(sql, params).await
     }
 
+    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -785,6 +803,7 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
+    #[hotpath::skip]
     pub async fn execute_batch(
         &self,
         sql: &str,
@@ -824,6 +843,7 @@ fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDeca
     }
 }
 
+#[hotpath::measure]
 fn registered_owner_error(error: DatabaseOwnerErrorV1) -> TraceDecayError {
     registered_error(
         "issue registered global database client",
@@ -831,6 +851,7 @@ fn registered_owner_error(error: DatabaseOwnerErrorV1) -> TraceDecayError {
     )
 }
 
+#[hotpath::measure]
 fn engine_error(error: TraceDecayError) -> tracedecay_runtime_core::db::engine::Error {
     tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
 }

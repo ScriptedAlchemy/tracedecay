@@ -67,6 +67,7 @@ where
 }
 
 /// Replay an already-published value when it is byte-equal, otherwise conflict.
+#[hotpath::measure]
 pub(crate) fn replay_if_equal<T, E>(existing: T, incoming: &T, conflict: E) -> Result<T, E>
 where
     T: PartialEq,
@@ -86,6 +87,7 @@ pub(crate) enum ReplayPresence {
 }
 
 /// Insert-if-absent / replay-if-equal decision used by preview commitments.
+#[hotpath::measure]
 pub(crate) fn require_absent_or_equal<T, E>(
     existing: Option<T>,
     incoming: &T,
@@ -102,12 +104,14 @@ where
 }
 
 /// Compare-and-swap writes must change exactly one durable row.
+#[hotpath::measure]
 pub(crate) fn require_single_cas_row<E>(updated: u64, conflict: E) -> Result<(), E> {
     if updated == 1 { Ok(()) } else { Err(conflict) }
 }
 
 /// `INSERT … ON CONFLICT DO NOTHING` must either create the fence or find it
 /// still active. A retained proven-clear row is a conflict, not a replay.
+#[hotpath::measure]
 pub(crate) fn require_inserted_or_active<E>(
     inserted: u64,
     already_active: bool,

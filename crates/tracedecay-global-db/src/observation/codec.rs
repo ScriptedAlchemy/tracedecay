@@ -5,6 +5,7 @@ use tracedecay_store::{
     ObservationStoreError, ObservationStoreResult, RepositoryProvenanceAttachmentV1,
 };
 
+#[hotpath::measure]
 pub(super) fn storage(
     operation: &'static str,
     source: impl std::error::Error + Send + Sync + 'static,
@@ -15,6 +16,7 @@ pub(super) fn storage(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn storage_message(
     operation: &'static str,
     message: impl Into<String>,
@@ -22,6 +24,7 @@ pub(super) fn storage_message(
     storage(operation, std::io::Error::other(message.into()))
 }
 
+#[hotpath::measure]
 pub(super) fn decode<T: serde::de::DeserializeOwned>(
     value: &str,
     operation: &'static str,
@@ -29,6 +32,7 @@ pub(super) fn decode<T: serde::de::DeserializeOwned>(
     serde_json::from_str(value).map_err(|error| storage(operation, error))
 }
 
+#[hotpath::measure]
 pub(super) fn decode_repository_provenance_attachment(
     availability_json: &str,
     capture_json: Option<&str>,
@@ -51,6 +55,7 @@ pub(super) fn decode_repository_provenance_attachment(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn decode_sequence(value: i64, operation: &'static str) -> ObservationStoreResult<u64> {
     u64::try_from(value).map_err(|_| storage_message(operation, "negative observation sequence"))
 }

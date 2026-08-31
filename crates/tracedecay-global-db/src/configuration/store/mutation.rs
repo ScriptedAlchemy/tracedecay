@@ -34,6 +34,7 @@ use super::{
     canonical_sha256, invalid_store_data, params, registry_default_candidate, unavailable_store,
 };
 
+#[hotpath::measure]
 pub(super) fn decode_stored_mutation_receipt(
     row: &Row,
 ) -> ConfigurationStoreResult<StoredMutationReceipt> {
@@ -218,6 +219,7 @@ pub(super) async fn insert_mutation_receipt(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_commit_bindings(
     commit: &ConfigurationCommitV1,
 ) -> ConfigurationStoreResult<()> {
@@ -368,6 +370,7 @@ pub(super) async fn commit_configuration_transaction_with_registry(
     Ok(commit.receipt.clone())
 }
 
+#[hotpath::measure]
 pub(super) fn map_protected_change_snapshot_error(
     error: ProtectedChangeSnapshotError,
 ) -> ConfigurationError {
@@ -380,6 +383,7 @@ pub(super) fn map_protected_change_snapshot_error(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn map_store_error(error: ConfigurationStoreError) -> ConfigurationError {
     match error {
         ConfigurationStoreError::RevisionConflict => ConfigurationError::RevisionConflict,
@@ -393,6 +397,7 @@ pub(super) fn map_store_error(error: ConfigurationStoreError) -> ConfigurationEr
     }
 }
 
+#[hotpath::measure]
 pub(super) fn derived_identifier<T>(
     prefix: &str,
     digest: &ManifestDigest,
@@ -410,6 +415,7 @@ where
     })
 }
 
+#[hotpath::measure]
 pub(super) fn direct_operation_digest(
     mutation: &DirectConfigurationMutation,
 ) -> Result<ManifestDigest, ConfigurationError> {
@@ -417,6 +423,7 @@ pub(super) fn direct_operation_digest(
         .map_err(ConfigurationError::validation)
 }
 
+#[hotpath::measure]
 pub(super) fn result_revision_id(
     expected_revision_id: &ConfigurationRevisionId,
     idempotency_key: &ConfigurationIdempotencyKey,
@@ -436,6 +443,7 @@ pub(super) fn result_revision_id(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn mutation_provenance(
     layer: &ConfigurationLayerIdV1,
     revision_id: &ConfigurationRevisionId,
@@ -448,6 +456,7 @@ pub(super) fn mutation_provenance(
     }]
 }
 
+#[hotpath::measure]
 pub(super) fn replace_direct_effective_value(
     effective_values: &mut BTreeMap<SettingKey, ConfigurationValueV1>,
     provenance: &mut BTreeMap<SettingKey, Vec<ConfigurationCandidateV1>>,
@@ -460,6 +469,7 @@ pub(super) fn replace_direct_effective_value(
     provenance.insert(key, mutation_provenance(layer, revision_id));
 }
 
+#[hotpath::measure]
 pub(super) fn apply_direct_mutation_to_snapshot(
     current: &ConfigurationSnapshotV1,
     mutation: &DirectConfigurationMutation,
@@ -535,6 +545,7 @@ pub(super) fn apply_direct_mutation_to_snapshot(
     Ok(snapshot)
 }
 
+#[hotpath::measure]
 pub(super) fn validate_direct_control_mutation(
     mutation: &DirectConfigurationMutation,
 ) -> Result<(), ConfigurationError> {
@@ -705,6 +716,7 @@ pub(super) async fn build_configuration_commit<T: Serialize>(
     ))
 }
 
+#[hotpath::measure]
 pub(super) fn validate_apply_request(
     request: &tracedecay_domain::configuration::ProtectedApplyRequest,
 ) -> Result<(), ConfigurationError> {
@@ -730,6 +742,7 @@ pub(super) fn validate_apply_request(
         .map_err(ConfigurationError::validation)
 }
 
+#[hotpath::measure]
 pub(super) fn validate_plan_evidence(
     plan: &ProtectedChangePlan,
     evidence: &ScopeRevalidationEvidenceV1,
@@ -744,6 +757,7 @@ pub(super) fn validate_plan_evidence(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn redacted_value_digest(
     value: Option<&ConfigurationValueV1>,
 ) -> Result<Option<ManifestDigest>, ConfigurationError> {
@@ -753,6 +767,7 @@ pub(super) fn redacted_value_digest(
         .map_err(ConfigurationError::validation)
 }
 
+#[hotpath::measure]
 pub(super) fn rollback_redacted_changes(
     current: &ConfigurationSnapshotV1,
     target: &ConfigurationSnapshotV1,

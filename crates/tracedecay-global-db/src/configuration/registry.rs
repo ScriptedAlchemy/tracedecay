@@ -97,6 +97,7 @@ pub struct ConfigurationRegistry {
     definitions: BTreeMap<SettingKey, SettingDefinitionV1>,
 }
 
+#[hotpath::measure_all]
 impl ConfigurationRegistry {
     /// Build the core registry. In addition to authority, policy,
     /// collection, analyzer, and topology definitions, this includes every
@@ -375,6 +376,7 @@ impl ConfigurationRegistry {
 /// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.
 pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
 
+#[hotpath::measure]
 fn register_project_stored_user_profile_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
@@ -421,6 +423,7 @@ fn register_project_stored_user_profile_settings(
     Ok(())
 }
 
+#[hotpath::measure]
 fn code_index_worker_definition() -> Result<SettingDefinitionV1, ConfigurationRegistryError> {
     Ok(SettingDefinitionV1 {
         key: setting_key(USER_CODE_INDEX_WORKERS_SETTING_KEY)?,
@@ -521,6 +524,7 @@ impl Default for ProjectDefaults {
 }
 
 /// Register every project scalar in the sole typed registry.
+#[hotpath::measure]
 fn register_project_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
@@ -697,10 +701,12 @@ fn register_project_settings(
     Ok(())
 }
 
+#[hotpath::measure]
 fn setting_key(value: &str) -> Result<SettingKey, ConfigurationRegistryError> {
     Ok(SettingKey::new(value)?)
 }
 
+#[hotpath::measure]
 fn validate_semantic_runtime_payload(
     key: &SettingKey,
     value: &ConfigurationValueV1,
@@ -732,6 +738,7 @@ fn validate_semantic_runtime_payload(
         })
 }
 
+#[hotpath::measure]
 fn classify_semantic_json_error(error: &serde_json::Error) -> InvalidSettingPayloadReason {
     if error.is_syntax() || error.is_eof() {
         return InvalidSettingPayloadReason::MalformedJson;
@@ -746,6 +753,7 @@ fn classify_semantic_json_error(error: &serde_json::Error) -> InvalidSettingPayl
     }
 }
 
+#[hotpath::measure]
 fn semantic_config_has_invalid_artifact_digest(config: &SemanticConfig) -> bool {
     config
         .active_profile

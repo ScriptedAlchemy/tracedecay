@@ -51,6 +51,7 @@ pub struct GlobalDbObservationStore {
     runtime: DatabaseRuntimeClientV1,
 }
 
+#[hotpath::measure_all]
 impl GlobalDbObservationStore {
     pub fn new(database: Database) -> Self {
         let runtime = database.runtime_client();
@@ -75,6 +76,7 @@ impl GlobalDbObservationStore {
     /// (`tracedecay_rusqlite_runtime::repository::observation_cursor_authority`)
     /// that the runtime write path also executes. No record content is
     /// decoded, derived, or hashed.
+    #[hotpath::skip]
     async fn record_refusal_with_coverage(
         &self,
         write: &AnchoredObservationWrite,
@@ -235,12 +237,14 @@ impl GlobalDbObservationStore {
         Ok(())
     }
 
+    #[hotpath::skip]
     pub async fn converge_projection_predecessor(
         &self,
     ) -> ProjectionStoreResult<ProjectionPredecessorConvergence> {
         crate::converge_projection_predecessor(&self.database).await
     }
 
+    #[hotpath::skip]
     async fn prepare_observation_persist(
         &self,
         write: AnchoredObservationWrite,
@@ -504,6 +508,7 @@ struct ObservationPreflightSnapshot {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_observation_snapshot_probe() {
     tracing::trace!(
         target: "tracedecay::observation_snapshot_query",
@@ -514,11 +519,13 @@ fn record_observation_snapshot_probe() {
 }
 
 #[inline(always)]
+#[hotpath::measure]
 fn record_observation_snapshot_row() {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("global_db.observation_batch.snapshot_rows").inc(1_u64);
 }
 
+#[hotpath::measure_all]
 impl ObservationPreflightSnapshot {
     fn admission_refusal(
         &self,
@@ -571,6 +578,7 @@ struct BatchAliasAuthority {
     pending: bool,
 }
 
+#[hotpath::measure_all]
 impl ObservationBatchState {
     fn from_preflight(preflight: &ObservationPreflightSnapshot) -> Self {
         Self {
@@ -824,6 +832,7 @@ async fn read_source_cursors_from_snapshot(
     Ok(cursors)
 }
 
+#[hotpath::measure]
 fn retrieval_alias_key(
     scope: &ObservationScopeV1,
     alias: &tracedecay_domain::NativeAliasV2,
@@ -1069,6 +1078,7 @@ async fn read_stored_observations_from_snapshot(
     Ok(observations)
 }
 
+#[hotpath::measure]
 fn decode_json<T: serde::de::DeserializeOwned>(
     encoded: String,
     operation: &'static str,
@@ -1085,6 +1095,7 @@ enum PreparedObservationPersist {
     DeferredExactDuplicate(Box<AnchoredObservationWrite>),
 }
 
+#[hotpath::measure_all]
 impl PreparedObservationPersist {
     fn ready(outcome: ObservationPersistOutcome, stored: &StoredObservation) -> Self {
         Self::Ready(Box::new(ObservationBatchPersistOutcome::new(
@@ -1095,6 +1106,7 @@ impl PreparedObservationPersist {
 }
 
 impl ObservationStore for GlobalDbObservationStore {
+    #[hotpath::skip]
     async fn persist_observation(
         &self,
         write: AnchoredObservationWrite,
@@ -1199,6 +1211,7 @@ impl ObservationStore for GlobalDbObservationStore {
         .await
     }
 
+    #[hotpath::skip]
     async fn get_source_cursor(
         &self,
         source: &ClaudeSourceIdentityV1,
@@ -1207,6 +1220,7 @@ impl ObservationStore for GlobalDbObservationStore {
         read_runtime_source_cursor(&self.runtime, source, scope)
     }
 
+    #[hotpath::skip]
     async fn advance_source_cursor(
         &self,
         advance: ObservationCursorAdvance,
@@ -1271,6 +1285,7 @@ impl ObservationStore for GlobalDbObservationStore {
         }
     }
 
+    #[hotpath::skip]
     async fn get_observation(
         &self,
         observation_id: &CanonicalObservationIdV1,
@@ -1278,6 +1293,7 @@ impl ObservationStore for GlobalDbObservationStore {
         read_runtime_stored_observation(&self.runtime, observation_id)
     }
 
+    #[hotpath::skip]
     async fn replay_observations(
         &self,
         request: ObservationReplayRequest,
@@ -1313,6 +1329,7 @@ struct RuntimeObservationProbe {
     commit_started: AtomicBool,
 }
 
+#[hotpath::measure_all]
 impl RuntimeObservationProbe {
     fn from_control(control: &RuntimeRequestControlV1) -> Self {
         Self {
@@ -1345,6 +1362,7 @@ impl RuntimeRequestProbeV1 for RuntimeObservationProbe {
     }
 }
 
+#[hotpath::measure]
 fn identity_collision(
     observation_id: CanonicalObservationIdV1,
     existing_digest: PayloadDigestV1,
@@ -1358,6 +1376,7 @@ fn identity_collision(
     }
 }
 
+#[hotpath::measure]
 fn dispatch_runtime_observation_read(
     runtime: &DatabaseRuntimeClientV1,
     operation: ObservationReadOperationV1,
@@ -1440,6 +1459,7 @@ fn dispatch_runtime_observation_read(
     }
 }
 
+#[hotpath::measure]
 fn stored_observation_from_runtime_row(
     row: StoredObservationRowV1,
 ) -> ObservationStoreResult<StoredObservation> {
@@ -1462,6 +1482,7 @@ fn stored_observation_from_runtime_row(
     ))
 }
 
+#[hotpath::measure]
 fn read_runtime_source_cursor(
     runtime: &DatabaseRuntimeClientV1,
     source: &ClaudeSourceIdentityV1,
@@ -1496,6 +1517,7 @@ fn read_runtime_source_cursor(
 /// construction failure is therefore a contract violation, and it surfaces
 /// as the typed store error — silently answering "not at the scan frontier"
 /// would record no coverage and leave the refused record re-read forever.
+#[hotpath::measure]
 fn refused_scan_frontier(
     write: &AnchoredObservationWrite,
     actual_cursor: Option<&ClaudeSourceCursorV1>,
@@ -1521,6 +1543,7 @@ fn refused_scan_frontier(
     .map(Some)
 }
 
+#[hotpath::measure]
 fn read_runtime_stored_observation(
     runtime: &DatabaseRuntimeClientV1,
     observation_id: &CanonicalObservationIdV1,
@@ -1658,6 +1681,7 @@ async fn submit_observation_writes(
     Ok(outcomes)
 }
 
+#[hotpath::measure]
 fn persist_outcome_from_submit(
     stored: &StoredObservation,
     candidate: &DurableObservationV1,
@@ -1716,6 +1740,7 @@ struct SubmitCommandIdentity<'command> {
     command_bytes: usize,
 }
 
+#[hotpath::measure]
 fn observation_submit_metadata(
     runtime: &DatabaseRuntimeClientV1,
     command: SubmitCommandIdentity<'_>,
@@ -1838,6 +1863,7 @@ async fn dispatch_runtime_submit(
         .map_err(|error| runtime_storage_error(operation, format!("{error:?}")))
 }
 
+#[hotpath::measure]
 fn runtime_command_value(
     payload: &RepositoryWritePayloadV1,
 ) -> ObservationStoreResult<serde_json::Value> {
@@ -1865,6 +1891,7 @@ fn runtime_command_value(
     }
 }
 
+#[hotpath::measure]
 fn runtime_observation_command(write: &AnchoredObservationWrite) -> serde_json::Value {
     serde_json::json!({
         "kind": "observation",
@@ -1877,6 +1904,7 @@ fn runtime_observation_command(write: &AnchoredObservationWrite) -> serde_json::
     })
 }
 
+#[hotpath::measure]
 fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult<String> {
     let digest = canonical_sha256(value).map_err(|error| {
         runtime_storage_error("derive observation runtime identity", error.to_string())
@@ -1884,6 +1912,7 @@ fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult
     runtime_digest_suffix(&digest).map(str::to_owned)
 }
 
+#[hotpath::measure]
 fn runtime_digest_suffix(digest: &ManifestDigest) -> ObservationStoreResult<&str> {
     digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
         runtime_storage_error(
@@ -1893,6 +1922,7 @@ fn runtime_digest_suffix(digest: &ManifestDigest) -> ObservationStoreResult<&str
     })
 }
 
+#[hotpath::measure]
 fn runtime_storage_error(
     operation: &'static str,
     message: impl std::fmt::Display,
@@ -1904,6 +1934,7 @@ fn runtime_storage_error(
 }
 
 impl ObservationProjectionStore for GlobalDbObservationStore {
+    #[hotpath::skip]
     async fn next_queued_observation(
         &self,
     ) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
@@ -1923,6 +1954,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         }
     }
 
+    #[hotpath::skip]
     async fn project_observation(
         &self,
         observation_id: &CanonicalObservationIdV1,
@@ -1930,6 +1962,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         crate::project_observation(&self.database, observation_id).await
     }
 
+    #[hotpath::skip]
     async fn project_queued_observations(
         &self,
         max: usize,
@@ -1939,6 +1972,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
             .map(Some)
     }
 
+    #[hotpath::skip]
     async fn projection_checkpoint(&self) -> ProjectionStoreResult<ProjectionCheckpoint> {
         match dispatch_runtime_observation_read(
             &self.runtime,
@@ -1956,6 +1990,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         }
     }
 
+    #[hotpath::skip]
     async fn rebuild_projection(
         &self,
         frontier_sequence: u64,
@@ -1964,6 +1999,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
     }
 }
 
+#[hotpath::measure]
 fn projection_runtime_error(
     error: ObservationStoreError,
 ) -> tracedecay_store::ProjectionStoreError {

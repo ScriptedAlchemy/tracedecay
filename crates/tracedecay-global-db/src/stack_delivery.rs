@@ -74,7 +74,9 @@ pub enum GitHubStackDeliveryStateV1 {
     AuthorizationLost,
 }
 
+#[hotpath::measure_all]
 impl GitHubStackDeliveryStateV1 {
+    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -116,11 +118,14 @@ pub enum GitHubStackSignalAppendOutcomeV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl GitHubStackSignalAppendOutcomeV1 {
+    #[hotpath::skip]
     pub const fn is_saturated(&self) -> bool {
         matches!(self, Self::Saturated { .. })
     }
 
+    #[hotpath::skip]
     pub const fn pending_count(&self) -> usize {
         match self {
             Self::Appended { pending_count, .. }
@@ -129,6 +134,7 @@ impl GitHubStackSignalAppendOutcomeV1 {
         }
     }
 
+    #[hotpath::skip]
     pub const fn deferred_count(&self) -> usize {
         match self {
             Self::Appended { deferred_count, .. }
@@ -222,6 +228,7 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
         })
 }
 
+#[hotpath::measure]
 fn validate_text(value: &str, field: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err(format!("GitHub stack {field} must not be empty"));
@@ -237,6 +244,7 @@ fn validate_text(value: &str, field: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_signal(record: &GitHubStackSignalRecordV1) -> Result<(), String> {
     validate_text(&record.project_id, "project id")?;
     validate_text(&record.signal_id, "signal id")?;
@@ -254,10 +262,12 @@ fn validate_signal(record: &GitHubStackSignalRecordV1) -> Result<(), String> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_recipient(recipient: &str) -> Result<(), String> {
     validate_text(recipient, "recipient")
 }
 
+#[hotpath::measure]
 fn decode_signal_row(
     row: &tracedecay_runtime_core::db::engine::Row,
 ) -> Result<GitHubStackSignalRecordV1, String> {
@@ -354,6 +364,7 @@ async fn promote_deferred(executor: &impl Executor, project_id: &str) -> Result<
 
 /// Records the durable queue depth a caller has already counted inside its
 /// own transaction; it never issues extra queries for observability.
+#[hotpath::measure]
 fn record_queue_depth(pending: usize, deferred: usize) {
     hotpath::gauge!("global_db.stack_delivery.queue.pending_depth").set(pending as u64);
     hotpath::gauge!("global_db.stack_delivery.queue.deferred_depth").set(deferred as u64);
@@ -514,6 +525,7 @@ async fn transition_pending_batch(
     Ok(())
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Appends one immutable signal and its recipient bindings.  Overflow
     /// bindings are durably deferred and reported as typed saturation.
@@ -707,6 +719,7 @@ impl RegisteredGlobalDb {
         .await
     }
 
+    #[hotpath::skip]
     async fn transition_github_stack_deliveries_to_host_pending(
         &self,
         project_id: &str,
@@ -838,6 +851,7 @@ impl RegisteredGlobalDb {
     /// Marks a pending/deferred recipient as permanently unauthorized.  The
     /// optional outcome is intentionally not persisted: the state itself is
     /// the durable denial authority.
+    #[hotpath::skip]
     pub async fn record_github_stack_authorization_loss(
         &self,
         project_id: &str,
@@ -894,6 +908,7 @@ impl RegisteredGlobalDb {
 
     /// Looks up the immutable signal payload by its exact registered-project
     /// identity.
+    #[hotpath::skip]
     pub async fn github_stack_signal(
         &self,
         project_id: &str,
@@ -963,6 +978,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns one recipient's durable binding state.
+    #[hotpath::skip]
     pub async fn github_stack_recipient_state(
         &self,
         project_id: &str,

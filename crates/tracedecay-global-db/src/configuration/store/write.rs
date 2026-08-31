@@ -11,6 +11,7 @@ use super::{
     invalid_store_data, params, unavailable_store,
 };
 
+#[hotpath::measure]
 fn encode_snapshot_entry(
     value: Option<ConfigurationValueV1>,
     provenance: Vec<ConfigurationCandidateV1>,
@@ -23,6 +24,7 @@ fn encode_snapshot_entry(
     .map_err(|error| invalid_store_data(format!("encode configuration snapshot entry: {error}")))
 }
 
+#[hotpath::measure]
 fn snapshot_entry_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Option<String>) {
     let layer = provenance
         .iter()
@@ -84,6 +86,7 @@ pub(super) async fn insert_snapshot_entries(
     Ok(())
 }
 
+#[hotpath::measure]
 fn encode_plan_payload(
     plan: &ConfigurationProtectedPlanRecordV1,
 ) -> ConfigurationStoreResult<Vec<u8>> {

@@ -113,6 +113,7 @@ async fn resolve_owner_bound_anchor_record(
     Ok(Some(record))
 }
 
+#[hotpath::measure]
 fn validate_exact_observation_provenance(
     target: &RetrievalAnchorTargetV2,
     source_generation: &AnchorSourceGenerationV2,
@@ -166,6 +167,7 @@ async fn read_projection_checkpoint_sequence(
 /// resolver reports its current stream position under exactly the shard keys
 /// the anchor's frozen watermark claims; shards the anchor never froze are
 /// never claimed, and an empty frozen watermark stays exact.
+#[hotpath::measure]
 fn observed_anchor_watermark(frozen: &VectorWatermark, observed_sequence: u64) -> VectorWatermark {
     let mut components = std::collections::BTreeMap::new();
     for shard in frozen.components.keys() {
@@ -174,6 +176,7 @@ fn observed_anchor_watermark(frozen: &VectorWatermark, observed_sequence: u64) -
     VectorWatermark { components }
 }
 
+#[hotpath::measure_all]
 impl super::RegisteredGlobalDb {
     pub async fn resolve_observation_evidence_anchor(
         &self,
@@ -187,6 +190,7 @@ impl super::RegisteredGlobalDb {
         resolve_owner_bound_anchor_record(&snapshot, owner, anchor_id).await
     }
 
+    #[hotpath::skip]
     pub async fn resolve_observation_evidence_anchor_report(
         &self,
         owner: &ObservationScopeV1,

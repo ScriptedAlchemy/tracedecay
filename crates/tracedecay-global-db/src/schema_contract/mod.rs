@@ -3,6 +3,7 @@ mod invariants;
 mod pragma;
 mod validation;
 
+#[hotpath::measure]
 pub(crate) fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
     value
         .as_bytes()
@@ -10,6 +11,7 @@ pub(crate) fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
+#[hotpath::measure]
 fn normalize_trigger_sql(sql: &str) -> String {
     sql.trim_end_matches(';')
         .split_whitespace()

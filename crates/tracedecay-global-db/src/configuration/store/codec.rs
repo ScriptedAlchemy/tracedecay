@@ -120,6 +120,7 @@ pub(super) struct RedactedDirectConfigurationAuditTargetV1 {
     setting_keys: Vec<SettingKey>,
 }
 
+#[hotpath::measure]
 pub(super) fn redacted_direct_audit_target(
     mutation: &DirectConfigurationMutation,
 ) -> Result<RedactedDirectConfigurationAuditTargetV1, ConfigurationError> {
@@ -129,14 +130,17 @@ pub(super) fn redacted_direct_audit_target(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn invalid_store_data(message: impl Into<String>) -> ConfigurationStoreError {
     ConfigurationStoreError::InvalidData(message.into())
 }
 
+#[hotpath::measure]
 pub(super) fn unavailable_store(error: impl std::fmt::Display) -> ConfigurationStoreError {
     ConfigurationStoreError::unavailable(error)
 }
 
+#[hotpath::measure]
 pub(super) fn decode_id<T>(value: String, field: &'static str) -> ConfigurationStoreResult<T>
 where
     T: TryFrom<String>,
@@ -147,6 +151,7 @@ where
     })
 }
 
+#[hotpath::measure]
 pub(super) fn projection_encoding<T: Serialize>(value: &T) -> ConfigurationStoreResult<String> {
     match serde_json::to_value(value)
         .map_err(|error| invalid_store_data(format!("encode configuration projection: {error}")))?
@@ -160,6 +165,7 @@ pub(super) fn projection_encoding<T: Serialize>(value: &T) -> ConfigurationStore
     }
 }
 
+#[hotpath::measure]
 pub(super) fn authority_projection(
     authority: &AuthorityRef,
 ) -> (&'static str, Option<String>, Option<String>) {
@@ -175,6 +181,7 @@ pub(super) fn authority_projection(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn source_kind_projection(source_kind: SourceKindV1) -> &'static str {
     match source_kind {
         SourceKindV1::Claude => "claude",
@@ -186,6 +193,7 @@ pub(super) fn source_kind_projection(source_kind: SourceKindV1) -> &'static str 
     }
 }
 
+#[hotpath::measure]
 pub(super) fn rule_effect_projection(effect: RuleEffect) -> &'static str {
     match effect {
         RuleEffect::Allow => "allow",
@@ -427,6 +435,7 @@ pub(super) async fn insert_configuration_projections(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn decode_plan_row(
     row: &Row,
 ) -> ConfigurationStoreResult<ConfigurationProtectedPlanRecordV1> {

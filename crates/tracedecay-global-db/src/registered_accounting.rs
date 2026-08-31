@@ -7,6 +7,7 @@ use super::{
     push_optional_analytics_filter,
 };
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.registered.accounting.upsert")]
     pub async fn try_upsert_project_tokens(
@@ -35,14 +36,17 @@ impl RegisteredGlobalDb {
     /// A project with no registry row has genuinely saved nothing, so an
     /// absent row is `Ok(0)`. Every other outcome is a failed read and stays
     /// an error rather than becoming that same zero.
+    #[hotpath::skip]
     pub async fn try_get_project_tokens(&self, project_path: &Path) -> Result<u64, String> {
         self.try_tokens_saved(Some(project_path), "project").await
     }
 
+    #[hotpath::skip]
     pub async fn try_global_tokens_saved(&self) -> Result<u64, String> {
         self.try_tokens_saved(None, "global").await
     }
 
+    #[hotpath::skip]
     async fn try_tokens_saved(
         &self,
         project_path: Option<&Path>,
@@ -105,6 +109,7 @@ impl RegisteredGlobalDb {
 
     /// Sums settled savings-ledger rows for an optional project path.
     /// A failed read stays an error instead of becoming a trustworthy zero.
+    #[hotpath::skip]
     pub async fn sum_savings(
         &self,
         project: Option<&str>,
@@ -118,6 +123,7 @@ impl RegisteredGlobalDb {
 
     /// Same aggregation for an already-resolved canonical project identity.
     /// Application read models use this to avoid reinterpreting identity as a path.
+    #[hotpath::skip]
     pub async fn sum_savings_by_project_id(
         &self,
         project_id: Option<&str>,
@@ -178,6 +184,7 @@ impl RegisteredGlobalDb {
     /// Per-day savings-ledger aggregation, newest day first. `Ok(vec![])` is
     /// the truthful "no settled rows in range"; snapshot, query, and decode
     /// failures stay errors instead of an empty history.
+    #[hotpath::skip]
     pub async fn savings_history(
         &self,
         project: Option<&str>,
@@ -231,6 +238,7 @@ impl RegisteredGlobalDb {
     }
 }
 
+#[hotpath::measure]
 fn tokens_saved_query(project_path: Option<&str>) -> (String, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
@@ -246,6 +254,7 @@ fn tokens_saved_query(project_path: Option<&str>) -> (String, Vec<Value>) {
     (sql, values)
 }
 
+#[hotpath::measure]
 fn savings_scope_query(select: &str, project_id: Option<&str>, since: i64) -> (String, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();

@@ -16,6 +16,7 @@ pub(super) struct StoredComponentActivationState {
     pub(super) activation_error_code: Option<String>,
 }
 
+#[hotpath::measure]
 pub(super) fn validate_component_name(component: &str) -> ConfigurationStoreResult<()> {
     if component.is_empty()
         || component.trim() != component
@@ -29,6 +30,7 @@ pub(super) fn validate_component_name(component: &str) -> ConfigurationStoreResu
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_activation_error_code(code: Option<&str>) -> ConfigurationStoreResult<()> {
     let Some(code) = code else {
         return Ok(());
@@ -45,6 +47,7 @@ pub(super) fn validate_activation_error_code(code: Option<&str>) -> Configuratio
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn decode_component_activation_state(
     row: &Row,
 ) -> ConfigurationStoreResult<StoredComponentActivationState> {

@@ -31,7 +31,9 @@ pub struct GitIndexReadExecutor<'store, 'db> {
     store: &'store GlobalDbGitIndexTransactionStore<'db>,
 }
 
+#[hotpath::measure_all]
 impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
+    #[hotpath::skip]
     pub const fn new(store: &'store GlobalDbGitIndexTransactionStore<'db>) -> Self {
         Self { store }
     }
@@ -68,6 +70,7 @@ impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
     /// idempotency key. The store returns the whole recovery set (bounded by the
     /// number of active transactions, not the repository's full history); the
     /// walk is applied here so the contract cursor stays store-neutral.
+    #[hotpath::skip]
     async fn recovery_candidates(
         &self,
         query: &CodeRecoveryCandidatesQueryV1,
@@ -88,6 +91,7 @@ impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
 
     /// Keyset page over the repositories that hold recovery records, ordered by
     /// repository id.
+    #[hotpath::skip]
     async fn recovery_repositories(
         &self,
         query: &CodeRecoveryRepositoriesQueryV1,
@@ -107,6 +111,7 @@ impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
     }
 }
 
+#[hotpath::measure]
 fn paginate_candidates(
     mut records: Vec<GitIndexTransactionRecordV1>,
     after: Option<&GitIndexIdempotencyKey>,
@@ -128,6 +133,7 @@ fn paginate_candidates(
     CodeRecoveryCandidatesPageV1 { records, next }
 }
 
+#[hotpath::measure]
 fn paginate_repositories(
     mut repositories: Vec<RepositoryId>,
     after: Option<&RepositoryId>,
@@ -150,6 +156,7 @@ fn paginate_repositories(
 /// Truncates an in-memory page back to `limit` and returns the last retained
 /// element's cursor when more rows remain. Mirrors the over-fetch/`page_tail`
 /// pattern the effects executor uses against SQL `LIMIT n + 1`.
+#[hotpath::measure]
 fn page_tail<T, C>(items: &mut Vec<T>, limit: u32, cursor: impl Fn(&T) -> C) -> Option<C> {
     let limit = limit as usize;
     if items.len() > limit {

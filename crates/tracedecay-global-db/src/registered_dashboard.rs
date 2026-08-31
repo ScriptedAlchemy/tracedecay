@@ -17,6 +17,7 @@ use super::{
 type Result<T> = std::result::Result<T, TraceDecayError>;
 pub const MAX_REGISTERED_PROJECT_ROOTS_PER_INVENTORY: usize = 256;
 
+#[hotpath::measure]
 fn profile_store_path_is_contained(
     profile_root: &Path,
     store_relpath: &str,
@@ -44,6 +45,7 @@ fn profile_store_path_is_contained(
     path.starts_with(&canonical_profile) && (!target_exists || path != canonical_profile)
 }
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     pub fn canonical_project_key(project_path: &Path) -> String {
         super::project_registry::canonical_project_path(project_path)
@@ -136,6 +138,7 @@ impl RegisteredGlobalDb {
         Ok(projects)
     }
 
+    #[hotpath::skip]
     pub async fn code_project_exists(&self, project_id: &str) -> Result<bool> {
         let snapshot = self
             .dashboard_snapshot("check code project registration")
@@ -289,6 +292,7 @@ impl RegisteredGlobalDb {
         }))
     }
 
+    #[hotpath::skip]
     pub async fn project_registry_contexts_for_projects(
         &self,
         projects: &[CodeProjectRecord],
@@ -299,6 +303,7 @@ impl RegisteredGlobalDb {
         contexts_for_projects(&snapshot, projects).await
     }
 
+    #[hotpath::skip]
     pub async fn try_list_store_instances_for_project(
         &self,
         project_id: &str,
@@ -607,6 +612,7 @@ impl RegisteredGlobalDb {
         Ok(true)
     }
 
+    #[hotpath::skip]
     async fn dashboard_snapshot(
         &self,
         operation: &'static str,
@@ -905,6 +911,7 @@ async fn query_ids(
         .map_err(|error| dashboard_error(operation, error))
 }
 
+#[hotpath::measure]
 fn decode_code_project(row: &Row) -> Option<CodeProjectRecord> {
     Some(CodeProjectRecord {
         project_id: row.get(0).ok()?,
@@ -918,6 +925,7 @@ fn decode_code_project(row: &Row) -> Option<CodeProjectRecord> {
     })
 }
 
+#[hotpath::measure]
 fn decode_project_alias(row: &Row) -> Option<ProjectAliasRecord> {
     Some(ProjectAliasRecord {
         alias_path: row.get(0).ok()?,
@@ -926,6 +934,7 @@ fn decode_project_alias(row: &Row) -> Option<ProjectAliasRecord> {
     })
 }
 
+#[hotpath::measure]
 fn decode_store(row: &Row) -> Option<StoreInstanceRecord> {
     Some(StoreInstanceRecord {
         store_id: row.get(0).ok()?,
@@ -940,6 +949,7 @@ fn decode_store(row: &Row) -> Option<StoreInstanceRecord> {
     })
 }
 
+#[hotpath::measure]
 fn decode_graph_scope(row: &Row) -> Option<GraphScopeRecord> {
     Some(GraphScopeRecord {
         graph_scope_id: row.get(0).ok()?,
@@ -953,6 +963,7 @@ fn decode_graph_scope(row: &Row) -> Option<GraphScopeRecord> {
     })
 }
 
+#[hotpath::measure]
 fn decode_store_artifact(row: &Row) -> Option<StoreArtifactRecord> {
     Some(StoreArtifactRecord {
         store_id: row.get(0).ok()?,
@@ -964,6 +975,7 @@ fn decode_store_artifact(row: &Row) -> Option<StoreArtifactRecord> {
     })
 }
 
+#[hotpath::measure]
 fn dashboard_error(operation: &'static str, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         operation: operation.to_string(),
@@ -971,6 +983,7 @@ fn dashboard_error(operation: &'static str, error: impl std::fmt::Display) -> Tr
     }
 }
 
+#[hotpath::measure]
 fn dashboard_decode_error(operation: &'static str) -> TraceDecayError {
     TraceDecayError::Database {
         operation: operation.to_string(),
@@ -978,6 +991,7 @@ fn dashboard_decode_error(operation: &'static str) -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 fn dashboard_message(operation: &'static str, message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Database {
         operation: operation.to_string(),

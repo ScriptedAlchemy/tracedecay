@@ -31,7 +31,9 @@ pub struct GlobalDbNativeIntegrationStore<'db> {
     db: GitMutationDatabase<'db>,
 }
 
+#[hotpath::measure_all]
 impl<'db> GlobalDbNativeIntegrationStore<'db> {
+    #[hotpath::skip]
     pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self {
             db: GitMutationDatabase::Registered(db),
@@ -55,6 +57,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn read_preview(
         &self,
         preview_id: &NativeIntegrationPreviewId,
@@ -86,6 +89,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn read_approval(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -176,6 +180,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn read_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -185,6 +190,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_status_from_transaction(&snapshot, transaction_id).await
     }
 
+    #[hotpath::skip]
     pub async fn read_record(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -194,6 +200,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_record_from_transaction(&snapshot, transaction_id).await
     }
 
+    #[hotpath::skip]
     pub async fn read_receipt(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -316,6 +323,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
 
     /// Every transaction that has not reached its terminal receipt, oldest
     /// first. Restart recovery replays these through the coordinator.
+    #[hotpath::skip]
     pub async fn pending_transactions(
         &self,
         repository_id: Option<&RepositoryId>,
@@ -343,6 +351,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         Ok(records)
     }
 
+    #[hotpath::skip]
     pub async fn approval_consumed(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -394,12 +403,14 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
+    #[hotpath::skip]
     pub(super) async fn begin_write(
         &self,
     ) -> NativeIntegrationStoreResult<GitMutationWriteTransaction<'_>> {
         self.db.begin_write().await.map_err(unavailable)
     }
 
+    #[hotpath::skip]
     pub(super) async fn read_snapshot(
         &self,
     ) -> NativeIntegrationStoreResult<GitMutationReadSnapshot> {
@@ -687,6 +698,7 @@ where
     Ok(Some(receipt))
 }
 
+#[hotpath::measure]
 fn decode_record(row: &Row) -> NativeIntegrationStoreResult<NativeIntegrationRecordV1> {
     let preview: NativeIntegrationPreviewV1 = decode(&text(row, 0, "record preview")?)?;
     let approval: NativeIntegrationApprovalV1 = decode(&text(row, 1, "record approval")?)?;
@@ -800,6 +812,7 @@ where
 
 /// A status replacement may advance phase, revision, cancellation, and
 /// timestamps; it can never rebind the transaction's immutable identity.
+#[hotpath::measure]
 fn status_transition_matches(
     current: &NativeIntegrationTransactionStatusV1,
     expected_phase_revision: u64,
@@ -818,11 +831,13 @@ fn status_transition_matches(
         && current.expected_destination_tip == replacement.expected_destination_tip
 }
 
+#[hotpath::measure]
 fn phase_revision_i64(phase_revision: u64) -> NativeIntegrationStoreResult<i64> {
     i64::try_from(phase_revision)
         .map_err(|_| invalid("native integration phase revision exceeds SQLite range"))
 }
 
+#[hotpath::measure]
 fn phase_code(phase: NativeIntegrationPhaseV1) -> &'static str {
     match phase {
         NativeIntegrationPhaseV1::Prepared => "prepared",
@@ -833,6 +848,7 @@ fn phase_code(phase: NativeIntegrationPhaseV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn terminal_outcome_code(outcome: NativeIntegrationTerminalOutcomeV1) -> &'static str {
     match outcome {
         NativeIntegrationTerminalOutcomeV1::Committed => "committed",
@@ -842,16 +858,19 @@ fn terminal_outcome_code(outcome: NativeIntegrationTerminalOutcomeV1) -> &'stati
     }
 }
 
+#[hotpath::measure]
 pub(super) fn encode<T: serde::Serialize>(value: &T) -> NativeIntegrationStoreResult<String> {
     serde_json::to_string(value).map_err(|error| invalid(error.to_string()))
 }
 
+#[hotpath::measure]
 pub(super) fn decode<T: serde::de::DeserializeOwned>(
     value: &str,
 ) -> NativeIntegrationStoreResult<T> {
     serde_json::from_str(value).map_err(|error| invalid(error.to_string()))
 }
 
+#[hotpath::measure]
 pub(super) fn text(
     row: &Row,
     column: i32,
@@ -861,6 +880,7 @@ pub(super) fn text(
         .map_err(|error| invalid(format!("read {field}: {error}")))
 }
 
+#[hotpath::measure]
 fn optional_text(
     row: &Row,
     column: i32,
@@ -870,15 +890,18 @@ fn optional_text(
         .map_err(|error| invalid(format!("read {field}: {error}")))
 }
 
+#[hotpath::measure]
 pub(super) fn invalid(message: impl Into<String>) -> NativeIntegrationStoreError {
     NativeIntegrationStoreError::InvalidData(message.into())
 }
 
 #[allow(clippy::needless_pass_by_value)]
+#[hotpath::measure]
 pub(super) fn invalid_domain(error: tracedecay_domain::DomainError) -> NativeIntegrationStoreError {
     NativeIntegrationStoreError::InvalidData(error.to_string())
 }
 
+#[hotpath::measure]
 pub(super) fn unavailable(error: impl std::fmt::Display) -> NativeIntegrationStoreError {
     NativeIntegrationStoreError::unavailable(error)
 }

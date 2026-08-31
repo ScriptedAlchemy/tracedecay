@@ -13,6 +13,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
+#[hotpath::measure]
 pub(super) fn storage(
     operation: &'static str,
     source: impl std::error::Error + Send + Sync + 'static,
@@ -23,6 +24,7 @@ pub(super) fn storage(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn storage_message(
     operation: &'static str,
     message: impl Into<String>,
@@ -30,10 +32,12 @@ pub(super) fn storage_message(
     storage(operation, std::io::Error::other(message.into()))
 }
 
+#[hotpath::measure]
 pub(super) fn decode_sequence(value: i64, operation: &'static str) -> ProjectionStoreResult<u64> {
     u64::try_from(value).map_err(|_| storage_message(operation, "negative observation sequence"))
 }
 
+#[hotpath::measure]
 pub(super) fn decode_observation_row(
     row: &Row,
     operation: &'static str,
@@ -346,6 +350,7 @@ pub(super) async fn read_message(
     }))
 }
 
+#[hotpath::measure]
 fn output_owner_lookup_sql(select_expr: &str, ordering: &str) -> String {
     format!(
         "(
@@ -372,6 +377,7 @@ fn output_owner_lookup_sql(select_expr: &str, ordering: &str) -> String {
 /// their statement from this single spelling so the aggregation cannot
 /// drift; `provenance_filter` scopes only the grouped rows (the correlated
 /// owner lookups constrain themselves to each group's exact key).
+#[hotpath::measure]
 fn output_state_aggregation_sql(provenance_filter: &str) -> String {
     let newest_id = output_owner_lookup_sql("provenance.observation_id", "DESC");
     let oldest_id = output_owner_lookup_sql("provenance.observation_id", "ASC");
@@ -737,6 +743,7 @@ pub(in super::super) async fn verify_projection_rows_from_records(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn same_projection_lineage(
     candidate: &DurableObservationV1,
     owner: &DurableObservationV1,
@@ -786,6 +793,7 @@ pub(in super::super) struct ProjectionRowsBatch {
     messages: HashMap<(String, String), SessionMessageRecord>,
 }
 
+#[hotpath::measure_all]
 impl ProjectionRowsBatch {
     pub(in super::super) fn session(
         &self,
@@ -950,6 +958,7 @@ pub(in super::super) async fn read_projection_rows_batch(
 /// `observations` row simply yields no row: the caller maps that absence to
 /// [`ProjectionStoreError::ProvenanceCollision`], exactly as the single-output
 /// reads did.
+#[hotpath::measure]
 fn output_authority_batch_sql() -> String {
     let newest_id = output_owner_lookup_sql("provenance.observation_id", "DESC");
     let oldest_id = output_owner_lookup_sql("provenance.observation_id", "ASC");
@@ -1095,6 +1104,7 @@ pub(in super::super) async fn resolve_output_projection(
     Ok(owner_projection)
 }
 
+#[hotpath::measure]
 pub(super) fn session_rows_compatible(actual: &SessionRecord, expected: &SessionRecord) -> bool {
     reconcile_session_rows(actual, expected).is_some()
 }
@@ -1109,6 +1119,7 @@ pub(super) fn session_rows_compatible(actual: &SessionRecord, expected: &Session
 /// [`reconcile_session_rows`] itself stays pure string/shape logic with no
 /// filesystem access. macOS `/var` firmlink expansions are collapsed back to the
 /// public `/var/...` spelling inside [`canonical_project_path`].
+#[hotpath::measure]
 pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> SessionRecord {
     let Some(canonical) = canonical_project_path(&session.project_path) else {
         return session.clone();
@@ -1142,6 +1153,7 @@ thread_local! {
 /// [`tracedecay_sessions::runtime::git_correlation::normalize_worktree`]) so host-reported
 /// temp/project roots are not rewritten into a form that breaks search keys and
 /// authority verify against the original observation path.
+#[hotpath::measure]
 fn canonical_project_path(path: &str) -> Option<String> {
     CANONICAL_PROJECT_PATH_CACHE.with(|cache| {
         if let Some(cached) = cache.borrow().get(path) {
@@ -1153,6 +1165,7 @@ fn canonical_project_path(path: &str) -> Option<String> {
     })
 }
 
+#[hotpath::measure]
 fn compute_canonical_project_path(path: &str) -> Option<String> {
     let path_ref = std::path::Path::new(path);
     if !path_ref.exists() {
@@ -1172,6 +1185,7 @@ fn compute_canonical_project_path(path: &str) -> Option<String> {
 /// so this function — reached from the verify/audit and rebuild paths as well
 /// as apply — never touches the filesystem and stays reproducible from stored
 /// evidence.
+#[hotpath::measure]
 pub(super) fn reconcile_session_rows(
     actual: &SessionRecord,
     expected: &SessionRecord,
@@ -1245,6 +1259,7 @@ pub(super) fn reconcile_session_rows(
 #[derive(Debug)]
 struct ReconcileConflict;
 
+#[hotpath::measure]
 fn reconcile_optional<T: Clone + Eq>(
     actual: Option<&T>,
     expected: Option<&T>,
@@ -1257,6 +1272,7 @@ fn reconcile_optional<T: Clone + Eq>(
     }
 }
 
+#[hotpath::measure]
 fn reconcile_metadata(
     actual: Option<&String>,
     expected: Option<&String>,
@@ -1290,6 +1306,7 @@ fn reconcile_metadata(
         .map_err(|_| ReconcileConflict)
 }
 
+#[hotpath::measure]
 fn reconcile_usage(
     actual: &serde_json::Value,
     expected: &serde_json::Value,

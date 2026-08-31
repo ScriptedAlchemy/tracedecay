@@ -3,6 +3,7 @@ use tracedecay_sessions::runtime::SessionStoreAccess;
 
 use crate::RegisteredGlobalDb;
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     pub async fn list_session_sync_source_frontiers(
         &self,
@@ -12,6 +13,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn read_session_sync_journal(
         &self,
         key: &str,
@@ -21,6 +23,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn list_session_sync_journals(
         &self,
         key_prefix: &str,
@@ -30,6 +33,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn list_incomplete_session_sync_journal_page(
         &self,
         key_prefix: &str,
@@ -40,6 +44,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn insert_session_sync_journal(
         &self,
         key: &str,
@@ -51,6 +56,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn compare_and_swap_session_sync_journal(
         &self,
         key: &str,

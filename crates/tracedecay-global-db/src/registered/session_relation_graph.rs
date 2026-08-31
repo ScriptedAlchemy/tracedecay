@@ -5,6 +5,7 @@ use tracedecay_session_temporal_store::relations::{
     SessionRelationGraphStore, SessionRelationScope,
 };
 
+#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Mounts the daemon-owned native graph handle for this exact session
     /// shard. Rebinding is accepted only for the same identity and allocation.
