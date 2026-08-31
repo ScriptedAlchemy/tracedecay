@@ -226,6 +226,13 @@ required-features = ["test-helpers"]
 name = "tiered_storage_rss"
 required-features = ["test-helpers"]
 
+# Residency probe for consecutive generation cycles (stage, retire, repeat)
+# on one incarnation — the issue #762 cross-cycle retention journey. Also
+# `#[ignore]`d.
+[[test]]
+name = "generation_cycle_rss"
+required-features = ["test-helpers"]
+
 # At-rest snapshot probe: reopen cost of a sealed generation, full LPG replay
 # vs a columnar CompactStore base. Also `#[ignore]`d. The `compact` half needs
 # `graph-disk-tier` for `GrafeoDB::compact()`; the `replay` baseline runs under
