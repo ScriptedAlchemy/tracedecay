@@ -47,6 +47,7 @@ impl DatabaseWriterConnection<'_> {
 }
 
 impl DatabaseEngineWriteConnection {
+    #[hotpath::measure(label = "runtime_core.db.write_conn.query")]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -58,6 +59,7 @@ impl DatabaseEngineWriteConnection {
         self.conn.query(sql, params).await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_conn.execute")]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -65,10 +67,12 @@ impl DatabaseEngineWriteConnection {
         self.conn.execute(sql, params).await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_conn.execute_batch")]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.conn.execute_batch(sql).await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_conn.long_lease_begin")]
     pub(crate) async fn authorized_long_lease_transaction(
         &self,
     ) -> crate::db::engine::Result<DatabaseEngineLongLeaseTransaction> {
@@ -109,6 +113,7 @@ impl crate::db::engine::Executor for DatabaseEngineWriteConnection {
 }
 
 impl DatabaseEngineReadConnection {
+    #[hotpath::measure(label = "runtime_core.db.read_conn.query")]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -129,6 +134,7 @@ impl DatabaseEngineReadConnection {
         }
     }
 
+    #[hotpath::measure(label = "runtime_core.db.read_conn.snapshot_begin")]
     pub async fn read_snapshot(&self) -> crate::db::engine::Result<DatabaseEngineReadSnapshot> {
         self.conn
             .read_snapshot()
@@ -162,6 +168,7 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadConnection {
 }
 
 impl DatabaseEngineReadSnapshot {
+    #[hotpath::measure(label = "runtime_core.db.snapshot.query")]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -198,6 +205,7 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadSnapshot {
 }
 
 impl DatabaseEngineLongLeaseTransaction {
+    #[hotpath::measure(label = "runtime_core.db.long_lease.batch")]
     pub(crate) async fn execute_authority_revalidated_batch(
         &self,
         sql: &str,
@@ -207,10 +215,12 @@ impl DatabaseEngineLongLeaseTransaction {
             .await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.long_lease.commit")]
     pub(crate) async fn commit(self) -> crate::db::engine::Result<()> {
         self.transaction.commit().await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.long_lease.rollback")]
     pub(crate) async fn rollback(self) -> crate::db::engine::Result<()> {
         self.transaction.rollback().await
     }
@@ -251,6 +261,7 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         Self::Write(transaction)
     }
 
+    #[hotpath::measure(label = "runtime_core.db.memory_txn.query")]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -265,6 +276,7 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
+    #[hotpath::measure(label = "runtime_core.db.memory_txn.execute")]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -277,6 +289,7 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
+    #[hotpath::measure(label = "runtime_core.db.memory_txn.execute_batch")]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         match self {
             Self::Read(_) => Err(crate::db::engine::Error::Runtime(
@@ -286,6 +299,7 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
+    #[hotpath::measure(label = "runtime_core.db.memory_txn.commit")]
     pub async fn commit(self) -> Result<()> {
         match self {
             Self::Read(snapshot) => {
@@ -301,6 +315,7 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
+    #[hotpath::measure(label = "runtime_core.db.memory_txn.rollback")]
     pub async fn rollback(self) -> Result<()> {
         match self {
             Self::Read(snapshot) => {
@@ -364,6 +379,7 @@ impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseMemoryTransaction
 }
 
 impl DatabaseWriteTransaction<'_> {
+    #[hotpath::measure(label = "runtime_core.db.write_txn.execute")]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -371,6 +387,7 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.execute(sql, params).await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_txn.query")]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -382,14 +399,17 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_txn.execute_batch")]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_txn.execute_batch")]
     pub async fn execute_batch_engine(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_txn.execute")]
     pub async fn execute_engine<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -397,6 +417,7 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.execute(sql, params).await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_txn.query")]
     pub async fn query_engine<P>(
         &self,
         sql: &str,
@@ -408,6 +429,7 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_txn.commit")]
     pub async fn commit(self) -> Result<()> {
         let Self {
             transaction,
@@ -498,6 +520,7 @@ impl DatabaseWriteTransaction<'_> {
         })
     }
 
+    #[hotpath::measure(label = "runtime_core.db.write_txn.rollback")]
     pub async fn rollback(self) -> Result<()> {
         let Self {
             transaction,
