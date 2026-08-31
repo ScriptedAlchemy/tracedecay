@@ -8,8 +8,10 @@ use tokio::task::JoinSet;
 
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchMaintenanceWakeV1, git_watch};
+use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 
 use super::*;
 
@@ -17,60 +19,6 @@ use super::*;
 /// receipts to the daemon log after the coordinator returns.
 pub(super) const DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE: tokio::time::Duration =
     tokio::time::Duration::from_millis(100);
-
-/// Explicit network boundary for serving the canonical enrolled Remote Brain
-/// protocol over TLS. Local daemon application traffic keeps its independent
-/// loopback-only HTTP listener.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteBrainTlsConfig {
-    listen: std::net::SocketAddr,
-    certificate_chain: PathBuf,
-    private_key: PathBuf,
-}
-
-impl RemoteBrainTlsConfig {
-    pub fn from_optional_parts(
-        listen: Option<std::net::SocketAddr>,
-        certificate_chain: Option<PathBuf>,
-        private_key: Option<PathBuf>,
-    ) -> Result<Option<Self>> {
-        match (listen, certificate_chain, private_key) {
-            (None, None, None) => Ok(None),
-            (Some(listen), Some(certificate_chain), Some(private_key)) => {
-                if listen.ip().is_unspecified() {
-                    return Err(TraceDecayError::Config {
-                        message: "Remote Brain TLS listener requires an explicit interface address; wildcard addresses are refused".to_owned(),
-                    });
-                }
-                if certificate_chain.as_os_str().is_empty() || private_key.as_os_str().is_empty() {
-                    return Err(TraceDecayError::Config {
-                        message: "Remote Brain TLS certificate and private-key paths must be non-empty".to_owned(),
-                    });
-                }
-                Ok(Some(Self {
-                    listen,
-                    certificate_chain,
-                    private_key,
-                }))
-            }
-            _ => Err(TraceDecayError::Config {
-                message: "Remote Brain TLS listener requires --remote-listen, --remote-tls-cert, and --remote-tls-key together".to_owned(),
-            }),
-        }
-    }
-
-    pub(super) fn listen(&self) -> std::net::SocketAddr {
-        self.listen
-    }
-
-    pub(super) fn certificate_chain(&self) -> &Path {
-        &self.certificate_chain
-    }
-
-    pub(super) fn private_key(&self) -> &Path {
-        &self.private_key
-    }
-}
 
 fn prewarm_static_daemon_bootstrap_catalog() {
     if let Err(error) = prewarm_daemon_bootstrap_catalog() {

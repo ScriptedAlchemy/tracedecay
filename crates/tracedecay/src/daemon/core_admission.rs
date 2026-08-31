@@ -16,6 +16,7 @@ use super::{
     write_json_rpc_response,
 };
 use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
+use tracedecay_daemon_control::DAEMON_SHUTDOWN_METHOD;
 use tracedecay_mcp::ErrorCode;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
@@ -520,7 +521,7 @@ pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
     let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
         return false;
     };
-    if request.method == super::DAEMON_SHUTDOWN_METHOD {
+    if request.method == DAEMON_SHUTDOWN_METHOD {
         return request.id.is_some_and(|id| !id.is_null());
     }
     // MCP discovery and handshake are reserved, never bulk. They render the
@@ -556,7 +557,7 @@ pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
 pub(crate) fn daemon_shutdown_response(request_line: &str) -> Option<JsonRpcResponse> {
     let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
     let id = request.id.filter(|id| !id.is_null())?;
-    (request.method == super::DAEMON_SHUTDOWN_METHOD)
+    (request.method == DAEMON_SHUTDOWN_METHOD)
         .then(|| JsonRpcResponse::success(id, serde_json::json!({"accepted": true})))
 }
 

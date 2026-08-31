@@ -191,7 +191,7 @@ fn socket_path_from_args<'a>(mut args: impl Iterator<Item = &'a str>) -> Option<
 
 fn remote_tls_from_args<'a>(
     mut args: impl Iterator<Item = &'a str>,
-) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+) -> Result<Option<crate::RemoteBrainTlsConfig>> {
     let mut listen = None;
     let mut certificate_chain = None;
     let mut private_key = None;
@@ -239,11 +239,8 @@ fn remote_tls_from_args<'a>(
             })
         })
         .transpose()?;
-    let remote_tls = super::super::RemoteBrainTlsConfig::from_optional_parts(
-        listen,
-        certificate_chain,
-        private_key,
-    )?;
+    let remote_tls =
+        crate::RemoteBrainTlsConfig::from_optional_parts(listen, certificate_chain, private_key)?;
     super::validate_managed_remote_tls(remote_tls.as_ref())?;
     Ok(remote_tls)
 }
@@ -313,7 +310,7 @@ fn socket_path_from_service_unit(unit: &str) -> Option<PathBuf> {
 
 pub(super) fn remote_tls_from_service_unit(
     unit: &str,
-) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+) -> Result<Option<crate::RemoteBrainTlsConfig>> {
     let Some(exec_start) = unit
         .lines()
         .find_map(|line| line.trim().strip_prefix("ExecStart="))
@@ -338,7 +335,7 @@ pub(super) fn socket_path_from_launchd_plist(plist: &str) -> Option<PathBuf> {
 
 pub(super) fn remote_tls_from_launchd_plist(
     plist: &str,
-) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+) -> Result<Option<crate::RemoteBrainTlsConfig>> {
     let Some(program_arguments_start) = plist.find("<key>ProgramArguments</key>") else {
         return Ok(None);
     };
@@ -398,9 +395,7 @@ pub(super) fn socket_path_from_unit_text(unit: &str) -> Option<PathBuf> {
     }
 }
 
-pub(super) fn remote_tls_from_unit_text(
-    unit: &str,
-) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+pub(super) fn remote_tls_from_unit_text(unit: &str) -> Result<Option<crate::RemoteBrainTlsConfig>> {
     match ServiceRunner::current()? {
         ServiceRunner::Systemd => remote_tls_from_service_unit(unit),
         ServiceRunner::Launchd => remote_tls_from_launchd_plist(unit),
@@ -423,9 +418,7 @@ fn systemd_user_service_path() -> Result<PathBuf> {
         .ok_or_else(|| TraceDecayError::Config {
             message: "could not determine XDG config directory".to_string(),
         })?;
-    Ok(config_home
-        .join("systemd/user")
-        .join(super::super::SERVICE_NAME))
+    Ok(config_home.join("systemd/user").join(crate::SERVICE_NAME))
 }
 
 fn launchd_user_service_path() -> Result<PathBuf> {

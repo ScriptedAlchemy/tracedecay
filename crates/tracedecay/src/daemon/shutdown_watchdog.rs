@@ -27,8 +27,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::core_lifecycle::DAEMON_SHUTDOWN_DEADLINE;
 use super::log_daemon_event;
+use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 
 /// Wall clock past the graceful drain deadline reserved for receipt logging,
 /// endpoint cleanup, and the bounded runtime teardown in the CLI shell.

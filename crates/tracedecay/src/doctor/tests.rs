@@ -561,7 +561,7 @@ async fn store_layout_resolution_surfaces_split_identity_conflict()
 #[test]
 fn doctor_fails_stopped_or_disabled_units_with_enable_now_remedy() {
     use super::{DaemonServiceDoctorVerdict, daemon_service_doctor_verdict};
-    use crate::daemon::DaemonServiceState;
+    use tracedecay_daemon_control::DaemonServiceState;
 
     for state in [
         DaemonServiceState::StoppedEnabled,
@@ -605,7 +605,7 @@ fn doctor_fails_stopped_or_disabled_units_with_enable_now_remedy() {
 #[test]
 fn doctor_warns_on_missing_or_running_disabled_units() {
     use super::{DaemonServiceDoctorVerdict, daemon_service_doctor_verdict};
-    use crate::daemon::DaemonServiceState;
+    use tracedecay_daemon_control::DaemonServiceState;
 
     assert_eq!(
         daemon_service_doctor_verdict(DaemonServiceState::Missing),

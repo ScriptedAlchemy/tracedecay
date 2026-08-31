@@ -137,7 +137,7 @@ use std::sync::Arc;
 pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
 pub(super) use tool_call_support::{json_result, text_tool_result};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracedecay_application::RetainedSurfaceOperation;
 #[cfg(test)]
 use tracedecay_application::{
@@ -306,6 +306,13 @@ pub struct ToolCallRegistryOptions<'a> {
     /// Absence is a typed unavailable authority, never a local store fallback.
     pub(crate) session_sync_service:
         Option<&'a dyn tracedecay_application::session_sync::SessionSyncServicePort>,
+    /// One-shot report from the single verified-graph open funnel
+    /// (`dispatch_groups::admitted_graph_query`) back to the top-level
+    /// dispatch boundary: set to the serving generation id when a graph-backed
+    /// tool answered from the last complete seated generation while the
+    /// scheduler rebuilds, so the response gains a typed
+    /// `code_graph_freshness` trailer. Constructed fresh per tool call.
+    pub(crate) served_stale_graph_generation: std::sync::Arc<std::sync::OnceLock<String>>,
     pub session_authorities: SessionAuthorities<'a>,
 }
 
@@ -355,6 +362,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             generation_census_reader: None,
             retained_project_server_resolver: None,
             session_sync_service: None,
+            served_stale_graph_generation: std::sync::Arc::new(std::sync::OnceLock::new()),
             session_authorities: SessionAuthorities::default(),
         }
     }
@@ -586,6 +594,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
         // The lease is cloned out of `options` (one field, not the whole
         // struct) so the dispatch arms below can take `options` by value.
         let project_session_db_lease = options.registered_project_session_db.clone();
+        let served_stale_graph_generation = Arc::clone(&options.served_stale_graph_generation);
         let project_session_db = project_session_db_lease
             .as_ref()
             .or(options.session_authorities.project);
@@ -676,7 +685,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 | None => Err(unknown_tool_error(tool_name)),
             }
         };
-        if matches!(
+        let result = if matches!(
             dispatch_group,
             Some(McpToolDispatchGroup::RetainedApplication)
         ) || super::binding::tool_requires_canonical_effect_settlement(tool_name)
@@ -694,6 +703,28 @@ pub fn handle_tool_call_with_registry_options<'a>(
                     dispatch_budget,
                 )),
             }
+        };
+        match result {
+            Ok(mut result) => {
+                // The verified-graph open funnel reports serve-old-while-
+                // rebuilding through the one-shot options slot; the answer is
+                // sound for the served generation but may trail the live
+                // worktree, and the response must say so.
+                if let Some(generation) = served_stale_graph_generation.get()
+                    && let Some(content) = result
+                        .value
+                        .get_mut("content")
+                        .and_then(|content| content.as_array_mut())
+                {
+                    content.push(json!({"type": "text", "text": format!(
+                        "\ncode_graph_freshness: stale — serving the last complete generation \
+                         {generation} while the code index rebuilds; results may trail the \
+                         live worktree"
+                    )}));
+                }
+                Ok(result)
+            }
+            Err(error) => Err(error),
         }
     };
     Box::pin(hotpath::future!(dispatch, label = "mcp.tool_call"))

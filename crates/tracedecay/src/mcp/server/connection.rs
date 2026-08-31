@@ -974,7 +974,8 @@ impl McpServer {
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
     /// explicitly afterwards without re-running the persistence logic.
     pub async fn shutdown(self: &Arc<Self>) {
-        let deadline = tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE;
+        let deadline =
+            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
         let status = self.shutdown_until(deadline).await;
         if !status.is_clean() {
             tracing::warn!(?status, "MCP server shutdown did not complete cleanly");
@@ -1081,7 +1082,7 @@ impl McpServer {
     pub(crate) async fn shutdown_background_tasks(&self) {
         let failures = self
             .shutdown_background_tasks_until(
-                tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE,
+                tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
             )
             .await;
         if !failures.is_empty() {
