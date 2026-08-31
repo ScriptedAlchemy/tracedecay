@@ -9,6 +9,8 @@
 //! crate owns the resulting HTTP router and transport policy.
 
 #[cfg(feature = "test-transport")]
+use tracedecay_daemon_service::DaemonInvocationService;
+#[cfg(feature = "test-transport")]
 use tracedecay_dashboard_api::{
     DashboardApplicationRuntime, DashboardAutomationAuthorityV1, DashboardAutomationWriter,
     DashboardGitCorrelationReadPortV1, DashboardLcmReadPortV1,
@@ -67,10 +69,8 @@ pub fn register_test_schema_installer() {
 pub async fn dashboard_automation_authority_for_test(
     cg: std::sync::Arc<crate::tracedecay::TraceDecay>,
     profile_root: impl AsRef<std::path::Path>,
-) -> tracedecay_domain::errors::Result<(
-    DashboardAutomationAuthorityV1,
-    DashboardAutomationWriter,
-)> {
+) -> tracedecay_domain::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)>
+{
     let profile_root = profile_root.as_ref().canonicalize()?;
     let project_root = cg.project_root().canonicalize()?;
     let configuration = hotpath::future!(
@@ -78,11 +78,9 @@ pub async fn dashboard_automation_authority_for_test(
         label = "dashboard.automation.configuration"
     )
     .await
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("dashboard automation fixture configuration is unavailable: {error}"),
-        },
-    )?;
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("dashboard automation fixture configuration is unavailable: {error}"),
+    })?;
     let configured_project_root = configuration.target.project_root.canonicalize()?;
     if configured_project_root != project_root {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -93,11 +91,9 @@ pub async fn dashboard_automation_authority_for_test(
     let project_id = configuration.target.project_id.clone();
     let scope =
         tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
-            .map_err(
-                |error| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("dashboard automation fixture scope is invalid: {error}"),
-                },
-            )?;
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("dashboard automation fixture scope is invalid: {error}"),
+            })?;
     let project_database = hotpath::future!(
         cg.store_runtime_registry()
             .project_sessions(project_id.clone(), [project_root.clone()]),
@@ -110,18 +106,16 @@ pub async fn dashboard_automation_authority_for_test(
         &configuration.snapshot.effective_behavior_digest,
         &configuration.snapshot.resolution_provenance_digest,
     ))
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("dashboard automation fixture policy digest failed: {error}"),
-        },
-    )?;
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("dashboard automation fixture policy digest failed: {error}"),
+    })?;
     let writer = standalone_dashboard_automation_writer();
     let resident_memory = std::sync::Arc::new(
         tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
             tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
         ),
     );
-    let invocation_service = crate::daemon::DaemonInvocationService::with_code_index_schedulers(
+    let invocation_service = DaemonInvocationService::with_code_index_schedulers(
         tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
             1,
             resident_memory,
@@ -247,8 +241,7 @@ impl DashboardGraphTestRuntimeV1 {
         &self,
         project_root: &std::path::Path,
         project_id: tracedecay_domain::ProjectId,
-    ) -> tracedecay_domain::errors::Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1>
-    {
+    ) -> tracedecay_domain::errors::Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let registered = hotpath::future!(
             self.registry
                 .project_sessions(project_id.clone(), [project_root.to_path_buf()]),
@@ -344,11 +337,9 @@ impl DashboardGraphTestRuntimeV1 {
             .identity
             .project_id
             .as_deref()
-            .ok_or_else(
-                || tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "dashboard graph fixture has no project identity".to_owned(),
-                },
-            )
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "dashboard graph fixture has no project identity".to_owned(),
+            })
             .and_then(|project_id| {
                 tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
                     tracedecay_domain::errors::TraceDecayError::Config {

@@ -102,7 +102,7 @@ fn verified_graph_context(cancellation: &CancellationSignal) -> RequestContext {
 
 fn verified_graph(
     fixture_symbols: &[FixtureSymbol<'_>],
-) -> crate::tracedecay::queries::graph::VerifiedGraphQuery {
+) -> tracedecay_usecases::graph::VerifiedGraphQuery {
     let generation = fixture_id::<CodeGenerationId>("generation.affected-tests.1");
     let mut files = Vec::new();
     let mut chunks = Vec::new();
@@ -191,7 +191,7 @@ fn verified_graph(
         .interactive_reader_with_cancellation(&generation, Arc::clone(&graph_cancellation))
         .expect("open generation-pinned fixture reader");
     let context = verified_graph_context(&cancellation);
-    crate::tracedecay::queries::graph::VerifiedGraphQuery::from_reader(
+    tracedecay_usecases::graph::VerifiedGraphQuery::from_fixture_reader(
         reader,
         graph_cancellation,
         context,
@@ -924,7 +924,7 @@ fn tail_handles_short_input() {
 /// the per-file index cutover, both scoped reads hydrated the whole corpus
 /// stream and refused this exact shape with a budget error — a 13-file PR
 /// paid (and could not even complete) a full-corpus sweep.
-fn scoped_read_fixture() -> crate::tracedecay::queries::graph::VerifiedGraphQuery {
+fn scoped_read_fixture() -> tracedecay_usecases::graph::VerifiedGraphQuery {
     let mut fixture_symbols = vec![
         FixtureSymbol {
             path: "src/hot.rs",
@@ -937,7 +937,9 @@ fn scoped_read_fixture() -> crate::tracedecay::queries::graph::VerifiedGraphQuer
             annotated_test: false,
         },
     ];
-    let bulk_paths: Vec<String> = (0..12).map(|index| format!("src/bulk_{index}.rs")).collect();
+    let bulk_paths: Vec<String> = (0..12)
+        .map(|index| format!("src/bulk_{index}.rs"))
+        .collect();
     for path in &bulk_paths {
         fixture_symbols.push(FixtureSymbol {
             path,
@@ -960,7 +962,9 @@ fn scoped_test_annotation_lookup_needs_only_a_file_scale_budget() {
         .expect("a two-file question must not require a corpus-scale symbol budget");
     assert_eq!(
         annotated,
-        ["src/hot.rs".to_owned()].into_iter().collect::<HashSet<_>>(),
+        ["src/hot.rs".to_owned()]
+            .into_iter()
+            .collect::<HashSet<_>>(),
         "only the file whose function carries a test marker is reported"
     );
 

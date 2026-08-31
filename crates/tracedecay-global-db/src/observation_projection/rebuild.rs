@@ -7,7 +7,7 @@ use tracedecay_runtime_core::db::{
     Database,
     engine::{Executor, QueryExecutor, params},
 };
-use tracedecay_sessions::retrieval_content::{
+use tracedecay_lcm::retrieval_content::{
     derived_text_for_index, derived_text_for_snippet, projected_content_hash,
 };
 use tracedecay_store::{

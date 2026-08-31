@@ -1,14 +1,18 @@
 use serde_json::Value;
 use tracedecay_application::{ApplicationProblem, ResultContractRef};
 use tracedecay_tool_catalog::BindingSurface;
+use tracedecay_usecases::graph::VerifiedGraphQueryRequest;
 
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::tracedecay::TraceDecay;
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::analysis as portable_analysis;
+use tracedecay_mcp::handlers::graph as portable_graph;
+use tracedecay_mcp::handlers::info as portable_info;
 
 use super::ToolCallRegistryOptions;
 use super::tool_call_support::handle_retrieve;
@@ -33,22 +37,15 @@ fn graph_read_unavailable(detail: &str) -> TraceDecayError {
 }
 
 async fn admitted_graph_query(
-    cg: &TraceDecay,
+    _cg: &TraceDecay,
     options: &ToolCallRegistryOptions<'_>,
     operation_name: &str,
-) -> Result<crate::tracedecay::queries::graph::VerifiedGraphQuery> {
-    let projection = options
-        .code_graph_projection_read_port
-        .as_deref()
-        .ok_or_else(|| {
-            graph_read_unavailable("the exact project graph projection is not mounted")
-        })?;
-    let admission = options
-        .code_graph_read_admission_port
-        .as_deref()
-        .ok_or_else(|| {
-            graph_read_unavailable("the exact project graph admission is not mounted")
-        })?;
+) -> Result<tracedecay_usecases::graph::VerifiedGraphQuery> {
+    let Some(port) = options.verified_graph_query_port.as_deref() else {
+        return Err(graph_read_unavailable(
+            "the exact project verified graph query is not mounted",
+        ));
+    };
     let request_id = options
         .application_request_id
         .clone()
@@ -74,14 +71,12 @@ async fn admitted_graph_query(
     // through this one open, so a slow span here is admission contention or a
     // stale generation, never handler work.
     hotpath::future!(
-        cg.open_verified_graph_query(
-            projection,
-            admission,
+        port.open(VerifiedGraphQueryRequest::new(
             &operation,
             request_id,
             deadline,
             cancellation,
-        ),
+        )),
         label = "mcp.dispatch.graph_query_admission"
     )
     .await
@@ -254,19 +249,19 @@ fn dispatch_graph_tools_inner<'a>(
             }
             "tracedecay_callers" => {
                 let graph_query = admitted_graph_query(cg, &options, "code_callers").await?;
-                graph::handle_callers(cg, &graph_query, args).await
+                portable_graph::handle_callers(&graph_query, args).await
             }
             "tracedecay_callees" => {
                 let graph_query = admitted_graph_query(cg, &options, "callees").await?;
-                graph::handle_callees(cg, &graph_query, args).await
+                portable_graph::handle_callees(&graph_query, args).await
             }
             "tracedecay_impact" => {
                 let graph_query = admitted_graph_query(cg, &options, "impact").await?;
-                graph::handle_impact(cg, &graph_query, args).await
+                portable_graph::handle_impact(&graph_query, args).await
             }
             "tracedecay_node" => {
                 let graph_query = admitted_graph_query(cg, &options, "node").await?;
-                graph::handle_node(cg, &graph_query, args).await
+                portable_graph::handle_node(&graph_query, args).await
             }
             "tracedecay_similar" => {
                 let graph_query = admitted_graph_query(cg, &options, "similar").await?;
@@ -288,11 +283,12 @@ fn dispatch_graph_tools_inner<'a>(
             "tracedecay_implementations" => {
                 let graph_query =
                     admitted_graph_query(cg, &options, "code_implementations").await?;
-                graph::handle_implementations(cg, &graph_query, args, selected_scope_prefix).await
+                portable_graph::handle_implementations(&graph_query, args, selected_scope_prefix)
+                    .await
             }
             "tracedecay_callers_for" => {
                 let graph_query = admitted_graph_query(cg, &options, "code_callers").await?;
-                graph::handle_callers_for(cg, &graph_query, args).await
+                portable_graph::handle_callers_for(&graph_query, args).await
             }
             "tracedecay_find_exact_symbol" => {
                 let graph_query = admitted_graph_query(cg, &options, "qualified_name").await?;
@@ -309,21 +305,21 @@ fn dispatch_graph_tools_inner<'a>(
             }
             "tracedecay_by_qualified_name" => {
                 let graph_query = admitted_graph_query(cg, &options, "qualified_name").await?;
-                graph::handle_by_qualified_name(cg, &graph_query, args).await
+                portable_graph::handle_by_qualified_name(&graph_query, args).await
             }
             "tracedecay_signature" => {
                 let graph_query =
                     admitted_graph_query(cg, &options, "code_signature_search").await?;
-                graph::handle_signature(cg, &graph_query, args).await
+                portable_graph::handle_signature(&graph_query, args).await
             }
             "tracedecay_impls" => {
                 let graph_query =
                     admitted_graph_query(cg, &options, "code_implementations").await?;
-                graph::handle_impls(cg, &graph_query, args).await
+                portable_graph::handle_impls(&graph_query, args).await
             }
             "tracedecay_derives" => {
                 let graph_query = admitted_graph_query(cg, &options, "code_type_hierarchy").await?;
-                graph::handle_derives(cg, &graph_query, args).await
+                portable_graph::handle_derives(&graph_query, args).await
             }
             _ => Err(unknown_tool_error(tool_name)),
         }
@@ -406,31 +402,31 @@ fn dispatch_info_tools_inner<'a>(
             }
             "tracedecay_files" => {
                 let graph = admitted_graph_query(cg, &options, "file_metadata").await?;
-                info::handle_files(cg, &graph, args, selected_scope_prefix).await
+                portable_info::handle_files(&graph, args, selected_scope_prefix).await
             }
             "tracedecay_admin_sync" => {
                 info::handle_admin_sync(cg, args, options.code_index_reconcile_sink.as_ref()).await
             }
             "tracedecay_port_status" => {
                 let graph = admitted_graph_query(cg, &options, "port_status").await?;
-                info::handle_port_status(cg, &graph, args).await
+                portable_info::handle_port_status(&graph, args).await
             }
             "tracedecay_port_order" => {
                 let graph = admitted_graph_query(cg, &options, "port_order").await?;
-                info::handle_port_order(cg, &graph, args).await
+                portable_info::handle_port_order(&graph, args).await
             }
             "tracedecay_simplify_scan" => info::handle_simplify_scan(cg, args, scope_prefix).await,
             "tracedecay_type_hierarchy" => {
                 let graph = admitted_graph_query(cg, &options, "code_type_hierarchy").await?;
-                info::handle_type_hierarchy(cg, &graph, args).await
+                portable_info::handle_type_hierarchy(&graph, args).await
             }
             "tracedecay_body" => {
                 let graph = admitted_graph_query(cg, &options, "source_body").await?;
-                info::handle_body(cg, &graph, args, selected_scope_prefix).await
+                portable_info::handle_body(&graph, args, selected_scope_prefix).await
             }
             "tracedecay_todos" => {
                 let graph = admitted_graph_query(cg, &options, "todos").await?;
-                info::handle_todos(cg, &graph, args, scope_prefix).await
+                portable_info::handle_todos(&graph, args, scope_prefix).await
             }
             "tracedecay_read" => {
                 let operation = match args.get("mode").and_then(Value::as_str).unwrap_or("full") {
@@ -439,16 +435,16 @@ fn dispatch_info_tools_inner<'a>(
                     _ => "source_lines",
                 };
                 let graph = admitted_graph_query(cg, &options, operation).await?;
-                info::handle_read(cg, &graph, args).await
+                portable_info::handle_read(&graph, args).await
             }
             "tracedecay_outline" => {
                 let graph = admitted_graph_query(cg, &options, "source_outline").await?;
-                info::handle_outline(cg, &graph, args).await
+                portable_info::handle_outline(&graph, args).await
             }
             "tracedecay_config" => info::handle_config(cg, &args).await,
             "tracedecay_signature_search" => {
                 let graph = admitted_graph_query(cg, &options, "code_signature_search").await?;
-                info::handle_signature_search(cg, &graph, args, selected_scope_prefix).await
+                portable_info::handle_signature_search(&graph, args, selected_scope_prefix).await
             }
             _ => Err(unknown_tool_error(tool_name)),
         }
@@ -610,15 +606,15 @@ fn dispatch_analysis_tools_inner<'a>(
         match tool_name {
             "tracedecay_dead_code" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_dead_code(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_dead_code(&graph, args, scope_prefix).await
             }
             "tracedecay_circular" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_circular(cg, &graph, args).await
+                portable_analysis::handle_circular(&graph, args).await
             }
             "tracedecay_hotspots" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_hotspots(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_hotspots(&graph, args, scope_prefix).await
             }
             "tracedecay_unused_imports" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
@@ -633,39 +629,39 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_rank" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_rank(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_rank(&graph, args, scope_prefix).await
             }
             "tracedecay_largest" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_largest(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_largest(&graph, args, scope_prefix).await
             }
             "tracedecay_coupling" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_coupling(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_coupling(&graph, args, scope_prefix).await
             }
             "tracedecay_inheritance_depth" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_inheritance_depth(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_inheritance_depth(&graph, args, scope_prefix).await
             }
             "tracedecay_distribution" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_distribution(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_distribution(&graph, args, scope_prefix).await
             }
             "tracedecay_recursion" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_recursion(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_recursion(&graph, args, scope_prefix).await
             }
             "tracedecay_complexity" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_complexity(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_complexity(&graph, args, scope_prefix).await
             }
             "tracedecay_doc_coverage" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_doc_coverage(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_doc_coverage(&graph, args, scope_prefix).await
             }
             "tracedecay_god_class" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_god_class(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_god_class(&graph, args, scope_prefix).await
             }
             "tracedecay_unsafe_patterns" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
@@ -673,11 +669,11 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_constructors" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_constructors(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_constructors(&graph, args, scope_prefix).await
             }
             "tracedecay_field_sites" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_field_sites(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_field_sites(&graph, args, scope_prefix).await
             }
             "tracedecay_diagnostics" => {
                 let graph = admitted_graph_query(cg, &options, "diagnostics_read").await?;

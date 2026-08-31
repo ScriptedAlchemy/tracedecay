@@ -231,48 +231,6 @@ pub struct FeedbackImpactSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct TestResultsSurfaceRequest {}
 
-pub(crate) const fn native_integration_operation(
-    request: &NativeIntegrationSurfaceRequest,
-) -> ApplicationSurfaceOperation {
-    match request {
-        NativeIntegrationSurfaceRequest::StackSnapshot(_) => {
-            ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
-        }
-        NativeIntegrationSurfaceRequest::Preflight(_) => {
-            ApplicationSurfaceOperation::NativeIntegrationPreflight
-        }
-        NativeIntegrationSurfaceRequest::Approve(_) => {
-            ApplicationSurfaceOperation::NativeIntegrationApprove
-        }
-        NativeIntegrationSurfaceRequest::Apply(_) => {
-            ApplicationSurfaceOperation::NativeIntegrationApply
-        }
-        NativeIntegrationSurfaceRequest::Status(_) => {
-            ApplicationSurfaceOperation::NativeIntegrationStatus
-        }
-        NativeIntegrationSurfaceRequest::Cancel(_) => {
-            ApplicationSurfaceOperation::NativeIntegrationCancel
-        }
-        NativeIntegrationSurfaceRequest::Worktree(request) => match request {
-            NativeWorktreeSurfaceRequest::Inventory(_) => {
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
-            }
-            NativeWorktreeSurfaceRequest::Inspect(_) => {
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
-            }
-            NativeWorktreeSurfaceRequest::Confirm(_) => {
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
-            }
-            NativeWorktreeSurfaceRequest::Remove(_) => {
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
-            }
-            NativeWorktreeSurfaceRequest::Reconcile(_) => {
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
-            }
-        },
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ApplicationSurfaceRequest {
     GitRead(GitReadSurfaceRequest),
@@ -3841,7 +3799,7 @@ pub(crate) fn mcp_project_open_reset_refusal(
         .map(|envelope| envelope.with_owning_layer(ProblemOwningLayer::Runtime))
 }
 
-fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
+pub(crate) fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;

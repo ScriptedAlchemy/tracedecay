@@ -1,17 +1,14 @@
 //! Typed wire projections shared by the primitive graph handlers.
 
 use tracedecay_application::retrieval::{
-    PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1, PrimitiveNotFoundV1,
-    PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSemanticModeV1,
-    PrimitiveSymbolLocationV1,
+    PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
+    PrimitiveSearchCoverageV1, PrimitiveSemanticModeV1, PrimitiveSymbolLocationV1,
 };
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
-
-use tracedecay_mcp::ToolResult;
 use tracedecay_domain::errors::Result;
-
-use super::super::support::text_tool_result;
-use super::verified::{graph_symbol_end_line, required_graph_file_path, required_graph_metadata};
+use tracedecay_mcp::handlers::graph::{
+    graph_symbol_end_line, required_graph_file_path, required_graph_metadata,
+};
 
 pub(super) fn semantic_search_mode(
     mode: Option<PrimitiveSemanticModeV1>,
@@ -85,18 +82,4 @@ pub(super) fn symbol_location(
         end_line: graph_symbol_end_line(metadata)?.saturating_add(1),
         unavailable_fields: vec!["attrs_start_line".to_owned()],
     })
-}
-
-pub(super) fn node_not_found(node_id: &str) -> Result<ToolResult> {
-    let output = PrimitiveNotFoundV1 {
-        status: "not_found".to_owned(),
-        reason_code: "node_not_found".to_owned(),
-        node_id: node_id.to_owned(),
-        message: format!("Node not found: {node_id}"),
-    };
-    Ok(
-        text_tool_result(&serde_json::to_string_pretty(&output)?, vec![])
-            .with_semantic_error(true)
-            .with_failure_message(format!("node not found: {node_id}")),
-    )
 }

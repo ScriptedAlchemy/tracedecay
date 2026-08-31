@@ -24,6 +24,7 @@ use crate::daemon::http_application::{
     DaemonHttpApplicationRegistry, DaemonHttpApplicationService,
     validate_remote_brain_tls_identity_at,
 };
+use tracedecay_daemon_service::DaemonInvocationService;
 
 const REMOTE_TLS_CERTIFICATE: &[u8] =
     include_bytes!("../../../../../tests/fixtures/remote_tls/localhost.crt.pem");
@@ -79,7 +80,7 @@ fn unprovisioned_remote_registry(identity: &str) -> DaemonHttpApplicationRegistr
     let router = crate::daemon::remote_protocol::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         transaction,
-        crate::daemon::service::invocation::DaemonInvocationService::default(),
+        DaemonInvocationService::default(),
     )
     .expect("remote protocol router");
     let registry = DaemonHttpApplicationRegistry::default();
@@ -816,7 +817,7 @@ async fn remote_tls_listener_serves_only_remote_routes_and_isolates_credential_a
     let first_router = crate::daemon::remote_protocol::build_daemon_remote_protocol_router(
         Arc::clone(&first_credentials),
         runtime.remote_replay_transaction(),
-        crate::daemon::service::invocation::DaemonInvocationService::default(),
+        DaemonInvocationService::default(),
     )
     .expect("first remote protocol router");
     let first_registry = DaemonHttpApplicationRegistry::default();
@@ -941,7 +942,7 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     let router = crate::daemon::remote_protocol::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
-        crate::daemon::service::invocation::DaemonInvocationService::default(),
+        DaemonInvocationService::default(),
     )
     .expect("remote protocol router");
     let registry = DaemonHttpApplicationRegistry::default();

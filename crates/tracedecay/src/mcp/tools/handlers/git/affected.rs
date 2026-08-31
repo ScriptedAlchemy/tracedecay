@@ -15,11 +15,11 @@ pub(crate) trait AffectedTestDependents: Sync {
 }
 
 struct VerifiedAffectedTestDependents<'a> {
-    query: &'a crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    query: &'a tracedecay_usecases::graph::VerifiedGraphQuery,
 }
 
 pub(super) async fn collect_verified_affected_test_files(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     files: &[String],
     max_depth: usize,
     custom_glob: Option<&glob::Pattern>,
@@ -43,10 +43,7 @@ impl AffectedTestDependents for VerifiedAffectedTestDependents<'_> {
         Box::pin(async move {
             let mut dependents = FileDependentsByFile::new();
             for file in files {
-                dependents.insert(
-                    file.clone(),
-                    self.query.manager().get_file_dependents(file).await?,
-                );
+                dependents.insert(file.clone(), self.query.get_file_dependents(file).await?);
             }
             Ok(dependents)
         })
@@ -110,7 +107,7 @@ pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Siz
 #[hotpath::measure(future = true, label = "mcp.git.affected.total")]
 pub(crate) async fn handle_affected(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
     let files = require_string_array_arg(&args, "files")?;

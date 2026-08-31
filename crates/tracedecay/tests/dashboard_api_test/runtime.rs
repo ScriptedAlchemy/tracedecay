@@ -508,12 +508,12 @@ impl DashboardTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         message: &SessionMessageRecord,
-    ) -> std::result::Result<(), tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> std::result::Result<(), tracedecay_lcm::LcmError> {
         let database = self
             .database(scope)
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let storage_root = database.db_path().parent().ok_or_else(|| {
-            tracedecay_sessions::runtime::lcm::LcmError::Db(
+            tracedecay_lcm::LcmError::Db(
                 "registered session database has no storage root".to_owned(),
             )
         })?;
@@ -559,17 +559,17 @@ impl DashboardTestRuntimeV1 {
     pub(crate) async fn lcm_insert_summary_node_for_test(
         &self,
         scope: HostAdmissionScope,
-        draft: tracedecay_sessions::runtime::lcm::LcmSummaryNodeDraft,
+        draft: tracedecay_lcm::LcmSummaryNodeDraft,
     ) -> std::result::Result<
-        tracedecay_sessions::runtime::lcm::LcmSummaryNode,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmSummaryNode,
+        tracedecay_lcm::LcmError,
     > {
         let database = self
             .database(scope)
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let summary_hash =
-            tracedecay_sessions::retrieval_content::projected_content_hash(&draft.summary_text);
-        let summary_id = tracedecay_sessions::runtime::lcm::dag::summary_node_id(
+            tracedecay_lcm::retrieval_content::projected_content_hash(&draft.summary_text);
+        let summary_id = tracedecay_lcm::dag::summary_node_id(
             &draft.provider,
             &draft.session_id,
             draft.depth,
@@ -579,7 +579,7 @@ impl DashboardTestRuntimeV1 {
         let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         database
             .lcm_publish_immutable_summary_guarded(
-                tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication {
+                tracedecay_lcm::types::LcmImmutableSummaryPublication {
                     summary_id,
                     predecessor_summary_id: None,
                     draft,
@@ -642,12 +642,12 @@ async fn load_registered_raw_message(
     database: &RegisteredGlobalDb,
     provider: &str,
     message_id: &str,
-) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
+) -> Option<tracedecay_lcm::LcmRawMessage> {
     let snapshot = database
         .read_snapshot()
         .await
         .expect("dashboard test raw-message snapshot must remain registered");
-    tracedecay_sessions::runtime::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+    tracedecay_lcm::schema::load_raw_message(&snapshot, provider, message_id)
         .await
         .expect("dashboard test raw-message load must not hide database or receipt failure")
 }

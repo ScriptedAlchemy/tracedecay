@@ -23,6 +23,7 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::http_application::{DaemonHttpApplicationRegistry, DaemonHttpApplicationService};
+use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_usecases::operation_stream::{
     OperationEventAuthority, OperationId, OperationKind, OperationStreamConfig,
 };
@@ -995,8 +996,7 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
             let resolver_calls = Arc::clone(&observed_resolver_calls);
             async move {
                 resolver_calls.fetch_add(1, Ordering::Relaxed);
-                std::future::pending::<tracedecay_domain::errors::Result<Option<Router>>>()
-                    .await
+                std::future::pending::<tracedecay_domain::errors::Result<Option<Router>>>().await
             }
         })
         .expect("install parked project resolver");
@@ -1104,7 +1104,7 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     let remote = super::remote_protocol::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
-        super::service::invocation::DaemonInvocationService::default(),
+        DaemonInvocationService::default(),
     )
     .expect("remote protocol router");
     let registry = DaemonHttpApplicationRegistry::default();
@@ -1161,7 +1161,7 @@ async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admis
     let router = super::remote_protocol::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         transaction,
-        super::service::invocation::DaemonInvocationService::default(),
+        DaemonInvocationService::default(),
     )
     .expect("remote protocol router");
     registry
@@ -1235,7 +1235,7 @@ async fn local_remote_status_reads_the_mounted_runtime() {
     let remote = super::remote_protocol::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
-        super::service::invocation::DaemonInvocationService::default(),
+        DaemonInvocationService::default(),
     )
     .expect("remote protocol router");
     let registry = DaemonHttpApplicationRegistry::default();

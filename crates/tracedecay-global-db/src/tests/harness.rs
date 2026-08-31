@@ -972,10 +972,10 @@ impl HostAdmissionTestRuntimeV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn lcm_describe_for_test(
         &self,
-        request: tracedecay_sessions::runtime::lcm::LcmDescribeRequest,
+        request: tracedecay_lcm::LcmDescribeRequest,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmDescribeResponse,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmDescribeResponse,
+        tracedecay_lcm::LcmError,
     > {
         self.profile_registered.lcm_describe(request).await
     }
@@ -983,10 +983,10 @@ impl HostAdmissionTestRuntimeV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn lcm_expand_for_test(
         &self,
-        request: tracedecay_sessions::runtime::lcm::LcmExpandRequest,
+        request: tracedecay_lcm::LcmExpandRequest,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmExpandResponse,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmExpandResponse,
+        tracedecay_lcm::LcmError,
     > {
         self.profile_registered.lcm_expand(request).await
     }
@@ -1021,13 +1021,13 @@ impl HostAdmissionTestRuntimeV1 {
 
         let external_content = "canonical external payload";
         let external_hash =
-            tracedecay_sessions::runtime::lcm::util::sha256_hex(external_content.as_bytes());
+            tracedecay_lcm::util::sha256_hex(external_content.as_bytes());
         let raw_hash =
-            tracedecay_sessions::runtime::lcm::util::sha256_hex(b"canonical raw message");
+            tracedecay_lcm::util::sha256_hex(b"canonical raw message");
         let child_summary_hash =
-            tracedecay_sessions::runtime::lcm::util::sha256_hex(b"canonical child summary");
+            tracedecay_lcm::util::sha256_hex(b"canonical child summary");
         let parent_summary_hash =
-            tracedecay_sessions::runtime::lcm::util::sha256_hex(b"canonical parent summary");
+            tracedecay_lcm::util::sha256_hex(b"canonical parent summary");
         let payload_dir = database
             .db_path()
             .parent()

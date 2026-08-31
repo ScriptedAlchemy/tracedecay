@@ -4,10 +4,10 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::SharedHostAdmissionBroker;
 use tracedecay_mcp::ToolResult;
-use tracedecay_domain::errors::Result;
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 
 use super::SessionAuthorities;
@@ -36,12 +36,12 @@ use context_scout::{
     ContextScoutReadSurfaceV1, hook_v2_cancel, hook_v2_delivery_receipt, hook_v2_feedback,
     hook_v2_feedback_notice_delivery, hook_v2_scout_prepare, hook_v2_scout_read, hook_v2_status,
 };
-use tracedecay_mcp::map_host_admission_outcome;
 use hermes::{hermes_receipt, user_review};
 use ingest::{
     accounting_receipt, claude_compact, codex_compact, cursor_compact, ingest_transcript,
 };
 use terminal::retain_codex_stop;
+use tracedecay_mcp::map_host_admission_outcome;
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)

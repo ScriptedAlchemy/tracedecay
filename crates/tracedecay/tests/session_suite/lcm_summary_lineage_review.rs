@@ -4,10 +4,10 @@ use tempfile::TempDir;
 use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, LcmLineageFaultForTest};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::lcm::types::{
+use tracedecay_lcm::types::{
     LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition,
 };
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandRequest, LcmExpandTarget,
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
 };
@@ -34,7 +34,7 @@ trait ProfileLcmFixture {
     async fn lcm_publish_immutable_summary(
         &self,
         publication: LcmImmutableSummaryPublication,
-    ) -> Result<tracedecay_sessions::runtime::lcm::types::LcmSummaryPublicationReceipt, LcmError>;
+    ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError>;
 }
 
 impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
@@ -56,7 +56,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn lcm_publish_immutable_summary(
         &self,
         publication: LcmImmutableSummaryPublication,
-    ) -> Result<tracedecay_sessions::runtime::lcm::types::LcmSummaryPublicationReceipt, LcmError>
+    ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError>
     {
         self.lcm_publish_immutable_summary_for_test(HostAdmissionScope::Profile, publication)
             .await

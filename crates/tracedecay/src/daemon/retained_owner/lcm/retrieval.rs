@@ -14,8 +14,8 @@ use tracedecay_application::{
     ApplicationOutcome, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
 };
 use tracedecay_domain::{HydrationStateV1, RetrievalGrainV1, SessionId, TemporalModeV1};
-use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_sessions::runtime::git_correlation::{GitScopeFilter, git_scope_filter_from_args};
+use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeTarget, LcmExpandQueryPagination, LcmExpandQueryResponse,
     LcmExpandTarget, LcmSourceRef,
 };
@@ -183,7 +183,7 @@ pub(super) async fn execute_grep(
         .unwrap_or_default();
     let start = request.start_time.as_ref().or(request.since.as_ref());
     let end = request.end_time.as_ref().or(request.until.as_ref());
-    let git_filter = GitScopeFilter::from_args(
+    let git_filter = git_scope_filter_from_args(
         trimmed(request.branch.as_deref())?,
         trimmed(request.worktree.as_deref())?,
         trimmed(request.commit.as_deref())?,

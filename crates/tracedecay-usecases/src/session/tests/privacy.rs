@@ -12,7 +12,7 @@ use tracedecay_domain::{
     SessionId, TemporalModeV1, UtcMicros, WorktreeId,
 };
 use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
 use tracedecay_temporal_query::TemporalKernelResult;

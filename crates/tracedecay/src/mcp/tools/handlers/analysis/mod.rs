@@ -1,55 +1,26 @@
-//! Structural analysis tool handlers.
+//! Composition-root analysis handlers that still need source-masking or LSP.
 //!
-//! One sibling module per report. This module holds only the shared imports
-//! (siblings pick them up through `use super::*`), the two path predicates used
-//! by more than one sibling, and the re-exports the handler dispatcher calls.
-//!
-//! `constructors`, `field_sites`, `imports`, `recursion`, and `unsafe_patterns`
-//! read Rust source with hand-rolled byte scanners built on
-//! [`tracedecay_mcp::is_ident_byte`]. See the
-//! notes in `docs/` before extending those scanners. `unmounted_files` is the
-//! one source-reading sibling that already parses: a mis-read `mod` line there
-//! would report a compiled file as an orphan (or, worse, hide a real one), so
-//! it uses tree-sitter rather than joining the byte-scanner cohort.
+//! Portable census reports live in `tracedecay_mcp::handlers::analysis`.
 
-mod circular;
-mod complexity;
-mod constructors;
-mod dead_code;
 mod diagnostics;
-mod field_sites;
-mod hotspots;
 mod imports;
-mod metrics;
-mod recursion;
 mod unmounted_files;
 mod unsafe_patterns;
 
-pub(super) use circular::handle_circular;
-pub(super) use complexity::{handle_complexity, handle_doc_coverage, handle_god_class};
-pub(super) use constructors::handle_constructors;
-pub(super) use dead_code::handle_dead_code;
 pub(super) use diagnostics::handle_diagnostics;
-pub(super) use field_sites::handle_field_sites;
-pub(super) use hotspots::handle_hotspots;
 pub(super) use imports::handle_unused_imports;
-pub(super) use metrics::{
-    handle_coupling, handle_distribution, handle_inheritance_depth, handle_largest, handle_rank,
-};
-pub(super) use recursion::handle_recursion;
 pub(super) use unmounted_files::handle_unmounted_files;
 pub(super) use unsafe_patterns::handle_unsafe_patterns;
 
-use tracedecay_mcp::{is_ident_byte, line_number_at, skip_ascii_whitespace};
+use tracedecay_mcp::is_ident_byte;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay_code_index::graph_projection::CodeGraphSemanticEdgeV1;
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
-use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::SymbolOccurrenceId;
 use tracedecay_lsp::analyzer::activity::{active_languages_for_files, documents_for_adapter};
 use tracedecay_lsp::analyzer::broker::{
     CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity, NodeSpan,
@@ -57,12 +28,11 @@ use tracedecay_lsp::analyzer::broker::{
 };
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::support::{
     effective_path, generic_tool_result, rendered_tool_result, require_object_args,
-    require_positive_limit, unique_file_paths,
+    unique_file_paths,
 };
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
@@ -81,7 +51,6 @@ fn path_matches_optional_scope(path: &str, scope_prefix: Option<&str>) -> bool {
 }
 
 const ANALYSIS_SYMBOL_BUDGET: usize = 500_000;
-const ANALYSIS_RELATION_BUDGET: usize = 2_000_000;
 
 #[derive(Clone)]
 struct VerifiedAnalysisSymbol {
@@ -99,7 +68,7 @@ impl VerifiedAnalysisSymbol {
 }
 
 fn verified_analysis_symbols(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     scope_prefix: Option<&str>,
 ) -> Result<Vec<VerifiedAnalysisSymbol>> {
     let page = graph.symbols_page(None, ANALYSIS_SYMBOL_BUDGET)?;
@@ -144,20 +113,4 @@ fn verified_analysis_symbols(
             Err(error) => Some(Err(error)),
         })
         .collect()
-}
-
-fn verified_analysis_edges(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    symbols: &[VerifiedAnalysisSymbol],
-    kinds: &[RelationEdgeKindV1],
-) -> Result<Vec<CodeGraphSemanticEdgeV1>> {
-    let occurrences = symbols
-        .iter()
-        .map(|symbol| symbol.occurrence.clone())
-        .collect::<Vec<_>>();
-    graph.edges_among(&occurrences, kinds, ANALYSIS_RELATION_BUDGET)
-}
-
-fn verified_analysis_unavailable(capability: &str, detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route(format!("verified-{capability}-unavailable"), false, detail)
 }

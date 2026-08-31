@@ -110,7 +110,7 @@ fn path_looks_like_test(path: &str) -> bool {
 #[hotpath::measure(future = true, label = "mcp.analysis.unsafe_patterns.total")]
 pub(crate) async fn handle_unsafe_patterns(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {

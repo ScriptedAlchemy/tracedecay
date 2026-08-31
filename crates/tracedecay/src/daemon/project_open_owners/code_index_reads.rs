@@ -9,9 +9,42 @@ mod scope_admission_tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tracedecay_application::ResolvedScope;
-use tracedecay_usecases::graph::{CodeGraphReadError, VerifiedCodeGraphRead};
+use tracedecay_application::{Deadline, ResolvedScope, now_micros};
+use tracedecay_usecases::graph::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
+
+fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), CodeGraphReadError> {
+    if request.cancellation.is_cancelled()
+        || request
+            .live_cancellation
+            .is_some_and(|signal| signal.is_cancelled())
+    {
+        return Err(CodeGraphReadError::Cancelled);
+    }
+    let observed_at = now_micros();
+    if request
+        .deadline
+        .as_ref()
+        .is_some_and(|deadline| deadline.is_elapsed_at(observed_at))
+    {
+        return Err(CodeGraphReadError::TimedOut);
+    }
+    match request.context.admission_at(observed_at) {
+        tracedecay_application::RequestAdmission::Admitted => Ok(()),
+        tracedecay_application::RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
+        tracedecay_application::RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
+    }
+}
+
+async fn sleep_until_deadline(deadline: &Deadline) {
+    let now = now_micros();
+    if deadline.is_elapsed_at(now) {
+        return;
+    }
+    let remaining = deadline.expires_at.0.saturating_sub(now.0);
+    tokio::time::sleep(Duration::from_micros(remaining as u64)).await;
+}
 
 struct ProjectCodeGraphProjectionReadPortV1 {
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -46,34 +79,44 @@ impl tracedecay_usecases::graph::CodeGraphProjectionReadPort
             {
                 return Err(CodeGraphReadError::Denied);
             }
-            if request.cancellation.is_cancelled() {
-                return Err(CodeGraphReadError::Cancelled);
-            }
-            match request.context.admission_at(request.observed_at) {
-                tracedecay_application::RequestAdmission::Admitted => {}
-                tracedecay_application::RequestAdmission::Cancelled => {
-                    return Err(CodeGraphReadError::Cancelled);
-                }
-                tracedecay_application::RequestAdmission::TimedOut => {
-                    return Err(CodeGraphReadError::TimedOut);
-                }
-            }
-            let latest = self
+            refuse_projection_wait(&request)?;
+            let wait = self
                 .schedulers
-                .latest_complete_ready_decoded_for_root_scope(&self.project_root, &self.scope)
-                .await
-                .ok_or_else(|| CodeGraphReadError::Unavailable {
-                    detail: "the verified code graph is not ready for the exact project root"
-                        .to_owned(),
-                })?;
+                .latest_complete_ready_decoded_for_root_scope(&self.project_root, &self.scope);
+            let latest = match (request.deadline.as_ref(), request.live_cancellation) {
+                (None, None) => wait.await,
+                (deadline, live_cancellation) => {
+                    tokio::select! {
+                        biased;
+                        _ = async {
+                            if let Some(signal) = live_cancellation {
+                                signal.cancelled().await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        } => return Err(CodeGraphReadError::Cancelled),
+                        _ = async {
+                            if let Some(deadline) = deadline {
+                                sleep_until_deadline(deadline).await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        } => return Err(CodeGraphReadError::TimedOut),
+                        latest = wait => latest,
+                    }
+                }
+            }
+            .ok_or_else(|| CodeGraphReadError::Unavailable {
+                detail: "the verified code graph is not ready for the exact project root"
+                    .to_owned(),
+            })?;
+            refuse_projection_wait(&request)?;
             let store = latest.interactive_graph_store().map_err(|error| {
                 CodeGraphReadError::Unavailable {
                     detail: error.to_string(),
                 }
             })?;
-            if request.cancellation.is_cancelled() {
-                return Err(CodeGraphReadError::Cancelled);
-            }
+            refuse_projection_wait(&request)?;
             VerifiedCodeGraphRead::new(self.scope.clone(), store)
         })
     }

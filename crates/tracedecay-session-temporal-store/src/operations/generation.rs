@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde_json::json;
 use tracedecay_runtime_core::db::engine::params;
 
-use tracedecay_sessions::runtime::lcm::types::{LcmError, LcmImmutableSummaryPublication};
+use tracedecay_lcm::types::{LcmError, LcmImmutableSummaryPublication};
 
 use super::PUBLICATION_ROUTE;
 use crate::relations::{SessionRelationProjection, SummarySourceRef};
@@ -35,7 +35,7 @@ pub(super) fn validate_lineage_projection(
         })
         .collect::<BTreeMap<_, _>>();
     for source in &publication.draft.source_refs {
-        let tracedecay_sessions::runtime::lcm::types::LcmSourceRef::SummaryNode { node_id } =
+        let tracedecay_lcm::types::LcmSourceRef::SummaryNode { node_id } =
             source
         else {
             continue;

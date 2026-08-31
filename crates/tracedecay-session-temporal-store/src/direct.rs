@@ -2,7 +2,7 @@ use tracedecay_domain::{RetrievalAnchorId, SessionId};
 use tracedecay_runtime_core::db::engine::params;
 
 use super::execution::SessionTemporalExecutionError;
-use tracedecay_sessions::lcm::contracts::{LcmDescribeTarget, LcmExpandTarget};
+use tracedecay_lcm::contracts::{LcmDescribeTarget, LcmExpandTarget};
 
 use super::sql::TemporalSqlRead;
 

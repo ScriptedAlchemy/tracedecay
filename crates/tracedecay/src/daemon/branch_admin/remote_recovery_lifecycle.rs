@@ -9,6 +9,7 @@ use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
 use crate::daemon::store_writer_gate::WriterAdmissionGuard;
+use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
@@ -27,8 +28,7 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     git_index_transaction_services: Arc<
         tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry,
     >,
-    native_integration_services:
-        Arc<crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar>,
+    native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
     session_sync_service: Arc<super::super::session_sync::DaemonSessionSyncService>,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<super::project_retirement::ProjectServerRetirement>>>,

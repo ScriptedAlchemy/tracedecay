@@ -39,12 +39,12 @@ use tracedecay_mcp::tools::render;
 
 mod affected_test_failure;
 
+#[cfg(test)]
+use tracedecay_mcp::{MAX_TEST_TIMEOUT_SECS, cargo_test_args};
 use tracedecay_mcp::{
     RunAffectedArgs, TestProfile, TestRunControl, TestRunFailure, TestRunOutput, libtest_identity,
     parse_libtest_output, run_cargo_tests,
 };
-#[cfg(test)]
-use tracedecay_mcp::{MAX_TEST_TIMEOUT_SECS, cargo_test_args};
 
 /// Maximum near-duplicate matches attached per diagnostic.
 const NEAR_DUP_MAX: usize = 3;
@@ -128,7 +128,7 @@ fn test_target_key(node: &GraphTestSymbol) -> String {
 #[hotpath::measure(future = true, label = "mcp.workflow.diagnose.total")]
 pub(super) async fn handle_diagnose(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     args: Value,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
 ) -> Result<ToolResult> {
@@ -265,7 +265,7 @@ pub(super) async fn handle_diagnose(
 }
 
 fn diagnostic_symbol_at_location(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     file: &str,
     one_based_line: u32,
 ) -> Result<Option<CodeGraphSymbolSummaryV1>> {
@@ -448,7 +448,7 @@ fn compiler_publication_report(
 #[hotpath::measure(future = true, label = "mcp.workflow.diagnose.redundancy")]
 async fn diagnose_redundancy_index(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
 ) -> Result<HashMap<String, Vec<Value>>> {
     let options = RedundancyOptions {
         path_prefix: None,
@@ -507,7 +507,7 @@ fn severity_string(s: Severity) -> &'static str {
 /// Handles `tracedecay_run_affected_tests`.
 pub(super) async fn handle_run_affected_tests(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     args: Value,
     cancellation: Option<CancellationSignal>,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
@@ -526,7 +526,7 @@ pub(super) async fn handle_run_affected_tests(
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.total")]
 async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     args: Value,
     cancellation: Option<CancellationSignal>,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
@@ -924,7 +924,7 @@ fn resolve_changed_paths(
 }
 
 fn collect_affected_test_targets(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     changed_paths: &[String],
 ) -> Result<HashMap<String, TestTarget>> {
     // Two paths feed into the test set:
@@ -972,7 +972,7 @@ fn add_direct_test_targets(
 }
 
 fn add_indirect_test_targets(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     nodes: &[GraphTestSymbol],
     annotations_by_file: &mut HashMap<String, HashSet<String>>,
     test_targets: &mut HashMap<String, TestTarget>,
@@ -1027,7 +1027,7 @@ fn add_indirect_test_targets(
 }
 
 fn affected_test_symbols_in_file(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     path: &str,
 ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
     const MAX_FILE_SYMBOLS: usize = 50_000;
@@ -1069,7 +1069,7 @@ fn graph_test_symbol(summary: &CodeGraphSymbolSummaryV1) -> Result<Option<GraphT
 }
 
 fn test_annotations_in_file<'a>(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     path: &str,
     cache: &'a mut HashMap<String, HashSet<String>>,
 ) -> Result<&'a HashSet<String>> {

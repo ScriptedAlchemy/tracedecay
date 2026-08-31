@@ -102,13 +102,11 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
                         .profile_identity()
                         .is_some_and(|identity| identity.profile_id() == &expected_profile_id);
                     if !profile_matches {
-                        return Err(
-                            tracedecay_domain::errors::TraceDecayError::project_route(
-                                "project_route_not_authorized",
-                                false,
-                                "retained dashboard project belongs to another profile",
-                            ),
-                        );
+                        return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                            "project_route_not_authorized",
+                            false,
+                            "retained dashboard project belongs to another profile",
+                        ));
                     }
                     Some(server.cg_snapshot().await)
                 }
@@ -169,6 +167,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
     pub(crate) code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
+    pub(crate) verified_graph_query_port:
+        Option<Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>>,
     pub(crate) code_index_ignored_dependency_admission:
         Option<CodeIndexIgnoredDependencyAdmissionPort>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
@@ -176,7 +176,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
         Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
-    pub(crate) daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
+    pub(crate) daemon_invocation_service:
+        Option<tracedecay_daemon_service::DaemonInvocationService>,
     pub(crate) delivery_settlement_authority:
         Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
     pub(crate) delivery_settlement_recorder:
@@ -282,6 +283,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
+            verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
             retained_project_server_resolver: None,
@@ -386,6 +388,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
+            verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
             retained_project_server_resolver: None,
@@ -451,6 +454,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
+            verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
             retained_project_server_resolver: None,
@@ -528,6 +532,14 @@ impl McpServerConstructionContext {
         self
     }
 
+    pub(crate) fn with_verified_graph_query_port(
+        mut self,
+        port: Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>,
+    ) -> Self {
+        self.verified_graph_query_port = Some(port);
+        self
+    }
+
     pub(crate) fn with_code_index_ignored_dependency_admission(
         mut self,
         admission: CodeIndexIgnoredDependencyAdmissionPort,
@@ -554,7 +566,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_daemon_invocation_service(
         mut self,
-        service: crate::daemon::DaemonInvocationService,
+        service: tracedecay_daemon_service::DaemonInvocationService,
     ) -> Self {
         self.daemon_invocation_service = Some(service);
         self

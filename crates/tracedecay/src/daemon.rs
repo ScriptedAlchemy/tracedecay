@@ -266,7 +266,6 @@ mod invocation_state;
 pub(crate) use invocation_state::DaemonInvocationState;
 pub(crate) mod lcm_authority;
 mod lsp_sessions;
-pub(crate) use service::request_cancellation;
 use lsp_sessions::{
     admitted_lsp_root_for_project_path, admitted_lsp_workspace_for_request,
     cleanup_connection_lsp_sessions, invocation_lsp_session_transition,
@@ -371,15 +370,6 @@ use wire_io::{
 };
 
 pub use bootstrap::{RemoteBrainTlsConfig, run_foreground};
-pub(crate) use service::invocation::{
-    DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,
-    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrar,
-    DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService, DaemonLspOwnerRegistrar,
-    DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
-    DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
-    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1, admit_registered_hook_orchestration,
-    daemon_operation_event_authority,
-};
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
     default_socket_path, install_service, install_service_under_lease,
@@ -392,6 +382,10 @@ pub use service::{
     with_quiesced_installed_service,
 };
 pub(crate) use service::{installed_service_state, unavailable_daemon_socket_advice};
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod invocation_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

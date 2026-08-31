@@ -307,7 +307,7 @@ const REDUNDANCY_PAIR_SLICE: usize = 2048;
 #[hotpath::measure(label = "graph.redundancy_scan", future = true)]
 pub(crate) async fn redundancy_scan(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     options: &RedundancyOptions<'_>,
 ) -> Result<RedundancyScanV1> {
     // 1. Collect candidate function nodes.
@@ -812,7 +812,7 @@ fn redundancy_output(
 
 #[hotpath::measure(label = "graph.redundancy_scan.candidates")]
 fn collect_candidates(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     path_prefix: Option<&str>,
     min_lines: u32,
     include_generated: bool,

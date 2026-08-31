@@ -3,13 +3,14 @@
 use serde_json::Value;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_domain::errors::Result;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::super::ToolCallRegistryOptions;
 use super::super::{health, redundancy};
 use super::admitted_graph_query;
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::health as portable_health;
 
 /// Dispatch code-health and session-baseline tools (`tracedecay_health`,
 /// `tracedecay_test_risk`, `tracedecay_runtime`, ...).
@@ -29,15 +30,15 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
         }
         "tracedecay_gini" => {
             let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_gini(cg, &graph, args, scope_prefix).await
+            portable_health::handle_gini(&graph, args, scope_prefix).await
         }
         "tracedecay_dependency_depth" => {
             let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_dependency_depth(cg, &graph, args, scope_prefix).await
+            portable_health::handle_dependency_depth(&graph, args, scope_prefix).await
         }
         "tracedecay_health" => {
             let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_health(cg, &graph, args, scope_prefix).await
+            portable_health::handle_health(&graph, args, scope_prefix).await
         }
         "tracedecay_redundancy" => {
             let graph = admitted_graph_query(cg, &options, "redundancy").await?;
@@ -56,7 +57,7 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
         }
         "tracedecay_dsm" => {
             let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_dsm(cg, &graph, args, scope_prefix).await
+            portable_health::handle_dsm(&graph, args, scope_prefix).await
         }
         "tracedecay_test_risk" => {
             let graph = admitted_graph_query(cg, &options, "health_read").await?;

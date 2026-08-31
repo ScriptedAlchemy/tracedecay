@@ -19,12 +19,12 @@ use tracedecay_domain::{
     SessionSourceCoverageReasonV1, SessionSourceCoverageStateV1, SessionSourceCoverageV1,
     TemporalModeV1, ValidCoverageIntervalV1 as DomainValidCoverageIntervalV1,
 };
-use tracedecay_sessions::lcm::contracts::{
+use tracedecay_lcm::contracts::{
     LcmContentRange, LcmDataFreshness, LcmDescribeResponse, LcmExpandResponse, LcmRawMessage,
     LcmRawMessageMetadata, LcmRetrievalOutcome, LcmSourceRef, LcmStorageKind, LcmSummaryNode,
 };
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmContentSlice, LcmExpandQueryBudget,
     LcmExpandQueryContextBlock, LcmExpandQueryMatch, LcmExpandQueryResponse,
     LcmExpandQuerySynthesisPrompt,

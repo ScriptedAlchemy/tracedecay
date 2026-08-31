@@ -45,6 +45,8 @@ pub struct CodeGraphReadRequest<'a> {
     pub context: &'a RequestContext,
     pub observed_at: UtcMicros,
     pub cancellation: Arc<dyn GraphCancellation>,
+    pub deadline: Option<Deadline>,
+    pub live_cancellation: Option<&'a CancellationSignal>,
 }
 
 impl<'a> CodeGraphReadRequest<'a> {
@@ -57,7 +59,19 @@ impl<'a> CodeGraphReadRequest<'a> {
             context,
             observed_at,
             cancellation,
+            deadline: None,
+            live_cancellation: None,
         }
+    }
+
+    pub fn with_deadline(mut self, deadline: Deadline) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    pub fn with_live_cancellation(mut self, cancellation: &'a CancellationSignal) -> Self {
+        self.live_cancellation = Some(cancellation);
+        self
     }
 
     pub fn from_context(context: &'a RequestContext, observed_at: UtcMicros) -> Self {

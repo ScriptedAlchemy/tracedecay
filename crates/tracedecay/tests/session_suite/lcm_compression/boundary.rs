@@ -404,10 +404,10 @@ async fn compression_boundary_link_preserves_payload_owner_and_projects_debt() {
     );
 
     let expansion = db
-        .lcm_expand(tracedecay_sessions::runtime::lcm::LcmExpandRequest {
+        .lcm_expand(tracedecay_lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-old".into(),
-            target: tracedecay_sessions::runtime::lcm::LcmExpandTarget::ExternalPayload {
+            target: tracedecay_lcm::LcmExpandTarget::ExternalPayload {
                 payload_ref: payload_ref.clone(),
             },
             content_slice: None,
@@ -418,10 +418,10 @@ async fn compression_boundary_link_preserves_payload_owner_and_projects_debt() {
         .unwrap();
     assert!(expansion.content.starts_with("tool output"));
     assert!(
-        db.lcm_expand(tracedecay_sessions::runtime::lcm::LcmExpandRequest {
+        db.lcm_expand(tracedecay_lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-new".into(),
-            target: tracedecay_sessions::runtime::lcm::LcmExpandTarget::ExternalPayload {
+            target: tracedecay_lcm::LcmExpandTarget::ExternalPayload {
                 payload_ref
             },
             content_slice: None,
@@ -530,10 +530,10 @@ async fn boundary_link_to_existing_target_leaves_source_session_state_intact() {
     );
     assert_eq!(state_after.maintenance_debt, state_before.maintenance_debt);
     let payload_expansion = db
-        .lcm_expand(tracedecay_sessions::runtime::lcm::LcmExpandRequest {
+        .lcm_expand(tracedecay_lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-old".into(),
-            target: tracedecay_sessions::runtime::lcm::LcmExpandTarget::ExternalPayload {
+            target: tracedecay_lcm::LcmExpandTarget::ExternalPayload {
                 payload_ref: payload_ref.clone(),
             },
             content_slice: None,

@@ -80,8 +80,8 @@ impl LcmDaemonStore for FakeStore {
                 context_recovery_hint: None,
                 retry_status: None,
                 relation_projection_status:
-                    tracedecay_sessions::runtime::lcm::LcmRelationProjectionStatus::NotApplicable,
-                frontier: tracedecay_sessions::runtime::lcm::LcmLifecycleState {
+                    tracedecay_lcm::LcmRelationProjectionStatus::NotApplicable,
+                frontier: tracedecay_lcm::LcmLifecycleState {
                     provider: request.provider,
                     conversation_id: request.session_id.clone(),
                     current_session_id: request.session_id,

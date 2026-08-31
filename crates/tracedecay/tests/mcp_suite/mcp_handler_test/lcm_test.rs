@@ -14,9 +14,9 @@ use tracedecay_mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
-use tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication;
+use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 #[cfg(feature = "test-transport")]
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
 };
 #[cfg(feature = "test-transport")]
@@ -2357,7 +2357,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     assert_eq!(payload["status"], "ok");
     assert_eq!(
         payload["lcm"]["schema_version"],
-        json!(tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION)
+        json!(tracedecay_lcm::LCM_SCHEMA_VERSION)
     );
 
     runtime

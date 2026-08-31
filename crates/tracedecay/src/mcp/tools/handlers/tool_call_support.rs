@@ -4,11 +4,11 @@ use serde_json::{Value, json};
 
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::response_handles::{
     ResponseHandleLookup, public_retrieve_error, retrieve_response_handle,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::binding::{
     tool_accepts_registered_project_selector, tool_is_selector_bound_effect,

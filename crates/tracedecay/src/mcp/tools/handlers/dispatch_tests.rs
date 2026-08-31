@@ -1148,7 +1148,7 @@ async fn pr_context_propagates_terminal_graph_failures_without_a_cursor() {
         let detail = error.to_string();
         let result = git::handle_pr_context(
             &cg,
-            async move { Err::<crate::tracedecay::queries::graph::VerifiedGraphQuery, _>(error) },
+            async move { Err::<tracedecay_usecases::graph::VerifiedGraphQuery, _>(error) },
             json!({"base_ref": "main", "head_ref": "HEAD", "format": "json"}),
             None,
             None,

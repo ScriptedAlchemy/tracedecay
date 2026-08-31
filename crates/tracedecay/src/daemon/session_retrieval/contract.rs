@@ -11,14 +11,14 @@ use tracedecay_domain::{
     CompactContextLineageEdgeV1, CursorManifestLimitKindV1, HydrationStateV1, RetrievalAnchorId,
     RetrievalGrainV1, SessionId, SessionSourceCoverageV1, TemporalCoverageCountsV1,
 };
-use tracedecay_sessions::lcm::contracts::LcmRetrievalOutcome;
+use tracedecay_lcm::contracts::LcmRetrievalOutcome;
 use tracedecay_temporal_query::ports::{
     TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
 
 use tracedecay_global_db::WorkflowScopeFilter;
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
 use tracedecay_sessions::runtime::{

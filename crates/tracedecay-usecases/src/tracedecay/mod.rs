@@ -207,6 +207,8 @@ pub trait SourceReadRuntimePort: Send + Sync {
     fn project_root(&self) -> &Path;
     fn db(&self) -> &Database;
     fn is_read_only(&self) -> bool;
+    /// Exact registered project identity this runtime may read.
+    fn project_id(&self) -> &str;
 }
 
 pub type SourceEditRuntime = dyn SourceEditRuntimePort;

@@ -12,7 +12,7 @@ use tracedecay_usecases::observability::{
 };
 
 use super::log_daemon_event;
-use crate::daemon::service::invocation::DaemonInvocationService;
+use tracedecay_daemon_service::DaemonInvocationService;
 
 pub(in crate::daemon) fn automation_funnel_observation_from_record(
     record: &AutomationRunLedgerRecord,

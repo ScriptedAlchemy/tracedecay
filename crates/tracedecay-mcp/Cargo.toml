@@ -57,6 +57,7 @@ hotpath-cpu = [
 test-transport = []
 
 [dependencies]
+glob = "0.3"
 hotpath.workspace = true
 libc = "0.2"
 schemars = "1.2.1"

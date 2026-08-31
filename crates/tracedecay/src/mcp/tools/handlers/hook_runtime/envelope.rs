@@ -2,8 +2,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_automation_runtime::automation::config_error;
-use tracedecay_domain::{ObservationSourceRangeV1, SessionId, UtcMicros};
 use tracedecay_domain::errors::Result;
+use tracedecay_domain::{ObservationSourceRangeV1, SessionId, UtcMicros};
 
 pub(super) fn hook_now() -> UtcMicros {
     UtcMicros(

@@ -9,10 +9,11 @@ use tracedecay_usecases::primitives::{
 };
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
-use crate::daemon::service::invocation::daemon_operation_event_authority;
 use crate::daemon::session_retrieval::DaemonSessionLookupPrimitiveV1;
-use crate::daemon::{DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError};
+use crate::daemon::DaemonInvocationState;
+use tracedecay_daemon_service::DaemonPrimitiveRuntimeRegistrationError;
 use crate::mcp::McpServer;
+use tracedecay_daemon_service::daemon_operation_event_authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[hotpath::measure(label = "daemon.project.owners.primitive", future = true)]

@@ -6,6 +6,7 @@
 
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
+use tracedecay_daemon_service::DaemonSemanticRuntimeRegistrationError;
 
 mod code_index_activation;
 mod runtime;
@@ -550,6 +551,13 @@ async fn production_project_server_inner(
         &code_index_ignored_dependency_admission,
     ))
     .with_code_graph_read_admission_port(Arc::clone(&code_graph_read_admission_port))
+    .with_verified_graph_query_port(
+        crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
+            Arc::clone(&code_graph_read_admission_port),
+            Arc::clone(&code_graph_projection_read_port),
+            Some(Arc::clone(&cg) as Arc<dyn tracedecay_usecases::tracedecay::SourceReadRuntimePort>),
+        ),
+    )
     .with_code_index_search_authority(code_search_authority.clone())
     .with_project_server_live(Arc::clone(&route_registered))
     .with_application_invocation_executor(Arc::clone(&application_invocation_executor))
@@ -942,6 +950,13 @@ async fn production_project_server_inner(
                 &code_index_ignored_dependency_admission,
             ))
             .with_code_graph_read_admission_port(Arc::clone(&code_graph_read_admission_port))
+            .with_verified_graph_query_port(
+                crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
+                    Arc::clone(&code_graph_read_admission_port),
+                    Arc::clone(&code_graph_projection_read_port),
+                    Some(Arc::clone(&cg) as Arc<dyn tracedecay_usecases::tracedecay::SourceReadRuntimePort>),
+                ),
+            )
             .with_code_index_search_authority(code_search_authority)
             .with_project_server_live(Arc::clone(&route_registered))
             .with_application_invocation_executor(application_invocation_executor)

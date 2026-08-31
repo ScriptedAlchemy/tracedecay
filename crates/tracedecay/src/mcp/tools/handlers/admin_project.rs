@@ -8,8 +8,8 @@ use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 

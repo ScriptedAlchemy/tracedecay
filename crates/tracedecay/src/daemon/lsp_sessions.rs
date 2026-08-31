@@ -3,33 +3,36 @@
 //! Records which LSP sessions one connection opened so they are all released
 //! when it goes away, and authorizes the workspace a request may reach.
 
+use tracedecay_daemon_service::{
+    DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationService,
+    DaemonLspSessionAccess,
+};
+
 use super::*;
 
 pub(super) fn invocation_lsp_session_transition(
     request: &DaemonInvocationRequest,
-) -> Option<service::invocation::DaemonLspSessionAccess> {
+) -> Option<DaemonLspSessionAccess> {
     match &request.payload {
-        service::invocation::DaemonInvocationPayload::LspReconnect { session, .. }
-        | service::invocation::DaemonInvocationPayload::LspDetach { session, .. } => {
-            Some(session.clone())
-        }
+        DaemonInvocationPayload::LspReconnect { session, .. }
+        | DaemonInvocationPayload::LspDetach { session, .. } => Some(session.clone()),
         _ => None,
     }
 }
 
 pub(super) fn update_connection_lsp_sessions(
-    sessions: &mut HashMap<String, service::invocation::DaemonLspSessionAccess>,
-    transitioned: Option<&service::invocation::DaemonLspSessionAccess>,
+    sessions: &mut HashMap<String, DaemonLspSessionAccess>,
+    transitioned: Option<&DaemonLspSessionAccess>,
     response: &DaemonInvocationResponse,
 ) {
     match &response.outcome {
-        service::invocation::DaemonInvocationOutcome::LspOpened { session, .. } => {
+        DaemonInvocationOutcome::LspOpened { session, .. } => {
             sessions.insert(session.session_id.clone(), session.clone());
         }
-        service::invocation::DaemonInvocationOutcome::LspReconnected { session } => {
+        DaemonInvocationOutcome::LspReconnected { session } => {
             sessions.insert(session.session_id.clone(), session.clone());
         }
-        service::invocation::DaemonInvocationOutcome::LspDetached => {
+        DaemonInvocationOutcome::LspDetached => {
             if let Some(detached) = transitioned {
                 sessions.remove(&detached.session_id);
             }
@@ -41,7 +44,7 @@ pub(super) fn update_connection_lsp_sessions(
 #[hotpath::measure(label = "daemon.lsp_sessions.cleanup", future = true)]
 pub(super) async fn cleanup_connection_lsp_sessions(
     invocation: &DaemonInvocationState,
-    sessions: HashMap<String, service::invocation::DaemonLspSessionAccess>,
+    sessions: HashMap<String, DaemonLspSessionAccess>,
 ) {
     for session in sessions.into_values() {
         invocation
@@ -59,7 +62,7 @@ pub(super) fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<
 
 pub(super) async fn admitted_lsp_workspace_for_request(
     store_administration: &StoreAdministration,
-    service: &service::invocation::DaemonInvocationService,
+    service: &DaemonInvocationService,
     project_path: &Path,
     request: &DaemonInvocationRequest,
 ) -> Option<AuthorizedLspWorkspace> {
@@ -79,9 +82,9 @@ pub(super) async fn admitted_lsp_workspace_for_request(
 #[hotpath::measure(label = "daemon.lsp_sessions.settle", future = true)]
 pub(super) async fn settle_pending_lsp_workspace_mutation(
     store_administration: &StoreAdministration,
-    service: &service::invocation::DaemonInvocationService,
+    service: &DaemonInvocationService,
     project_path: &Path,
-    session: &service::invocation::DaemonLspSessionAccess,
+    session: &DaemonLspSessionAccess,
 ) {
     let Some(mutation) = service.pending_lsp_workspace_folder_mutation(session).await else {
         return;
@@ -109,7 +112,7 @@ pub(super) async fn settle_pending_lsp_workspace_mutation(
 #[hotpath::measure(label = "daemon.lsp_sessions.authorize", future = true)]
 async fn authorize_lsp_workspace_for_uris(
     store_administration: &StoreAdministration,
-    service: &service::invocation::DaemonInvocationService,
+    service: &DaemonInvocationService,
     project_path: &Path,
     requested_uris: Vec<String>,
 ) -> Option<AuthorizedLspWorkspace> {

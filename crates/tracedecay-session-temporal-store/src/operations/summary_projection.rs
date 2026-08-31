@@ -1,6 +1,6 @@
 use tracedecay_runtime_core::db::engine::params;
 
-use tracedecay_sessions::lcm::contracts::{LcmError, LcmSourceRef};
+use tracedecay_lcm::contracts::{LcmError, LcmSourceRef};
 
 use super::CanonicalPublicationManifest;
 

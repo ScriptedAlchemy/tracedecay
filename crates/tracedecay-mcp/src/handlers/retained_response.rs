@@ -15,7 +15,10 @@ fn retained_contract_error(
     }
 }
 
-pub fn retained_safe_diagnostic(code: &'static str, message: &'static str) -> Result<SafeDiagnostic> {
+pub fn retained_safe_diagnostic(
+    code: &'static str,
+    message: &'static str,
+) -> Result<SafeDiagnostic> {
     SafeDiagnostic::new(code, message)
         .map_err(|error| retained_contract_error("invalid retained application diagnostic", error))
 }

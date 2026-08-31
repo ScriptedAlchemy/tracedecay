@@ -10,11 +10,12 @@
 
 use super::project_open_admission::ProjectOpenWaitOutcome;
 use super::*;
-use service::invocation::semantic_evaluation::SemanticInvocationControlV1;
 use std::future::Future;
 use tracedecay_code_index_runtime::git_transactions;
-#[cfg(any(not(unix), test))]
-use tracedecay_daemon_protocol::DaemonInvocationProblem;
+use tracedecay_daemon_service::{
+    DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
+    DaemonInvocationService, Lease, SemanticInvocationControlV1, register,
+};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 fn semantic_invocation_interruption_response(
@@ -214,9 +215,9 @@ pub(super) fn invalid_multi_root_invocation_response(
 ) -> Option<DaemonInvocationResponse> {
     let multi_root_payload = matches!(
         &request.payload,
-        service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead { .. }
-            | service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
-            | service::invocation::DaemonInvocationPayload::MultiRootExecute { .. }
+        DaemonInvocationPayload::MultiRootScopeSetRead { .. }
+            | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
+            | DaemonInvocationPayload::MultiRootExecute { .. }
     );
     if !multi_root_payload {
         return None;
@@ -249,7 +250,7 @@ pub(super) async fn execute_portable_daemon_invocation(
         return response;
     }
     let semantic_cancellation_lease = if semantic_control.is_some() {
-        match crate::daemon::request_cancellation::register(&request_id) {
+        match register(&request_id) {
             Some(lease) => Some(lease),
             None => {
                 return DaemonInvocationResponse::problem(
@@ -261,26 +262,21 @@ pub(super) async fn execute_portable_daemon_invocation(
     } else {
         None
     };
-    let semantic_cancellation = semantic_cancellation_lease
-        .as_ref()
-        .map(crate::daemon::request_cancellation::Lease::token);
-    let lsp_cancellation_lease =
-        if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
-            match crate::daemon::request_cancellation::register(&request_id) {
-                Some(lease) => Some(lease),
-                None => {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::InvalidRequest,
-                    );
-                }
+    let semantic_cancellation = semantic_cancellation_lease.as_ref().map(Lease::token);
+    let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
+        match register(&request_id) {
+            Some(lease) => Some(lease),
+            None => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::InvalidRequest,
+                );
             }
-        } else {
-            None
-        };
-    let lsp_cancellation = lsp_cancellation_lease
-        .as_ref()
-        .map(crate::daemon::request_cancellation::Lease::token);
+        }
+    } else {
+        None
+    };
+    let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
     let request_cancellation = semantic_cancellation.clone().or(lsp_cancellation.clone());
     let lsp_project_open_gates = Arc::clone(&project_open_gates);
     #[cfg(test)]
@@ -467,7 +463,7 @@ pub(super) async fn write_tool_list_changed_notification(
 
 pub(super) async fn resolve_multi_root_projects(
     store_administration: &StoreAdministration,
-    service: &service::invocation::DaemonInvocationService,
+    service: &DaemonInvocationService,
     selectors: &[tracedecay_application::RegisteredRootSelectorV1],
 ) -> std::result::Result<
     Vec<(
@@ -475,15 +471,15 @@ pub(super) async fn resolve_multi_root_projects(
         tracedecay_application::ResolvedScope,
         tracedecay_application::RegisteredRootLocatorV1,
     )>,
-    service::invocation::DaemonInvocationProblem,
+    DaemonInvocationProblem,
 > {
     let database = store_administration
         .registered_profile_database()
         .await
-        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let profile_id = store_administration
         .profile_identity()
-        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?
         .profile_id()
         .clone();
     let mut roots = Vec::with_capacity(selectors.len());
@@ -491,41 +487,42 @@ pub(super) async fn resolve_multi_root_projects(
         let context = database
             .project_registry_context_by_id(selector.project_id.as_str())
             .await
-            .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?
-            .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+            .map_err(|_| DaemonInvocationProblem::Unavailable)?
+            .ok_or(DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
         if context.project.project_id != selector.project_id.as_str() {
-            return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
+            return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
         let mut stores = context
             .stores
             .iter()
             .filter(|store| store.store.project_id == selector.project_id.as_str());
         let Some(store) = stores.next() else {
-            return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+            return Err(DaemonInvocationProblem::Unavailable);
         };
         if stores.next().is_some() {
-            return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+            return Err(DaemonInvocationProblem::Unavailable);
         }
         let registered_root = PathBuf::from(context.project.canonical_root);
         if !registered_root.is_absolute()
             || registered_root.canonicalize().ok().as_ref() != Some(&registered_root)
         {
-            return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+            return Err(DaemonInvocationProblem::Unavailable);
         }
         let root = selector
             .root
             .canonicalize()
-            .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+            .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         tracedecay_usecases::context::RegisteredScopeResolver::resolve(
             &registered_root,
             &root,
             &selector.project_id,
         )
-        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
-        let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&root, &selector.project_id)
-            .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+        let scope =
+            tracedecay_code_index_runtime::resolved_scope_for_project(&root, &selector.project_id)
+                .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         if !service.lsp_owner_matches_scope(&root, &scope).await {
-            return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
+            return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
         let locator = tracedecay_application::RegisteredRootLocatorV1::new(
             selector.project_id.clone(),
@@ -533,7 +530,7 @@ pub(super) async fn resolve_multi_root_projects(
             store.store.store_id.clone(),
             root.clone(),
         )
-        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         roots.push((root, scope, locator));
     }
     roots.sort_by(|left, right| left.1.scope_digest.cmp(&right.1.scope_digest));
@@ -541,7 +538,7 @@ pub(super) async fn resolve_multi_root_projects(
         .windows(2)
         .any(|pair| pair[0].1.scope_digest == pair[1].1.scope_digest)
     {
-        return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+        return Err(DaemonInvocationProblem::InvalidRequest);
     }
     Ok(roots)
 }
@@ -563,38 +560,33 @@ pub(super) async fn execute_daemon_invocation(
         return response;
     }
     let semantic_cancellation_lease = if semantic_control.is_some() {
-        match crate::daemon::request_cancellation::register(&request_id) {
+        match register(&request_id) {
             Some(lease) => Some(lease),
             None => {
                 return DaemonInvocationResponse::problem(
                     request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    DaemonInvocationProblem::InvalidRequest,
                 );
             }
         }
     } else {
         None
     };
-    let semantic_cancellation = semantic_cancellation_lease
-        .as_ref()
-        .map(crate::daemon::request_cancellation::Lease::token);
-    let lsp_cancellation_lease =
-        if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
-            match crate::daemon::request_cancellation::register(&request_id) {
-                Some(lease) => Some(lease),
-                None => {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        service::invocation::DaemonInvocationProblem::InvalidRequest,
-                    );
-                }
+    let semantic_cancellation = semantic_cancellation_lease.as_ref().map(Lease::token);
+    let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
+        match register(&request_id) {
+            Some(lease) => Some(lease),
+            None => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::InvalidRequest,
+                );
             }
-        } else {
-            None
-        };
-    let lsp_cancellation = lsp_cancellation_lease
-        .as_ref()
-        .map(crate::daemon::request_cancellation::Lease::token);
+        }
+    } else {
+        None
+    };
+    let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
     let request_cancellation = semantic_cancellation.clone().or(lsp_cancellation.clone());
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
@@ -634,7 +626,7 @@ pub(super) async fn execute_daemon_invocation(
                 record_project_route_refusal(request.operation().as_str(), &error);
                 return DaemonInvocationResponse::problem(
                     request_id,
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
                 );
             }
         };
@@ -681,7 +673,7 @@ pub(super) async fn execute_daemon_invocation(
             let Ok((canonical_project_path, _)) = DaemonEngine::project_route(handshake) else {
                 return DaemonInvocationResponse::problem(
                     request_id,
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
                 );
             };
             resolved_project_path = canonical_project_path;
@@ -696,7 +688,7 @@ pub(super) async fn execute_daemon_invocation(
             record_admitted_root_refusal(request.operation().as_str());
             return DaemonInvocationResponse::problem(
                 request_id,
-                service::invocation::DaemonInvocationProblem::Unavailable,
+                DaemonInvocationProblem::Unavailable,
             );
         }
         project_path = Some(resolved_project_path);
@@ -714,7 +706,7 @@ fn project_open_problem(
     error: &tracedecay_domain::errors::TraceDecayError,
     workflow_application: bool,
     git_operation: bool,
-) -> service::invocation::DaemonInvocationProblem {
+) -> DaemonInvocationProblem {
     // A store that refuses to open until it is explicitly reset is a terminal
     // state for *every* operation, not only the workflow application. Scoping
     // this to `authority == "workflow"` sent every other caller down the
@@ -727,17 +719,17 @@ fn project_open_problem(
         tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, .. }
             if workflow_application || authority != "workflow"
     ) {
-        service::invocation::DaemonInvocationProblem::ResetRequired
+        DaemonInvocationProblem::ResetRequired
     } else if crate::daemon::error_message_is_project_open_retryable(&error.to_string()) {
         // A still-warming project open (or a saturated open queue) is a
         // retryable state for every operation. Mapping it to the git branch's
         // terminal not-found/not-authorized would misreport an authorized
         // worktree that merely has not finished opening.
-        service::invocation::DaemonInvocationProblem::Unavailable
+        DaemonInvocationProblem::Unavailable
     } else if git_operation {
-        service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
+        DaemonInvocationProblem::NotFoundOrNotAuthorized
     } else {
-        service::invocation::DaemonInvocationProblem::Unavailable
+        DaemonInvocationProblem::Unavailable
     }
 }
 
@@ -910,11 +902,11 @@ mod workflow_reset_tests {
         );
         assert_eq!(
             project_open_problem(&error, true, false),
-            service::invocation::DaemonInvocationProblem::ResetRequired
+            DaemonInvocationProblem::ResetRequired
         );
         assert_eq!(
             project_open_problem(&error, false, false),
-            service::invocation::DaemonInvocationProblem::Unavailable
+            DaemonInvocationProblem::Unavailable
         );
     }
 
@@ -923,12 +915,12 @@ mod workflow_reset_tests {
         let warming = project_warming_error(Path::new("/tmp/surface-fixture"));
         assert_eq!(
             project_open_problem(&warming, false, true),
-            service::invocation::DaemonInvocationProblem::Unavailable,
+            DaemonInvocationProblem::Unavailable,
             "a warming open must not answer git reads as not found or unauthorized"
         );
         assert_eq!(
             project_open_problem(&warming, false, false),
-            service::invocation::DaemonInvocationProblem::Unavailable
+            DaemonInvocationProblem::Unavailable
         );
     }
 
@@ -939,11 +931,11 @@ mod workflow_reset_tests {
         };
         assert_eq!(
             project_open_problem(&failed, false, true),
-            service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
+            DaemonInvocationProblem::NotFoundOrNotAuthorized
         );
         assert_eq!(
             project_open_problem(&failed, false, false),
-            service::invocation::DaemonInvocationProblem::Unavailable
+            DaemonInvocationProblem::Unavailable
         );
     }
 }

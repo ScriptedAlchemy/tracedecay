@@ -17,7 +17,7 @@ use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
     engine::{QueryExecutor, params},
 };
-use tracedecay_sessions::runtime::lcm::{LcmError, LcmSummaryRequest};
+use tracedecay_lcm::{LcmError, LcmSummaryRequest};
 
 use super::cursor_agent::{CursorAgentSummaryConfig, summarize_with_cursor_agent};
 use super::{AuthoritativeSummary, SummaryResolutionError};

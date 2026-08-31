@@ -16,7 +16,7 @@ async fn legacy_profile_requires_reset_without_carrying_session_content_forward(
         TraceDecayError::ProfileResetRequired {
             component: "LCM",
             found_version: None,
-            required_version: tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION,
+            required_version: tracedecay_lcm::LCM_SCHEMA_VERSION,
         }
     ));
     assert!(!table_exists(&db_path, "lcm_raw_messages").await);
@@ -26,8 +26,8 @@ async fn legacy_profile_requires_reset_without_carrying_session_content_forward(
 #[tokio::test]
 async fn stale_or_future_lcm_marker_requires_reset_without_rewriting_marker() {
     for found_version in [
-        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION - 1,
-        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION + 1,
+        tracedecay_lcm::LCM_SCHEMA_VERSION - 1,
+        tracedecay_lcm::LCM_SCHEMA_VERSION + 1,
     ] {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -45,7 +45,7 @@ async fn stale_or_future_lcm_marker_requires_reset_without_rewriting_marker() {
                 component: "LCM",
                 found_version: Some(actual),
                 required_version:
-                    tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION,
+                    tracedecay_lcm::LCM_SCHEMA_VERSION,
             } if actual == found_version
         ));
         assert_eq!(schema_version(&db_path).await, found_version);
@@ -65,7 +65,7 @@ async fn current_lcm_schema_reopens_without_republishing_its_marker() {
         .expect("current global db reopen");
     assert_eq!(
         schema_version_on(&reopened).await,
-        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
+        tracedecay_lcm::LCM_SCHEMA_VERSION
     );
     drop(reopened);
     assert_eq!(migration_applied_at(&db_path).await, 123);

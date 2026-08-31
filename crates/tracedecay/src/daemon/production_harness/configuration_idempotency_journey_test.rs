@@ -21,6 +21,7 @@ use tracedecay_tool_catalog::{
 
 use super::journey_test_support::tool_payload;
 use super::*;
+use tracedecay_daemon_service::daemon_operation_event_authority;
 
 const HTTP_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

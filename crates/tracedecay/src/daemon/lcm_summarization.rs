@@ -5,7 +5,7 @@ use tracedecay_domain::CanonicalObservationEnvelopeV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_sessions::runtime::lcm::{LcmError, LcmSummaryRequest};
+use tracedecay_lcm::{LcmError, LcmSummaryRequest};
 
 mod cursor_agent;
 mod provider_capabilities;

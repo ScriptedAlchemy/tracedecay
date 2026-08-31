@@ -24,8 +24,8 @@ use tracedecay_domain::configuration::{
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::dashboard_lcm::DashboardLcmReadAdapter;
 use super::support::generic_tool_result;
@@ -48,7 +48,7 @@ struct DashboardProfileCodeIndexWorkerSettingsAdapter {
     database: RegisteredGlobalDbLeaseV1,
     profile_id: UserProfileId,
     project_root: PathBuf,
-    registrar: crate::daemon::DaemonConfigurationRuntimeRegistrar,
+    registrar: tracedecay_daemon_service::DaemonConfigurationRuntimeRegistrar,
 }
 
 impl DashboardProfileCodeIndexWorkerSettingsAdapter {
@@ -56,13 +56,13 @@ impl DashboardProfileCodeIndexWorkerSettingsAdapter {
         database: RegisteredGlobalDbLeaseV1,
         profile_id: UserProfileId,
         project_root: PathBuf,
-        service: &crate::daemon::DaemonInvocationService,
+        service: &tracedecay_daemon_service::DaemonInvocationService,
     ) -> Self {
         Self {
             database,
             profile_id,
             project_root,
-            registrar: crate::daemon::DaemonConfigurationRuntimeRegistrar::new(service),
+            registrar: tracedecay_daemon_service::DaemonConfigurationRuntimeRegistrar::new(service),
         }
     }
 }
@@ -71,7 +71,7 @@ pub(crate) fn compose_dashboard_profile_code_index_worker_settings(
     database: RegisteredGlobalDbLeaseV1,
     profile_id: UserProfileId,
     project_root: PathBuf,
-    service: &crate::daemon::DaemonInvocationService,
+    service: &tracedecay_daemon_service::DaemonInvocationService,
 ) -> Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort> {
     Arc::new(DashboardProfileCodeIndexWorkerSettingsAdapter::new(
         database,
@@ -680,7 +680,7 @@ pub(super) async fn handle_dashboard(
     delivery_settlement_authority: Option<
         Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
     >,
-    daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
+    daemon_invocation_service: Option<tracedecay_daemon_service::DaemonInvocationService>,
 ) -> Result<ToolResult> {
     let action = args
         .get("action")

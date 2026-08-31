@@ -432,10 +432,10 @@ async fn classify_registered_schema_admission(
     // state instead of being masked by the coarser workflow/configuration
     // schema resets, which would also flag a store those features were simply
     // never installed in.
-    tracedecay_sessions::runtime::lcm::schema::require_admissible_lcm_schema(connection)
+    tracedecay_lcm::schema::require_admissible_lcm_schema(connection)
         .await
         .map_err(|error| match error {
-            tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
+            tracedecay_lcm::LcmError::ProfileResetRequired {
                 found_version,
                 required_version,
             } => tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
@@ -720,10 +720,10 @@ async fn install_registered_schema_stages(
         }
     }
 
-    tracedecay_sessions::runtime::lcm::schema::ensure_lcm_schema_in_transaction(transaction)
+    tracedecay_lcm::schema::ensure_lcm_schema_in_transaction(transaction)
         .await
         .map_err(|error| match error {
-            tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
+            tracedecay_lcm::LcmError::ProfileResetRequired {
                 found_version,
                 required_version,
             } => tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {

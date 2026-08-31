@@ -10,6 +10,7 @@ use tracedecay_application::context_scout::{
     ContextScoutWorkV1,
 };
 use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_domain::errors::Result;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
@@ -19,7 +20,6 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
@@ -268,7 +268,7 @@ pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Resu
     let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
     Ok(orchestration_response(
         "hook_v2_scout_prepare",
-        crate::daemon::admit_registered_hook_orchestration(
+        tracedecay_daemon_service::admit_registered_hook_orchestration(
             envelope.clone(),
             snapshot.binding,
             lifecycle,
@@ -281,9 +281,9 @@ pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Resu
 
 fn orchestration_response(
     action: &str,
-    outcome: crate::daemon::HookOrchestrationAdmissionV1,
+    outcome: tracedecay_daemon_service::HookOrchestrationAdmissionV1,
 ) -> Value {
-    use crate::daemon::HookOrchestrationAdmissionV1 as Admission;
+    use tracedecay_daemon_service::HookOrchestrationAdmissionV1 as Admission;
     match outcome {
         Admission::Enqueued => json!({ "action": action, "status": "accepted" }),
         Admission::Backpressured => json!({ "action": action, "status": "deferred" }),

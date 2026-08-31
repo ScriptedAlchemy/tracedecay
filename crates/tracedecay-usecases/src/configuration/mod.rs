@@ -3,6 +3,7 @@
 pub mod authorization;
 pub mod operations;
 pub mod ports;
+pub mod profile_workers;
 pub mod runtime;
 pub mod types;
 pub mod user_settings;
@@ -12,6 +13,10 @@ pub use authorization::{
     ConfigurationMutationGrantAuthorityFuture, PolicyBackedConfigurationMutationAuthorization,
 };
 pub use operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
+pub use profile_workers::{
+    commit_profile_code_index_worker_selection, map_profile_worker_configuration_error,
+    profile_code_index_worker_mutation,
+};
 pub use ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationCurrentStateV1,
     ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture, CredentialWritePort,

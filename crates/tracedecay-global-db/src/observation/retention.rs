@@ -12,7 +12,7 @@
 //!
 //! Superseded and deleted dispositions release their storage. This module
 //! is the retention pass that does that, mirroring the
-//! sibling LCM slice ([`tracedecay_sessions::runtime::lcm::retention`]): a bounded,
+//! sibling LCM slice ([`tracedecay_lcm::retention`]): a bounded,
 //! DryRun/Apply, before/after-measured engine.
 //!
 //! # The disposition ledger is the governing authority

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::*;
@@ -10,6 +10,32 @@ use crate::config::USER_DATA_DIR_ENV;
 struct FixtureCodeGraphProjection {
     scope: tracedecay_application::ResolvedScope,
     store: Arc<tracedecay_code_index::graph_projection::CodeGraphProjectionStore>,
+}
+
+#[derive(Clone)]
+struct FixtureSourceReadRuntime {
+    project_root: PathBuf,
+    project_id: String,
+    database: tracedecay_runtime_core::db::Database,
+    read_only: bool,
+}
+
+impl tracedecay_usecases::tracedecay::SourceReadRuntimePort for FixtureSourceReadRuntime {
+    fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    fn db(&self) -> &tracedecay_runtime_core::db::Database {
+        &self.database
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn project_id(&self) -> &str {
+        &self.project_id
+    }
 }
 
 #[derive(Clone)]
@@ -137,11 +163,9 @@ pub(super) fn verified_graph_options<'a>(
         .as_deref()
         .and_then(|value| tracedecay_domain::ProjectId::new(value.to_owned()).ok())
         .expect("registered graph fixture project identity");
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
-        cg.project_root(),
-        &project_id,
-    )
-    .expect("registered graph fixture scope");
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+            .expect("registered graph fixture scope");
     let cancellation =
         tracedecay_application::CancellationSignal::active("cancel.mcp-verified-graph-fixture")
             .expect("graph fixture cancellation");
@@ -171,6 +195,24 @@ pub(super) fn verified_graph_options<'a>(
         store,
     }));
     options.code_graph_read_admission_port = Some(Arc::new(FixtureCodeGraphAdmission { scope }));
+    options.verified_graph_query_port = Some(
+        crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
+            options
+                .code_graph_read_admission_port
+                .clone()
+                .expect("graph fixture admission"),
+            options
+                .code_graph_projection_read_port
+                .clone()
+                .expect("graph fixture projection"),
+            Some(Arc::new(FixtureSourceReadRuntime {
+                project_root: cg.project_root().to_path_buf(),
+                project_id: project_id.as_str().to_owned(),
+                database: cg.db().clone(),
+                read_only: cg.is_read_only(),
+            })),
+        ),
+    );
     options
 }
 
@@ -182,6 +224,18 @@ pub(super) fn verified_graph_error_options<'a>(
     let mut options = verified_graph_options(cg, options);
     options.code_graph_projection_read_port =
         Some(Arc::new(FailingFixtureCodeGraphProjection { error }));
+    options.verified_graph_query_port = Some(
+        crate::tracedecay::queries::graph::admitted_verified_graph_query_port(
+            options
+                .code_graph_read_admission_port
+                .clone()
+                .expect("graph fixture admission"),
+            options
+                .code_graph_projection_read_port
+                .clone()
+                .expect("graph fixture projection"),
+        ),
+    );
     options
 }
 

@@ -86,9 +86,7 @@ impl ProjectServerRetirementAdmission<'_> {
         retirement: Task,
     ) -> ProjectServerCapacityRetirementCompletion
     where
-        Task: std::future::Future<Output = tracedecay_domain::errors::Result<()>>
-            + Send
-            + 'static,
+        Task: std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static,
     {
         self.retirements.retain(|retirement| {
             !matches!(
@@ -125,14 +123,14 @@ pub(in crate::daemon) struct ProjectRetirementFenceV1 {
     // Field order is lifecycle order: reopen roots before releasing the store
     // writer gate so a deletion owner can never have its permanent fence
     // removed by this temporary recovery guard.
-    _invocation: crate::daemon::service::project_runtime::ProjectRuntimeRootQuiescenceV1,
+    _invocation: tracedecay_daemon_service::ProjectRuntimeRootQuiescenceV1,
     _project_open: crate::daemon::project_open_admission::ProjectOpenIdentityQuiescenceV1,
     _writer: crate::daemon::store_writer_gate::WriterAdmissionGuard,
 }
 
 impl ProjectRetirementFenceV1 {
     pub(super) fn new(
-        invocation: crate::daemon::service::project_runtime::ProjectRuntimeRootQuiescenceV1,
+        invocation: tracedecay_daemon_service::ProjectRuntimeRootQuiescenceV1,
         project_open: crate::daemon::project_open_admission::ProjectOpenIdentityQuiescenceV1,
         writer: crate::daemon::store_writer_gate::WriterAdmissionGuard,
     ) -> Self {
@@ -501,7 +499,7 @@ mod tests {
             .into_iter()
             .collect();
         let invocation_registry =
-            crate::daemon::service::project_runtime::ProjectRuntimeRegistryV1::default();
+            tracedecay_daemon_service::ProjectRuntimeRegistryV1::default();
         let invocation = invocation_registry
             .quiesce_roots(&roots)
             .await

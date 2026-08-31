@@ -14,7 +14,7 @@ use tracedecay_store::{
 };
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-use tracedecay_sessions::lcm::contracts::LcmError;
+use tracedecay_lcm::contracts::LcmError;
 use tracedecay_sessions::runtime::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
@@ -531,7 +531,7 @@ async fn upsert_projected_raw_message(
     conn: &impl Executor,
     message: &SessionMessageRecord,
 ) -> ProjectionStoreResult<()> {
-    tracedecay_sessions::runtime::lcm::raw::upsert_projection_raw_message(conn, message)
+    tracedecay_lcm::raw::upsert_projection_raw_message(conn, message)
         .await
         .map_err(|error| match error {
             LcmError::SanitizationRefused { reason } => {

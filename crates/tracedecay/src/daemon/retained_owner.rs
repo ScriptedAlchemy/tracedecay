@@ -9,6 +9,7 @@ use tracedecay_application::{
     RequestAdmission, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfacePortsV1, now_micros,
 };
+use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_domain::ManifestDigest;
 
 use crate::tracedecay::TraceDecay;
@@ -52,8 +53,7 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) project_workflow_index: Option<Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>>,
     pub(crate) project_lcm: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
     pub(crate) configuration_digest: ManifestDigest,
-    pub(crate) invocation_service:
-        Option<crate::daemon::service::invocation::DaemonInvocationService>,
+    pub(crate) invocation_service: Option<DaemonInvocationService>,
 }
 
 pub(crate) fn retained_surface_ports(

@@ -104,6 +104,7 @@ hotpath = [
     "tracedecay-code-index-runtime/hotpath",
     "tracedecay-dashboard-api/hotpath",
     "tracedecay-daemon-protocol/hotpath",
+    "tracedecay-daemon-service/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-hooks/hotpath",
@@ -119,6 +120,7 @@ hotpath = [
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
     "tracedecay-session-temporal-store/hotpath",
+    "tracedecay-lcm/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-source-edit/hotpath",
     "tracedecay-store/hotpath",
@@ -141,6 +143,7 @@ hotpath-alloc = [
     "tracedecay-code-index-runtime/hotpath-alloc",
     "tracedecay-dashboard-api/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
+    "tracedecay-daemon-service/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
@@ -156,6 +159,7 @@ hotpath-alloc = [
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-session-temporal-store/hotpath-alloc",
+    "tracedecay-lcm/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-source-edit/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
@@ -178,6 +182,7 @@ hotpath-cpu = [
     "tracedecay-code-index-runtime/hotpath-cpu",
     "tracedecay-dashboard-api/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
+    "tracedecay-daemon-service/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
@@ -193,6 +198,7 @@ hotpath-cpu = [
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-session-temporal-store/hotpath-cpu",
+    "tracedecay-lcm/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-source-edit/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
@@ -294,6 +300,7 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 test-helpers = [
     "tracedecay-automation-runtime/test-helpers",
     "tracedecay-code-index-runtime/test-helpers",
+    "tracedecay-daemon-service/test-helpers",
     "tracedecay-host-admission/test-helpers",
     "tracedecay-maintenance/test-helpers",
 ]
@@ -386,6 +393,7 @@ tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention",
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
@@ -401,6 +409,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-source-edit = { path = "../tracedecay-source-edit", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
@@ -506,6 +515,9 @@ tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0", feat
 # Journal tests in the composition root call effect_runtime journal internals
 # that stay crate-private in production and compile only under test-helpers.
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0", features = ["test-helpers"] }
+# Root lib tests call daemon-service fixture constructors (`invoke`,
+# publication gates). Feature unification keeps them off the CLI lane.
+tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

@@ -1,9 +1,9 @@
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_store::{ParseOffset, SessionMessageRecord, SessionRecord};
 
-use crate::retrieval_content::derived_text_for_index;
-use crate::runtime::lcm::payload::PayloadFileRollback;
-use crate::runtime::lcm::raw;
+use tracedecay_lcm::payload::PayloadFileRollback;
+use tracedecay_lcm::raw;
+use tracedecay_lcm::retrieval_content::derived_text_for_index;
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
 use super::types::{TranscriptBatch, TranscriptPersistenceError};

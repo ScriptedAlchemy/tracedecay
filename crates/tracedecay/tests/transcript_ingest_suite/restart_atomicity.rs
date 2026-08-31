@@ -123,7 +123,7 @@ impl ProjectSessionTestRuntime {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
+    ) -> Option<tracedecay_lcm::LcmRawMessage> {
         self.runtime
             .project_lcm_raw_message_for_test(provider, message_id)
             .await

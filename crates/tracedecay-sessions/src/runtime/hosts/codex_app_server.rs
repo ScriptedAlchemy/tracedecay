@@ -19,7 +19,7 @@ use std::os::unix::process::CommandExt;
 use serde_json::{Value, json};
 use tracedecay_store::cursor_dispatch::CURSOR_MODEL_KEYS;
 
-use crate::runtime::lcm::LcmSummaryRequest;
+use tracedecay_lcm::LcmSummaryRequest;
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader};
 use tracedecay_daemon_protocol::wire::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -741,7 +741,7 @@ pub fn strip_reasoning_tags(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
+    use tracedecay_lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
     use serde_json::json;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;

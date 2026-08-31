@@ -30,25 +30,6 @@ mod dashboard_lcm;
 // default production build does not carry it as an unused re-export.
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_lcm::DashboardLcmReadAdapter;
-mod dependency_hints;
-mod dispatch_controls;
-mod dispatch_groups;
-pub mod edit;
-pub mod git;
-pub mod graph;
-pub mod grep;
-pub mod health;
-pub mod hook_runtime;
-pub mod info;
-pub mod redundancy;
-pub(crate) mod retained_catalog;
-mod session_authorities;
-pub mod skills;
-mod support;
-mod tool_call_support;
-mod work;
-pub mod workflow;
-mod workflow_family;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -67,6 +48,9 @@ mod configuration_dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod context_scout_control_dispatch_tests;
+mod dependency_hints;
+mod dispatch_controls;
+mod dispatch_groups;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -85,6 +69,15 @@ mod dispatch_test_support;
     clippy::uninlined_format_args
 )]
 mod dispatch_tests;
+pub mod edit;
+pub mod git;
+pub mod graph;
+pub mod grep;
+pub mod health;
+pub mod hook_runtime;
+pub mod info;
+pub mod redundancy;
+pub(crate) mod retained_catalog;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -112,6 +105,10 @@ mod runtime_generation_census_dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod search_graph_independence_tests;
+mod session_authorities;
+pub mod skills;
+mod support;
+mod tool_call_support;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -121,6 +118,18 @@ mod search_graph_independence_tests;
     clippy::uninlined_format_args
 )]
 mod tool_definition_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod verified_graph_query_authority_tests;
+mod work;
+pub mod workflow;
+mod workflow_family;
 
 pub use session_authorities::SessionAuthorities;
 use std::path::Path;
@@ -145,8 +154,6 @@ use super::binding::{
 };
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::tracedecay::TraceDecay;
-use tracedecay_application::ProjectRegistryReadPort;
-use tracedecay_mcp::handle_multi_root;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,
@@ -159,9 +166,11 @@ use retained_catalog::dispatch_profile_retained_application_tool;
 use retained_catalog::retained_mcp_composition;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
+use tracedecay_application::ProjectRegistryReadPort;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::handle_multi_root;
 use work::handle_work;
 use workflow_family::handle_workflow;
 
@@ -257,7 +266,8 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<&'a dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     pub dashboard_application_invocation_executor:
         Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
-    pub(crate) daemon_invocation_service: Option<&'a crate::daemon::DaemonInvocationService>,
+    pub(crate) daemon_invocation_service:
+        Option<&'a tracedecay_daemon_service::DaemonInvocationService>,
     pub(crate) dashboard_delivery_settlement_authority:
         Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
     pub application_request_id: Option<tracedecay_application::RequestId>,
@@ -281,6 +291,8 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::mcp::server::CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port:
         Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
+    pub(crate) verified_graph_query_port:
+        Option<std::sync::Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>>,
     pub(crate) code_index_ignored_dependency_admission:
         Option<crate::mcp::server::CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority for runtime telemetry.
@@ -338,6 +350,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_search_authority: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
+            verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             generation_census_reader: None,
             retained_project_server_resolver: None,

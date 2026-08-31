@@ -22,8 +22,8 @@ use tracedecay_domain::{SessionId, TemporalModeV1, UtcMicros};
 use tracedecay_session_temporal_store::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
-use tracedecay_sessions::runtime::lcm::LcmStatus;
-use tracedecay_sessions::runtime::lcm::types::LcmPayloadCoverageState;
+use tracedecay_lcm::LcmStatus;
+use tracedecay_lcm::types::LcmPayloadCoverageState;
 use tracedecay_sessions::runtime::{SessionMessageType, SessionSearchScope};
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOperation, LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest,

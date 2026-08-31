@@ -31,20 +31,20 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::advisory::GitHubRepositoryTargetV1;
 
-use super::{
-    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationState,
-};
+use super::DaemonInvocationState;
 use tracedecay_application::request_identity::{PreviewIdentityDomain, derive_preview_identity};
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
-use crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar;
 use crate::mcp::McpServer;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_daemon_service::{
+    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
+    DaemonNativeIntegrationRuntimeRegistrar, DaemonWorkProposalRoutingAuthorityV1,
+};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
@@ -79,7 +79,7 @@ const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
 const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
-pub(super) use crate::daemon::service::invocation::{
+pub(super) use tracedecay_daemon_service::{
     LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1,
 };
 
@@ -530,12 +530,11 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
             message: "project-open source edit preview requires authoritative project identity"
                 .to_owned(),
         })?;
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
-        .map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("project-open source edit preview scope denied: {error}"),
-        }
-    })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open source edit preview scope denied: {error}"),
+            })?;
     let authorization = ProjectOpenSourceEditAuthorizationV1 {
         project_root: project_root.to_path_buf(),
         scope,
@@ -571,12 +570,11 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
         .configuration_target()
         .project_id
         .clone();
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
-        .map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("test project-open resolved scope denied: {error}"),
-        }
-    })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("test project-open resolved scope denied: {error}"),
+            })?;
     let authorization = ProjectOpenSourceEditAuthorizationV1 {
         project_root,
         scope,
@@ -631,12 +629,11 @@ pub(super) async fn register_project_open_production_owners(
             message: "project-open owners require the daemon-owned project session database"
                 .to_owned(),
         })?;
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
-        .map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("project-open resolved scope denied: {error}"),
-        }
-    })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open resolved scope denied: {error}"),
+            })?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -859,16 +856,15 @@ pub(super) async fn register_project_open_production_owners(
             message: format!("project-open work topology policy is unavailable: {error}"),
         })?
         .clone();
-    let work_proposal_routing =
-        crate::daemon::service::invocation::DaemonWorkProposalRoutingAuthorityV1::mount(
-            scope.clone(),
-            configuration.revision_id.clone(),
-            &configuration.snapshot,
-            &access.configuration_digest,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open Work proposal routing is unavailable: {error}"),
-        })?;
+    let work_proposal_routing = DaemonWorkProposalRoutingAuthorityV1::mount(
+        scope.clone(),
+        configuration.revision_id.clone(),
+        &configuration.snapshot,
+        &access.configuration_digest,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project-open Work proposal routing is unavailable: {error}"),
+    })?;
     // Project-open has no authenticated GitHub response or persisted source
     // record. It mounts policy and delivery only; the review refresh owner is
     // the sole producer of canonical provider observations and anchors.

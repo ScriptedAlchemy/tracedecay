@@ -25,7 +25,7 @@ fn assert_authoritative_settlement(response: DaemonInvocationResponse) {
 #[tokio::test]
 async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settlement() {
     const REQUEST_ID: &str = "request.in-process-effect-cancel";
-    let lease = crate::daemon::request_cancellation::register(REQUEST_ID)
+    let lease = tracedecay_daemon_service::register(REQUEST_ID)
         .expect("register invocation cancellation");
     let daemon_cancellation = lease.token();
     let completed = Arc::new(AtomicBool::new(false));
@@ -66,7 +66,7 @@ async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settle
 #[tokio::test]
 async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement() {
     const REQUEST_ID: &str = "request.in-process-effect-deadline";
-    let lease = crate::daemon::request_cancellation::register(REQUEST_ID)
+    let lease = tracedecay_daemon_service::register(REQUEST_ID)
         .expect("register invocation cancellation");
     let daemon_cancellation = lease.token();
     let completed = Arc::new(AtomicBool::new(false));
@@ -100,7 +100,7 @@ async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement
 #[tokio::test(start_paused = true)]
 async fn in_process_effect_without_settlement_returns_reset_required() {
     const REQUEST_ID: &str = "request.in-process-effect-no-settlement";
-    let lease = crate::daemon::request_cancellation::register(REQUEST_ID)
+    let lease = tracedecay_daemon_service::register(REQUEST_ID)
         .expect("register invocation cancellation");
     let invocation = tokio::spawn(std::future::pending::<DaemonInvocationResponse>());
 
@@ -134,7 +134,7 @@ async fn in_process_effect_without_settlement_returns_reset_required() {
 #[tokio::test]
 async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
     const REQUEST_ID: &str = "request.in-process-admitted-cancellation";
-    let registry = crate::daemon::service::project_runtime::ProjectRuntimeRegistryV1::default();
+    let registry = tracedecay_daemon_service::ProjectRuntimeRegistryV1::default();
     let project = std::path::PathBuf::from("/projects/in-process-admitted-cancellation");
     registry
         .publish(
@@ -146,7 +146,7 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
     let admission = registry
         .admit_request(&project, None)
         .expect("admit outer project request");
-    let lease = crate::daemon::request_cancellation::register(REQUEST_ID)
+    let lease = tracedecay_daemon_service::register(REQUEST_ID)
         .expect("register invocation cancellation");
     let admitted_cancellation = lease.token();
     let (started, started_rx) = tokio::sync::oneshot::channel::<()>();

@@ -13,8 +13,8 @@ use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, Reque
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 use super::json_result;
 use tracedecay_mcp::ToolResult;

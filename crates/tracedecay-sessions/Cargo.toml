@@ -18,6 +18,7 @@ hotpath = [
     "tracedecay-capture/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-graph-db/hotpath",
+    "tracedecay-lcm/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
@@ -32,6 +33,7 @@ hotpath-alloc = [
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-lcm/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
@@ -46,6 +48,7 @@ hotpath-cpu = [
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-lcm/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
@@ -77,6 +80,7 @@ tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }

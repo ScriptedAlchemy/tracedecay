@@ -11,9 +11,11 @@ use super::shutdown_orchestration::{DaemonShutdownFailures, DaemonShutdownReceip
 /// persistence and WAL checkpoints). Must stay comfortably below systemd's
 /// stop timeout (90s by default) so the daemon exits cleanly instead of
 /// being killed with `SIGKILL` mid-checkpoint.
-pub(crate) const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
+pub(crate) const DAEMON_SHUTDOWN_DEADLINE: Duration =
+    tracedecay_daemon_service::RUNTIME_SHUTDOWN_DEADLINE;
 pub(crate) const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
-pub(crate) const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
+pub(crate) const DAEMON_TASK_ABORT_DEADLINE: Duration =
+    tracedecay_daemon_service::TASK_ABORT_DEADLINE;
 
 /// Per-phase shutdown budgets.
 ///

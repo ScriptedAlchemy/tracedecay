@@ -15,9 +15,6 @@ use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
-use super::service::invocation::{
-    DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
-};
 use crate::application_surface::ApplicationSurfaceOperation;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::{
@@ -26,6 +23,9 @@ use tracedecay_application::{
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_daemon_protocol::invocation_now_micros;
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
+use tracedecay_daemon_service::{
+    DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
+};
 use tracedecay_dashboard_api::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,

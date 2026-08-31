@@ -19,12 +19,12 @@ use super::{
     enter_test_daemon_database_scope, test_client_identity_for, test_daemon_engine_for_profile,
     test_handshake_defaults,
 };
-use crate::daemon::service::invocation::{
-    DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationRequest, parse_daemon_invocation_request,
-};
 use crate::daemon::{
     DaemonHandshake, execute_daemon_invocation, execute_portable_daemon_invocation,
+};
+use tracedecay_daemon_service::{
+    DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
+    DaemonInvocationRequest, cancel, parse_daemon_invocation_request,
 };
 
 fn git(root: &Path, args: &[&str]) {
@@ -166,15 +166,9 @@ async fn run_multi_root_quiescence() {
     let cancelled_read_id = "request.multi-root.cancelled-read";
     let cancelled_cas_id = "request.multi-root.cancelled-cas";
     let cancelled_execute_id = "request.multi-root.cancelled-execute";
-    assert!(!crate::daemon::request_cancellation::cancel(
-        cancelled_read_id
-    ));
-    assert!(!crate::daemon::request_cancellation::cancel(
-        cancelled_cas_id
-    ));
-    assert!(!crate::daemon::request_cancellation::cancel(
-        cancelled_execute_id
-    ));
+    assert!(!cancel(cancelled_read_id));
+    assert!(!cancel(cancelled_cas_id));
+    assert!(!cancel(cancelled_execute_id));
     let interrupted = [
         (
             DaemonInvocationRequest::multi_root_scope_set_read(

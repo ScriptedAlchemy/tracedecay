@@ -28,9 +28,10 @@ where
     F: FnOnce(
             &Path,
             &tracedecay_application::branch_snapshots::LocalBranchReadControlV1,
-        )
-            -> std::result::Result<T, tracedecay_application::branch_snapshots::LocalBranchSnapshotErrorV1>
-        + Send
+        ) -> std::result::Result<
+            T,
+            tracedecay_application::branch_snapshots::LocalBranchSnapshotErrorV1,
+        > + Send
         + 'static,
 {
     let permit = Arc::clone(&BRANCH_REF_READ_ADMISSION)
@@ -565,16 +566,18 @@ pub(crate) async fn handle_branch_diff(
             deadline.clone(),
             cancellation.clone(),
             move |root, control| {
-                let base = tracedecay_application::branch_snapshots::local_branch_revision_controlled(
-                    root,
-                    &resolution_base,
-                    control,
-                )?;
-                let head = tracedecay_application::branch_snapshots::local_branch_revision_controlled(
-                    root,
-                    &resolution_head,
-                    control,
-                )?;
+                let base =
+                    tracedecay_application::branch_snapshots::local_branch_revision_controlled(
+                        root,
+                        &resolution_base,
+                        control,
+                    )?;
+                let head =
+                    tracedecay_application::branch_snapshots::local_branch_revision_controlled(
+                        root,
+                        &resolution_head,
+                        control,
+                    )?;
                 Ok((base, head))
             },
         ),

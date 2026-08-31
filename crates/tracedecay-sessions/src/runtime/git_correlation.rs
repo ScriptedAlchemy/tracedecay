@@ -34,7 +34,9 @@ pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 4;
 pub const GIT_EVIDENCE_PROJECTOR_REVISION_V1: &str = "session-git-evidence-projector.v1";
 pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
-pub const MAX_SESSIONS_FOR_LIMIT: usize = 100;
+// The scope value type and session cap are owned by the LCM engine crate so
+// its grep filters and this correlation engine narrow by the same rules.
+pub use tracedecay_lcm::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
 pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
 pub const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
 
@@ -439,29 +441,21 @@ impl GitRefFilter {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitScopeFilter {
-    pub branch: Option<String>,
-    pub worktree: Option<String>,
-    pub commit: Option<String>,
-}
-
-impl GitScopeFilter {
-    pub fn from_args(
-        branch: Option<&str>,
-        worktree: Option<&str>,
-        commit: Option<&str>,
-    ) -> Result<Self, GitCorrelationError> {
-        Ok(Self {
-            branch: nonempty(branch).map(str::to_owned),
-            worktree: nonempty(worktree).map(normalize_worktree),
-            commit: nonempty(commit).map(parse_commit_sha).transpose()?,
-        })
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.branch.is_none() && self.worktree.is_none() && self.commit.is_none()
-    }
+/// Parse and normalize raw scope arguments into a [`GitScopeFilter`].
+///
+/// The value type lives in `tracedecay-lcm`; this constructor stays here
+/// because worktree normalization and commit-SHA validation are
+/// correlation-engine rules.
+pub fn git_scope_filter_from_args(
+    branch: Option<&str>,
+    worktree: Option<&str>,
+    commit: Option<&str>,
+) -> Result<GitScopeFilter, GitCorrelationError> {
+    Ok(GitScopeFilter {
+        branch: nonempty(branch).map(str::to_owned),
+        worktree: nonempty(worktree).map(normalize_worktree),
+        commit: nonempty(commit).map(parse_commit_sha).transpose()?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -9,16 +9,17 @@ use tracedecay_application::{
     CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
     SafeDiagnostic,
 };
+use tracedecay_daemon_service::callable_code_request_context;
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
-use tracedecay_usecases::{
-    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
-    ProjectSourceAccessSnapshot,
-};
 use tracedecay_usecases::configuration::{
     ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
 };
 use tracedecay_usecases::graph::CodeGraphReadError;
+use tracedecay_usecases::{
+    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
+    ProjectSourceAccessSnapshot,
+};
 
 type CurrentAccessFuture<'a> = Pin<
     Box<dyn Future<Output = Result<ProjectSourceAccessSnapshot, ApplicationProblem>> + Send + 'a>,
@@ -151,7 +152,7 @@ impl DaemonCodeGraphReadAdmission {
         if access.scope != self.scope {
             return Err(CodeGraphReadError::Denied);
         }
-        let context = crate::daemon::service::invocation::callable_code_request_context(
+        let context = callable_code_request_context(
             &self.scope,
             &access,
             request.request_id.as_str(),

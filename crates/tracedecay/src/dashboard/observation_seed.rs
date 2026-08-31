@@ -24,8 +24,8 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 
 /// One canonical message observation to seed for a dashboard fixture session.
 pub struct DashboardSessionMessageSeedV1<'a> {

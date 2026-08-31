@@ -27,8 +27,8 @@ use tracedecay_domain::configuration::{
 };
 
 use tracedecay_global_db::configuration::{
-    GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerCommitV1,
-    ProfileCodeIndexWorkerConfigurationStore, ProfileCodeIndexWorkerConfigurationV1,
+    GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
+    ProfileCodeIndexWorkerConfigurationV1,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
@@ -268,7 +268,7 @@ fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
 pub struct RetentionConfig {
     /// Session-store (LCM raw/projected) retention windows.
     #[serde(default)]
-    pub session_lcm: tracedecay_sessions::runtime::lcm::LcmRetentionConfig,
+    pub session_lcm: tracedecay_lcm::LcmRetentionConfig,
     /// Observation-evidence generation-scoped retention windows.
     #[serde(default)]
     pub observation: tracedecay_global_db::observation::retention::ObservationRetentionConfig,
@@ -295,7 +295,7 @@ pub struct RetentionConfig {
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
-            session_lcm: tracedecay_sessions::runtime::lcm::LcmRetentionConfig::default(),
+            session_lcm: tracedecay_lcm::LcmRetentionConfig::default(),
             observation:
                 tracedecay_global_db::observation::retention::ObservationRetentionConfig::default(),
             orphan_store_gc_days: default_orphan_store_gc_days(),
@@ -1050,33 +1050,6 @@ pub(crate) async fn read_or_initialize_profile_code_index_worker_configuration(
             .map_err(map_configuration_error)?;
     store
         .read_or_initialize(now_micros())
-        .await
-        .map_err(map_configuration_error)
-}
-
-pub(crate) fn profile_code_index_worker_mutation(
-    database: &RegisteredGlobalDb,
-    profile_id: &UserProfileId,
-    selection: CodeIndexWorkerSelectionV1,
-) -> Result<tracedecay_usecases::configuration::DirectConfigurationMutation> {
-    ProfileCodeIndexWorkerConfigurationStore::new_registered(database, profile_id)
-        .and_then(|store| store.mutation(selection))
-        .map_err(map_configuration_error)
-}
-
-#[hotpath::measure(label = "daemon.config.profile_workers.commit", future = true)]
-pub(crate) async fn commit_profile_code_index_worker_selection(
-    database: RegisteredGlobalDbLeaseV1,
-    profile_id: &UserProfileId,
-    authority: &tracedecay_usecases::configuration::ConfigurationMutationAuthority,
-    selection: CodeIndexWorkerSelectionV1,
-    expected_revision: &ConfigurationRevisionId,
-) -> Result<ProfileCodeIndexWorkerCommitV1> {
-    let store =
-        ProfileCodeIndexWorkerConfigurationStore::new_registered(database.as_ref(), profile_id)
-            .map_err(map_configuration_error)?;
-    store
-        .commit_selection(authority, selection, expected_revision)
         .await
         .map_err(map_configuration_error)
 }

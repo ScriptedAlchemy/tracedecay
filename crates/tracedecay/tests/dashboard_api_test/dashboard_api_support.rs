@@ -19,7 +19,7 @@ pub(crate) use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
 };
 pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
-pub(crate) use tracedecay_sessions::runtime::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+pub(crate) use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 pub(crate) fn test_fact_write_control() -> tracedecay_store::FactWriteControl {

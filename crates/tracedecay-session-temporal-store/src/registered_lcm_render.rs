@@ -8,14 +8,14 @@ use super::relations::{SummaryRelationRead, SummarySourceRef as GraphSummarySour
 use super::render::apply_canonical_content;
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, Value, params, params_from_iter};
-use tracedecay_sessions::lcm::contracts::{
+use tracedecay_lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
     LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget,
     LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessageMetadata, LcmRawMessageOverview,
     LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
-use tracedecay_sessions::runtime::lcm::raw::{
+use tracedecay_lcm::raw::{
     RAW_MESSAGE_METADATA_SELECT_COLUMNS, raw_message_metadata_from_row,
 };
 
@@ -107,7 +107,7 @@ pub(super) async fn describe(
     };
 
     let session_token_estimate = if target == "session" {
-        let store = tracedecay_sessions::runtime::lcm::query::store_status(
+        let store = tracedecay_lcm::query::store_status(
             snapshot,
             provider,
             Some(session_id),

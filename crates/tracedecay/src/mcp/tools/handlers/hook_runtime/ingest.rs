@@ -3,10 +3,10 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
 use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
@@ -19,10 +19,10 @@ use tracedecay_usecases::session::lcm::{
 
 use super::super::SessionAuthorities;
 
+use super::required_str;
 use tracedecay_mcp::{
     hook_admission_error, map_claude_observation_ingest_error, map_transcript_ingest_error,
 };
-use super::required_str;
 
 mod kernels;
 
@@ -497,7 +497,7 @@ fn pressure_only_command(
     protocol: LcmHostProtocol,
 ) -> LcmAuthorityRequest {
     LcmAuthorityRequest::Compact(LcmCompactionCommand {
-        preflight: tracedecay_sessions::runtime::lcm::LcmPreflightRequest {
+        preflight: tracedecay_lcm::LcmPreflightRequest {
             provider: provider.to_owned(),
             session_id: session_id.to_string(),
             messages: Vec::new(),

@@ -1,21 +1,18 @@
 use std::path::Path;
 
 use tracedecay_domain::SessionId;
-use tracedecay_sessions::runtime::{
-    SessionMessageRecord, SessionStoreAccess,
-    lcm::{
-        LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest, LcmDescribeResponse,
-        LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest,
-        LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepOutcome, LcmGrepRequest,
-        LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest, LcmPreflightResponse,
-        LcmRecentSession, LcmRelationProjectionStatus, LcmSessionBoundaryRequest,
-        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus,
-        LcmSummaryExpansion, compression,
-        dag::LcmSummaryPublicationPort,
-        payload,
-        types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
-    },
+use tracedecay_lcm::{
+    LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest, LcmDescribeResponse,
+    LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest, LcmExpandResponse,
+    LcmGcConfig, LcmGcReport, LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage,
+    LcmLoadSessionRequest, LcmPreflightRequest, LcmPreflightResponse, LcmRecentSession,
+    LcmRelationProjectionStatus, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
+    LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus, LcmSummaryExpansion, compression,
+    dag::LcmSummaryPublicationPort,
+    payload,
+    types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
 };
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionStoreAccess};
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::RegisteredGlobalDb;
@@ -307,7 +304,7 @@ impl RegisteredGlobalDb {
         deep: bool,
         sample_limit: usize,
         cfg: &LcmGcConfig,
-    ) -> Result<tracedecay_sessions::runtime::lcm::query::PayloadHealthDetail, LcmError> {
+    ) -> Result<tracedecay_lcm::query::PayloadHealthDetail, LcmError> {
         SessionStoreAccess::new(self)
             .lcm_payload_health_detail(storage_root, provider, session_id, deep, sample_limit, cfg)
             .await

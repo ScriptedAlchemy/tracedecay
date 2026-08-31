@@ -25,8 +25,8 @@ use serde_json::{Value, json};
 
 use super::support::{generic_tool_result, require_object_args, unique_file_paths};
 use crate::tracedecay::TraceDecay;
-use tracedecay_mcp::ToolResult;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::ToolResult;
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 struct GitFileChange {

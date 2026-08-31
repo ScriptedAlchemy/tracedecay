@@ -6,11 +6,11 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::lcm::payload::DeleteOpts;
-use tracedecay_sessions::runtime::lcm::types::{
+use tracedecay_lcm::payload::DeleteOpts;
+use tracedecay_lcm::types::{
     LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt,
 };
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LCM_SCHEMA_VERSION, LcmContentSlice, LcmError, LcmExpandRequest, LcmExpandResponse,
     LcmExpandTarget, LcmRawMessage, LcmSourceRef, LcmStatus, LcmStorageKind, LcmSummaryNode,
     LcmSummaryNodeDraft,
@@ -27,7 +27,7 @@ fn externalized_tool_payload(prefix: &str, fill: char) -> String {
         fill.to_string().repeat(TOOL_PAYLOAD_FIXTURE_FILLER_CHARS)
     );
     assert!(
-        tracedecay_sessions::runtime::lcm::security::should_externalize(
+        tracedecay_lcm::security::should_externalize(
             "tool",
             Some("tool_result"),
             &payload,
@@ -925,7 +925,7 @@ async fn externalizes_large_tool_payload_with_recoverable_ref() {
     let payload_ref = raw.payload_ref.as_deref().expect("payload ref");
     assert!(payload_ref.ends_with(".payload"));
     assert_eq!(Path::new(payload_ref).file_name().unwrap(), payload_ref);
-    assert!(tracedecay_sessions::runtime::lcm::payload::validate_payload_ref(payload_ref).is_ok());
+    assert!(tracedecay_lcm::payload::validate_payload_ref(payload_ref).is_ok());
 
     let expanded = store
         .lcm_expand_payload(
@@ -1025,7 +1025,7 @@ async fn lcm_status_reports_missing_and_orphan_payloads_without_previewing_conte
         .payload_ref
         .expect("payload ref");
 
-    let payload_dir = tracedecay_sessions::runtime::lcm::payload::payload_dir(&storage_root);
+    let payload_dir = tracedecay_lcm::payload::payload_dir(&storage_root);
     std::fs::remove_file(payload_dir.join(&payload_ref)).unwrap();
     std::fs::write(payload_dir.join("orphan.payload"), "ORPHAN_PAYLOAD_SECRET").unwrap();
 
@@ -1123,7 +1123,7 @@ async fn delete_external_payload_rejects_referenced_payload_without_hash_verific
         .payload_ref
         .expect("payload ref");
     let payload_path =
-        tracedecay_sessions::runtime::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+        tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     assert!(payload_path.exists());
 
     let result = db
@@ -1235,7 +1235,7 @@ async fn external_payload_write_rejects_preexisting_symlink_ref() {
 
     let payload = externalized_tool_payload("tool output\n", 'C');
     let payload_ref = expected_payload_ref("cursor", "session-1", "tool-symlink", &payload);
-    let payload_dir = tracedecay_sessions::runtime::lcm::payload::payload_dir(&storage_root);
+    let payload_dir = tracedecay_lcm::payload::payload_dir(&storage_root);
     std::fs::create_dir_all(&payload_dir).unwrap();
     let outside_target = tmp.path().join("outside-target.txt");
     std::fs::write(&outside_target, "do not overwrite").unwrap();
@@ -1267,7 +1267,7 @@ async fn external_payload_write_rejects_symlinked_payload_directory() {
     std::fs::create_dir_all(&storage_root).unwrap();
     let outside_dir = tmp.path().join("outside-payloads");
     std::fs::create_dir_all(&outside_dir).unwrap();
-    let payload_dir = tracedecay_sessions::runtime::lcm::payload::payload_dir(&storage_root);
+    let payload_dir = tracedecay_lcm::payload::payload_dir(&storage_root);
     symlink(&outside_dir, &payload_dir).unwrap();
 
     let db = open_lcm_db(&tmp).await;
@@ -1410,7 +1410,7 @@ async fn redaction_applies_before_whole_message_externalization() {
 
     // The durable payload body was redacted before it ever hit disk.
     let payload_path =
-        tracedecay_sessions::runtime::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+        tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     let payload_body = std::fs::read_to_string(&payload_path).expect("payload file should exist");
     assert!(!payload_body.contains(secret));
     assert!(payload_body.contains("[TraceDecay redacted: credential assignment]"));

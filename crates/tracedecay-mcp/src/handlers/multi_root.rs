@@ -12,6 +12,7 @@ use tracedecay_application::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
+use crate::ToolResult;
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
     DaemonInvocationExecutor, InvocationCancellationPolicy, invocation_now_micros,
@@ -20,7 +21,6 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
     DaemonInvocationResponse,
 };
-use crate::ToolResult;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 fn json_result(value: &Value) -> ToolResult {

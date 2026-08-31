@@ -17,8 +17,8 @@ use tracedecay_dashboard_api::{
     DashboardLcmReadFutureV1, DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1,
     DashboardLcmReadRequestV1, DashboardLcmReadStateV1,
 };
+use tracedecay_lcm::{LcmDescribeResponse, LcmDescribeTarget};
 use tracedecay_sessions::runtime::SessionSearchTimeRange;
-use tracedecay_sessions::runtime::lcm::{LcmDescribeResponse, LcmDescribeTarget};
 
 use crate::daemon::session_retrieval::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, SessionApplicationRetrievalPortV1,

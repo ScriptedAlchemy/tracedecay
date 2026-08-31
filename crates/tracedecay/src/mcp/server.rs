@@ -18,12 +18,12 @@ use crate::mcp::tool_analytics::{
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_daemon_protocol::wire::is_wire_oversized_io_error;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
 use tracedecay_mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
@@ -333,6 +333,8 @@ pub struct McpServer {
     code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
     code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
+    verified_graph_query_port:
+        Option<Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>>,
     code_index_ignored_dependency_admission: Option<CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
@@ -444,7 +446,7 @@ pub struct McpServer {
     /// External/direct servers fall back to the authenticated socket client.
     application_invocation_executor:
         Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
-    daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
+    daemon_invocation_service: Option<tracedecay_daemon_service::DaemonInvocationService>,
     delivery_settlement_authority:
         Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
     delivery_settlement_recorder:
@@ -601,10 +603,8 @@ impl McpServer {
                 tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
             })
             .await
-            .map_err(|error| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("test server host-admission task failed: {error}"),
-                }
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("test server host-admission task failed: {error}"),
             })?;
             let (admission_runtime, _) = admission_runtime?;
             context.host_admission_broker = Some(Arc::new(
@@ -634,12 +634,9 @@ impl McpServer {
         context
             .host_admission_test_runtime
             .as_ref()
-            .ok_or_else(
-                || tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "registered test context is missing its host-admission runtime"
-                        .to_owned(),
-                },
-            )?;
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "registered test context is missing its host-admission runtime".to_owned(),
+            })?;
         let retained_root = context.cg.project_root().to_path_buf();
         // The daemon always has the active project mounted, so its resolver can
         // serve it like any other registered project. Mirror that here through
@@ -687,13 +684,11 @@ impl McpServer {
                         return Ok(matches.pop());
                     }
                     if !matches.is_empty() {
-                        return Err(
-                            tracedecay_domain::errors::TraceDecayError::project_route(
-                                "project_route_ambiguous",
-                                false,
-                                "multiple retained test servers match one registered project route",
-                            ),
-                        );
+                        return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                            "project_route_ambiguous",
+                            false,
+                            "multiple retained test servers match one registered project route",
+                        ));
                     }
                     let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
                     let Some(active) = active else {
@@ -780,6 +775,7 @@ impl McpServer {
             code_index_branch_diff_executor,
             code_graph_projection_read_port,
             code_graph_read_admission_port,
+            verified_graph_query_port,
             code_index_ignored_dependency_admission,
             code_index_search_authority,
             retained_project_server_resolver,
@@ -1040,6 +1036,7 @@ impl McpServer {
             code_index_branch_diff_executor,
             code_graph_projection_read_port,
             code_graph_read_admission_port,
+            verified_graph_query_port,
             code_index_ignored_dependency_admission,
             generation_census_reader: tokio::sync::OnceCell::new(),
             source_edit_executor: tokio::sync::OnceCell::new(),

@@ -24,7 +24,7 @@ use tracedecay_domain::{
     ValidCoverageIntervalV1 as DomainValidCoverageIntervalV1, canonical_sha256,
 };
 use tracedecay_sessions::WorkflowIndexReadPort;
-use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
+use tracedecay_sessions::runtime::git_correlation::{GitScopeFilter, git_scope_filter_from_args};
 use tracedecay_sessions::runtime::{
     ProviderScope, SessionMessageRecord, SessionMessageSearchResult, SessionMessageType,
     SessionRecord, SessionSearchScope,
@@ -401,7 +401,7 @@ impl MessageSearchInput {
         let worktree = optional_string(request.worktree.as_deref())?;
         let commit = optional_string(request.commit.as_deref())?;
         let git =
-            GitScopeFilter::from_args(branch.as_deref(), worktree.as_deref(), commit.as_deref())
+            git_scope_filter_from_args(branch.as_deref(), worktree.as_deref(), commit.as_deref())
                 .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
         Ok(Self {
             query,

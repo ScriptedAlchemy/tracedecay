@@ -1,5 +1,10 @@
 //! Per-project invocation admission and direct multi-root routing.
 
+use tracedecay_daemon_service::{
+    DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationPayload,
+    DaemonInvocationProblem, Lease, register,
+};
+
 use super::*;
 
 impl DaemonInvocationState {
@@ -15,29 +20,26 @@ impl DaemonInvocationState {
         }
         let direct_request_cancellation_lease = if matches!(
             &request.payload,
-            service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead { .. }
-                | service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
-                | service::invocation::DaemonInvocationPayload::MultiRootExecute { .. }
+            DaemonInvocationPayload::MultiRootScopeSetRead { .. }
+                | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
+                | DaemonInvocationPayload::MultiRootExecute { .. }
         ) && request_cancellation.is_none()
         {
-            let Some(lease) = crate::daemon::request_cancellation::register(&request.request_id)
-            else {
+            let Some(lease) = register(&request.request_id) else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    DaemonInvocationProblem::InvalidRequest,
                 );
             };
             Some(lease)
         } else {
             None
         };
-        let direct_request_cancellation = request_cancellation.clone().or_else(|| {
-            direct_request_cancellation_lease
-                .as_ref()
-                .map(crate::daemon::request_cancellation::Lease::token)
-        });
+        let direct_request_cancellation = request_cancellation
+            .clone()
+            .or_else(|| direct_request_cancellation_lease.as_ref().map(Lease::token));
         let request_project_path = request.requires_project().then_some(project_path).flatten();
-        if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead {
+        if let DaemonInvocationPayload::MultiRootScopeSetRead {
             request: scope_set_request,
             observed_at,
             deadline,
@@ -47,7 +49,7 @@ impl DaemonInvocationState {
             let Some(active_project_root) = request_project_path else {
                 return DaemonInvocationResponse::problem(
                     request.request_id.clone(),
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
                 );
             };
             let Some(_project_request_lease) =
@@ -55,7 +57,7 @@ impl DaemonInvocationState {
             else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
-                    service::invocation::DaemonInvocationProblem::Unavailable,
+                    DaemonInvocationProblem::Unavailable,
                 );
             };
             if cancellation.is_cancelled()
@@ -100,7 +102,7 @@ impl DaemonInvocationState {
             else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    DaemonInvocationProblem::InvalidRequest,
                 );
             };
             let Some((scope, outcome)) = self
@@ -118,18 +120,15 @@ impl DaemonInvocationState {
             else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
-                    service::invocation::DaemonInvocationProblem::Unavailable,
+                    DaemonInvocationProblem::Unavailable,
                 );
             };
             return DaemonInvocationResponse::with_outcome(
                 request.request_id,
-                service::invocation::DaemonInvocationOutcome::MultiRootScopeSetRead {
-                    scope,
-                    outcome,
-                },
+                DaemonInvocationOutcome::MultiRootScopeSetRead { scope, outcome },
             );
         }
-        if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
+        if let DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
             request: scope_set_request,
             observed_at,
             deadline,
@@ -139,7 +138,7 @@ impl DaemonInvocationState {
             let Some(active_project_root) = request_project_path else {
                 return DaemonInvocationResponse::problem(
                     request.request_id.clone(),
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
                 );
             };
             let Some(_project_request_lease) =
@@ -147,7 +146,7 @@ impl DaemonInvocationState {
             else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
-                    service::invocation::DaemonInvocationProblem::Unavailable,
+                    DaemonInvocationProblem::Unavailable,
                 );
             };
             if cancellation.is_cancelled()
@@ -174,7 +173,7 @@ impl DaemonInvocationState {
                 let Some(lease) = self.service.admit_project_request(&selector.root) else {
                     return DaemonInvocationResponse::problem(
                         request.request_id.clone(),
-                        service::invocation::DaemonInvocationProblem::Unavailable,
+                        DaemonInvocationProblem::Unavailable,
                     );
                 };
                 _selected_project_request_leases.push(lease);
@@ -196,7 +195,7 @@ impl DaemonInvocationState {
             else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    DaemonInvocationProblem::InvalidRequest,
                 );
             };
             return match self
@@ -227,15 +226,12 @@ impl DaemonInvocationState {
                     else {
                         return DaemonInvocationResponse::problem(
                             request.request_id,
-                            service::invocation::DaemonInvocationProblem::Unavailable,
+                            DaemonInvocationProblem::Unavailable,
                         );
                     };
                     DaemonInvocationResponse::with_outcome(
                         request.request_id,
-                        service::invocation::DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap {
-                            scope,
-                            outcome,
-                        },
+                        DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { scope, outcome },
                     )
                 }
                 None if direct_request_cancellation
@@ -255,11 +251,11 @@ impl DaemonInvocationState {
                 }
                 None => DaemonInvocationResponse::problem(
                     request.request_id,
-                    service::invocation::DaemonInvocationProblem::Unavailable,
+                    DaemonInvocationProblem::Unavailable,
                 ),
             };
         }
-        if let service::invocation::DaemonInvocationPayload::MultiRootExecute {
+        if let DaemonInvocationPayload::MultiRootExecute {
             request: execute_request,
             observed_at,
             deadline,
@@ -269,7 +265,7 @@ impl DaemonInvocationState {
             let Some(active_project_root) = request_project_path else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
                 );
             };
             let Some(_project_request_lease) =
@@ -277,7 +273,7 @@ impl DaemonInvocationState {
             else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
-                    service::invocation::DaemonInvocationProblem::Unavailable,
+                    DaemonInvocationProblem::Unavailable,
                 );
             };
             if cancellation.is_cancelled()
@@ -311,23 +307,22 @@ impl DaemonInvocationState {
                 )
                 .await;
         }
-        let lsp_workspace =
-            if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
-                match request_project_path {
-                    Some(project_path) => {
-                        admitted_lsp_workspace_for_request(
-                            store_administration,
-                            &self.service,
-                            project_path,
-                            &request,
-                        )
-                        .await
-                    }
-                    None => None,
+        let lsp_workspace = if request.operation() == DaemonInvocationOperation::LspOpen {
+            match request_project_path {
+                Some(project_path) => {
+                    admitted_lsp_workspace_for_request(
+                        store_administration,
+                        &self.service,
+                        project_path,
+                        &request,
+                    )
+                    .await
                 }
-            } else {
-                None
-            };
+                None => None,
+            }
+        } else {
+            None
+        };
         let git_service = if invocation_is_git_operation(request.operation()) {
             git_service_for_project_path(store_administration, request_project_path).await
         } else {
@@ -344,9 +339,7 @@ impl DaemonInvocationState {
                 None
             };
         let lsp_frame_session = match &request.payload {
-            service::invocation::DaemonInvocationPayload::LspFrame { session, .. } => {
-                Some(session.clone())
-            }
+            DaemonInvocationPayload::LspFrame { session, .. } => Some(session.clone()),
             _ => None,
         };
         let response = Box::pin(self.service.invoke_with_cancellation(

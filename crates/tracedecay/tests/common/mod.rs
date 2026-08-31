@@ -1185,7 +1185,7 @@ impl LcmTestRuntime {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
+    ) -> Option<tracedecay_lcm::LcmRawMessage> {
         self.runtime
             .lcm_load_raw_message_for_test(provider, message_id)
             .await
@@ -1193,10 +1193,10 @@ impl LcmTestRuntime {
 
     pub async fn lcm_insert_summary_node(
         &self,
-        draft: tracedecay_sessions::runtime::lcm::LcmSummaryNodeDraft,
+        draft: tracedecay_lcm::LcmSummaryNodeDraft,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmSummaryNode,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmSummaryNode,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime
             .lcm_insert_summary_node_for_test(HostAdmissionScope::Profile, draft)
@@ -1205,10 +1205,10 @@ impl LcmTestRuntime {
 
     pub async fn lcm_update_lifecycle(
         &self,
-        update: tracedecay_sessions::runtime::lcm::LcmLifecycleUpdate,
+        update: tracedecay_lcm::LcmLifecycleUpdate,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmLifecycleState,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime
             .lcm_update_lifecycle_for_test(HostAdmissionScope::Profile, update)
@@ -1220,8 +1220,8 @@ impl LcmTestRuntime {
         provider: &str,
         conversation_id: &str,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmLifecycleState,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime
             .lcm_lifecycle_state_for_test(provider, conversation_id)
@@ -1230,20 +1230,20 @@ impl LcmTestRuntime {
 
     pub async fn lcm_preflight(
         &self,
-        request: tracedecay_sessions::runtime::lcm::LcmPreflightRequest,
+        request: tracedecay_lcm::LcmPreflightRequest,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmPreflightResponse,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmPreflightResponse,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime.lcm_preflight_for_test(request).await
     }
 
     pub async fn lcm_compress(
         &self,
-        request: tracedecay_sessions::runtime::lcm::LcmCompressionRequest,
+        request: tracedecay_lcm::LcmCompressionRequest,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmCompressionResponse,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmCompressionResponse,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime.lcm_compress_for_test(request).await
     }
@@ -1253,38 +1253,38 @@ impl LcmTestRuntime {
         provider: &str,
         session_id: Option<&str>,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmStatus,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmStatus,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime.lcm_status_for_test(provider, session_id).await
     }
 
     pub async fn lcm_load_session(
         &self,
-        request: tracedecay_sessions::runtime::lcm::LcmLoadSessionRequest,
+        request: tracedecay_lcm::LcmLoadSessionRequest,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmLoadSessionPage,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmLoadSessionPage,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime.lcm_load_session_for_test(request).await
     }
 
     pub async fn lcm_grep(
         &self,
-        request: tracedecay_sessions::runtime::lcm::LcmGrepRequest,
+        request: tracedecay_lcm::LcmGrepRequest,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmGrepOutcome,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmGrepOutcome,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime.lcm_grep_for_test(request).await
     }
 
     pub async fn lcm_expand(
         &self,
-        request: tracedecay_sessions::runtime::lcm::LcmExpandRequest,
+        request: tracedecay_lcm::LcmExpandRequest,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmExpandResponse,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmExpandResponse,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime.lcm_expand_for_test(request).await
     }
@@ -1295,8 +1295,8 @@ impl LcmTestRuntime {
         session_id: &str,
         node_id: &str,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmSummaryExpansion,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmSummaryExpansion,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime
             .lcm_expand_summary_node_for_test(provider, session_id, node_id)
@@ -1305,10 +1305,10 @@ impl LcmTestRuntime {
 
     pub async fn lcm_session_boundary(
         &self,
-        request: tracedecay_sessions::runtime::lcm::LcmSessionBoundaryRequest,
+        request: tracedecay_lcm::LcmSessionBoundaryRequest,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmSessionBoundaryResponse,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmSessionBoundaryResponse,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime.lcm_session_boundary_for_test(request).await
     }
@@ -1358,7 +1358,7 @@ impl LcmTestStore<'_> {
     pub async fn ingest_raw_message(
         &self,
         message: &SessionMessageRecord,
-    ) -> Result<(), tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<(), tracedecay_lcm::LcmError> {
         self.runtime
             .lcm_ingest_raw_message_for_test(HostAdmissionScope::Profile, message)
             .await
@@ -1372,17 +1372,17 @@ impl LcmTestStore<'_> {
         offset: usize,
         limit: usize,
     ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmExpandResponse,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmExpandResponse,
+        tracedecay_lcm::LcmError,
     > {
         self.runtime
-            .lcm_expand_for_test(tracedecay_sessions::runtime::lcm::LcmExpandRequest {
+            .lcm_expand_for_test(tracedecay_lcm::LcmExpandRequest {
                 provider: provider.to_string(),
                 session_id: session_id.to_string(),
-                target: tracedecay_sessions::runtime::lcm::LcmExpandTarget::ExternalPayload {
+                target: tracedecay_lcm::LcmExpandTarget::ExternalPayload {
                     payload_ref: payload_ref.to_string(),
                 },
-                content_slice: Some(tracedecay_sessions::runtime::lcm::LcmContentSlice {
+                content_slice: Some(tracedecay_lcm::LcmContentSlice {
                     offset,
                     limit,
                 }),

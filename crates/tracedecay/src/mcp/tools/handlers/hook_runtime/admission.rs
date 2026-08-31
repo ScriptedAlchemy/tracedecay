@@ -4,9 +4,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use tracedecay_domain::errors::Result;
 use tracedecay_domain::{ProviderId, SessionId, UtcMicros};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_domain::errors::Result;
 
 use super::context_scout::{
     admit_native_context_scout_lifecycle, hook_v2_context_scout_lifecycle_for_session,
@@ -237,7 +237,7 @@ fn forget_hook_v2_admission_ledger_for_test(data_root: &Path, host: tracedecay_h
 /// idempotency record.
 pub(crate) enum HookV2AdmissionOutcomeV1 {
     Admitted {
-        orchestration: crate::daemon::HookOrchestrationAdmissionV1,
+        orchestration: tracedecay_daemon_service::HookOrchestrationAdmissionV1,
         ready_guidance: Value,
         feedback_notice: Value,
         github_stack_signal_available: bool,
@@ -417,7 +417,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         },
         _ => Value::Null,
     };
-    let orchestration = crate::daemon::admit_registered_hook_orchestration(
+    let orchestration = tracedecay_daemon_service::admit_registered_hook_orchestration(
         envelope.clone(),
         snapshot.binding.clone(),
         lifecycle,

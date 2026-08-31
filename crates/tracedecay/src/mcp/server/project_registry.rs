@@ -19,8 +19,8 @@ use tracedecay_application::{
 use tracedecay_dashboard_api::project_registry::{
     build_project_registry_view, public_code_project_from_record,
 };
-use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
 use tracedecay_domain::errors::Result;
+use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
 
 #[derive(Clone)]
 pub(crate) struct DaemonProjectRegistryReadService {

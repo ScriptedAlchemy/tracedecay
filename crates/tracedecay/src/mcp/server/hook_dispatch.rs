@@ -40,8 +40,7 @@ impl McpServer {
         &self,
         event: &hook_events::HookEvent,
         route_cache: &mut HookProjectRouteCache,
-    ) -> tracedecay_domain::errors::Result<crate::mcp::project_route::ResolvedProjectRoute>
-    {
+    ) -> tracedecay_domain::errors::Result<crate::mcp::project_route::ResolvedProjectRoute> {
         let route = match HookProjectRouteCache::route_cwd(event) {
             Some(cwd) => {
                 crate::mcp::server::routing::resolve_private_project_route(

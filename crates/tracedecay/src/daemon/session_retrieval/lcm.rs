@@ -7,8 +7,8 @@ use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
-use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
+use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
 use tracedecay_temporal_query::TemporalKernelResult;

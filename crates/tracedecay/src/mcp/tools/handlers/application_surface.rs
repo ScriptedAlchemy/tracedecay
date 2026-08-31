@@ -17,8 +17,8 @@ use crate::mcp::tools::dispatch::{
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
-use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::application_output::view::CanonicalHumanView;
 
 pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {

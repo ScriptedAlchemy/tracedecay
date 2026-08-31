@@ -10,6 +10,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::application_surface::ApplicationSurfaceOperation;
+use tracedecay_daemon_service::{
+    DaemonInvocationOperation, DaemonInvocationProblem, ProjectRuntimeRequestLeaseV1,
+    WorkApplicationOutcomeV1, cancel,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::operation_stream::OperationRequestControls;
 
@@ -51,13 +55,13 @@ pub(super) fn denied_root_generation(
     scope: &tracedecay_application::ResolvedScope,
 ) -> std::result::Result<
     tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
-    service::invocation::DaemonInvocationProblem,
+    DaemonInvocationProblem,
 > {
     tracedecay_domain::RootScopeOutcomeV1::new(
         scope.scope_digest.clone(),
         tracedecay_domain::ScopeOutcome::Denied,
     )
-    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)
+    .map_err(|_| DaemonInvocationProblem::InvalidRequest)
 }
 
 pub(super) fn unavailable_root_generation(
@@ -65,13 +69,13 @@ pub(super) fn unavailable_root_generation(
     reason: tracedecay_domain::ScopeUnavailableReasonV1,
 ) -> std::result::Result<
     tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
-    service::invocation::DaemonInvocationProblem,
+    DaemonInvocationProblem,
 > {
     tracedecay_domain::RootScopeOutcomeV1::new(
         scope.scope_digest.clone(),
         tracedecay_domain::ScopeOutcome::Unavailable { reason },
     )
-    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)
+    .map_err(|_| DaemonInvocationProblem::InvalidRequest)
 }
 
 pub(super) fn frozen_root_generation(
@@ -79,32 +83,29 @@ pub(super) fn frozen_root_generation(
     scope_set_digest: &tracedecay_domain::ManifestDigest,
     source_revision: &str,
     operation: &Value,
-) -> std::result::Result<
-    tracedecay_domain::RootGenerationV1,
-    service::invocation::DaemonInvocationProblem,
-> {
+) -> std::result::Result<tracedecay_domain::RootGenerationV1, DaemonInvocationProblem> {
     let collection_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.multi-root.collection.v1",
         scope,
         source_revision,
     ))
-    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+    .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
     let collection_revision = tracedecay_domain::CollectionRevision::new(collection_digest)
-        .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+        .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
     let stack_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.multi-root.stack.v1",
         scope_set_digest,
         operation,
     ))
-    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+    .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
     let stack_revision = tracedecay_domain::StackRevision::new(stack_digest)
-        .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+        .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
     tracedecay_domain::RootGenerationV1::new(
         scope.scope_digest.clone(),
         collection_revision,
         stack_revision,
     )
-    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)
+    .map_err(|_| DaemonInvocationProblem::InvalidRequest)
 }
 
 pub(super) fn explicit_git_state(root: &Path) -> Option<String> {
@@ -129,21 +130,19 @@ pub(super) fn explicit_git_state(root: &Path) -> Option<String> {
 
 fn extract_application_payload<T: serde::Serialize>(
     outcome: &T,
-) -> std::result::Result<Value, service::invocation::DaemonInvocationProblem> {
+) -> std::result::Result<Value, DaemonInvocationProblem> {
     serde_json::to_value(outcome)
         .ok()
         .and_then(|value| value.get("value")?.get("payload").cloned())
-        .ok_or(service::invocation::DaemonInvocationProblem::Unavailable)
+        .ok_or(DaemonInvocationProblem::Unavailable)
 }
 
 pub(super) fn extract_work_application_payload(
-    outcome: &service::invocation::WorkApplicationOutcomeV1,
-) -> std::result::Result<Value, service::invocation::DaemonInvocationProblem> {
+    outcome: &WorkApplicationOutcomeV1,
+) -> std::result::Result<Value, DaemonInvocationProblem> {
     match outcome {
-        service::invocation::WorkApplicationOutcomeV1::Views(outcome) => {
-            extract_application_payload(outcome)
-        }
-        _ => Err(service::invocation::DaemonInvocationProblem::InvalidRequest),
+        WorkApplicationOutcomeV1::Views(outcome) => extract_application_payload(outcome),
+        _ => Err(DaemonInvocationProblem::InvalidRequest),
     }
 }
 
@@ -201,8 +200,7 @@ pub(super) struct InProcessDaemonInvocationExecutor {
     store_administration: StoreAdministration,
     project_path: PathBuf,
     scope: tracedecay_application::ResolvedScope,
-    project_admission:
-        Option<crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1>,
+    project_admission: Option<ProjectRuntimeRequestLeaseV1>,
     admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
 }
 
@@ -228,7 +226,7 @@ impl InProcessDaemonInvocationExecutor {
         store_administration: StoreAdministration,
         project_path: PathBuf,
         scope: tracedecay_application::ResolvedScope,
-        project_admission: crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1,
+        project_admission: ProjectRuntimeRequestLeaseV1,
         admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
     ) -> Self {
         Self {
@@ -601,7 +599,7 @@ async fn settle_in_process_invocation(
         () = tokio::time::sleep(remaining) => true,
     };
     if !has_admitted_cancellation {
-        crate::daemon::request_cancellation::cancel(request_id);
+        cancel(request_id);
     }
     match policy {
         tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly => {
@@ -761,32 +759,30 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
     }
 }
 
-pub(super) fn invocation_is_git_operation(
-    operation: service::invocation::DaemonInvocationOperation,
-) -> bool {
+pub(super) fn invocation_is_git_operation(operation: DaemonInvocationOperation) -> bool {
     matches!(
         operation,
-        service::invocation::DaemonInvocationOperation::GitStatus
-            | service::invocation::DaemonInvocationOperation::GitDiff
-            | service::invocation::DaemonInvocationOperation::GitHistory
-            | service::invocation::DaemonInvocationOperation::GitBlame
-            | service::invocation::DaemonInvocationOperation::GitHunks
-            | service::invocation::DaemonInvocationOperation::GitPreview
-            | service::invocation::DaemonInvocationOperation::GitApply
+        DaemonInvocationOperation::GitStatus
+            | DaemonInvocationOperation::GitDiff
+            | DaemonInvocationOperation::GitHistory
+            | DaemonInvocationOperation::GitBlame
+            | DaemonInvocationOperation::GitHunks
+            | DaemonInvocationOperation::GitPreview
+            | DaemonInvocationOperation::GitApply
     )
 }
 
 pub(super) fn invocation_is_native_integration_operation(
-    operation: service::invocation::DaemonInvocationOperation,
+    operation: DaemonInvocationOperation,
 ) -> bool {
     matches!(
         operation,
-        service::invocation::DaemonInvocationOperation::GitHubStackSignalExpand
-            | service::invocation::DaemonInvocationOperation::NativeIntegrationStackSnapshot
-            | service::invocation::DaemonInvocationOperation::NativeIntegrationPreflight
-            | service::invocation::DaemonInvocationOperation::NativeIntegrationApprove
-            | service::invocation::DaemonInvocationOperation::NativeIntegrationApply
-            | service::invocation::DaemonInvocationOperation::NativeIntegrationStatus
-            | service::invocation::DaemonInvocationOperation::NativeIntegrationCancel
+        DaemonInvocationOperation::GitHubStackSignalExpand
+            | DaemonInvocationOperation::NativeIntegrationStackSnapshot
+            | DaemonInvocationOperation::NativeIntegrationPreflight
+            | DaemonInvocationOperation::NativeIntegrationApprove
+            | DaemonInvocationOperation::NativeIntegrationApply
+            | DaemonInvocationOperation::NativeIntegrationStatus
+            | DaemonInvocationOperation::NativeIntegrationCancel
     )
 }

@@ -24,8 +24,8 @@ use tracedecay_query::temporal::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalPortError, TemporalRetrievalScope,
     TemporalSourceAccess,
 };
-use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content;
-use tracedecay_sessions::runtime::lcm::{LcmStorageKind, raw};
+use tracedecay_lcm::payload::read_verified_payload_content;
+use tracedecay_lcm::{LcmStorageKind, raw};
 
 use super::operations::CanonicalPublicationManifest;
 use super::sql::TemporalSqlRead;

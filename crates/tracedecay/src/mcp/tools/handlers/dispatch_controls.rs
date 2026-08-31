@@ -4,8 +4,8 @@ use serde_json::Value;
 use tracedecay_application::{CancellationSignal, Deadline};
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::{ToolCallRegistryOptions, analytics};
 use tracedecay_mcp::ToolResult;

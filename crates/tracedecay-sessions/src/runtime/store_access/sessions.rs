@@ -7,7 +7,7 @@ use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
-use crate::retrieval_content::{
+use tracedecay_lcm::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
 use crate::runtime::SessionMessageSearchResult;

@@ -497,12 +497,12 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
             .await
             .unwrap();
         let mut payload_rollback =
-            tracedecay_sessions::runtime::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+            tracedecay_lcm::payload::PayloadFileRollback::begin_cancellation_safe(
                 &task_storage_root,
             );
-        let payload = tracedecay_sessions::runtime::lcm::payload::write_external_payload_tracked(
+        let payload = tracedecay_lcm::payload::write_external_payload_tracked(
             &task_storage_root,
-            tracedecay_sessions::runtime::lcm::payload::ExternalPayloadWrite {
+            tracedecay_lcm::payload::ExternalPayloadWrite {
                 provider: "codex",
                 session_id: "cancelled-transaction",
                 message_id: "cancelled-message",
@@ -519,7 +519,7 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
 
     let payload_ref = created_rx.await.expect("payload creation signal");
     let payload_path =
-        tracedecay_sessions::runtime::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+        tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     assert!(payload_path.is_file());
 
     let snapshot = db.read_snapshot().await.unwrap();
@@ -589,7 +589,7 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
 async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     let harness = RegisteredGlobalDbHarness::open("cancelled-lcm-lifecycle").await;
     let db = harness.registered.clone();
-    let update = tracedecay_sessions::runtime::lcm::LcmLifecycleUpdate {
+    let update = tracedecay_lcm::LcmLifecycleUpdate {
         provider: "cursor".to_string(),
         conversation_id: "cancelled-lifecycle".to_string(),
         current_session_id: "cancelled-lifecycle".to_string(),
@@ -597,7 +597,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
         last_finalized_session_id: None,
         last_finalized_frontier_store_id: None,
         maintenance_debt: vec![
-            tracedecay_sessions::runtime::lcm::LcmMaintenanceDebt::RawBacklog {
+            tracedecay_lcm::LcmMaintenanceDebt::RawBacklog {
                 from_store_id: 1,
                 to_store_id: 2,
             },
@@ -608,7 +608,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     let task_update = update.clone();
     let task = tokio::spawn(async move {
         let transaction = task_db.begin_write_transaction().await.unwrap();
-        tracedecay_sessions::runtime::lcm::compression::update_lifecycle(&transaction, task_update)
+        tracedecay_lcm::compression::update_lifecycle(&transaction, task_update)
             .await
             .unwrap();
         written_tx.send(()).unwrap();
@@ -618,7 +618,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     written_rx.await.expect("lifecycle write signal");
     let snapshot = db.read_snapshot().await.unwrap();
     assert!(
-        tracedecay_sessions::runtime::lcm::compression::lifecycle_state(
+        tracedecay_lcm::compression::lifecycle_state(
             &snapshot,
             "cursor",
             "cancelled-lifecycle",
@@ -633,7 +633,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     assert!(task.await.unwrap_err().is_cancelled());
     let snapshot = db.read_snapshot().await.unwrap();
     assert!(
-        tracedecay_sessions::runtime::lcm::compression::lifecycle_state(
+        tracedecay_lcm::compression::lifecycle_state(
             &snapshot,
             "cursor",
             "cancelled-lifecycle",
@@ -645,7 +645,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     drop(snapshot);
 
     let transaction = db.begin_write_transaction().await.unwrap();
-    let state = tracedecay_sessions::runtime::lcm::compression::update_lifecycle(
+    let state = tracedecay_lcm::compression::update_lifecycle(
         &transaction,
         update.clone(),
     )

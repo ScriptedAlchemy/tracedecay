@@ -8,8 +8,8 @@ use std::sync::{
 
 use serde_json::json;
 
-use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
@@ -25,6 +25,7 @@ use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 mod project_retirement;
@@ -464,8 +465,7 @@ pub(super) struct StoreAdministration {
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
-    native_integration_services:
-        Arc<crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar>,
+    native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
     remote_recovery_project_lifecycles:
         remote_recovery_lifecycle::SharedRemoteRecoveryProjectLifecyclesV1,
     #[cfg(unix)]
@@ -519,8 +519,7 @@ impl Default for StoreAdministration {
                 DaemonGitIndexTransactionServiceRegistry::default(),
             ),
             native_integration_services: Arc::new(
-                crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar::default(
-                ),
+                DaemonNativeIntegrationRuntimeRegistrar::default(),
             ),
             remote_recovery_project_lifecycles: Arc::default(),
             #[cfg(unix)]
@@ -1035,7 +1034,7 @@ impl StoreAdministration {
 
     pub(super) fn native_integration_services(
         &self,
-    ) -> &Arc<crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar> {
+    ) -> &Arc<DaemonNativeIntegrationRuntimeRegistrar> {
         &self.native_integration_services
     }
 

@@ -16,13 +16,14 @@ use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
 use tracedecay_automation_runtime::automation::runner::{
     MemoryCuratorAutomationOptions, run_memory_curator_with_backend_for_retained_settlement,
 };
+use tracedecay_daemon_service::DaemonInvocationService;
 
 const MEMORY_CURATOR_REQUEST_TIMEOUT_SECS: u64 = 80;
 
 #[hotpath::measure(label = "daemon.dashboard.automation.curate", future = true)]
 pub(crate) async fn execute_retained_memory_curator(
     cg: &TraceDecay,
-    invocation_service: &crate::daemon::service::invocation::DaemonInvocationService,
+    invocation_service: &DaemonInvocationService,
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &FactStoreCurateRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {

@@ -1405,10 +1405,10 @@ async fn session_reflector_replay_respects_include_summaries_false() {
         .expect("seeded raw message provides summary ownership");
     db.lcm_publish_immutable_summary_for_test(
         HostAdmissionScope::Project,
-        tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication {
+        tracedecay_lcm::types::LcmImmutableSummaryPublication {
             summary_id: "summary.session-reflect-1.no-replay".to_string(),
             predecessor_summary_id: None,
-            draft: tracedecay_sessions::runtime::lcm::LcmSummaryNodeDraft {
+            draft: tracedecay_lcm::LcmSummaryNodeDraft {
                 provider: "cursor".to_string(),
                 conversation_id: "session-reflect-1".to_string(),
                 session_id: "session-reflect-1".to_string(),
@@ -1416,7 +1416,7 @@ async fn session_reflector_replay_respects_include_summaries_false() {
                 summary_text: "summary that should not be replayed when summaries are disabled"
                     .to_string(),
                 source_refs: vec![
-                    tracedecay_sessions::runtime::lcm::LcmSourceRef::RawMessage {
+                    tracedecay_lcm::LcmSourceRef::RawMessage {
                         store_id: source.store_id,
                     },
                 ],

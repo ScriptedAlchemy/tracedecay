@@ -13,7 +13,6 @@ pub(in crate::runtime) use hosts::{opencode_frontier, opencode_part_scan, openco
 pub mod git_correlation;
 mod host_scan;
 pub mod ingest;
-pub mod lcm;
 mod observation;
 pub use observation::snapshot_observation;
 pub(in crate::runtime) use observation::{ingest_byte_budget, jsonl_observation_admission};
@@ -27,6 +26,9 @@ mod workflow;
 pub use workflow::{workflow_index, workflow_ingest, workflow_state};
 
 pub use crate::{ProviderScope, SessionProvider};
+// Shared full-text/LCM retrieval filters are owned by the LCM engine crate;
+// the session search surface re-imports them so both sides filter identically.
+pub use tracedecay_lcm::{SessionMessageType, SessionSearchScope};
 pub use ingest::{
     IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestDisposition,
     TranscriptIngestOutcome, classify_claude_observation_failure,
@@ -84,58 +86,3 @@ impl Default for SessionSearchFilters<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionSearchScope {
-    All,
-    ParentsOnly,
-    SubagentsOnly,
-}
-
-impl SessionSearchScope {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "all" => Some(Self::All),
-            "parents_only" => Some(Self::ParentsOnly),
-            "subagents_only" => Some(Self::SubagentsOnly),
-            _ => None,
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::ParentsOnly => "parents_only",
-            Self::SubagentsOnly => "subagents_only",
-        }
-    }
-}
-
-/// Semantic message filter shared by full-text and LCM retrieval. Providers
-/// sometimes encode tool results with role `user`, so this is intentionally
-/// stronger than the raw role filter.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionMessageType {
-    #[default]
-    All,
-    DirectUser,
-    ToolResult,
-}
-
-impl SessionMessageType {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "all" => Some(Self::All),
-            "direct_user" => Some(Self::DirectUser),
-            "tool_result" => Some(Self::ToolResult),
-            _ => None,
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::DirectUser => "direct_user",
-            Self::ToolResult => "tool_result",
-        }
-    }
-}

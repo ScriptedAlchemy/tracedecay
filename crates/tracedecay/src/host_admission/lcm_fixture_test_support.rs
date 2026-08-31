@@ -634,17 +634,17 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_insert_summary_node_for_test(
         &self,
         scope: HostAdmissionScope,
-        draft: tracedecay_sessions::runtime::lcm::LcmSummaryNodeDraft,
+        draft: tracedecay_lcm::LcmSummaryNodeDraft,
     ) -> std::result::Result<
-        tracedecay_sessions::runtime::lcm::LcmSummaryNode,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmSummaryNode,
+        tracedecay_lcm::LcmError,
     > {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let summary_hash =
-            tracedecay_sessions::retrieval_content::projected_content_hash(&draft.summary_text);
-        let summary_id = tracedecay_sessions::runtime::lcm::dag::summary_node_id(
+            tracedecay_lcm::retrieval_content::projected_content_hash(&draft.summary_text);
+        let summary_id = tracedecay_lcm::dag::summary_node_id(
             &draft.provider,
             &draft.session_id,
             draft.depth,
@@ -654,7 +654,7 @@ impl HostAdmissionTestRuntimeV1 {
         let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         database
             .lcm_publish_immutable_summary_guarded(
-                tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication {
+                tracedecay_lcm::types::LcmImmutableSummaryPublication {
                     summary_id,
                     predecessor_summary_id: None,
                     draft,
@@ -670,20 +670,20 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_update_lifecycle_for_test(
         &self,
         scope: HostAdmissionScope,
-        update: tracedecay_sessions::runtime::lcm::LcmLifecycleUpdate,
+        update: tracedecay_lcm::LcmLifecycleUpdate,
     ) -> std::result::Result<
-        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmLifecycleState,
+        tracedecay_lcm::LcmError,
     > {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let transaction = database
             .begin_write_transaction()
             .await
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let state =
-            tracedecay_sessions::runtime::lcm::compression::update_lifecycle(&transaction, update)
+            tracedecay_lcm::compression::update_lifecycle(&transaction, update)
                 .await?;
         transaction.commit().await?;
         Ok(state)
@@ -693,14 +693,14 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_publish_immutable_summary_for_test(
         &self,
         scope: HostAdmissionScope,
-        publication: tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication,
+        publication: tracedecay_lcm::types::LcmImmutableSummaryPublication,
     ) -> std::result::Result<
-        tracedecay_sessions::runtime::lcm::types::LcmSummaryPublicationReceipt,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::types::LcmSummaryPublicationReceipt,
+        tracedecay_lcm::LcmError,
     > {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         database
             .lcm_publish_immutable_summary_guarded(publication, &control, || Ok(()))
@@ -1163,13 +1163,13 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> std::result::Result<Option<(String, String)>, tracedecay_sessions::runtime::lcm::LcmError>
+    ) -> std::result::Result<Option<(String, String)>, tracedecay_lcm::LcmError>
     {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT snippet_text, index_text
@@ -1188,12 +1188,12 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_raw_message_fts_count_for_test(
         &self,
         query: &str,
-    ) -> std::result::Result<i64, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> std::result::Result<i64, tracedecay_lcm::LcmError> {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT COUNT(*)
@@ -1203,7 +1203,7 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await?;
         let row = rows.next().await?.ok_or_else(|| {
-            tracedecay_sessions::runtime::lcm::LcmError::Db("COUNT(*) returned no row".to_owned())
+            tracedecay_lcm::LcmError::Db("COUNT(*) returned no row".to_owned())
         })?;
         Ok(row.get(0)?)
     }
@@ -1213,13 +1213,13 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> std::result::Result<Option<Option<String>>, tracedecay_sessions::runtime::lcm::LcmError>
+    ) -> std::result::Result<Option<Option<String>>, tracedecay_lcm::LcmError>
     {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT metadata_json
@@ -1239,25 +1239,25 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         payload_ref: &str,
-        opts: &tracedecay_sessions::runtime::lcm::payload::DeleteOpts,
+        opts: &tracedecay_lcm::payload::DeleteOpts,
     ) -> std::result::Result<
-        tracedecay_sessions::runtime::lcm::payload::DeleteOutcome,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::payload::DeleteOutcome,
+        tracedecay_lcm::LcmError,
     > {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let storage_root = database.db_path().parent().ok_or_else(|| {
-            tracedecay_sessions::runtime::lcm::LcmError::Db(
+            tracedecay_lcm::LcmError::Db(
                 "registered session database has no storage root".to_owned(),
             )
         })?;
         let transaction = database
             .begin_write_transaction()
             .await
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let prepared =
-            tracedecay_sessions::runtime::lcm::payload::delete_external_payload_in_transaction(
+            tracedecay_lcm::payload::delete_external_payload_in_transaction(
                 &transaction,
                 storage_root,
                 payload_ref,
@@ -1269,10 +1269,10 @@ impl HostAdmissionTestRuntimeV1 {
         let mut outcome = prepared.outcome;
         if prepared.pending_removal_bytes.is_some() {
             let transaction = database.begin_write_transaction().await.map_err(|error| {
-                tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string())
+                tracedecay_lcm::LcmError::Db(error.to_string())
             })?;
             let drained =
-                tracedecay_sessions::runtime::lcm::gc::drain_pending_payload_delete_in_transaction(
+                tracedecay_lcm::gc::drain_pending_payload_delete_in_transaction(
                     &transaction,
                     storage_root,
                     payload_ref,
@@ -1303,13 +1303,13 @@ impl HostAdmissionTestRuntimeV1 {
         payload_ref: &str,
     ) -> std::result::Result<
         Option<LcmExternalPayloadManifestTestRecord>,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmError,
     > {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT manifest.payload_ref, manifest.session_id,
@@ -1346,12 +1346,12 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_summary_publication_receipt_id_for_test(
         &self,
         summary_id: &str,
-    ) -> std::result::Result<Option<String>, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> std::result::Result<Option<String>, tracedecay_lcm::LcmError> {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT json_extract(publication_json, '$.receipt_id')
@@ -1371,12 +1371,12 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         payload_ref: &str,
         replacement: &LcmExternalPayloadManifestTestRecord,
-    ) -> std::result::Result<(), tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> std::result::Result<(), tracedecay_lcm::LcmError> {
         let transaction = self
             .primary_lcm_fixture_database_for_test()
             .begin_write_transaction()
             .await
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
         transaction
             .execute_batch("DROP TRIGGER session_external_payload_manifests_immutable_update_v1;")
             .await?;
@@ -1414,15 +1414,15 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         conversation_id: &str,
     ) -> std::result::Result<
-        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
-        tracedecay_sessions::runtime::lcm::LcmError,
+        tracedecay_lcm::LcmLifecycleState,
+        tracedecay_lcm::LcmError,
     > {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
-        tracedecay_sessions::runtime::lcm::compression::lifecycle_state(
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        tracedecay_lcm::compression::lifecycle_state(
             &snapshot,
             provider,
             conversation_id,

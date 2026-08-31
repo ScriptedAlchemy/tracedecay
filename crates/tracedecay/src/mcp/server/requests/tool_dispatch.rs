@@ -299,6 +299,7 @@ impl McpServer {
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
                 code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
+                verified_graph_query_port: self.verified_graph_query_port.clone(),
                 code_index_ignored_dependency_admission: self
                     .code_index_ignored_dependency_admission
                     .clone(),

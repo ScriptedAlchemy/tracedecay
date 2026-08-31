@@ -5,7 +5,7 @@
 
 use tracedecay_domain::HydrationStateV1;
 
-use tracedecay_sessions::lcm::contracts::{
+use tracedecay_lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmError, LcmExpandResponse, LcmSourceRef,
 };
 
@@ -127,7 +127,7 @@ pub fn apply_canonical_summary_source_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_sessions::lcm::contracts::{
+    use tracedecay_lcm::contracts::{
         LcmExpandedSummarySource, LcmRawMessage, LcmStorageKind,
     };
 

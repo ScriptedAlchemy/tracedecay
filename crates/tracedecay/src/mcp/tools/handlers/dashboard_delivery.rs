@@ -21,7 +21,7 @@ use tracedecay_usecases::delivery::{ProjectDeliveryReadOutcomeV1, ProjectDeliver
 use tracedecay_usecases::git_query::GitQueryBounds;
 use tracedecay_usecases::git_reads::{GitReadAuthorityV1, GitReadOutcomeV1, GitReadResultV1};
 
-use crate::daemon::DaemonInvocationService;
+use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_dashboard_api::{
     DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1, DashboardHttpRequestControlV1,
 };

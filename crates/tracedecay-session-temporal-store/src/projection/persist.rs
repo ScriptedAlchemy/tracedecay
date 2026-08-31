@@ -9,7 +9,7 @@ use tracedecay_domain::{
     derive_exact_observation_anchor_id,
 };
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_sessions::retrieval_content::projected_content_hash;
+use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_store::{
     SessionMessageProjection, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,

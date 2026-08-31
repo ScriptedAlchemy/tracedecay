@@ -13,10 +13,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);
 static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
@@ -300,43 +300,6 @@ pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
     })
 }
 
-/// Rejects a zero result limit with a typed error.
-///
-/// Handlers clamp a caller-supplied limit with `min(max)`, which leaves an
-/// explicit `"limit": 0` intact, so zero is caller input rather than an
-/// invariant the handler can assume away.
-pub(crate) fn require_positive_limit(limit: usize, tool_name: &str) -> Result<()> {
-    if limit == 0 {
-        return Err(TraceDecayError::Config {
-            message: format!("invalid parameter: {tool_name} requires limit to be at least 1"),
-        });
-    }
-    Ok(())
-}
-
-/// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
-/// fallback alias. LLMs occasionally shorten `node_id` to `id`; this avoids a
-/// confusing error when that happens.
-///
-/// A present-but-blank value is rejected here rather than forwarded to the
-/// graph traversal layer; every handler that takes a node id shares this one
-/// guard, so the failure is a typed argument error naming the parameter.
-pub(super) fn require_node_id(args: &Value) -> Result<&str> {
-    let node_id = args
-        .get("node_id")
-        .or_else(|| args.get("id"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: node_id".to_string(),
-        })?;
-    if node_id.trim().is_empty() {
-        return Err(TraceDecayError::Config {
-            message: "invalid parameter: node_id must not be empty".to_string(),
-        });
-    }
-    Ok(node_id)
-}
-
 /// Returns the user-provided `path` argument, falling back to the scope
 /// prefix when the argument is absent. This makes listing tools
 /// automatically scoped to the subdirectory the server was launched from.
@@ -511,7 +474,7 @@ mod tests {
 
     use super::{
         CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result,
-        is_explicit_project_path_selector, rendered_tool_result, require_node_id,
+        is_explicit_project_path_selector, rendered_tool_result,
     };
     use tracedecay_application::retrieval::NodeSurfaceRequestV1;
 
@@ -579,30 +542,6 @@ mod tests {
     }
 
     #[test]
-    fn test_require_node_id_canonical() {
-        let args = json!({"node_id": "fn:abc123"});
-        assert!(matches!(require_node_id(&args), Ok("fn:abc123")));
-    }
-
-    #[test]
-    fn test_require_node_id_alias() {
-        let args = json!({"id": "trait:def456"});
-        assert!(matches!(require_node_id(&args), Ok("trait:def456")));
-    }
-
-    #[test]
-    fn test_require_node_id_prefers_canonical() {
-        let args = json!({"node_id": "fn:canonical", "id": "fn:alias"});
-        assert!(matches!(require_node_id(&args), Ok("fn:canonical")));
-    }
-
-    #[test]
-    fn test_require_node_id_missing() {
-        let args = json!({"query": "something"});
-        assert!(require_node_id(&args).is_err());
-    }
-
-    #[test]
     fn primitive_request_decode_strips_transport_keys_and_rejects_legacy_aliases() {
         let decoded = decode_primitive_request::<NodeSurfaceRequestV1>(
             &json!({
@@ -629,26 +568,6 @@ mod tests {
         )
         .expect_err("the unreleased id alias is not part of the canonical request");
         assert!(error.to_string().contains("unknown field `id`"));
-    }
-
-    /// Every node-id handler shares this one guard, so a blank value must be
-    /// rejected here — naming the offending parameter — rather than reaching
-    /// graph traversal.
-    #[test]
-    fn require_node_id_rejects_blank_values() {
-        for args in [
-            json!({"node_id": ""}),
-            json!({"node_id": "   "}),
-            json!({"node_id": "\t\n"}),
-            json!({"id": ""}),
-        ] {
-            let error = require_node_id(&args).expect_err(&format!("blank node id: {args}"));
-            let message = error.to_string();
-            assert!(
-                message.contains("node_id must not be empty"),
-                "unexpected message for {args}: {message}"
-            );
-        }
     }
 
     #[test]

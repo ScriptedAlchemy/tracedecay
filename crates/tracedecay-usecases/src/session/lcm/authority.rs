@@ -16,7 +16,7 @@ use tracedecay_domain::ManifestDigest;
 
 use crate::context::CancellationToken;
 use crate::session::SessionRequestBinding;
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LcmCompressionResponse, LcmPreflightRequest, LcmPreflightResponse, LcmStatus,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};

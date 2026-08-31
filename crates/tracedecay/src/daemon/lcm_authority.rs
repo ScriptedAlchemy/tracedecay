@@ -11,7 +11,7 @@ use tracedecay_application::{
     CancellationSignal, CancellationStage, OperationTermination, RequestAdmission, RequestContext,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmGcConfig, LcmPreflightRequest,
     LcmPreflightResponse, LcmStatus, LcmSummarizerMode,
 };

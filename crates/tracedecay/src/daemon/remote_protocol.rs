@@ -69,7 +69,7 @@ use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::SchemaId;
 
 use crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
-use crate::daemon::service::invocation::DaemonInvocationService;
+use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod observability;

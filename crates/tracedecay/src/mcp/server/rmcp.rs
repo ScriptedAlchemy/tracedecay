@@ -41,13 +41,11 @@ pub(crate) struct RmcpSelectedProjectResponseAuthority {
 impl RmcpSelectedProjectResponseAuthority {
     fn request_key(id: &Value) -> tracedecay_domain::errors::Result<String> {
         if id.is_null() {
-            return Err(
-                tracedecay_domain::errors::TraceDecayError::project_route(
-                    "project_route_unavailable",
-                    true,
-                    "selected RMCP response has no request identity",
-                ),
-            );
+            return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                "project_route_unavailable",
+                true,
+                "selected RMCP response has no request identity",
+            ));
         }
         serde_json::to_string(id).map_err(|error| {
             tracedecay_domain::errors::TraceDecayError::project_route(
@@ -72,13 +70,11 @@ impl RmcpSelectedProjectResponseAuthority {
             )
         })?;
         if leases.contains_key(&key) {
-            return Err(
-                tracedecay_domain::errors::TraceDecayError::project_route(
-                    "project_route_unavailable",
-                    true,
-                    "selected RMCP response identity is already awaiting transport delivery",
-                ),
-            );
+            return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                "project_route_unavailable",
+                true,
+                "selected RMCP response identity is already awaiting transport delivery",
+            ));
         }
         leases.insert(key, lease);
         Ok(())

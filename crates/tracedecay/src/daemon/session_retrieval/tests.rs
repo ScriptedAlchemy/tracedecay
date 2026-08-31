@@ -11,7 +11,7 @@ use tracedecay_domain::{
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, TemporalModeV1,
     UtcMicros, derive_exact_observation_anchor_id,
 };
-use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
+use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     SessionRecord, SessionTemporalSnapshotRequestV1, build_observation_resolution_authorization_v1,

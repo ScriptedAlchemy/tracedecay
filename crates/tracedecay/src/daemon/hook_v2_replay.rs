@@ -731,7 +731,7 @@ mod tests {
 
     fn admitted() -> HookV2AdmissionOutcomeV1 {
         HookV2AdmissionOutcomeV1::Admitted {
-            orchestration: crate::daemon::HookOrchestrationAdmissionV1::Unavailable,
+            orchestration: tracedecay_daemon_service::HookOrchestrationAdmissionV1::Unavailable,
             ready_guidance: serde_json::Value::Null,
             feedback_notice: serde_json::Value::Null,
             github_stack_signal_available: false,
@@ -814,7 +814,7 @@ mod tests {
                                 .push("replayed lifecycle suggestion");
                         }
                         HookV2AdmissionOutcomeV1::Admitted {
-                            orchestration: crate::daemon::HookOrchestrationAdmissionV1::Enqueued,
+                            orchestration: tracedecay_daemon_service::HookOrchestrationAdmissionV1::Enqueued,
                             ready_guidance: serde_json::json!({
                                 "suggestion": "replayed lifecycle suggestion"
                             }),

@@ -71,8 +71,11 @@ pub mod workflow;
 pub use analysis::{is_ident_byte, line_number_at, skip_ascii_whitespace};
 pub use catalog_error::McpCatalogError;
 pub use handlers::{
-    handle_multi_root, retained_problem_envelope, retained_safe_diagnostic,
-    validated_retained_response,
+    CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, effective_path, generic_tool_result,
+    handle_multi_root, rendered_tool_result, require_node_id, require_object_args,
+    require_positive_limit, retained_problem_envelope, retained_safe_diagnostic,
+    take_internal_context_memory_analytics, text_tool_result, tool_json, tool_json_with_md,
+    unique_file_paths, validated_retained_response,
 };
 pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,

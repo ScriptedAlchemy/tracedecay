@@ -7,6 +7,7 @@
 use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
+use tracedecay_daemon_service::{DaemonInvocationService, Lease, cancel, register};
 
 type ProjectOwnerAwaitFutureV1<'a, T> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,
@@ -376,7 +377,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
 
     async fn attempts(
         self,
-        service: &crate::daemon::service::invocation::DaemonInvocationService,
+        service: &DaemonInvocationService,
         project_root: Option<&Path>,
         response: &DaemonInvocationResponse,
     ) -> Vec<tracedecay_domain::DeliverySettlementAttemptV1> {
@@ -800,7 +801,7 @@ fn serve_broker_socket_client_inner(
             )
         {
             hotpath::measure_block!("daemon.engine.transport.cancel", {
-                crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
+cancel(cancellation.target_request_id());
             });
             drop(setup_activity);
             return Ok(None);
@@ -1018,10 +1019,10 @@ fn serve_broker_socket_client_inner(
                         };
                         let delivery_cancellation = request_id
                             .as_deref()
-                            .and_then(crate::daemon::request_cancellation::register);
+                            .and_then(register);
                         let cancellation = delivery_cancellation
                             .as_ref()
-                            .map(super::request_cancellation::Lease::token);
+                            .map(Lease::token);
                         let ack_line = match await_daemon_delivery_ack(
                             &mut transport,
                             ack_timeout,
@@ -1468,7 +1469,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         )
     {
         hotpath::measure_block!("daemon.engine.transport.cancel", {
-            crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
+            cancel(cancellation.target_request_id());
         });
         drop(setup_activity);
         return Ok(());
@@ -1675,10 +1676,10 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                     };
                     let delivery_cancellation = request_id
                         .as_deref()
-                        .and_then(crate::daemon::request_cancellation::register);
+                        .and_then(register);
                     let cancellation = delivery_cancellation
                         .as_ref()
-                        .map(super::request_cancellation::Lease::token);
+                        .map(Lease::token);
                     let ack_line = match await_daemon_delivery_ack(
                         &mut transport,
                         ack_timeout,

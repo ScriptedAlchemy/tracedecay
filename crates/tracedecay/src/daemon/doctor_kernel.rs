@@ -33,6 +33,7 @@ use tracedecay_application::{
 };
 
 use super::maintenance::GuardedStoreTelemetryPort;
+use tracedecay_daemon_service::DaemonFeedbackRuntimeRegistrar;
 
 const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
 const DOCTOR_REPORT_USE_CASE: &str = "use-case.application.doctor.report";
@@ -616,7 +617,7 @@ pub async fn collect_retention_backlog_findings(
     let Ok(snapshot) = profile_sessions.read_snapshot().await else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    let Ok(records) = tracedecay_sessions::runtime::lcm::retention::read_session_retention_backlog(
+    let Ok(records) = tracedecay_lcm::retention::read_session_retention_backlog(
         &snapshot,
         store,
         &retention.session_lcm,
@@ -867,7 +868,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     retention: crate::config::RetentionConfig,
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
-    feedback_runtimes: crate::daemon::service::invocation::DaemonFeedbackRuntimeRegistrar,
+    feedback_runtimes: DaemonFeedbackRuntimeRegistrar,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
     configuration_runtime: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
 ) -> tracedecay_dashboard_api::DoctorReportReader {
@@ -889,11 +890,13 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let store_telemetry_sampling = store_telemetry_sampling.clone();
         let configuration_runtime = Arc::clone(&configuration_runtime);
         Box::pin(async move {
-            let scope =
-                tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
-                    .map_err(|_| ApplicationContractError::Inconsistent {
-                        field: "daemon Doctor project scope",
-                    })?;
+            let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+                &project_root,
+                &project_id,
+            )
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "daemon Doctor project scope",
+            })?;
             let context = doctor_report_request_context(scope)?;
             let mut telemetry_ports = Vec::new();
             let mut telemetry_paths = BTreeSet::new();

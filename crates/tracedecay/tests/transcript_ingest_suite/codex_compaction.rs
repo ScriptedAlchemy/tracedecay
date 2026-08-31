@@ -11,7 +11,7 @@ use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::runtime::codex::CodexSource;
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
 

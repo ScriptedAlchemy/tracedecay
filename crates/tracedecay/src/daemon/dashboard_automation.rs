@@ -21,6 +21,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger,
 };
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;
+use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_dashboard_api::{
     DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1,
     DashboardAutomationObservationRecorderV1, DashboardAutomationRunOutcomeV1,
@@ -80,7 +81,7 @@ impl DashboardAutomationRequestRuntime {
 }
 
 pub(crate) fn dashboard_automation_observation_port(
-    invocation_service: crate::daemon::service::invocation::DaemonInvocationService,
+    invocation_service: DaemonInvocationService,
 ) -> tracedecay_dashboard_api::DashboardAutomationObservationPortV1 {
     Arc::new(move |project_root| {
         let invocation_service = invocation_service.clone();
@@ -112,7 +113,7 @@ pub(crate) fn compose_dashboard_automation_authority(
     daemon_user_profile_id: UserProfileId,
     retained_project_server_resolver: RetainedProjectServerResolver,
     writer: DashboardAutomationWriter,
-    invocation_service: crate::daemon::service::invocation::DaemonInvocationService,
+    invocation_service: DaemonInvocationService,
 ) -> Result<DashboardAutomationAuthorityV1> {
     let project_resolver = dashboard_automation_project_resolver(
         daemon_user_profile_id,
@@ -130,7 +131,7 @@ fn compose_dashboard_automation_authority_with_resolver(
     profile_root: PathBuf,
     project_resolver: DashboardAutomationProjectResolver,
     writer: DashboardAutomationWriter,
-    invocation_service: crate::daemon::service::invocation::DaemonInvocationService,
+    invocation_service: DaemonInvocationService,
 ) -> Result<DashboardAutomationAuthorityV1> {
     let run_port = dashboard_automation_run_port(
         profile_root.clone(),
@@ -151,7 +152,7 @@ pub(crate) fn compose_dashboard_automation_authority_for_test(
     profile_root: PathBuf,
     retained: Arc<TraceDecay>,
     writer: DashboardAutomationWriter,
-    invocation_service: crate::daemon::service::invocation::DaemonInvocationService,
+    invocation_service: DaemonInvocationService,
 ) -> Result<DashboardAutomationAuthorityV1> {
     let retained_root = retained.project_root().to_path_buf();
     let project_resolver: DashboardAutomationProjectResolver =
@@ -191,7 +192,7 @@ pub(crate) fn compose_dashboard_automation_authority_for_test(
 fn dashboard_automation_run_port(
     profile_root: PathBuf,
     project_resolver: DashboardAutomationProjectResolver,
-    invocation_service: crate::daemon::service::invocation::DaemonInvocationService,
+    invocation_service: DaemonInvocationService,
 ) -> DashboardAutomationRunPortV1 {
     Arc::new(move |invocation| {
         let profile_root = profile_root.clone();
@@ -360,7 +361,7 @@ async fn execute_dashboard_automation_run(
     request: DashboardAutomationRunRequestV1,
     request_control: DashboardHttpRequestControlV1,
     _run_control: &AutomationRunControl,
-    invocation_service: &crate::daemon::service::invocation::DaemonInvocationService,
+    invocation_service: &DaemonInvocationService,
 ) -> DashboardAutomationResult<DashboardAutomationRunOutcomeV1> {
     let producer = crate::daemon::project_automation_observation_producer(
         invocation_service,

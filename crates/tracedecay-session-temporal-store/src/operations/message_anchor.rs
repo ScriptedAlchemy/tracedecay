@@ -17,7 +17,7 @@ use tracedecay_domain::{
     RetrievalAnchorRecord, derive_exact_observation_anchor_id,
 };
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_sessions::runtime::lcm::types::LcmError;
+use tracedecay_lcm::types::LcmError;
 use tracedecay_store::derive_canonical_projection;
 
 use super::sources::unavailable;
@@ -321,7 +321,7 @@ mod tests {
         SessionId, UserProfileId, UtcMicros,
     };
     use tracedecay_runtime_core::db::engine::params;
-    use tracedecay_sessions::runtime::lcm::types::{
+    use tracedecay_lcm::types::{
         LcmError, LcmImmutableSummaryPublication, LcmSourceRef, LcmSummaryNodeDraft,
     };
 
@@ -571,7 +571,7 @@ mod tests {
 
     async fn publish(
         conn: &impl crate::handle::SessionTemporalExec,
-    ) -> Result<tracedecay_sessions::runtime::lcm::types::LcmSummaryPublicationReceipt, LcmError>
+    ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError>
     {
         super::super::publication::publish_immutable_summary(
             conn,

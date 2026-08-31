@@ -22,9 +22,9 @@ use tracedecay_automation_runtime::automation::skill_usage::{
     record_skill_usage, skill_improvement_recommendations, stale_skill_recommendations,
     summarize_skill_usage, summarize_skill_usage_for,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::ToolResult;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::support::{tool_json, tool_json_with_md};
 use tracedecay_mcp::tools::renderers;

@@ -27,8 +27,8 @@ use crate::daemon::retained_owner::{MemoryTargetAccessV1, open_project_retained_
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
-use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 

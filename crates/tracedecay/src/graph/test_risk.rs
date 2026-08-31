@@ -130,7 +130,7 @@ impl TestAttributionMethod {
 #[hotpath::measure(label = "graph.health.test_risk", future = true)]
 pub(crate) async fn analyze_test_risk(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
     path_prefix: Option<&str>,
     include_tested: bool,
     limit: usize,
@@ -318,7 +318,7 @@ pub(crate) struct VerifiedTestEvidence {
 
 #[hotpath::measure(label = "graph.health.test_risk.evidence")]
 pub(crate) fn verified_test_evidence(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
 ) -> Result<VerifiedTestEvidence> {
     let page = graph.symbols_page(None, MAX_TEST_RISK_SYMBOLS)?;
     if page.has_more {

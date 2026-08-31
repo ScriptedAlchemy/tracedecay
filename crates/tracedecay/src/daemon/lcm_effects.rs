@@ -4,11 +4,11 @@ use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSummarizerMode,
 };
 #[cfg(any(test, feature = "test-helpers"))]
-use tracedecay_sessions::runtime::lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
+use tracedecay_lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
 
 const LCM_EFFECT_CEILING: Duration = Duration::from_secs(30);
 const LCM_EFFECT_WORK_LIMIT: usize = 4_096;
@@ -255,7 +255,7 @@ mod tests {
     use tracedecay_global_db::RegisteredGlobalDb;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::params;
-    use tracedecay_sessions::runtime::lcm::{
+    use tracedecay_lcm::{
         LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode,
     };
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -484,7 +484,7 @@ mod tests {
         let harness = RegisteredGlobalDbHarness::open("lcm-preflight-read-only").await;
         let db = harness.registered.clone();
         let response = db
-            .lcm_preflight(tracedecay_sessions::runtime::lcm::LcmPreflightRequest {
+            .lcm_preflight(tracedecay_lcm::LcmPreflightRequest {
                 provider: "cursor".to_string(),
                 session_id: "missing-session".to_string(),
                 messages: Vec::new(),

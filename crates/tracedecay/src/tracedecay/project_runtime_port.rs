@@ -263,4 +263,12 @@ impl SourceReadRuntimePort for TraceDecay {
     fn is_read_only(&self) -> bool {
         TraceDecay::is_read_only(self)
     }
+
+    fn project_id(&self) -> &str {
+        self.store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .unwrap_or("")
+    }
 }

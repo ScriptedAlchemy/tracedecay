@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tracedecay_lcm::message_storage_text;
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
 };
@@ -668,16 +669,6 @@ pub fn preview_title(text: &str) -> String {
     } else {
         collapsed.chars().take(MAX_TITLE_CHARS).collect()
     }
-}
-
-/// Return the storage representation used by LCM raw ingest for provider
-/// transcript content. This intentionally matches the active-message path:
-/// strings stay strings, structured content is compact JSON.
-pub fn message_storage_text(content: &Value) -> String {
-    if let Some(text) = content.as_str() {
-        return text.to_string();
-    }
-    serde_json::to_string(content).unwrap_or_else(|_| content.to_string())
 }
 
 /// Return lossless storage text plus tool names discovered in either structured

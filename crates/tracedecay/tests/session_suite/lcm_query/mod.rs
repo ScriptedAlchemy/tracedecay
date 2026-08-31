@@ -3,7 +3,7 @@ use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::ParseOffset;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::{
     LCM_SCHEMA_VERSION, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError,
     LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
     LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope,
@@ -36,14 +36,14 @@ trait ProfileLcmFixture {
     async fn lcm_insert_summary_node(
         &self,
         draft: LcmSummaryNodeDraft,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSummaryNode, LcmError>;
+    ) -> Result<tracedecay_lcm::LcmSummaryNode, LcmError>;
 
     async fn lcm_ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError>;
 
     async fn lcm_update_lifecycle(
         &self,
         update: LcmLifecycleUpdate,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmLifecycleState, LcmError>;
+    ) -> Result<tracedecay_lcm::LcmLifecycleState, LcmError>;
 }
 
 impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
@@ -80,7 +80,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn lcm_insert_summary_node(
         &self,
         draft: LcmSummaryNodeDraft,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSummaryNode, LcmError> {
+    ) -> Result<tracedecay_lcm::LcmSummaryNode, LcmError> {
         self.lcm_insert_summary_node_for_test(HostAdmissionScope::Profile, draft)
             .await
     }
@@ -93,7 +93,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn lcm_update_lifecycle(
         &self,
         update: LcmLifecycleUpdate,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmLifecycleState, LcmError> {
+    ) -> Result<tracedecay_lcm::LcmLifecycleState, LcmError> {
         self.lcm_update_lifecycle_for_test(HostAdmissionScope::Profile, update)
             .await
     }

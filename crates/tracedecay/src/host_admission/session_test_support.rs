@@ -481,11 +481,11 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         message_id: &str,
     ) -> tracedecay_domain::errors::Result<
-        Option<tracedecay_sessions::runtime::lcm::LcmRawMessage>,
+        Option<tracedecay_lcm::LcmRawMessage>,
     > {
         let database = self.project_database_for_test()?;
         let snapshot = database.read_snapshot().await?;
-        tracedecay_sessions::runtime::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+        tracedecay_lcm::schema::load_raw_message(&snapshot, provider, message_id)
             .await
             .map_err(
                 |error| tracedecay_domain::errors::TraceDecayError::Database {

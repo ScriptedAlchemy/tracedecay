@@ -9,7 +9,7 @@ use tracedecay_application::retained_surfaces::{
 };
 use tracedecay_sessions::runtime::git_correlation::{
     CommitEvidence, CommitRelation, CommitRelationFilter, GitCorrelationError, GitRefFilter,
-    GitScopeFilter, SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind,
+    SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind, git_scope_filter_from_args,
 };
 use tracedecay_sessions::{
     WorkflowAgent, WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowRun,
@@ -210,7 +210,7 @@ pub(crate) async fn workflows(
             WorkflowRunListOutcome::Unavailable(reason) => workflow_unavailable(reason),
         }
     } else {
-        let filter = GitScopeFilter::from_args(
+        let filter = git_scope_filter_from_args(
             request.branch.as_deref(),
             request.worktree.as_deref(),
             request.commit.as_deref(),

@@ -67,7 +67,7 @@ use tracedecay_query::retrieval::evidence_lanes::{
     TaskSessionLaneRetrieverV1, TaskSessionPlan23BindingV1,
 };
 use tracedecay_runtime_core::db::engine::Error as EngineError;
-use tracedecay_sessions::lcm::contracts::{
+use tracedecay_lcm::contracts::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
 };
@@ -95,7 +95,7 @@ use self::participant_freeze::{
 };
 use self::retrieval::{GlobalDbPreparedCandidatePort, GlobalDbTemporalReadPort};
 use self::sql::TemporalSqlRead;
-use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content_with_checkpoint;
+use tracedecay_lcm::payload::read_verified_payload_content_with_checkpoint;
 
 pub use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,

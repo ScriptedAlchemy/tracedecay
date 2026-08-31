@@ -97,7 +97,7 @@ fn scout_read_actions_are_closed_and_read_only() {
 fn hook_v2_scout_prepare_accepts_no_caller_candidates() {
     let response = orchestration_response(
         "hook_v2_scout_prepare",
-        crate::daemon::HookOrchestrationAdmissionV1::Unavailable,
+        tracedecay_daemon_service::HookOrchestrationAdmissionV1::Unavailable,
     );
     assert_eq!(response["status"], "unavailable");
     assert_eq!(response["reason"], "orchestration_unavailable");

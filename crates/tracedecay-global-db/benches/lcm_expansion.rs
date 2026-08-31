@@ -13,8 +13,8 @@ use tracedecay_domain::{
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_global_db::{GlobalDbObservationStore, RegisteredGlobalDb};
 use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
-use tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication;
-use tracedecay_sessions::runtime::lcm::{
+use tracedecay_lcm::types::LcmImmutableSummaryPublication;
+use tracedecay_lcm::{
     LcmContentSlice, LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
     LcmSummaryNodeDraft,
 };

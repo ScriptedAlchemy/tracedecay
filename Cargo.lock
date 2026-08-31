@@ -5916,12 +5916,14 @@ dependencies = [
  "tracedecay-code-index-retention",
  "tracedecay-code-index-runtime",
  "tracedecay-daemon-protocol",
+ "tracedecay-daemon-service",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-hooks",
  "tracedecay-host-admission",
+ "tracedecay-lcm",
  "tracedecay-lsp",
  "tracedecay-maintenance",
  "tracedecay-mcp",
@@ -5981,6 +5983,7 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
+ "tracedecay-lcm",
  "tracedecay-lsp",
  "tracedecay-policy",
  "tracedecay-private-fs",
@@ -6072,6 +6075,7 @@ dependencies = [
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-hooks",
+ "tracedecay-lcm",
  "tracedecay-policy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
@@ -6289,6 +6293,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-daemon-service"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "getrandom 0.2.17",
+ "hex",
+ "hotpath",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracedecay-agent-hosts",
+ "tracedecay-api",
+ "tracedecay-application",
+ "tracedecay-code-index",
+ "tracedecay-code-index-runtime",
+ "tracedecay-daemon-protocol",
+ "tracedecay-dashboard-api",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-graph-db",
+ "tracedecay-hooks",
+ "tracedecay-lsp",
+ "tracedecay-policy",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-search-eval",
+ "tracedecay-semantic",
+ "tracedecay-sessions",
+ "tracedecay-store",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "tracedecay-dashboard-api"
 version = "0.1.0"
 dependencies = [
@@ -6357,6 +6401,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-lcm",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -6445,6 +6490,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-lcm"
+version = "0.1.0"
+dependencies = [
+ "hotpath",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracing",
+]
+
+[[package]]
 name = "tracedecay-lsp"
 version = "0.1.0"
 dependencies = [
@@ -6498,6 +6565,7 @@ dependencies = [
 name = "tracedecay-mcp"
 version = "0.1.0"
 dependencies = [
+ "glob",
  "hotpath",
  "libc",
  "schemars",
@@ -6724,6 +6792,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
+ "tracedecay-lcm",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
@@ -6758,6 +6827,7 @@ dependencies = [
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-lcm",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -6862,6 +6932,7 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
+ "tracedecay-lcm",
  "tracedecay-lsp",
  "tracedecay-policy",
  "tracedecay-private-fs",

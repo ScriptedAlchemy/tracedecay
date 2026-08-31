@@ -864,7 +864,7 @@ impl CursorComposerSource {
                 byte_budget.defer();
                 break;
             }
-            let text = crate::runtime::shared::message_storage_text(&content);
+            let text = tracedecay_lcm::message_storage_text(&content);
             if text.trim().is_empty() {
                 continue;
             }

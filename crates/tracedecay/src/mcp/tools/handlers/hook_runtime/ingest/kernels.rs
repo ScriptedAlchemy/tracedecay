@@ -22,9 +22,9 @@ use tracedecay_domain::ObservationScopeV1;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::HostAdmissionFacade;
-use tracedecay_domain::errors::Result;
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
@@ -35,12 +35,12 @@ use tracedecay_usecases::session::lcm::{
 };
 
 use super::super::super::SessionAuthorities;
-use tracedecay_mcp::{map_claude_observation_ingest_error, map_transcript_ingest_error};
 use super::super::{required_str, required_user_db};
 use super::{
     admit_codex_project_rollouts, compaction_unavailable_reason,
     drain_host_observation_projections, project_observation_id,
 };
+use tracedecay_mcp::{map_claude_observation_ingest_error, map_transcript_ingest_error};
 
 /// Which payload shape a hook ingest request carries.
 ///
@@ -480,7 +480,7 @@ async fn capture_hermes_callback(
     let event_digest = tracedecay_domain::canonical_sha256(&(&"hermes", &session_id, &messages))
         .map_err(|error| config_error(format!("digest Hermes turn failed: {error}")))?;
     let request = LcmAuthorityRequest::Ingest(LcmTranscriptIngestCommand {
-        preflight: tracedecay_sessions::runtime::lcm::LcmPreflightRequest {
+        preflight: tracedecay_lcm::LcmPreflightRequest {
             provider: "hermes".to_owned(),
             session_id: session_id.to_owned(),
             messages,

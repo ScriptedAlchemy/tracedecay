@@ -432,7 +432,41 @@ where
         .min(context.grant().expires_at.0);
     let remaining_micros = terminal_at.saturating_sub(application_observed_at().0);
     let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
-    let cancelled = cancellation.cancelled();
+    race_application_request_wait(
+        remaining_micros,
+        cancellation.cancelled(),
+        future,
+        on_interruption,
+    )
+    .await
+}
+
+/// Races one awaitable step against a wall-clock deadline and a live
+/// application cancellation signal. The wait itself terminates even when
+/// `future` never wakes cooperatively.
+pub async fn run_deadline_signal_interruptible<T>(
+    deadline: &tracedecay_application::Deadline,
+    cancellation: &tracedecay_application::CancellationSignal,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, RequestInterruption> {
+    if cancellation.is_cancelled() {
+        return Err(RequestInterruption::Cancelled);
+    }
+    let observed_at = application_observed_at();
+    if deadline.is_elapsed_at(observed_at) {
+        return Err(RequestInterruption::DeadlineExceeded);
+    }
+    let remaining_micros = deadline.expires_at.0.saturating_sub(observed_at.0);
+    let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
+    race_application_request_wait(remaining_micros, cancellation.cancelled(), future, || {}).await
+}
+
+async fn race_application_request_wait<T>(
+    remaining_micros: u64,
+    cancelled: impl std::future::Future<Output = ()>,
+    future: impl std::future::Future<Output = T>,
+    on_interruption: impl FnOnce(),
+) -> Result<T, RequestInterruption> {
     tokio::pin!(cancelled);
     let deadline = tokio::time::sleep(std::time::Duration::from_micros(remaining_micros));
     tokio::pin!(deadline);
