@@ -11,10 +11,8 @@ mod workspace_diagnostics;
 use workspace_admission::CurrentLspWorkspaceAuthorityV1;
 pub(super) use workspace_diagnostics::PublishedCodeIndexWorkspaceDocuments;
 
-pub const LSP_WORKSPACE_CAPABILITY_ID_V1: &str =
-    "capability.application.lsp.workspace-folders";
-pub const LSP_WORKSPACE_USE_CASE_ID_V1: &str =
-    "use-case.application.lsp.workspace-folders";
+pub const LSP_WORKSPACE_CAPABILITY_ID_V1: &str = "capability.application.lsp.workspace-folders";
+pub const LSP_WORKSPACE_USE_CASE_ID_V1: &str = "use-case.application.lsp.workspace-folders";
 
 pub(super) fn admit_lsp_control(
     request_id: String,
@@ -85,10 +83,7 @@ impl DaemonInvocationService {
         self.project_runtimes.publish(project_root, owner).await
     }
 
-    pub async fn lsp_owner(
-        &self,
-        project_root: Option<&Path>,
-    ) -> Option<DaemonLspInvocationOwner> {
+    pub async fn lsp_owner(&self, project_root: Option<&Path>) -> Option<DaemonLspInvocationOwner> {
         let project_root = project_root?;
         if let Some(owner) = self
             .project_runtimes

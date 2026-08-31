@@ -739,7 +739,7 @@ impl DaemonCodeGraphManifestProviderV1 {
                 || existing.generations_root != generations_root
                 || existing.replay_root != replay_root
             {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict("code_graph_manifest.bind"));
             }
             existing.repositories.insert(repository);
             return Ok(());
@@ -870,15 +870,21 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         if owner.shard_id != binding.project_shard
             || !binding.repositories.contains(&source.repository)
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph_manifest.hydrate_sealed_code_generation",
+            ));
         }
         let tracedecay_store::StoreShardScopeV1::Project { project_id } =
             &binding.project_shard.scope
         else {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph_manifest.hydrate_sealed_code_generation",
+            ));
         };
         if project_id != &binding.project_id {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph_manifest.hydrate_sealed_code_generation",
+            ));
         }
 
         // Reuse a decode whose SHA-256 was already proven equal to this
@@ -915,7 +921,9 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
             || generation.snapshot().repository != source.repository
             || generation.manifest().generation_id != source.generation
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph_manifest.hydrate_sealed_code_generation",
+            ));
         }
         if decoded_from_disk {
             self.retain_hydrated_decode(owner.shard_id.clone(), source, Arc::clone(&generation))?;
@@ -1067,12 +1075,12 @@ mod tests {
 
         let mut foreign = source.clone();
         foreign.repository = RepositoryId::new("repository.foreign").unwrap();
-        assert_eq!(
+        assert!(matches!(
             provider
                 .hydrate_sealed_code_generation(&owner, &foreign, &|| Ok(()))
                 .unwrap_err(),
-            GraphDbError::Conflict
-        );
+            GraphDbError::Conflict { .. }
+        ));
 
         // A retired seal that only survives in the replay pool is still read.
         std::fs::write(replay_root.join(&seal_file), b"corrupt").unwrap();

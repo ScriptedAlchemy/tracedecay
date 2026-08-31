@@ -243,9 +243,11 @@ fn native_batch_admission_rejects_every_chunk_binding_mismatch() {
         let plan = fixture.plan(name, name, None);
         let (batch, receipt) = fixture.batch_and_receipt_with_mismatch(&plan, 1.0, Some(mismatch));
         fixture.begin_and_append(&mut authority, &plan, &receipt, name);
-        assert_eq!(
-            fixture.apply(&mut authority, &receipt, batch, name),
-            Err(GraphDbError::Conflict),
+        assert!(
+            matches!(
+                fixture.apply(&mut authority, &receipt, batch, name),
+                Err(GraphDbError::Conflict { .. })
+            ),
             "{name} must fail closed"
         );
         // The projection admits one pending stage at a time; release the
@@ -555,15 +557,15 @@ fn receipt_then_cancel_fences_a_delayed_native_apply() {
         SemanticVectorStageCancelOutcome::Cancelled(ref record)
             if record.state == SemanticVectorStageState::Cancelled
     ));
-    assert_eq!(
+    assert!(matches!(
         fixture.apply(
             &mut authority,
             &receipt,
             batch,
             "receipt-cancel.delayed-apply"
         ),
-        Err(GraphDbError::Conflict)
-    );
+        Err(GraphDbError::Conflict { .. })
+    ));
 }
 
 #[test]
@@ -601,7 +603,7 @@ fn native_apply_then_cancel_removes_before_settlement() {
             &receipt.receipt_digest,
         )
     });
-    assert_eq!(settlement, Err(GraphDbError::Conflict));
+    assert!(matches!(settlement, Err(GraphDbError::Conflict { .. })));
     with_context("apply-cancel.resume", |context| {
         assert!(matches!(
             fixture
@@ -742,15 +744,15 @@ fn cancelled_response_loss_retry_reconciles_native_cleanup() {
             SemanticVectorStageCancelOutcome::ExactReplay(_)
         ));
     });
-    assert_eq!(
+    assert!(matches!(
         fixture.apply(
             &mut authority,
             &receipt,
             batch,
             "cancel-retry.delayed-apply"
         ),
-        Err(GraphDbError::Conflict)
-    );
+        Err(GraphDbError::Conflict { .. })
+    ));
 }
 
 #[test]
@@ -832,10 +834,10 @@ fn retention_cleanup_failure_keeps_cancel_fence_until_retry() {
         assert_eq!(failure, Err(GraphDbError::Cancelled));
 
         pause.release();
-        assert_eq!(
+        assert!(matches!(
             delayed_apply.join().expect("delayed apply thread"),
-            Err(GraphDbError::Conflict)
-        );
+            Err(GraphDbError::Conflict { .. })
+        ));
         assert_eq!(
             pause.calls.load(Ordering::SeqCst),
             2,

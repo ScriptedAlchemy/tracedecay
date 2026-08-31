@@ -1,5 +1,5 @@
-use tracedecay_store::SessionMessageRecord;
 use tracedecay_runtime_core::db::engine::TestConnection;
+use tracedecay_store::SessionMessageRecord;
 
 const RAW_MESSAGE_TEST_SCHEMA: &str = "CREATE TABLE lcm_raw_messages (
     store_id INTEGER PRIMARY KEY,
