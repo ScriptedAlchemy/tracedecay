@@ -70,6 +70,7 @@ use crate::{
 
 /// Opens and verifies one dependency-free sealed generation without opening
 /// the shared mutable staging database.
+#[hotpath::measure(label = "graph_db.sealed_store.open_direct")]
 pub(crate) fn open_direct_sealed_generation(
     database_path: &Path,
     projection: crate::GraphProjectionIdentity,
