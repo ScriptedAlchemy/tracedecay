@@ -555,10 +555,10 @@ async fn handle_retained_dispatch<D, F>(
     tool_name: &str,
     args: Value,
     dispatch: D,
-) -> tracedecay_runtime_core::errors::Result<ToolResult>
+) -> tracedecay_domain::errors::Result<ToolResult>
 where
     D: Fn(String, Value) -> F,
-    F: std::future::Future<Output = tracedecay_runtime_core::errors::Result<Value>>,
+    F: std::future::Future<Output = tracedecay_domain::errors::Result<Value>>,
 {
     let mut result = dispatch(tool_name.to_owned(), args).await?;
     // The retained envelope wraps the owner's payload in authority and
@@ -573,16 +573,15 @@ where
             json!({ "handle": handle, "format": "json" }),
         )
         .await?;
-        let record: Value = serde_json::from_str(
-            retrieved["content"][0]["text"]
-                .as_str()
-                .ok_or_else(|| TraceDecayError::Config {
+        let record: Value =
+            serde_json::from_str(retrieved["content"][0]["text"].as_str().ok_or_else(|| {
+                TraceDecayError::Config {
                     message: format!("{tool_name} retrieve returned no text: {retrieved}"),
-                })?,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("{tool_name} retrieve returned invalid JSON: {error}"),
-        })?;
+                }
+            })?)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("{tool_name} retrieve returned invalid JSON: {error}"),
+            })?;
         result["content"][0]["text"] = record["content"].clone();
     }
     // The retained MCP contract is the versioned
