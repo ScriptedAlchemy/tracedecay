@@ -105,6 +105,22 @@ impl ConnectionRouteState {
         &self.memory_request_scope
     }
 
+    /// Snapshot immutable connection routing for one independent read.
+    ///
+    /// Selected response/request leases are request-owned and therefore start
+    /// empty. Effectful requests and notifications continue to use the
+    /// canonical connection state so their route-cache mutations are visible
+    /// to every later read after the connection barrier.
+    pub(crate) fn fork_for_independent_read(&self) -> Self {
+        Self {
+            initialize_route: self.initialize_route.clone(),
+            memory_request_scope: self.memory_request_scope.clone(),
+            route_cache: self.route_cache.clone(),
+            selected_response_lease: None,
+            selected_request_server: None,
+        }
+    }
+
     pub(crate) fn install_selected_response_lease(&mut self, lease: SelectedProjectResponseLease) {
         self.selected_response_lease = Some(lease);
     }

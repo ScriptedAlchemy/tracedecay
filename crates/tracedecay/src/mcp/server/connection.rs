@@ -8,6 +8,8 @@ use tracedecay_mcp::serialize_response_line;
 mod response_delivery;
 
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
+pub(super) const MAX_CONCURRENT_CONNECTION_READS: usize =
+    crate::daemon::MAX_CONCURRENT_REQUESTS_PER_DAEMON_CLIENT;
 
 #[hotpath::measure(label = "mcp.server.connection.read", future = true)]
 async fn read_connection_line(
@@ -232,6 +234,8 @@ impl McpShutdownState {
 /// not re-parse every pending line.
 struct QueuedRequestLine {
     line: String,
+    request_id: Option<Value>,
+    independent_read: bool,
     /// `Some(id)` only when the line is a `tools/call` for a
     /// live-cancellable tool — the only lines a queued cancellation matches.
     cancellable_request_id: Option<Value>,
@@ -276,18 +280,22 @@ impl Drop for PendingRequestGaugeGuard {
     }
 }
 
+#[hotpath::measure_all]
 impl QueuedRequestLine {
     fn new(line: String) -> Self {
-        let cancellable_request_id = hotpath::measure_block!(
+        let parsed = hotpath::measure_block!(
             "mcp.server.connection.queued_decode",
             serde_json::from_str::<JsonRpcRequest>(line.trim())
-        )
-        .ok()
-        .as_ref()
-        .and_then(cancellable_queued_request_id);
+        );
+        let request = parsed.as_ref().ok();
+        let request_id = request.and_then(|request| request.id.clone());
+        let independent_read = request.is_some_and(request_is_independent_read);
+        let cancellable_request_id = request.and_then(cancellable_queued_request_id);
         let depth = PendingRequestGaugeGuard::enter(line.len());
         Self {
             line,
+            request_id,
+            independent_read,
             cancellable_request_id,
             queued_at: std::time::Instant::now(),
             _depth: depth,
@@ -295,10 +303,14 @@ impl QueuedRequestLine {
     }
 
     fn from_parsed(line: String, request: Option<&JsonRpcRequest>) -> Self {
+        let request_id = request.and_then(|request| request.id.clone());
+        let independent_read = request.is_some_and(request_is_independent_read);
         let cancellable_request_id = request.and_then(cancellable_queued_request_id);
         let depth = PendingRequestGaugeGuard::enter(line.len());
         Self {
             line,
+            request_id,
+            independent_read,
             cancellable_request_id,
             queued_at: std::time::Instant::now(),
             _depth: depth,
@@ -310,6 +322,8 @@ impl QueuedRequestLine {
         let depth = PendingRequestGaugeGuard::enter_observed(line.len(), observer);
         Self {
             line,
+            request_id: None,
+            independent_read: false,
             cancellable_request_id: None,
             queued_at: std::time::Instant::now(),
             _depth: depth,
@@ -364,6 +378,189 @@ fn current_cancellable_request_key(
         .and_then(|id| application_surface_request_id(id, connection_scope))?;
     let cancelled = application_surface_request_id(request_id, connection_scope)?;
     (current == cancelled).then_some(current)
+}
+
+#[hotpath::measure(label = "mcp.server.connection.classify")]
+pub(super) fn request_is_independent_read(request: &JsonRpcRequest) -> bool {
+    match classify_mcp_method(&request.method) {
+        McpMethod::ToolsCall => request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("name"))
+            .and_then(Value::as_str)
+            .and_then(|tool_name| crate::mcp::tools::mcp_dispatch_contract(tool_name).ok())
+            .is_some_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only),
+        McpMethod::ToolsList
+        | McpMethod::ResourcesList
+        | McpMethod::ResourcesRead
+        | McpMethod::TrivialAck => true,
+        McpMethod::Initialize
+        | McpMethod::InitializedAck
+        | McpMethod::HookEvent
+        | McpMethod::Cancelled
+        | McpMethod::Unknown => false,
+    }
+}
+
+struct ConcurrentReadCompletion {
+    request_key: Option<String>,
+    _request_activity: Option<tracedecay_mcp::McpRequestActivity>,
+    revocable_tool_call: Option<(Value, String)>,
+    response: Option<JsonRpcResponse>,
+    selected_response_lease: Option<crate::mcp::server::routing::SelectedProjectResponseLease>,
+    connection_scope: String,
+    connection_closed: bool,
+}
+
+enum ConnectionLoopEvent {
+    Queued(String),
+    Incoming(std::io::Result<Option<String>>),
+    Completed(Option<std::result::Result<ConcurrentReadCompletion, tokio::task::JoinError>>),
+    Shutdown,
+    PeerClosed,
+}
+
+#[hotpath::measure(label = "mcp.server.connection.read_dispatch", future = true)]
+async fn dispatch_independent_read(
+    server: Arc<McpServer>,
+    request: JsonRpcRequest,
+    timings_enabled: bool,
+    mut connection: ConnectionRouteState,
+    request_activity: Option<tracedecay_mcp::McpRequestActivity>,
+    cancellation: tracedecay_session_memory::context::CancellationToken,
+    connection_shutdown: tracedecay_session_memory::context::CancellationToken,
+) -> ConcurrentReadCompletion {
+    let connection_scope = connection.memory_request_scope().to_owned();
+    let request_key = request
+        .id
+        .as_ref()
+        .and_then(|id| application_surface_request_id(id, &connection_scope));
+    let revocable_tool_call = request.id.clone().and_then(|id| {
+        (request.method == "tools/call").then_some(())?;
+        let tool_name = request.params.as_ref()?.get("name")?.as_str()?.to_owned();
+        Some((id, tool_name))
+    });
+    let (response, connection_closed) = {
+        let handling = Box::pin(server.handle_request_for_connection(
+            &request,
+            timings_enabled,
+            &mut connection,
+            cancellation.is_cancelled(),
+        ));
+        tokio::pin!(handling);
+        let mut cancellation_waiting_for_registration = false;
+        loop {
+            let waiting_for_registration = cancellation_waiting_for_registration;
+            let wait_for_cancellation_registration = async {
+                if !waiting_for_registration {
+                    std::future::pending::<()>().await;
+                    return;
+                }
+                loop {
+                    let registered = server
+                        .dispatch_authority
+                        .cancellation_registered()
+                        .notified();
+                    tokio::pin!(registered);
+                    registered.as_mut().enable();
+                    if let Some(id) = request.id.as_ref()
+                        && server.cancel_application_surface_request(id, &connection_scope)
+                    {
+                        return;
+                    }
+                    registered.await;
+                }
+            };
+            tokio::pin!(wait_for_cancellation_registration);
+            tokio::select! {
+                biased;
+                () = connection_shutdown.cancelled() => {
+                    if let Some(id) = request.id.as_ref() {
+                        let _ = server.cancel_application_surface_request(id, &connection_scope);
+                    }
+                    break (None, true);
+                }
+                response = &mut handling => break (response, false),
+                () = &mut wait_for_cancellation_registration => {
+                    cancellation_waiting_for_registration = false;
+                }
+                () = cancellation.cancelled(), if !cancellation_waiting_for_registration => {
+                    cancellation_waiting_for_registration = request
+                        .id
+                        .as_ref()
+                        .is_some_and(|id| {
+                            !server.cancel_application_surface_request(id, &connection_scope)
+                        });
+                }
+            }
+        }
+    };
+    let selected_response_lease = connection.take_selected_response_lease();
+    ConcurrentReadCompletion {
+        request_key,
+        _request_activity: request_activity,
+        revocable_tool_call,
+        response,
+        selected_response_lease,
+        connection_scope,
+        connection_closed,
+    }
+}
+
+struct ConnectionResponseWriter;
+
+#[hotpath::measure_all]
+impl ConnectionResponseWriter {
+    async fn write(
+        server: &McpServer,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
+        completion: &mut ConcurrentReadCompletion,
+    ) -> std::io::Result<bool> {
+        let response_revoked = completion
+            .selected_response_lease
+            .as_ref()
+            .map(crate::mcp::server::routing::SelectedProjectResponseLease::revoked);
+        let notifications: Vec<Value> =
+            crate::mcp::server::requests::recover_lock(&server.pending_notifications)
+                .drain(..)
+                .collect();
+        for notification in notifications {
+            if let Ok(serialized) = hotpath::measure_block!(
+                "mcp.server.notification.serialize",
+                serde_json::to_string(&notification)
+            ) && !server
+                .write_response_line_or_revoke(
+                    transport,
+                    &format!("{serialized}\n"),
+                    response_revoked,
+                )
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        let Some(response) = completion.response.as_ref() else {
+            return Ok(true);
+        };
+        let json_line = hotpath::measure_block!(
+            "mcp.server.response.serialize",
+            serialize_response_line(response)
+        );
+        server
+            .write_response_line_or_revoke(transport, &format!("{json_line}\n"), response_revoked)
+            .await
+    }
+}
+
+async fn wait_for_peer_close(
+    peer_close: &mut Option<
+        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    >,
+) {
+    match peer_close {
+        Some(peer_close) => peer_close.await,
+        None => std::future::pending().await,
+    }
 }
 
 #[hotpath::measure_all]
@@ -694,69 +891,195 @@ impl McpServer {
         timings_override: Option<bool>,
         request_lifecycle: Option<&dyn tracedecay_mcp::McpConnectionLifecyclePort>,
     ) -> Result<()> {
-        // Register the SIGTERM listener once before entering the loop so
-        // there is no window between iterations where a SIGTERM is delivered
-        // but no handler is installed (which would cause silent loss of the
-        // signal and skip the shutdown() flush).
-        #[cfg(unix)]
-        #[allow(clippy::expect_used)]
-        let mut sigterm = listen_for_process_signals.then(|| {
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler")
-        });
+        Box::pin(self.run_connection_loop(
+            transport,
+            shutdown_on_exit,
+            listen_for_process_signals,
+            timings_override,
+            request_lifecycle,
+        ))
+        .await
+    }
 
+    #[hotpath::measure(label = "mcp.server.connection.loop", future = true)]
+    async fn run_connection_loop(
+        self: &Arc<Self>,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
+        shutdown_on_exit: bool,
+        listen_for_process_signals: bool,
+        timings_override: Option<bool>,
+        request_lifecycle: Option<&dyn tracedecay_mcp::McpConnectionLifecyclePort>,
+    ) -> Result<()> {
         let mut connection_route = self.new_connection_route_state()?;
         let mut pending_lines: VecDeque<QueuedRequestLine> = VecDeque::new();
         let mut pending_cancellations = HashSet::new();
+        let mut active_reads: tokio::task::JoinSet<ConcurrentReadCompletion> =
+            tokio::task::JoinSet::new();
+        let mut active_cancellations: HashMap<
+            String,
+            tracedecay_session_memory::context::CancellationToken,
+        > = HashMap::new();
+        let connection_shutdown = tracedecay_session_memory::context::CancellationToken::new();
+        let mut input_closed = false;
+        let mut peer_close_check: Option<
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        > = None;
+        let timings_enabled = timings_override.unwrap_or_else(|| self.timings_enabled());
 
-        'connection: loop {
-            let line: String = if let Some(queued) = pending_lines.pop_front() {
-                queued.into_line()
-            } else {
-                let read = {
-                    let transport_read = read_connection_line(transport);
-                    tokio::pin!(transport_read);
-                    #[cfg(unix)]
-                    {
-                        if let Some(sigterm) = sigterm.as_mut() {
-                            tokio::select! {
-                                result = &mut transport_read => result,
-                                _ = tokio::signal::ctrl_c() => break,
-                                _ = sigterm.recv() => break,
-                            }
-                        } else if let Some(lifecycle) = request_lifecycle {
-                            tokio::select! {
-                                result = &mut transport_read => result,
-                                () = lifecycle.wait_for_draining() => break,
-                            }
-                        } else {
-                            transport_read.await
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        if listen_for_process_signals {
-                            tokio::select! {
-                                result = &mut transport_read => result,
-                                _ = tokio::signal::ctrl_c() => break,
-                            }
-                        } else {
-                            transport_read.await
-                        }
-                    }
-                };
-                match read {
-                    Ok(Some(line)) => line,
-                    Ok(None) => break,
-                    Err(e) => {
-                        if is_wire_oversized_io_error(&e) {
-                            let _ = write_wire_oversized_rejection(transport, &e).await;
-                            break;
-                        }
-                        self.shutdown_if(shutdown_on_exit).await;
-                        return Err(e.into());
+        // Install the process listeners once. This same fused future is polled
+        // by idle reads, active read batches, and effect barriers, so shutdown
+        // cannot land in an iteration gap.
+        let external_shutdown_requested = async {
+            if listen_for_process_signals {
+                #[cfg(unix)]
+                {
+                    #[allow(clippy::expect_used)]
+                    let mut sigterm =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                            .expect("failed to register SIGTERM handler");
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = sigterm.recv() => {}
                     }
                 }
+                #[cfg(not(unix))]
+                {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            } else if let Some(lifecycle) = request_lifecycle {
+                lifecycle.wait_for_draining().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(external_shutdown_requested);
+
+        'connection: loop {
+            if input_closed && pending_lines.is_empty() && active_reads.is_empty() {
+                break;
+            }
+
+            let queued_ready = pending_lines.front().is_some_and(|queued| {
+                if active_reads.is_empty() {
+                    return true;
+                }
+                if !queued.independent_read || active_reads.len() >= MAX_CONCURRENT_CONNECTION_READS
+                {
+                    return false;
+                }
+                queued
+                    .request_id
+                    .as_ref()
+                    .and_then(|id| {
+                        application_surface_request_id(id, connection_route.memory_request_scope())
+                    })
+                    .is_none_or(|key| !active_cancellations.contains_key(&key))
+            });
+
+            let line_from_queue = queued_ready;
+            let event = if queued_ready {
+                let Some(queued) = pending_lines.pop_front() else {
+                    continue;
+                };
+                ConnectionLoopEvent::Queued(queued.into_line())
+            } else if active_reads.is_empty() {
+                let incoming = read_connection_line(transport);
+                tokio::pin!(incoming);
+                tokio::select! {
+                    biased;
+                    () = &mut external_shutdown_requested => ConnectionLoopEvent::Shutdown,
+                    () = wait_for_peer_close(&mut peer_close_check), if input_closed =>
+                        ConnectionLoopEvent::PeerClosed,
+                    result = &mut incoming, if !input_closed =>
+                        ConnectionLoopEvent::Incoming(result),
+                }
+            } else {
+                let can_read_more =
+                    !input_closed && pending_lines.len() < MAX_PENDING_CANCELLABLE_REQUEST_LINES;
+                let incoming = read_connection_line(transport);
+                tokio::pin!(incoming);
+                tokio::select! {
+                    biased;
+                    () = &mut external_shutdown_requested => ConnectionLoopEvent::Shutdown,
+                    () = wait_for_peer_close(&mut peer_close_check), if input_closed =>
+                        ConnectionLoopEvent::PeerClosed,
+                    result = active_reads.join_next() => ConnectionLoopEvent::Completed(result),
+                    result = &mut incoming, if can_read_more =>
+                        ConnectionLoopEvent::Incoming(result),
+                }
+            };
+
+            let line = match event {
+                ConnectionLoopEvent::Queued(line) => Some(line),
+                ConnectionLoopEvent::Incoming(Ok(Some(line))) => Some(line),
+                ConnectionLoopEvent::Incoming(Ok(None)) => {
+                    input_closed = true;
+                    peer_close_check = Some(Box::pin(transport.peer_fully_closed_after_eof()));
+                    None
+                }
+                ConnectionLoopEvent::Incoming(Err(error)) => {
+                    connection_shutdown.cancel();
+                    while active_reads.join_next().await.is_some() {}
+                    if is_wire_oversized_io_error(&error) {
+                        let _ = write_wire_oversized_rejection(transport, &error).await;
+                        break;
+                    }
+                    self.shutdown_if(shutdown_on_exit).await;
+                    return Err(error.into());
+                }
+                ConnectionLoopEvent::Completed(completed) => {
+                    let Some(completed) = completed else {
+                        continue;
+                    };
+                    let mut completion = completed.map_err(|error| TraceDecayError::Config {
+                        message: format!("MCP concurrent read task failed: {error}"),
+                    })?;
+                    if let Some(request_key) = completion.request_key.as_ref() {
+                        active_cancellations.remove(request_key);
+                    }
+                    if completion.connection_closed {
+                        connection_shutdown.cancel();
+                        while active_reads.join_next().await.is_some() {}
+                        break;
+                    }
+                    match ConnectionResponseWriter::write(self, transport, &mut completion).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            connection_shutdown.cancel();
+                            while active_reads.join_next().await.is_some() {}
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::error!(error = %error, "failed to write MCP response");
+                            if let Some((id, _)) = &completion.revocable_tool_call {
+                                let _ = self.cancel_application_surface_request(
+                                    id,
+                                    &completion.connection_scope,
+                                );
+                            }
+                            connection_shutdown.cancel();
+                            while active_reads.join_next().await.is_some() {}
+                            self.shutdown_if(shutdown_on_exit).await;
+                            return Err(error.into());
+                        }
+                    }
+                    drop(completion);
+                    if request_lifecycle.is_some_and(|lifecycle| !lifecycle.accepting()) {
+                        connection_shutdown.cancel();
+                        while active_reads.join_next().await.is_some() {}
+                        break;
+                    }
+                    None
+                }
+                ConnectionLoopEvent::Shutdown | ConnectionLoopEvent::PeerClosed => {
+                    connection_shutdown.cancel();
+                    while active_reads.join_next().await.is_some() {}
+                    break;
+                }
+            };
+
+            let Some(line) = line else {
+                continue;
             };
 
             let line = line.trim().to_string();
@@ -768,6 +1091,101 @@ impl McpServer {
                 "mcp.server.connection.decode",
                 serde_json::from_str(&line)
             );
+            if let Ok(notification) = &parsed
+                && matches!(
+                    classify_mcp_method(&notification.method),
+                    McpMethod::Cancelled
+                )
+                && let Some(id) = notification
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("requestId"))
+            {
+                let connection_scope = connection_route.memory_request_scope();
+                if !self.cancel_application_surface_request(id, connection_scope)
+                    && let Some(key) = application_surface_request_id(id, connection_scope)
+                {
+                    if let Some(cancellation) = active_cancellations.get(&key) {
+                        cancellation.cancel();
+                    } else if pending_cancellations.len() < MAX_PENDING_CANCELLABLE_REQUEST_LINES
+                        && queued_cancellable_request_key(&pending_lines, id, connection_scope)
+                            .is_some()
+                    {
+                        pending_cancellations.insert(key);
+                    }
+                }
+                continue;
+            }
+
+            if let Ok(request) = &parsed
+                && request_is_independent_read(request)
+            {
+                let request_key = request.id.as_ref().and_then(|id| {
+                    application_surface_request_id(id, connection_route.memory_request_scope())
+                });
+                let duplicate_in_flight = request_key
+                    .as_ref()
+                    .is_some_and(|key| active_cancellations.contains_key(key));
+                if !duplicate_in_flight
+                    && active_reads.len() < MAX_CONCURRENT_CONNECTION_READS
+                    && (line_from_queue || pending_lines.is_empty())
+                {
+                    let request_activity = request_lifecycle
+                        .and_then(tracedecay_mcp::McpConnectionLifecyclePort::try_enter);
+                    if request_lifecycle.is_some() && request_activity.is_none() {
+                        let mut completion = ConcurrentReadCompletion {
+                            request_key,
+                            _request_activity: request_activity,
+                            revocable_tool_call: None,
+                            response: request.id.clone().map(|id| {
+                                JsonRpcResponse::error(
+                                    id,
+                                    ErrorCode::InternalError,
+                                    "TraceDecay daemon is draining for upgrade; retry the request"
+                                        .to_string(),
+                                )
+                            }),
+                            selected_response_lease: None,
+                            connection_scope: connection_route.memory_request_scope().to_owned(),
+                            connection_closed: false,
+                        };
+                        ConnectionResponseWriter::write(self, transport, &mut completion).await?;
+                        break;
+                    }
+                    let cancellation = tracedecay_session_memory::context::CancellationToken::new();
+                    if let Some(request_key) = request_key.as_ref() {
+                        if pending_cancellations.remove(request_key) {
+                            cancellation.cancel();
+                        }
+                        active_cancellations.insert(request_key.clone(), cancellation.clone());
+                    }
+                    let admission = crate::daemon::current_connection_admission();
+                    active_reads.spawn(crate::daemon::in_connection_admission(
+                        admission,
+                        dispatch_independent_read(
+                            Arc::clone(self),
+                            request.clone(),
+                            timings_enabled,
+                            connection_route.fork_for_independent_read(),
+                            request_activity,
+                            cancellation,
+                            connection_shutdown.clone(),
+                        ),
+                    ));
+                    continue;
+                }
+            }
+
+            if !active_reads.is_empty() {
+                if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {
+                    connection_shutdown.cancel();
+                    while active_reads.join_next().await.is_some() {}
+                    break;
+                }
+                pending_lines.push_back(QueuedRequestLine::from_parsed(line, parsed.as_ref().ok()));
+                continue;
+            }
+
             let revocable_tool_call = parsed.as_ref().ok().and_then(|request| {
                 (request.method == "tools/call").then_some(())?;
                 let id = request.id.clone()?;
@@ -801,80 +1219,28 @@ impl McpServer {
                                 .and_then(Value::as_str)
                                 .is_some_and(super::requests::tool_supports_live_cancellation);
                         if cancellable_tool_call {
-                            let external_shutdown_requested = async {
-                                if listen_for_process_signals {
-                                    #[cfg(unix)]
-                                    {
-                                        if let Some(sigterm) = sigterm.as_mut() {
-                                            tokio::select! {
-                                                _ = tokio::signal::ctrl_c() => {}
-                                                _ = sigterm.recv() => {}
-                                            }
-                                        } else {
-                                            let _ = tokio::signal::ctrl_c().await;
-                                        }
-                                    }
-                                    #[cfg(not(unix))]
-                                    {
-                                        let _ = tokio::signal::ctrl_c().await;
-                                    }
-                                } else if let Some(lifecycle) = request_lifecycle {
-                                    lifecycle.wait_for_draining().await;
-                                } else {
-                                    std::future::pending::<()>().await;
-                                }
-                            };
-                            tokio::pin!(external_shutdown_requested);
-                            let shutdown_requested = external_shutdown_requested;
-                            tokio::pin!(shutdown_requested);
                             let (response, closed) = self
                                 .handle_cancellable_application_request(
                                     &request,
-                                    timings_override.unwrap_or_else(|| self.timings_enabled()),
+                                    timings_enabled,
                                     &mut connection_route,
                                     transport,
                                     &mut pending_lines,
                                     &mut pending_cancellations,
-                                    shutdown_requested.as_mut(),
+                                    external_shutdown_requested.as_mut(),
                                 )
                                 .await?;
                             peer_closed = closed;
                             response
                         } else {
-                            let external_shutdown_requested = async {
-                                if listen_for_process_signals {
-                                    #[cfg(unix)]
-                                    {
-                                        if let Some(sigterm) = sigterm.as_mut() {
-                                            tokio::select! {
-                                                _ = tokio::signal::ctrl_c() => {}
-                                                _ = sigterm.recv() => {}
-                                            }
-                                        } else {
-                                            let _ = tokio::signal::ctrl_c().await;
-                                        }
-                                    }
-                                    #[cfg(not(unix))]
-                                    {
-                                        let _ = tokio::signal::ctrl_c().await;
-                                    }
-                                } else if let Some(lifecycle) = request_lifecycle {
-                                    lifecycle.wait_for_draining().await;
-                                } else {
-                                    std::future::pending::<()>().await;
-                                }
-                            };
-                            tokio::pin!(external_shutdown_requested);
-                            let shutdown_requested = external_shutdown_requested;
-                            tokio::pin!(shutdown_requested);
                             let (response, closed) = self
                                 .handle_non_cancellable_application_request(
                                     &request,
-                                    timings_override.unwrap_or_else(|| self.timings_enabled()),
+                                    timings_enabled,
                                     &mut connection_route,
                                     transport,
                                     &mut pending_lines,
-                                    shutdown_requested.as_mut(),
+                                    external_shutdown_requested.as_mut(),
                                 )
                                 .await?;
                             peer_closed = closed;
@@ -890,79 +1256,33 @@ impl McpServer {
             };
 
             let selected_response_lease = connection_route.take_selected_response_lease();
-
             if peer_closed {
                 drop(request_activity);
                 break;
             }
-
-            let response_revoked = selected_response_lease
-                .as_ref()
-                .map(crate::mcp::server::routing::SelectedProjectResponseLease::revoked);
-
-            // Drain and write any pending notifications (e.g., version warnings).
-            {
-                let notifications: Vec<Value> =
-                    crate::mcp::server::requests::recover_lock(&self.pending_notifications)
-                        .drain(..)
-                        .collect();
-                for notification in notifications {
-                    if let Ok(s) = hotpath::measure_block!(
-                        "mcp.server.notification.serialize",
-                        serde_json::to_string(&notification)
-                    ) {
-                        match self
-                            .write_response_line_or_revoke(
-                                transport,
-                                &format!("{s}\n"),
-                                response_revoked,
-                            )
-                            .await
-                        {
-                            Ok(true) => {}
-                            Ok(false) => break 'connection,
-                            Err(error) => {
-                                if let Some((id, _)) = &revocable_tool_call {
-                                    let _ = self.cancel_application_surface_request(
-                                        id,
-                                        connection_route.memory_request_scope(),
-                                    );
-                                }
-                                self.shutdown_if(shutdown_on_exit).await;
-                                return Err(error.into());
-                            }
-                        }
+            let mut completion = ConcurrentReadCompletion {
+                request_key: None,
+                _request_activity: request_activity,
+                revocable_tool_call,
+                response,
+                selected_response_lease,
+                connection_scope: connection_route.memory_request_scope().to_owned(),
+                connection_closed: false,
+            };
+            match ConnectionResponseWriter::write(self, transport, &mut completion).await {
+                Ok(true) => {}
+                Ok(false) => break 'connection,
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to write MCP response");
+                    if let Some((id, _)) = &completion.revocable_tool_call {
+                        let _ = self
+                            .cancel_application_surface_request(id, &completion.connection_scope);
                     }
+                    self.shutdown_if(shutdown_on_exit).await;
+                    return Err(error.into());
                 }
             }
-
-            if let Some(resp) = response {
-                let json_line = hotpath::measure_block!(
-                    "mcp.server.response.serialize",
-                    serialize_response_line(&resp)
-                );
-                let output = format!("{json_line}\n");
-                match self
-                    .write_response_line_or_revoke(transport, &output, response_revoked)
-                    .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => break 'connection,
-                    Err(error) => {
-                        tracing::error!(error = %error, "failed to write MCP response");
-                        if let Some((id, _)) = &revocable_tool_call {
-                            let _ = self.cancel_application_surface_request(
-                                id,
-                                connection_route.memory_request_scope(),
-                            );
-                        }
-                        self.shutdown_if(shutdown_on_exit).await;
-                        return Err(error.into());
-                    }
-                }
-            }
-            drop(selected_response_lease);
-            drop(request_activity);
+            drop(completion);
             if rejecting_for_drain
                 || request_lifecycle.is_some_and(|lifecycle| !lifecycle.accepting())
             {
@@ -1321,9 +1641,167 @@ impl McpServer {
 mod cancellable_queue_tests {
     use super::*;
 
+    struct DelayedRouteFixture {
+        _isolation: tempfile::TempDir,
+        harness: crate::daemon::ProductionProjectCompositionHarnessV1,
+        caller: Arc<McpServer>,
+        target_project_id: String,
+        route_started: Arc<std::sync::atomic::AtomicUsize>,
+        route_release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl DelayedRouteFixture {
+        async fn new() -> Self {
+            crate::product_runtime::register_fixture_product_runtime();
+            let isolation = tempfile::TempDir::new().expect("route concurrency isolation");
+            let active_root = isolation.path().join("active");
+            let target_root = isolation.path().join("target");
+            for root in [&active_root, &target_root] {
+                std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
+                std::fs::write(root.join("src/lib.rs"), "pub fn route_fixture() {}\n")
+                    .expect("fixture source");
+                super::super::writer_test_support::git(root, &["init", "-q", "-b", "main"]);
+                super::super::writer_test_support::git(
+                    root,
+                    &["config", "user.email", "route@test.invalid"],
+                );
+                super::super::writer_test_support::git(
+                    root,
+                    &["config", "user.name", "Route Test"],
+                );
+                super::super::writer_test_support::git(root, &["add", "."]);
+                super::super::writer_test_support::git(root, &["commit", "-q", "-m", "fixture"]);
+            }
+            let harness = crate::daemon::ProductionProjectCompositionHarnessV1::open(
+                isolation.path(),
+                [active_root.clone(), target_root.clone()],
+            )
+            .await
+            .expect("production route composition");
+            let mounted_active = harness.server(&active_root).expect("mounted active server");
+            let target = harness.server(&target_root).expect("mounted target server");
+            let target_project_id = target
+                .cg_snapshot()
+                .await
+                .store_layout()
+                .identity
+                .project_id
+                .clone()
+                .expect("target project identity");
+            let route_started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let route_release = Arc::new(tokio::sync::Semaphore::new(0));
+            let resolver_target = Arc::clone(&target);
+            let resolver_started = Arc::clone(&route_started);
+            let resolver_release = Arc::clone(&route_release);
+            let resolver: super::super::RetainedProjectServerResolver =
+                super::super::install_retained_project_server_resolver(move |_request| {
+                    let target = Arc::clone(&resolver_target);
+                    let started = Arc::clone(&resolver_started);
+                    let release = Arc::clone(&resolver_release);
+                    Box::pin(async move {
+                        started.fetch_add(1, Ordering::AcqRel);
+                        let permit = release.acquire().await.map_err(|error| {
+                            tracedecay_domain::errors::TraceDecayError::Config {
+                                message: format!("route concurrency gate closed: {error}"),
+                            }
+                        })?;
+                        permit.forget();
+                        Ok(Some(target))
+                    })
+                });
+            let context = super::super::McpServerConstructionContext::direct(
+                mounted_active.cg_snapshot().await,
+                None,
+            )
+            .with_direct_databases(
+                mounted_active.global_db.clone(),
+                mounted_active.registry_db.clone(),
+                mounted_active.session_db.clone(),
+                mounted_active.user_session_db.clone(),
+            )
+            .with_retained_project_server_resolver(resolver);
+            let caller = super::super::McpServer::new_with_context(context).await;
+            Self {
+                _isolation: isolation,
+                harness,
+                caller,
+                target_project_id,
+                route_started,
+                route_release,
+            }
+        }
+
+        async fn wait_for_routes(&self, expected: usize) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.route_started.load(Ordering::Acquire) < expected {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("selected requests did not enter route resolution");
+        }
+    }
+
     struct ObservedTransport {
         inner: tracedecay_mcp::transport::ChannelTransport,
         reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[derive(Clone, Default)]
+    struct TestConnectionLifecycle {
+        accepting: Arc<AtomicBool>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        draining: Arc<tokio::sync::Notify>,
+    }
+
+    struct TestRequestActivity(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for TestRequestActivity {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    impl TestConnectionLifecycle {
+        fn accepting() -> Self {
+            Self {
+                accepting: Arc::new(AtomicBool::new(true)),
+                ..Self::default()
+            }
+        }
+
+        fn begin_draining(&self) {
+            self.accepting.store(false, Ordering::Release);
+            self.draining.notify_waiters();
+        }
+    }
+
+    impl tracedecay_mcp::McpConnectionLifecyclePort for TestConnectionLifecycle {
+        fn accepting(&self) -> bool {
+            self.accepting.load(Ordering::Acquire)
+        }
+
+        fn try_enter(&self) -> Option<tracedecay_mcp::McpRequestActivity> {
+            if !self.accepting() {
+                return None;
+            }
+            self.active.fetch_add(1, Ordering::AcqRel);
+            if self.accepting() {
+                return Some(tracedecay_mcp::McpRequestActivity::retain(
+                    TestRequestActivity(Arc::clone(&self.active)),
+                ));
+            }
+            self.active.fetch_sub(1, Ordering::AcqRel);
+            None
+        }
+
+        fn wait_for_draining(&self) -> tracedecay_mcp::McpLifecycleDrainFuture<'_> {
+            Box::pin(async move {
+                while self.accepting() {
+                    self.draining.notified().await;
+                }
+            })
+        }
     }
 
     impl tracedecay_mcp::transport::McpTransport for ObservedTransport {
@@ -1358,6 +1836,391 @@ mod cancellable_queue_tests {
         })
         .await
         .expect("transport did not consume the expected request lines");
+    }
+
+    async fn receive_response(
+        responses: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Value {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let line = responses.recv().await.expect("connection response");
+                let value: Value =
+                    serde_json::from_str(line.trim()).expect("connection response JSON");
+                if value.get("id").is_some() {
+                    return value;
+                }
+            }
+        })
+        .await
+        .expect("connection response timeout")
+    }
+
+    #[tokio::test]
+    async fn independent_reads_complete_out_of_order_with_exact_ids() {
+        let fixture = DelayedRouteFixture::new().await;
+        let (mut transport, sender, mut responses) =
+            tracedecay_mcp::transport::ChannelTransport::new();
+        let serving = tokio::spawn({
+            let caller = Arc::clone(&fixture.caller);
+            async move { caller.run_connection(&mut transport).await }
+        });
+
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": "slow-read",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_fact_store_search",
+                        "arguments": {
+                            "query": "route concurrency",
+                            "project_selector": {
+                                "project_id": fixture.target_project_id.clone()
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send delayed selected read");
+        fixture.wait_for_routes(1).await;
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_status",
+                        "arguments": {"admission_only": true}
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send independent status read");
+
+        let fast = receive_response(&mut responses).await;
+        assert_eq!(
+            fast["id"],
+            serde_json::json!(2),
+            "the independent status read must not wait behind route resolution: {fast}"
+        );
+
+        fixture.route_release.add_permits(1);
+        let slow = receive_response(&mut responses).await;
+        assert_eq!(
+            slow["id"],
+            serde_json::json!("slow-read"),
+            "the delayed response must preserve the string request id: {slow}"
+        );
+
+        drop(sender);
+        serving
+            .await
+            .expect("join concurrent connection")
+            .expect("serve concurrent connection");
+        fixture.harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn effect_request_is_a_barrier_for_reads_on_both_sides() {
+        let fixture = DelayedRouteFixture::new().await;
+        let (inner_transport, sender, mut responses) =
+            tracedecay_mcp::transport::ChannelTransport::new();
+        let transport_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut transport = ObservedTransport {
+            inner: inner_transport,
+            reads: Arc::clone(&transport_reads),
+        };
+        let serving = tokio::spawn({
+            let caller = Arc::clone(&fixture.caller);
+            async move { caller.run_connection(&mut transport).await }
+        });
+
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_fact_store_search",
+                        "arguments": {
+                            "query": "before effect",
+                            "project_selector": {
+                                "project_id": fixture.target_project_id.clone()
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send read before effect");
+        fixture.wait_for_routes(1).await;
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_fact_store_add",
+                        "arguments": {
+                            "content": "effect barrier fixture",
+                            "category": "project",
+                            "trust": 0.9,
+                            "project_selector": {
+                                "project_id": fixture.target_project_id.clone()
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send effect barrier");
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_status",
+                        "arguments": {"admission_only": true}
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send read after effect");
+        wait_for_transport_reads(&transport_reads, 3).await;
+        assert_eq!(
+            fixture.route_started.load(Ordering::Acquire),
+            1,
+            "the effect must not begin before the preceding read settles"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), responses.recv())
+                .await
+                .is_err(),
+            "no request behind the blocked read/effect barrier may answer"
+        );
+
+        fixture.route_release.add_permits(1);
+        assert_eq!(receive_response(&mut responses).await["id"], json!(10));
+        fixture.wait_for_routes(2).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), responses.recv())
+                .await
+                .is_err(),
+            "the read after the effect must remain behind the effect"
+        );
+
+        fixture.route_release.add_permits(1);
+        assert_eq!(receive_response(&mut responses).await["id"], json!(11));
+        assert_eq!(receive_response(&mut responses).await["id"], json!(12));
+
+        drop(sender);
+        serving
+            .await
+            .expect("join effect barrier connection")
+            .expect("serve effect barrier connection");
+        fixture.harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn independent_read_work_is_bounded_by_daemon_per_client_admission() {
+        let fixture = DelayedRouteFixture::new().await;
+        let (mut transport, sender, mut responses) =
+            tracedecay_mcp::transport::ChannelTransport::new();
+        let serving = tokio::spawn({
+            let caller = Arc::clone(&fixture.caller);
+            async move { caller.run_connection(&mut transport).await }
+        });
+
+        for id in 1..=MAX_CONCURRENT_CONNECTION_READS + 1 {
+            sender
+                .send(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "tracedecay_fact_store_search",
+                            "arguments": {
+                                "query": format!("bounded read {id}"),
+                                "project_selector": {
+                                    "project_id": fixture.target_project_id.clone()
+                                }
+                            }
+                        }
+                    })
+                    .to_string(),
+                )
+                .expect("send bounded read");
+        }
+
+        fixture
+            .wait_for_routes(MAX_CONCURRENT_CONNECTION_READS)
+            .await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            fixture.route_started.load(Ordering::Acquire),
+            MAX_CONCURRENT_CONNECTION_READS,
+            "one connection must derive its active-read cap from daemon per-client admission"
+        );
+
+        fixture.route_release.add_permits(1);
+        let _ = receive_response(&mut responses).await;
+        fixture
+            .wait_for_routes(MAX_CONCURRENT_CONNECTION_READS + 1)
+            .await;
+        fixture
+            .route_release
+            .add_permits(MAX_CONCURRENT_CONNECTION_READS);
+
+        let mut response_ids = HashSet::new();
+        while response_ids.len() < MAX_CONCURRENT_CONNECTION_READS {
+            response_ids.insert(receive_response(&mut responses).await["id"].clone());
+        }
+        assert_eq!(
+            response_ids.len(),
+            MAX_CONCURRENT_CONNECTION_READS,
+            "every admitted and backpressured read must receive one response"
+        );
+
+        drop(sender);
+        serving
+            .await
+            .expect("join bounded connection")
+            .expect("serve bounded connection");
+        fixture.harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn notification_is_an_ordering_barrier_for_later_reads() {
+        let fixture = DelayedRouteFixture::new().await;
+        let (mut transport, sender, mut responses) =
+            tracedecay_mcp::transport::ChannelTransport::new();
+        let serving = tokio::spawn({
+            let caller = Arc::clone(&fixture.caller);
+            async move { caller.run_connection(&mut transport).await }
+        });
+
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 20,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_fact_store_search",
+                        "arguments": {
+                            "query": "before notification",
+                            "project_selector": {
+                                "project_id": fixture.target_project_id.clone()
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send read before notification");
+        fixture.wait_for_routes(1).await;
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized"
+                })
+                .to_string(),
+            )
+            .expect("send ordering notification");
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 21,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_status",
+                        "arguments": {"admission_only": true}
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send read after notification");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), responses.recv())
+                .await
+                .is_err(),
+            "the later read must not overtake an ordered notification"
+        );
+        fixture.route_release.add_permits(1);
+        assert_eq!(receive_response(&mut responses).await["id"], json!(20));
+        assert_eq!(receive_response(&mut responses).await["id"], json!(21));
+
+        drop(sender);
+        serving
+            .await
+            .expect("join notification barrier connection")
+            .expect("serve notification barrier connection");
+        fixture.harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn daemon_drain_cancels_and_joins_concurrent_reads() {
+        let fixture = DelayedRouteFixture::new().await;
+        let lifecycle = TestConnectionLifecycle::accepting();
+        let (mut transport, sender, _responses) =
+            tracedecay_mcp::transport::ChannelTransport::new();
+        let serving = tokio::spawn({
+            let caller = Arc::clone(&fixture.caller);
+            let lifecycle = lifecycle.clone();
+            async move {
+                caller
+                    .run_with_shutdown_policy(&mut transport, false, false, None, Some(&lifecycle))
+                    .await
+            }
+        });
+
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 30,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_fact_store_search",
+                        "arguments": {
+                            "query": "shutdown drain",
+                            "project_selector": {
+                                "project_id": fixture.target_project_id.clone()
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send read held across drain");
+        fixture.wait_for_routes(1).await;
+        assert_eq!(lifecycle.active.load(Ordering::Acquire), 1);
+
+        lifecycle.begin_draining();
+        tokio::time::timeout(Duration::from_secs(5), serving)
+            .await
+            .expect("draining connection did not join active reads")
+            .expect("join draining connection")
+            .expect("serve draining connection");
+        assert_eq!(
+            lifecycle.active.load(Ordering::Acquire),
+            0,
+            "shutdown drain must release every admitted request activity"
+        );
+
+        drop(sender);
+        fixture.harness.shutdown().await;
     }
 
     #[test]
