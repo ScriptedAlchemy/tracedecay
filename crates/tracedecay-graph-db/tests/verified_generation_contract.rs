@@ -1895,19 +1895,22 @@ fn foreign_prior_head_is_preserved_as_conflict() {
         .heads
         .insert(foreign.key.projection.clone(), foreign.clone());
 
-    assert_eq!(
-        registered
-            .registry
-            .publish_verified(
-                registration(registered.binding.clone(), temp.path()),
-                &mut authority,
-                &context,
-                &g2_record.publication.key,
-                None,
-            )
-            .unwrap_err(),
-        tracedecay_graph_db::GraphDbError::Conflict
-    );
+    let error = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g2_record.publication.key,
+            None,
+        )
+        .unwrap_err();
+    let tracedecay_graph_db::GraphDbError::Conflict { context } = error else {
+        panic!("a foreign prior head must remain a typed conflict");
+    };
+    assert_eq!(context.site, "publication.prepare.expected_prior_head");
+    assert!(context.expected.is_some());
+    assert!(context.actual.is_some());
     assert_eq!(
         authority.heads.get(&foreign.key.projection),
         Some(&foreign),
