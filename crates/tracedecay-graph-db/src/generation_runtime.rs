@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::ops::Range;
+use std::panic;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::thread;
 
 use grafeo_core::graph::Direction;
 use parking_lot::RwLockWriteGuard as ParkingRwLockWriteGuard;
@@ -77,6 +79,14 @@ struct GenerationStageContext {
     physical_namespace: GraphNamespace,
     dependency_namespaces: BTreeMap<crate::GraphProjectionIdentity, GraphNamespace>,
     dependency_digest: tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
+}
+
+/// CPU-only page batch, built outside the exclusive snapshot gate so the next
+/// page can construct while the current page applies.
+struct PreparedGenerationStagePage {
+    batch: GraphWriteBatch,
+    endpoint_namespaces: mutation::RelationEndpointNamespaces,
+    digest: String,
 }
 
 pub(crate) enum GenerationStageOutcome {
@@ -401,22 +411,15 @@ impl GraphDb {
                 crate::hotpath_observe::HydrationSource::Staged,
             );
         }
-        for (index, page) in pages.iter().enumerate() {
-            check()?;
-            self.apply_generation_stage_page_with_context(
-                &manifest,
-                &identity,
-                expected,
-                &context,
-                index.checked_sub(1).and_then(|prior| pages.get(prior)),
-                page,
-                adopt_legacy_partial && index == 0,
-                check,
-            )?;
-            // This is the exact cancellation boundary: the page transaction
-            // and receipt are durable, while no verified lease/head exists.
-            check()?;
-        }
+        self.stage_generation_pages(
+            &manifest,
+            &identity,
+            expected,
+            &context,
+            &pages,
+            adopt_legacy_partial,
+            check,
+        )?;
         // Every page is durable and receipted, so the rows are now recoverable
         // from the database alone. Release them here rather than carrying them
         // through finalization, reopen, and the recovered-digest proof.
@@ -459,6 +462,155 @@ impl GraphDb {
         Ok(Some(existing.commit))
     }
 
+    /// Constructs page N+1 while page N holds the exclusive apply gate.
+    /// Receipted pages skip construct so wedge-retry replay stays a peek.
+    #[hotpath::measure(label = "graph_db.generation.page_pipeline", impl_type = "GraphDb")]
+    fn stage_generation_pages(
+        &self,
+        manifest: &GraphGenerationManifest,
+        identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
+        context: &GenerationStageContext,
+        pages: &[GenerationStagePage],
+        adopt_legacy_partial: bool,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(), GraphDbError> {
+        let mut prepared_next = None;
+        for (index, page) in pages.iter().enumerate() {
+            check()?;
+            let first_page_blocked = index == 0
+                && self.generation_stage_first_page_blocked_without_legacy(
+                    identity,
+                    context,
+                    adopt_legacy_partial,
+                )?;
+            let current = if first_page_blocked {
+                None
+            } else {
+                match prepared_next.take() {
+                    Some(prepared) => Some(prepared),
+                    None => self.construct_generation_stage_page_if_needed(
+                        manifest, identity, expected, context, page, check,
+                    )?,
+                }
+            };
+            let successor = pages.get(index + 1);
+            let successor_needs_construct = match successor {
+                Some(next_page) if !first_page_blocked => !self
+                    .generation_stage_page_already_applied(
+                        identity, expected, context, next_page,
+                    )?,
+                Some(_) | None => false,
+            };
+            prepared_next = thread::scope(|scope| {
+                let successor_handle =
+                    successor
+                        .filter(|_| successor_needs_construct)
+                        .map(|next_page| {
+                            scope.spawn(|| {
+                                construct_generation_stage_page(
+                                    manifest,
+                                    identity,
+                                    context,
+                                    next_page,
+                                    &|| Ok(()),
+                                )
+                            })
+                        });
+                self.apply_prepared_generation_stage_page(
+                    manifest,
+                    identity,
+                    expected,
+                    context,
+                    index.checked_sub(1).and_then(|prior| pages.get(prior)),
+                    page,
+                    adopt_legacy_partial && index == 0,
+                    current,
+                    check,
+                )?;
+                // This is the exact cancellation boundary: the page transaction
+                // and receipt are durable, while no verified lease/head exists.
+                check()?;
+                successor_handle
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .unwrap_or_else(|payload| panic::resume_unwind(payload))
+                    })
+                    .transpose()
+            })?;
+        }
+        Ok(())
+    }
+
+    fn construct_generation_stage_page_if_needed(
+        &self,
+        manifest: &GraphGenerationManifest,
+        identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
+        context: &GenerationStageContext,
+        page: &GenerationStagePage,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Option<PreparedGenerationStagePage>, GraphDbError> {
+        if self.generation_stage_page_already_applied(identity, expected, context, page)? {
+            return Ok(None);
+        }
+        construct_generation_stage_page(manifest, identity, context, page, check).map(Some)
+    }
+
+    fn generation_stage_first_page_blocked_without_legacy(
+        &self,
+        identity: &GraphGenerationManifestIdentity,
+        context: &GenerationStageContext,
+        adopt_legacy_partial: bool,
+    ) -> Result<bool, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let Some(existing) = latest_projection(
+            database,
+            &context.physical_namespace,
+            &identity.projection.projection,
+        )?
+        else {
+            return Ok(false);
+        };
+        let exact_incomplete_legacy = adopt_legacy_partial
+            && existing.commit.source_generation == identity.source_generation
+            && existing.commit.watermark == identity.watermark
+            && existing.commit.generation_dependency_digest.is_none();
+        Ok(!exact_incomplete_legacy)
+    }
+
+    fn generation_stage_page_already_applied(
+        &self,
+        identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
+        context: &GenerationStageContext,
+        page: &GenerationStagePage,
+    ) -> Result<bool, GraphDbError> {
+        let (idempotency_key, input_digest) =
+            generation_stage_page_receipt(identity, expected, page)?;
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        Ok(
+            match crate::state::publication(
+                database,
+                &context.physical_namespace,
+                &idempotency_key,
+            )? {
+                Some(existing)
+                    if existing.input_digest == input_digest
+                        && existing.commit.source_generation == identity.source_generation
+                        && existing.commit.watermark == identity.watermark =>
+                {
+                    true
+                }
+                Some(_) | None => false,
+            },
+        )
+    }
+
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "graph_db.generation.page_apply", impl_type = "GraphDb")]
     fn apply_generation_stage_page_with_context(
@@ -470,6 +622,36 @@ impl GraphDb {
         predecessor: Option<&GenerationStagePage>,
         page: &GenerationStagePage,
         adopt_legacy_partial: bool,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphCommit, GraphDbError> {
+        self.apply_prepared_generation_stage_page(
+            manifest,
+            identity,
+            expected,
+            context,
+            predecessor,
+            page,
+            adopt_legacy_partial,
+            None,
+            check,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(
+        label = "graph_db.generation.page_apply_prepared",
+        impl_type = "GraphDb"
+    )]
+    fn apply_prepared_generation_stage_page(
+        &self,
+        manifest: &GraphGenerationManifest,
+        identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
+        context: &GenerationStageContext,
+        predecessor: Option<&GenerationStagePage>,
+        page: &GenerationStagePage,
+        adopt_legacy_partial: bool,
+        prepared: Option<PreparedGenerationStagePage>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         hotpath::gauge!("graph_db.generation.page_apply.bytes").set(page.live_bytes() as f64);
@@ -527,9 +709,20 @@ impl GraphDb {
                             .unwrap_or(GraphDbError::Conflict));
                     }
                 }
-                let (batch, endpoint_namespaces) =
-                    prepare_generation_stage_batch(manifest, identity, context, page, check)?;
-                let digest = batch.canonical_digest_checked(check)?;
+                let (batch, endpoint_namespaces, digest) = match prepared {
+                    Some(prepared) => (
+                        prepared.batch,
+                        prepared.endpoint_namespaces,
+                        prepared.digest,
+                    ),
+                    None => {
+                        let (batch, endpoint_namespaces) = prepare_generation_stage_batch(
+                            manifest, identity, context, page, check,
+                        )?;
+                        let digest = batch.canonical_digest_checked(check)?;
+                        (batch, endpoint_namespaces, digest)
+                    }
+                };
                 Ok(GraphBatchPlan::Apply(
                     PreparedGraphBatch {
                         batch,
@@ -1681,6 +1874,24 @@ fn prepare_generation_stage_batch(
     Ok((batch, endpoint_namespaces))
 }
 
+#[hotpath::measure(label = "graph_db.generation.page_construct")]
+fn construct_generation_stage_page(
+    manifest: &GraphGenerationManifest,
+    identity: &GraphGenerationManifestIdentity,
+    context: &GenerationStageContext,
+    page: &GenerationStagePage,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<PreparedGenerationStagePage, GraphDbError> {
+    let (batch, endpoint_namespaces) =
+        prepare_generation_stage_batch(manifest, identity, context, page, check)?;
+    let digest = batch.canonical_digest_checked(check)?;
+    Ok(PreparedGenerationStagePage {
+        batch,
+        endpoint_namespaces,
+        digest,
+    })
+}
+
 #[hotpath::measure]
 fn endpoint_namespace(
     identity: &GraphGenerationManifestIdentity,
@@ -1722,7 +1933,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
     use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
@@ -2393,6 +2604,137 @@ mod tests {
                 .sum::<usize>(),
             17
         );
+    }
+
+    #[test]
+    fn parallel_page_construction_matches_serial_digests() {
+        let manifest = large_manifest("parallel-page-construct");
+        let pages = super::generation_stage_pages_with_limits(
+            &manifest,
+            2_048,
+            MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
+        )
+        .unwrap();
+        assert!(
+            pages.len() >= 2,
+            "the fixture must split so construction can overlap"
+        );
+        let identity = manifest.identity();
+        let context = super::GenerationStageContext {
+            locator: GenerationLocator::new(
+                manifest.projection.clone(),
+                manifest.generation.clone(),
+            ),
+            physical_namespace: identity.physical_namespace().unwrap(),
+            dependency_namespaces: BTreeMap::new(),
+            dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+        };
+
+        let serial_started = Instant::now();
+        let serial = pages
+            .iter()
+            .map(|page| {
+                super::construct_generation_stage_page(
+                    &manifest,
+                    &identity,
+                    &context,
+                    page,
+                    &|| Ok(()),
+                )
+                .map(|prepared| prepared.digest)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let serial_ms = serial_started.elapsed();
+
+        let parallel_started = Instant::now();
+        let parallel = std::thread::scope(|scope| {
+            pages
+                .iter()
+                .map(|page| {
+                    scope.spawn(|| {
+                        super::construct_generation_stage_page(
+                            &manifest,
+                            &identity,
+                            &context,
+                            page,
+                            &|| Ok(()),
+                        )
+                        .map(|prepared| prepared.digest)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+        let parallel_ms = parallel_started.elapsed();
+
+        assert_eq!(serial, parallel);
+        eprintln!(
+            "page_construct pages={} serial={serial_ms:?} parallel={parallel_ms:?}",
+            pages.len()
+        );
+    }
+
+    #[test]
+    fn pipelined_custom_pages_seal_the_same_digest() {
+        let manifest = large_manifest("pipeline-page-apply");
+        let pages = super::generation_stage_pages_with_limits(
+            &manifest,
+            2_048,
+            MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
+        )
+        .unwrap();
+        assert!(pages.len() >= 2);
+        let sealed = sealed_digest(&manifest);
+        let temp = TempDir::new().unwrap();
+        let (owner, database) = persistent_database(&temp);
+        let identity = manifest.identity();
+        let context = super::GenerationStageContext {
+            locator: GenerationLocator::new(
+                manifest.projection.clone(),
+                manifest.generation.clone(),
+            ),
+            physical_namespace: identity.physical_namespace().unwrap(),
+            dependency_namespaces: database.require_exact_dependencies(&identity).unwrap(),
+            dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+        };
+        let started = Instant::now();
+        database
+            .stage_generation_pages(
+                &manifest,
+                &identity,
+                &sealed,
+                &context,
+                &pages,
+                false,
+                &|| Ok(()),
+            )
+            .unwrap();
+        database
+            .finalize_staged_generation(&identity, &sealed, &context, pages.last(), &|| Ok(()))
+            .unwrap();
+        eprintln!(
+            "page_pipeline pages={} stage+finalize={:?}",
+            pages.len(),
+            started.elapsed()
+        );
+        let (_, recovered) = database
+            .reopen_and_verify_existing_generation(
+                &identity,
+                &sealed,
+                manifest.row_counts(),
+                &|| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(recovered, sealed);
+        owner.close().unwrap();
     }
 
     #[test]
