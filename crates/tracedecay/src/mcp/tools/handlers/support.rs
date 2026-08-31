@@ -5,8 +5,6 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -15,23 +13,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
-
-pub(super) use tracedecay_mcp::handlers::run_bounded_search;
-
-pub(super) struct CancelSearchOnDrop(Arc<AtomicBool>);
-
-impl CancelSearchOnDrop {
-    #[cfg(test)]
-    pub(super) fn new(cancelled: Arc<AtomicBool>) -> Self {
-        Self(cancelled)
-    }
-}
-
-impl Drop for CancelSearchOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
 
 /// Builds a `Config` error from a message, for argument-validation failures.
 pub(super) fn argument_error(message: impl Into<String>) -> TraceDecayError {

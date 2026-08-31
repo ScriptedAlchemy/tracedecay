@@ -2,6 +2,7 @@
 //! and catalog crates.
 
 pub mod analysis;
+pub mod ast_grep;
 mod bounded_search;
 pub mod graph;
 pub mod grep;

@@ -14,7 +14,6 @@ mod admin_project;
 pub mod analysis;
 mod analytics;
 mod application_surface;
-pub mod ast_grep_search;
 mod automation_runs;
 pub mod dashboard;
 mod dashboard_delivery;
