@@ -635,7 +635,7 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
     );
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    assert!(matches!(
+    assert_eq!(
         registered
             .registry
             .publish_verified(
@@ -646,8 +646,8 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
                 Some(Arc::new(foreign)),
             )
             .unwrap_err(),
-        GraphDbError::Conflict { .. }
-    ));
+        GraphDbError::conflict("replay.validate_publication_manifest_identity")
+    );
 
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
