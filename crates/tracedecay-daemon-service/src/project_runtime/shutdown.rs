@@ -280,7 +280,7 @@ impl ProjectRuntimeRegistryV1 {
         mut runtimes: BTreeMap<PathBuf, ProjectRuntime>,
     ) -> bool {
         let deadline =
-            tokio::time::Instant::now() + crate::RUNTIME_SHUTDOWN_DEADLINE;
+            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
         let mut clean = shut_down_advisory(&runtimes).await;
         clean &= shut_down_feedback(&runtimes).await;
         clean &= shut_down_semantic(&mut runtimes, deadline).await;

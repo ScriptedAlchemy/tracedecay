@@ -9,8 +9,9 @@ use std::time::Duration;
 use sha2::Digest;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 
-use super::SOCKET_ENV;
+use crate::{RemoteBrainTlsConfig, SOCKET_ENV};
 
 mod probe;
 mod runner;
@@ -57,7 +58,7 @@ const DAEMON_OPEN_FILE_LIMIT: u32 = 8_192;
 /// ends in a named timeout receipt instead of an anonymous SIGKILL. This is
 /// not extra grace for slow work: the daemon still self-limits at 45s.
 const DAEMON_STOP_TIMEOUT_SECS: u64 =
-    super::DAEMON_SHUTDOWN_DEADLINE.as_secs() + DAEMON_STOP_TIMEOUT_MARGIN_SECS;
+    DAEMON_SHUTDOWN_DEADLINE.as_secs() + DAEMON_STOP_TIMEOUT_MARGIN_SECS;
 const DAEMON_STOP_TIMEOUT_MARGIN_SECS: u64 = 15;
 
 /// Backoff between supervisor restarts of the generated user unit.
@@ -71,7 +72,7 @@ pub struct DaemonServiceSpec {
     pub tracedecay_bin: PathBuf,
     pub socket_path: PathBuf,
     pub data_dir_override: Option<PathBuf>,
-    pub remote_tls: Option<super::RemoteBrainTlsConfig>,
+    pub remote_tls: Option<RemoteBrainTlsConfig>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,20 +90,25 @@ pub enum DaemonServiceState {
 pub struct QuiescedDaemonLifecycle {
     previous_state: DaemonServiceState,
     lifecycle_lease: Option<tracedecay_runtime_core::lifecycle_lease::LifecycleLease>,
+    expected_version: String,
     restored: bool,
 }
 
 impl QuiescedDaemonLifecycle {
-    pub fn acquire(operation: &str) -> Result<Self> {
-        Self::acquire_with(operation, || {
+    pub fn acquire(operation: &str, expected_version: &str) -> Result<Self> {
+        Self::acquire_with(operation, expected_version, || {
             tracedecay_runtime_core::lifecycle_lease::acquire_exclusive(operation)
         })
     }
 
     /// Stops the managed daemon, then waits up to `timeout` for its shared
     /// lifecycle lease to release before taking exclusive ownership.
-    pub fn acquire_with_timeout(operation: &str, timeout: Duration) -> Result<Self> {
-        Self::acquire_with(operation, || {
+    pub fn acquire_with_timeout(
+        operation: &str,
+        timeout: Duration,
+        expected_version: &str,
+    ) -> Result<Self> {
+        Self::acquire_with(operation, expected_version, || {
             tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_with_timeout(
                 operation, timeout,
             )
@@ -111,14 +117,16 @@ impl QuiescedDaemonLifecycle {
 
     fn acquire_with(
         operation: &str,
+        expected_version: &str,
         acquire: impl FnOnce() -> Result<tracedecay_runtime_core::lifecycle_lease::LifecycleLease>,
     ) -> Result<Self> {
-        let previous_state = quiesce_installed_service_before_lease()?;
+        let previous_state = quiesce_installed_service_before_lease(expected_version)?;
         match acquire() {
             Ok(lifecycle_lease) => {
                 let mut guard = Self {
                     previous_state,
                     lifecycle_lease: Some(lifecycle_lease),
+                    expected_version: expected_version.to_owned(),
                     restored: false,
                 };
                 match verify_installed_service_quiesced_under_lease() {
@@ -134,7 +142,10 @@ impl QuiescedDaemonLifecycle {
                 }
             }
             Err(operation_error) => {
-                let restore_result = restore_installed_service_after_failed_acquire(previous_state);
+                let restore_result = restore_installed_service_after_failed_acquire(
+                    previous_state,
+                    expected_version,
+                );
                 combine_operation_and_restore(operation, Err(operation_error), restore_result)
             }
         }
@@ -194,7 +205,7 @@ impl QuiescedDaemonLifecycle {
     fn restore_state(&mut self, state: DaemonServiceState) -> Result<()> {
         if state.is_running() {
             self.downgrade_to_shared()?;
-            restore_installed_service_after_update(state)?;
+            restore_installed_service_after_update(state, &self.expected_version)?;
         } else {
             drop(self.lifecycle_lease.take());
         }
@@ -245,9 +256,10 @@ impl Drop for QuiescedDaemonLifecycle {
 
 pub fn with_quiesced_installed_service<T>(
     operation: &str,
+    expected_version: &str,
     action: impl FnOnce(&tracedecay_runtime_core::lifecycle_lease::LifecycleLease) -> Result<T>,
 ) -> Result<T> {
-    let mut guard = QuiescedDaemonLifecycle::acquire(operation)?;
+    let mut guard = QuiescedDaemonLifecycle::acquire(operation, expected_version)?;
     let operation_result = guard.lifecycle_lease().and_then(action);
     let restore_result = guard.restore();
     combine_operation_and_restore(operation, operation_result, restore_result)
@@ -260,9 +272,10 @@ pub fn with_quiesced_installed_service<T>(
 #[hotpath::measure(label = "daemon.service.maintenance_window")]
 pub fn with_exclusive_maintenance_window<T>(
     operation: &str,
+    expected_version: &str,
     action: impl FnOnce(&str) -> Result<T>,
 ) -> Result<T> {
-    let mut guard = QuiescedDaemonLifecycle::acquire(operation)?;
+    let mut guard = QuiescedDaemonLifecycle::acquire(operation, expected_version)?;
     let token = guard
         .lifecycle_lease()?
         .token()
@@ -285,7 +298,7 @@ impl DaemonServiceState {
         matches!(self, Self::RunningEnabled | Self::StoppedEnabled)
     }
 
-    pub(crate) fn lifecycle_operator_advice(self) -> String {
+    pub fn lifecycle_operator_advice(self) -> String {
         let remedy = daemon_service_enable_now_remedy();
         match self {
             Self::RunningEnabled => {
@@ -331,7 +344,7 @@ impl DaemonServiceState {
     }
 }
 
-pub(crate) fn daemon_service_enable_now_remedy() -> &'static str {
+fn daemon_service_enable_now_remedy() -> &'static str {
     if cfg!(target_os = "linux") {
         "`tracedecay daemon install-service` or `systemctl --user enable --now tracedecay.service`"
     } else {
@@ -339,7 +352,7 @@ pub(crate) fn daemon_service_enable_now_remedy() -> &'static str {
     }
 }
 
-pub(crate) fn unavailable_daemon_socket_advice(
+pub fn unavailable_daemon_socket_advice(
     socket_path: &Path,
     state: Option<DaemonServiceState>,
 ) -> String {
@@ -366,7 +379,7 @@ pub(crate) fn unavailable_daemon_socket_advice(
 
 /// Unit-file presence only. Connect-path diagnosis must not spawn `systemctl`,
 /// which races tests that fake PATH and is slower than a socket miss.
-pub(crate) fn installed_service_unit_present() -> Result<bool> {
+fn installed_service_unit_present() -> Result<bool> {
     let service_path = service_unit_path()?;
     service_unit_exists(&service_path)
 }
@@ -449,7 +462,7 @@ impl DaemonServiceSpec {
         ];
         if let Some(data_dir_override) = &self.data_dir_override {
             env_entries.push((
-                crate::config::USER_DATA_DIR_ENV.to_string(),
+                tracedecay_runtime_core::config::USER_DATA_DIR_ENV.to_string(),
                 data_dir_override.display().to_string(),
             ));
         }
@@ -555,9 +568,7 @@ impl DaemonServiceSpec {
     }
 }
 
-pub(super) fn validate_managed_remote_tls(
-    remote_tls: Option<&super::RemoteBrainTlsConfig>,
-) -> Result<()> {
+pub(super) fn validate_managed_remote_tls(remote_tls: Option<&RemoteBrainTlsConfig>) -> Result<()> {
     let Some(remote_tls) = remote_tls else {
         return Ok(());
     };
@@ -697,7 +708,7 @@ fn home_for_service_env() -> Result<PathBuf> {
 }
 
 fn tracedecay_data_dir() -> Result<PathBuf> {
-    crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
+    tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })
 }
@@ -753,14 +764,14 @@ pub fn service_spec(
 pub fn service_spec_with_remote_tls(
     tracedecay_bin: impl Into<PathBuf>,
     socket: Option<String>,
-    remote_tls: Option<super::RemoteBrainTlsConfig>,
+    remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<DaemonServiceSpec> {
     let tracedecay_bin = tracedecay_bin.into();
     validate_managed_remote_tls(remote_tls.as_ref())?;
     Ok(DaemonServiceSpec {
         tracedecay_bin,
         socket_path: socket_path_or_default(socket)?,
-        data_dir_override: std::env::var_os(crate::config::USER_DATA_DIR_ENV)
+        data_dir_override: std::env::var_os(tracedecay_runtime_core::config::USER_DATA_DIR_ENV)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from),
         remote_tls,
@@ -768,18 +779,30 @@ pub fn service_spec_with_remote_tls(
 }
 
 #[doc(hidden)]
-pub fn prepare_scoop_package_service(package_id: &str, state_file: &Path) -> Result<()> {
-    windows_task::prepare_scoop_package_service(package_id, state_file)
+pub fn prepare_scoop_package_service(
+    package_id: &str,
+    state_file: &Path,
+    expected_version: &str,
+) -> Result<()> {
+    windows_task::prepare_scoop_package_service(package_id, state_file, expected_version)
 }
 
 #[doc(hidden)]
-pub fn restore_scoop_package_service(package_id: &str, state_file: &Path) -> Result<()> {
-    windows_task::restore_scoop_package_service(package_id, state_file)
+pub fn restore_scoop_package_service(
+    package_id: &str,
+    state_file: &Path,
+    expected_version: &str,
+) -> Result<()> {
+    windows_task::restore_scoop_package_service(package_id, state_file, expected_version)
 }
 
-pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
-    let guard = QuiescedDaemonLifecycle::acquire("daemon service install")?;
-    let operation_result = install_service_under_lease(spec, false);
+pub fn install_service(
+    spec: &DaemonServiceSpec,
+    start: bool,
+    expected_version: &str,
+) -> Result<PathBuf> {
+    let guard = QuiescedDaemonLifecycle::acquire("daemon service install", expected_version)?;
+    let operation_result = install_service_under_lease(spec, false, expected_version);
     let restore_result = if start {
         guard.finish_with_state(DaemonServiceState::RunningEnabled)
     } else {
@@ -793,7 +816,11 @@ pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf>
 /// acquires that lease itself and would deadlock if called from a
 /// lease-holding context.
 #[hotpath::measure(label = "daemon.service.install")]
-pub fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
+pub fn install_service_under_lease(
+    spec: &DaemonServiceSpec,
+    start: bool,
+    expected_version: &str,
+) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
     #[cfg(windows)]
     let new_windows_task = windows_task::service_state()? == DaemonServiceState::Missing;
@@ -806,7 +833,12 @@ pub fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Res
             spec.clone()
         };
         let service_path = write_service_unit(&materialized_spec)?;
-        runner.install(&service_path, start, &materialized_spec.socket_path)?;
+        runner.install(
+            &service_path,
+            start,
+            &materialized_spec.socket_path,
+            expected_version,
+        )?;
         Ok(service_path)
     })();
     if operation_result.is_err() && new_windows_task {
@@ -825,6 +857,7 @@ fn refresh_service_with_runner(
     runner: &ServiceRunner,
     spec: &DaemonServiceSpec,
     previous_state: DaemonServiceState,
+    expected_version: &str,
 ) -> Result<PathBuf> {
     if matches!(runner, ServiceRunner::Systemd) && previous_state == DaemonServiceState::Masked {
         let service_path = service_unit_path()?;
@@ -847,6 +880,7 @@ fn refresh_service_with_runner(
         &service_path,
         &materialized_spec.socket_path,
         previous_state,
+        expected_version,
     )?;
     Ok(service_path)
 }
@@ -855,13 +889,15 @@ fn refresh_service_with_runner(
 pub fn refresh_installed_service_under_lease_with_state(
     spec: &DaemonServiceSpec,
     previous_state: DaemonServiceState,
+    expected_version: &str,
 ) -> Result<Option<PathBuf>> {
-    refresh_installed_service_with_state(spec, Some(previous_state))
+    refresh_installed_service_with_state(spec, Some(previous_state), expected_version)
 }
 
 fn refresh_installed_service_with_state(
     spec: &DaemonServiceSpec,
     previous_state: Option<DaemonServiceState>,
+    expected_version: &str,
 ) -> Result<Option<PathBuf>> {
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(None);
@@ -878,7 +914,8 @@ fn refresh_installed_service_with_state(
         // The installed plist is the source of truth for the daemon's data
         // directory; the refreshing shell may not have the override set.
         refreshed_spec.data_dir_override =
-            launchd_plist_env_value(&unit, crate::config::USER_DATA_DIR_ENV).map(PathBuf::from);
+            launchd_plist_env_value(&unit, tracedecay_runtime_core::config::USER_DATA_DIR_ENV)
+                .map(PathBuf::from);
     } else if matches!(runner, ServiceRunner::WindowsTask) {
         refreshed_spec.data_dir_override = windows_task::profile_root_from_task_xml(&unit);
     }
@@ -907,7 +944,8 @@ fn refresh_installed_service_with_state(
         Some(state) => state,
         None => runner.service_state(&refreshed_spec.socket_path)?,
     };
-    refresh_service_with_runner(&runner, &refreshed_spec, previous_state).map(Some)
+    refresh_service_with_runner(&runner, &refreshed_spec, previous_state, expected_version)
+        .map(Some)
 }
 
 /// Stops the managed daemon before an exclusive lifecycle lease is acquired.
@@ -915,7 +953,9 @@ fn refresh_installed_service_with_state(
 /// intentionally stop-then-lock.
 #[doc(hidden)]
 #[hotpath::measure(label = "daemon.service.quiesce")]
-pub fn quiesce_installed_service_before_lease() -> Result<DaemonServiceState> {
+pub fn quiesce_installed_service_before_lease(
+    expected_version: &str,
+) -> Result<DaemonServiceState> {
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(DaemonServiceState::Missing);
     }
@@ -949,7 +989,7 @@ pub fn quiesce_installed_service_before_lease() -> Result<DaemonServiceState> {
         }
         return Ok(state);
     }
-    runner.stop_for_update()?;
+    runner.stop_for_update(expected_version)?;
     Ok(state)
 }
 
@@ -1005,7 +1045,10 @@ pub fn verify_installed_service_quiesced_under_lease() -> Result<DaemonServiceSt
 /// Callers hold a shared lifecycle lease, never the exclusive mutation lease.
 #[doc(hidden)]
 #[hotpath::measure(label = "daemon.service.restore")]
-pub fn restore_installed_service_after_update(previous_state: DaemonServiceState) -> Result<()> {
+pub fn restore_installed_service_after_update(
+    previous_state: DaemonServiceState,
+    expected_version: &str,
+) -> Result<()> {
     let previous_state = previous_state.expected_after_update();
     if !previous_state.is_running() || !cfg!(any(target_os = "linux", target_os = "macos", windows))
     {
@@ -1022,21 +1065,27 @@ pub fn restore_installed_service_after_update(previous_state: DaemonServiceState
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
-    ServiceRunner::current()?.restore_after_update(&service_path, &socket_path, previous_state)
+    ServiceRunner::current()?.restore_after_update(
+        &service_path,
+        &socket_path,
+        previous_state,
+        expected_version,
+    )
 }
 
 fn restore_installed_service_after_failed_acquire(
     previous_state: DaemonServiceState,
+    expected_version: &str,
 ) -> Result<()> {
     if !previous_state.is_running() {
         return Ok(());
     }
     let _lifecycle_lease =
         tracedecay_runtime_core::lifecycle_lease::acquire_shared_blocking("daemon state restore")?;
-    restore_installed_service_after_update(previous_state)
+    restore_installed_service_after_update(previous_state, expected_version)
 }
 
-pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
+pub fn uninstall_service(stop: bool, expected_version: &str) -> Result<PathBuf> {
     if !stop {
         let state = installed_service_state()?;
         if state.is_running() {
@@ -1048,15 +1097,15 @@ pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
             "daemon service uninstall --no-stop",
         )?;
         verify_installed_service_quiesced_under_lease()?;
-        return uninstall_service_under_lease(false);
+        return uninstall_service_under_lease(false, expected_version);
     }
-    let guard = QuiescedDaemonLifecycle::acquire("daemon service uninstall")?;
-    let operation_result = uninstall_service_under_lease(true);
+    let guard = QuiescedDaemonLifecycle::acquire("daemon service uninstall", expected_version)?;
+    let operation_result = uninstall_service_under_lease(true, expected_version);
     guard.finish_without_restore();
     operation_result
 }
 
-pub(crate) fn installed_service_state() -> Result<DaemonServiceState> {
+pub fn installed_service_state() -> Result<DaemonServiceState> {
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
         return Ok(DaemonServiceState::Missing);
@@ -1067,7 +1116,7 @@ pub(crate) fn installed_service_state() -> Result<DaemonServiceState> {
 }
 
 #[hotpath::measure(label = "daemon.service.start")]
-pub fn start_service() -> Result<()> {
+pub fn start_service(expected_version: &str) -> Result<()> {
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
         return Err(TraceDecayError::Config {
@@ -1076,17 +1125,17 @@ pub fn start_service() -> Result<()> {
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
-    ServiceRunner::current()?.start(&service_path, &socket_path)
+    ServiceRunner::current()?.start(&service_path, &socket_path, expected_version)
 }
 
 #[hotpath::measure(label = "daemon.service.stop")]
-pub fn stop_service() -> Result<()> {
+pub fn stop_service(expected_version: &str) -> Result<()> {
     if matches!(installed_service_state()?, DaemonServiceState::Missing) {
         return Err(TraceDecayError::Config {
             message: "no TraceDecay daemon service is installed".to_string(),
         });
     }
-    ServiceRunner::current()?.stop()
+    ServiceRunner::current()?.stop(expected_version)
 }
 
 /// Waits for a strict maintenance command to observe the exact managed-service
@@ -1095,7 +1144,10 @@ pub fn stop_service() -> Result<()> {
 /// unit and identify as the current installed version; stopped or missing
 /// services must remain quiescent.
 #[hotpath::measure(label = "daemon.service.wait_state")]
-pub fn wait_for_installed_service_state(expected: DaemonServiceState) -> Result<()> {
+pub fn wait_for_installed_service_state(
+    expected: DaemonServiceState,
+    expected_version: &str,
+) -> Result<()> {
     // A freshly restored daemon may legitimately spend a while on startup
     // recovery (schema migrations, projection rebuilds, transcript catch-up)
     // before it answers its first initialize, so the restoration window is
@@ -1115,7 +1167,7 @@ pub fn wait_for_installed_service_state(expected: DaemonServiceState) -> Result<
     const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
     let deadline = std::time::Instant::now() + TOTAL_TIMEOUT;
-    let mut last = installed_service_status_snapshot()?;
+    let mut last = installed_service_status_snapshot(expected_version)?;
     let mut last_progress = std::time::Instant::now();
     loop {
         let (actual, _, socket_state, protocol_state) = &last;
@@ -1133,7 +1185,7 @@ pub fn wait_for_installed_service_state(expected: DaemonServiceState) -> Result<
             last_progress = now;
         }
         std::thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
-        last = installed_service_status_snapshot()?;
+        last = installed_service_status_snapshot(expected_version)?;
     }
 
     let (actual, socket_path, socket_state, protocol_state) = last;
@@ -1145,7 +1197,9 @@ pub fn wait_for_installed_service_state(expected: DaemonServiceState) -> Result<
     })
 }
 
-fn installed_service_status_snapshot() -> Result<(
+fn installed_service_status_snapshot(
+    expected_version: &str,
+) -> Result<(
     DaemonServiceState,
     PathBuf,
     DaemonSocketState,
@@ -1167,7 +1221,7 @@ fn installed_service_status_snapshot() -> Result<(
     let actual = ServiceRunner::current()?.service_state(&socket_path)?;
     let socket_state = daemon_socket_state(&socket_path);
     let protocol_state = if actual.is_running() {
-        daemon_protocol_state(&socket_path)
+        daemon_protocol_state(&socket_path, expected_version)
     } else {
         DaemonProtocolState::NotRequired
     };
@@ -1208,10 +1262,10 @@ fn combine_operation_and_restore<T>(
 }
 
 #[hotpath::measure(label = "daemon.service.uninstall")]
-fn uninstall_service_under_lease(stop: bool) -> Result<PathBuf> {
+fn uninstall_service_under_lease(stop: bool, expected_version: &str) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
     let service_path = service_unit_path()?;
-    runner.before_uninstall(stop)?;
+    runner.before_uninstall(stop, expected_version)?;
     remove_service_unit(&service_path)?;
     runner.after_uninstall(stop);
     Ok(service_path)

@@ -3,8 +3,8 @@
 //! This crate owns request dispatch, project-runtime publication, and the
 //! payload handlers that execute after daemon handshake. It sits above
 //! usecases, application, agent-hosts, and code-index-runtime, and below the
-//! composition root. OS lifecycle management (install/start/stop/probe) stays
-//! in the root crate.
+//! composition root. OS lifecycle management (install/start/stop/probe) lives
+//! in `tracedecay-daemon-control`.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -51,12 +51,6 @@ use std::time::Duration;
 /// Matches the composition-root OS-lifecycle constant so process-wide drain
 /// and invocation abort stay the same two-second pin.
 pub const TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
-
-/// Upper bound for project-runtime shutdown persistence work.
-///
-/// Matches the composition-root daemon shutdown deadline so invocation-owned
-/// retirement cannot outlive the process drain that owns it.
-pub const RUNTIME_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 
 pub mod invocation;
 pub mod project_runtime;

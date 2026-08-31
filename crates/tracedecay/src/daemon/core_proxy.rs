@@ -41,7 +41,9 @@ use tracedecay_mcp::{ErrorCode, JsonRpcResponse};
 /// the same grace used for per-request connects before falling back.
 #[cfg(unix)]
 pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
-    let installed_socket = super::installed_service_socket_path().ok().flatten();
+    let installed_socket = tracedecay_daemon_control::installed_service_socket_path()
+        .ok()
+        .flatten();
     should_proxy_serve_to_daemon_with(
         socket_path,
         installed_socket.as_deref(),
