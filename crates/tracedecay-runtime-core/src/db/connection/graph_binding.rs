@@ -341,10 +341,7 @@ mod tests {
         // A newer record supersedes the memo; the old stamp becomes a miss.
         let second = GraphWatermark::new("sha256:memo-stamp-eight").expect("second watermark");
         database.record_memory_graph_source_watermark(8, second.clone());
-        assert_eq!(
-            database.memory_graph_source_watermark_at(8),
-            Some(second)
-        );
+        assert_eq!(database.memory_graph_source_watermark_at(8), Some(second));
         assert!(database.memory_graph_source_watermark_at(7).is_none());
     }
 
