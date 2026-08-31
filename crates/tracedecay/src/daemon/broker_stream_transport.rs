@@ -268,6 +268,7 @@ impl BrokerStreamTransport {
     /// deliver, so waiting for the peer's full close would only strand clients
     /// that hold their read half open awaiting the daemon's EOF (a cancelling
     /// client does exactly that).
+    #[hotpath::measure(label = "daemon.broker.eof_settled_wait", future = true)]
     async fn wait_for_accepted_requests_settled(
         active_requests: Arc<
             std::sync::Mutex<
@@ -473,8 +474,12 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     );
                     let peer_full_close = self.peer_fully_closed_after_eof();
                     tokio::select! {
-                        () = peer_full_close => {}
-                        () = settled => {}
+                        () = peer_full_close => {
+                            hotpath::gauge!("daemon.broker.eof_peer_close_total").inc(1_u64);
+                        }
+                        () = settled => {
+                            hotpath::gauge!("daemon.broker.eof_settled_close_total").inc(1_u64);
+                        }
                     }
                     return None;
                 }
