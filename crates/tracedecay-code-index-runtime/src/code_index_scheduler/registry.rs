@@ -5233,6 +5233,10 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Return the exact ready generation without blocking the async executor
     /// on the bounded synchronous freshness probe.
+    #[hotpath::measure(
+        label = "daemon.code_index.query.latest_ready_decoded",
+        future = true
+    )]
     pub async fn latest_complete_ready_decoded_for_root_scope(
         &self,
         project_root: &Path,
@@ -5484,6 +5488,10 @@ impl CodeIndexSchedulerRegistryV1 {
     /// pending for the background worker. A caller serving the stale seat
     /// quotes this so a wedged route — days-old seat, nothing progressing —
     /// is distinguishable from a routine rebuild window.
+    #[hotpath::measure(
+        label = "daemon.code_index.query.rebuild_pass_in_flight",
+        future = true
+    )]
     pub async fn rebuild_pass_in_flight_for_root_scope(
         &self,
         project_root: &Path,

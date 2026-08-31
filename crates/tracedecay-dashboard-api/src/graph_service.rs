@@ -190,6 +190,7 @@ struct AdmittedGraphReadV1 {
     freshness: crate::graph::CodeGraphReadFreshnessV1,
 }
 
+#[hotpath::measure(label = "dashboard_api.graph.admitted_read", future = true)]
 async fn admitted_graph(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,

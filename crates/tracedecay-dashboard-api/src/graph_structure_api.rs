@@ -958,6 +958,7 @@ fn graph_control<T: Serialize>(
     })
 }
 
+#[hotpath::measure(label = "dashboard_api.graph_structure.admitted_read", future = true)]
 async fn admitted_graph<T: Serialize>(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,
