@@ -22,7 +22,7 @@ use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-use tracedecay_usecases::configuration::DirectConfigurationMutation;
+use tracedecay_configuration::DirectConfigurationMutation;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};

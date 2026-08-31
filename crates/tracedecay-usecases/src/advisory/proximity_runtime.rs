@@ -27,7 +27,7 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ManifestDigest, RetrievalAnchorId, UtcMicros, canonical_sha256,
 };
 
-use crate::configuration::{ConfigurationControlStore, ConfigurationCurrentStateV1};
+use tracedecay_configuration::{ConfigurationControlStore, ConfigurationCurrentStateV1};
 
 use super::context_allows_feedback_operation;
 
@@ -675,7 +675,7 @@ mod tests {
 
     fn configuration(revision: &str, threshold: Option<u64>) -> ConfigurationCurrentStateV1 {
         let layers = threshold
-            .map(|threshold| crate::config::resolver::ConfigurationLayerV1 {
+            .map(|threshold| tracedecay_configuration::config::resolver::ConfigurationLayerV1 {
                 layer: ConfigurationLayerIdV1::Project {
                     project_id: ProjectId::new("project.proximity-pin").expect("project"),
                 },
@@ -687,8 +687,8 @@ mod tests {
             })
             .into_iter()
             .collect::<Vec<_>>();
-        let snapshot = crate::config::resolver::resolve_configuration(
-            &crate::config::registry::ConfigurationRegistry::core().expect("registry"),
+        let snapshot = tracedecay_configuration::config::resolver::resolve_configuration(
+            &tracedecay_configuration::config::registry::ConfigurationRegistry::core().expect("registry"),
             &layers,
         )
         .expect("configuration")

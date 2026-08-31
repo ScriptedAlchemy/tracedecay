@@ -497,7 +497,7 @@ impl RegisteredAdvisoryRuntimeV1 {
 pub struct RegisteredDeliveryReadAuthorityV1 {
     project_root: PathBuf,
     scope: tracedecay_application::ResolvedScope,
-    configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
+    configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     handle: tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1,
     source_access: Arc<dyn tracedecay_usecases::ProjectSourceAccessSnapshotPort>,
 }
@@ -506,7 +506,7 @@ impl RegisteredDeliveryReadAuthorityV1 {
     pub fn new(
         project_root: PathBuf,
         scope: tracedecay_application::ResolvedScope,
-        configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
+        configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
         handle: tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1,
         source_access: Arc<dyn tracedecay_usecases::ProjectSourceAccessSnapshotPort>,
     ) -> Self {

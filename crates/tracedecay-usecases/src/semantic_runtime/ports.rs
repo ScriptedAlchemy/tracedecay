@@ -16,7 +16,7 @@ use crate::config::retrieval::{
     RetrievalProfileCasV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
     SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
 };
-use crate::configuration::{
+use tracedecay_configuration::{
     ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
 };
 
@@ -1631,7 +1631,7 @@ mod validate_contract_tests {
     use tracedecay_domain::{ManifestDigest, VectorGenerationIdV1};
 
     use super::*;
-    use crate::configuration::ConfigurationCurrentStateV1;
+    use tracedecay_configuration::ConfigurationCurrentStateV1;
 
     fn pin() -> SemanticConfigurationPinV1 {
         SemanticConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {

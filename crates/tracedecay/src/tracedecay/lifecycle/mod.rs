@@ -21,11 +21,11 @@ use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;
-use tracedecay_usecases::config::{
+use tracedecay_configuration::config::{
     open_runtime_configuration_for_registered_database,
     open_runtime_configuration_for_registered_database_read_only,
 };
-use tracedecay_usecases::configuration::ProjectConfigurationRuntime;
+use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_usecases::tracedecay::ProjectStoreRuntimeV1;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
