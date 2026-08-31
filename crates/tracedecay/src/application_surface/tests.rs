@@ -1699,11 +1699,14 @@ async fn dead_daemon_surface_dispatch_fails_fast_with_typed_unreachable() {
             >,
         > {
             Box::pin(async {
-                Err(tracedecay_daemon_protocol::DaemonInvocationError::Unreachable {
-                    reason_code: "daemon_connect_down".to_owned(),
-                    detail: "could not connect to TraceDecay daemon endpoint 'unix:///dead.sock'"
-                        .to_owned(),
-                })
+                Err(
+                    tracedecay_daemon_protocol::DaemonInvocationError::Unreachable {
+                        reason_code: "daemon_connect_down".to_owned(),
+                        detail:
+                            "could not connect to TraceDecay daemon endpoint 'unix:///dead.sock'"
+                                .to_owned(),
+                    },
+                )
             })
         }
 
