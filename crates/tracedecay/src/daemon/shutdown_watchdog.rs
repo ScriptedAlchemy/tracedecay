@@ -103,9 +103,13 @@ mod tests {
     #[test]
     fn armed_action_fires_after_the_bound_without_a_runtime() {
         let (fired_tx, fired_rx) = mpsc::channel();
-        arm_with_action("test-shutdown-bound", Duration::from_millis(50), move || {
-            fired_tx.send(()).expect("watchdog observer alive");
-        });
+        arm_with_action(
+            "test-shutdown-bound",
+            Duration::from_millis(50),
+            move || {
+                fired_tx.send(()).expect("watchdog observer alive");
+            },
+        );
         fired_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("armed action must fire after the bound");
