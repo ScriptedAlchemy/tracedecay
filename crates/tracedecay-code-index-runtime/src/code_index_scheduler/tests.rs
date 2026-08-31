@@ -6900,16 +6900,10 @@ async fn dashboard_freshness_reports_active_reconcile_liveness() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    let canonical = fixture.path().canonicalize().expect("canonical fixture");
-    let reconcile_in_progress = {
-        let mounted = registry.mounted.lock().await;
-        Arc::clone(
-            &mounted
-                .get(&canonical)
-                .expect("mounted worktree")
-                .reconcile_in_progress,
-        )
-    };
+    let reconcile_in_progress = registry
+        .reconcile_in_progress_handle_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
 
     reconcile_in_progress.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     let projected = registry

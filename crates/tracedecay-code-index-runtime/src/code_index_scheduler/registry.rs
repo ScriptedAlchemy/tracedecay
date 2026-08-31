@@ -1255,6 +1255,23 @@ impl CodeIndexSchedulerRegistryV1 {
         Arc::clone(&self.background_reconcile_admission)
     }
 
+    /// Test-only handle to an exact mounted worktree's owner-pass counter, for
+    /// simulating an in-flight activation or reconcile pass.
+    #[cfg(test)]
+    pub async fn reconcile_in_progress_handle_for_test(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<AtomicUsize>> {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return None;
+        };
+        self.mounted
+            .lock()
+            .await
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.reconcile_in_progress))
+    }
+
     /// Test-only observation of an exact mounted worktree's active owner pass.
     #[cfg(test)]
     pub async fn reconcile_in_progress_for_test(&self, project_root: &Path) -> bool {
