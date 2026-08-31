@@ -13,7 +13,7 @@ use tracedecay_session_memory::memory::{
 };
 
 use super::{ContractFixture, await_mounted_graph_operation, project_id};
-use crate::daemon::profile_identity;
+use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 

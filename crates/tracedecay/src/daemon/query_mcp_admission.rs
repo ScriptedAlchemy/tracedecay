@@ -17,10 +17,10 @@ use tracedecay_domain::{
 };
 use tracedecay_query::code_search;
 
-use super::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_code_index_runtime::mcp_admission::{
     CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
 };
+use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 
 pub(crate) const QUERY_MCP_READ_CAPABILITY_V1: &str =
     "capability.application.code-index.search-read";

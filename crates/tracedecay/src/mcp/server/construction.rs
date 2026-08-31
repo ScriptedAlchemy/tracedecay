@@ -13,13 +13,14 @@ use tracedecay_application::{
     ProfileIdentityReadPort, SessionTemporalRefreshWakePort,
     remote::status::RemoteOperationalStatusReadPort,
 };
+use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
 
 fn wrap_profile_identity(
-    identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    identity: LocalProfileIdentityAuthorityV1,
 ) -> Arc<dyn ProfileIdentityReadPort> {
     Arc::new(identity)
 }
@@ -203,7 +204,7 @@ pub(crate) struct McpServerDaemonDatabases {
 }
 
 pub(crate) struct McpServerDaemonAuthority {
-    pub(crate) profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    pub(crate) profile_identity: LocalProfileIdentityAuthorityV1,
     pub(crate) databases: McpServerDaemonDatabases,
     pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
     pub(crate) project_session_refresh_wake:
@@ -222,7 +223,7 @@ pub(crate) struct McpServerDaemonAuthority {
 }
 
 pub(crate) struct McpServerDaemonCoreAuthority {
-    pub(crate) profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    pub(crate) profile_identity: LocalProfileIdentityAuthorityV1,
     pub(crate) accounting: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) registry: RegisteredGlobalDbLeaseV1,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
@@ -319,7 +320,7 @@ impl McpServerConstructionContext {
     #[cfg(test)]
     pub(crate) fn with_direct_profile_identity(
         mut self,
-        profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+        profile_identity: LocalProfileIdentityAuthorityV1,
     ) -> Self {
         self.profile_root = Some(profile_identity.profile_root().to_path_buf());
         self.profile_identity = Some(wrap_profile_identity(profile_identity));

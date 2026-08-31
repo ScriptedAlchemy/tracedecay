@@ -31,7 +31,7 @@ async fn activate(
         false,
         false,
     )?;
-    let client = tracedecay::daemon::invocation_client_for_current(handshake)?;
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     if json {
         eprintln!(
             "semantic activate: evaluating profile '{profile}' natively for {} \

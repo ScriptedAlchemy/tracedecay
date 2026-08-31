@@ -117,7 +117,7 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         .host_admission_broker(&recovered_db)
         .await
         .expect("reopened host admission spool");
-    let broker_path = super::super::authority::canonical_identity_path(
+    let broker_path = tracedecay_daemon_identity::authority::canonical_identity_path(
         &tracedecay_sessions::runtime::user_sessions_db_path(&profile_root),
     )
     .unwrap();

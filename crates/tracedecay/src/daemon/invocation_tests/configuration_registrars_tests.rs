@@ -42,7 +42,8 @@ async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
     let profile_root =
         tracedecay_runtime_core::storage::default_profile_root().expect("default profile root");
     let profile_identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
     let profile_sessions = runtime
         .session_registry_for_test()
         .profile_sessions()

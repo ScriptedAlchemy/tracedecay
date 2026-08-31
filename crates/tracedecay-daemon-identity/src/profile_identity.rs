@@ -10,28 +10,28 @@ use tracedecay_runtime_core::storage::{
     ProfileIdentityRecordV1, read_existing_profile_identity_record,
 };
 
-use super::authority::canonical_identity_path;
+use crate::authority::canonical_identity_path;
 
 /// Durable random identity for one local `TraceDecay` profile root.
 ///
 /// The profile root is retained with the decoded record so callers cannot
 /// accidentally pair its identities with another physical profile.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalProfileIdentityAuthorityV1 {
+pub struct LocalProfileIdentityAuthorityV1 {
     profile_root: PathBuf,
     record: ProfileIdentityRecordV1,
 }
 
 impl LocalProfileIdentityAuthorityV1 {
-    pub(crate) fn profile_root(&self) -> &Path {
+    pub fn profile_root(&self) -> &Path {
         &self.profile_root
     }
 
-    pub(crate) fn brain_id(&self) -> &BrainId {
+    pub fn brain_id(&self) -> &BrainId {
         &self.record.brain_id
     }
 
-    pub(crate) fn profile_id(&self) -> &UserProfileId {
+    pub fn profile_id(&self) -> &UserProfileId {
         &self.record.profile_id
     }
 }
@@ -60,11 +60,11 @@ impl ProfileIdentity for LocalProfileIdentityAuthorityV1 {
     }
 }
 
-pub(crate) fn load_or_create(profile_root: &Path) -> Result<LocalProfileIdentityAuthorityV1> {
+pub fn load_or_create(profile_root: &Path) -> Result<LocalProfileIdentityAuthorityV1> {
     load_or_create_pinned(profile_root, None)
 }
 
-pub(crate) fn load_existing(profile_root: &Path) -> Result<LocalProfileIdentityAuthorityV1> {
+pub fn load_existing(profile_root: &Path) -> Result<LocalProfileIdentityAuthorityV1> {
     let profile_root = canonical_identity_path(profile_root)?;
     validate_private_profile_root(&profile_root)?;
     let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
@@ -83,7 +83,7 @@ pub(crate) fn load_existing(profile_root: &Path) -> Result<LocalProfileIdentityA
 }
 
 #[hotpath::measure(label = "daemon.profile_identity.load_or_create")]
-pub(super) fn load_or_create_pinned(
+pub(crate) fn load_or_create_pinned(
     profile_root: &Path,
     expected: Option<(&BrainId, &UserProfileId)>,
 ) -> Result<LocalProfileIdentityAuthorityV1> {

@@ -136,7 +136,7 @@ impl TraceDecay {
                         .to_owned(),
             });
         }
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let runtime_registry =
             crate::project_store_runtime::join_standalone_session_registry(identity).await?;
         let profile_database = runtime_registry.port().profile_database().await?;

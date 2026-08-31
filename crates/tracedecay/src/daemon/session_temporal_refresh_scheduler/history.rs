@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
+use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_usecases::observation::ObservationCancellation;
 

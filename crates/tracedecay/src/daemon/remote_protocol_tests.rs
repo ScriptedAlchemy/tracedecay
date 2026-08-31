@@ -218,9 +218,12 @@ async fn remote_operational_read_observes_mounted_authorities_and_fails_typed_wh
     );
     #[cfg(not(unix))]
     let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
-    let daemon_authority =
-        super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
-            .expect("daemon authority");
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
@@ -323,9 +326,12 @@ async fn mounted_node_populates_exact_prebody_credential_route_and_shutdown_canc
     );
     #[cfg(not(unix))]
     let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
-    let daemon_authority =
-        super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
-            .expect("daemon authority");
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,

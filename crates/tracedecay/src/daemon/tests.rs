@@ -188,16 +188,18 @@ fn daemon_test_transcript_source_home_is_profile_parent() {
 
 fn test_store_administration_for_profile(profile_root: &std::path::Path) -> StoreAdministration {
     prepare_test_profile_root(profile_root);
-    let profile_identity = crate::daemon::profile_identity::load_or_create(profile_root)
-        .expect("load test profile identity");
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
+            .expect("load test profile identity");
     StoreAdministration::default().with_profile_identity(profile_identity)
 }
 
 #[cfg(unix)]
 fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngine {
     prepare_test_profile_root(profile_root);
-    let profile_identity = crate::daemon::profile_identity::load_or_create(profile_root)
-        .expect("load test profile identity");
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
+            .expect("load test profile identity");
     let engine = DaemonEngine::default().with_profile_identity(profile_identity);
     // Daemon bootstrap installs the profile worker plan before it publishes any
     // transport endpoint (`bootstrap::install_profile_worker_plan`), and project

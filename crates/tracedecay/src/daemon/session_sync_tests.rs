@@ -439,8 +439,8 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
             .expect("canonical repository"),
         linked_root.canonicalize().expect("canonical linked root"),
     ];
-    let identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         47,

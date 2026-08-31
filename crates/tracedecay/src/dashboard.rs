@@ -194,7 +194,7 @@ impl DashboardGraphTestRuntimeV1 {
         static NEXT_ELECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
         let profile_root = profile_root.as_ref().to_path_buf();
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let epoch = NEXT_ELECTION_EPOCH.fetch_add(1, Ordering::Relaxed);
         let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             identity.profile_root(),

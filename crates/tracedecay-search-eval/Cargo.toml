@@ -32,6 +32,7 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 ] }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["eval-helpers"] }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
@@ -48,6 +49,7 @@ hotpath = [
     "tracedecay-application/hotpath",
     "tracedecay-capture/hotpath",
     "tracedecay-code-index/hotpath",
+    "tracedecay-daemon-identity/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-query/hotpath",
@@ -61,6 +63,7 @@ hotpath-alloc = [
     "tracedecay-application/hotpath-alloc",
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-daemon-identity/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
@@ -74,6 +77,7 @@ hotpath-cpu = [
     "tracedecay-application/hotpath-cpu",
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-daemon-identity/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",

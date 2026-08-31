@@ -12,19 +12,19 @@ use tracedecay_domain::{BrainId, UserProfileId};
 use tracedecay_runtime_core::path_safety::{
     canonicalize_existing_prefix, collapse_relative_components,
 };
+#[cfg(windows)]
+use tracedecay_runtime_core::storage::DAEMON_AUTHORITY_DIRECTORY as AUTHORITY_DIRECTORY;
+use tracedecay_runtime_core::storage::DAEMON_AUTHORITY_LOCK_FILE as LOCK_FILE;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::profile_identity::LocalProfileIdentityAuthorityV1;
+use crate::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_daemon_protocol::DaemonEndpoint;
 
 #[cfg(windows)]
 mod windows_acl;
 
-const LOCK_FILE: &str = "daemon-authority.lock";
 const RECORD_FILE: &str = "daemon-authority.json";
-#[cfg(windows)]
-const AUTHORITY_DIRECTORY: &str = "daemon-authority";
 
 fn deserialize_endpoint<'de, D>(deserializer: D) -> std::result::Result<DaemonEndpoint, D::Error>
 where
@@ -56,28 +56,28 @@ where
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub(super) struct DaemonAuthorityRecord {
-    pub(super) pid: u32,
-    pub(super) process_run_id: String,
-    pub(super) started_at_unix_secs: i64,
-    pub(super) epoch: u64,
-    pub(super) version: String,
+pub struct DaemonAuthorityRecord {
+    pub pid: u32,
+    pub process_run_id: String,
+    pub started_at_unix_secs: i64,
+    pub epoch: u64,
+    pub version: String,
     #[serde(alias = "socket_path", deserialize_with = "deserialize_endpoint")]
-    pub(super) endpoint: DaemonEndpoint,
+    pub endpoint: DaemonEndpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) http_application_endpoint: Option<SocketAddr>,
+    pub http_application_endpoint: Option<SocketAddr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) remote_brain_tls_endpoint: Option<SocketAddr>,
-    pub(super) auth_token: String,
-    pub(super) profile_root: PathBuf,
+    pub remote_brain_tls_endpoint: Option<SocketAddr>,
+    pub auth_token: String,
+    pub profile_root: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) brain_id: Option<BrainId>,
+    pub brain_id: Option<BrainId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) profile_id: Option<UserProfileId>,
+    pub profile_id: Option<UserProfileId>,
 }
 
 #[derive(Debug)]
-pub(super) struct DaemonAuthority {
+pub struct DaemonAuthority {
     _lock: File,
     record_path: PathBuf,
     record: DaemonAuthorityRecord,
@@ -87,7 +87,7 @@ pub(super) struct DaemonAuthority {
 
 impl DaemonAuthority {
     #[hotpath::measure(label = "daemon.engine.authority.acquire")]
-    pub(super) fn acquire(
+    pub fn acquire(
         profile_root: &Path,
         endpoint: &DaemonEndpoint,
         version: &str,
@@ -145,7 +145,7 @@ impl DaemonAuthority {
             None => None,
         };
         let profile_identity =
-            super::profile_identity::load_or_create_pinned(&profile_root, pinned_identity)?;
+            crate::profile_identity::load_or_create_pinned(&profile_root, pinned_identity)?;
         let prior_epoch = prior_record.as_ref().map_or(0, |record| record.epoch);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -187,30 +187,30 @@ impl DaemonAuthority {
         })
     }
 
-    pub(super) fn record(&self) -> &DaemonAuthorityRecord {
+    pub fn record(&self) -> &DaemonAuthorityRecord {
         &self.record
     }
 
-    pub(super) fn endpoint(&self) -> &DaemonEndpoint {
+    pub fn endpoint(&self) -> &DaemonEndpoint {
         &self.record.endpoint
     }
 
-    pub(super) fn auth_token(&self) -> &str {
+    pub fn auth_token(&self) -> &str {
         &self.record.auth_token
     }
 
-    pub(super) fn profile_identity(&self) -> &LocalProfileIdentityAuthorityV1 {
+    pub fn profile_identity(&self) -> &LocalProfileIdentityAuthorityV1 {
         &self.profile_identity
     }
 
-    pub(super) fn publish_endpoint(&mut self, endpoint: &DaemonEndpoint) -> Result<()> {
+    pub fn publish_endpoint(&mut self, endpoint: &DaemonEndpoint) -> Result<()> {
         self.record.endpoint = canonical_endpoint(endpoint)?;
         write_record(&self.record_path, &self.record)?;
         self.endpoint_bound = true;
         Ok(())
     }
 
-    pub(super) fn publish_http_application_endpoint(&mut self, endpoint: SocketAddr) -> Result<()> {
+    pub fn publish_http_application_endpoint(&mut self, endpoint: SocketAddr) -> Result<()> {
         if !endpoint.ip().is_loopback() {
             return Err(TraceDecayError::Config {
                 message: format!(
@@ -222,7 +222,7 @@ impl DaemonAuthority {
         write_record(&self.record_path, &self.record)
     }
 
-    pub(super) fn publish_remote_brain_tls_endpoint(&mut self, endpoint: SocketAddr) -> Result<()> {
+    pub fn publish_remote_brain_tls_endpoint(&mut self, endpoint: SocketAddr) -> Result<()> {
         if endpoint.ip().is_unspecified() || endpoint.port() == 0 {
             return Err(TraceDecayError::Config {
                 message: format!(
@@ -234,7 +234,7 @@ impl DaemonAuthority {
         write_record(&self.record_path, &self.record)
     }
 
-    pub(super) fn ensure_current(&self) -> Result<()> {
+    pub fn ensure_current(&self) -> Result<()> {
         let current = read_record_if_present(&self.record_path)?;
         if current.as_ref().is_some_and(|record| {
             record.epoch == self.record.epoch
@@ -257,13 +257,13 @@ impl DaemonAuthority {
     }
 
     #[cfg(all(test, unix))]
-    pub(super) fn mark_endpoint_bound(&mut self) {
+    pub(crate) fn mark_endpoint_bound(&mut self) {
         self.endpoint_bound = true;
     }
 
     // Preserve the fallible cross-platform cleanup contract; Unix removal can fail.
     #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
-    pub(super) fn cleanup_owned_endpoint(&mut self) -> Result<()> {
+    pub fn cleanup_owned_endpoint(&mut self) -> Result<()> {
         if !self.endpoint_bound || self.ensure_current().is_err() {
             return Ok(());
         }
@@ -287,7 +287,7 @@ impl Drop for DaemonAuthority {
 }
 
 #[hotpath::measure(label = "daemon.engine.authority.current")]
-pub(super) fn current_record(profile_root: &Path) -> Result<Option<DaemonAuthorityRecord>> {
+pub fn current_record(profile_root: &Path) -> Result<Option<DaemonAuthorityRecord>> {
     #[cfg(windows)]
     if !validate_existing_profile_root(profile_root)? {
         return Ok(None);
@@ -326,7 +326,7 @@ fn authority_state_root(profile_root: &Path) -> PathBuf {
 /// Absolutizes `path`, canonicalizes through its deepest existing ancestor,
 /// then collapses `.`/`..` so the daemon's recorded identity paths are
 /// comparable byte-for-byte.
-pub(super) fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
+pub fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {

@@ -34,11 +34,11 @@ use super::{
     AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1,
     sealed_projection_requires_stage_boundary,
 };
-use crate::daemon::profile_identity;
 use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
+use tracedecay_daemon_identity::profile_identity;
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")

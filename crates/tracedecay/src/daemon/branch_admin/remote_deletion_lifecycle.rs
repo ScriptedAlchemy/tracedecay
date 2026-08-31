@@ -6,13 +6,14 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::remote_deletion::{
     RemoteDeletionExecutionError, RemoteDeletionFailureCode, RemoteDeletionPhase,
     RemoteDeletionReceipt, RemoteDeletionReceiptTarget,
 };
-use super::{StoreAdministration, authority, destructive_reservation_error};
+use super::{StoreAdministration, destructive_reservation_error};
 
 struct RemoteDeletionCleanupError {
     code: RemoteDeletionFailureCode,

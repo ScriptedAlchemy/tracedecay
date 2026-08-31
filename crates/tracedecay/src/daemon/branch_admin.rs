@@ -23,8 +23,9 @@ use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
 use super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
-use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
+use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_daemon_identity::{authority, profile_identity};
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
@@ -314,7 +315,7 @@ impl Drop for RetirementReaperRegistrationBarrier {
 
 #[derive(Clone)]
 pub(super) struct SessionRuntimeRegistryEntryV1 {
-    pub(super) identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    pub(super) identity: profile_identity::LocalProfileIdentityAuthorityV1,
     pub(super) registry: Arc<
         tokio::sync::OnceCell<
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
@@ -327,7 +328,7 @@ pub(super) type SharedSessionRuntimeRegistries = Arc<ProfiledTokioMutex<SessionR
 #[derive(Clone)]
 struct ProfileHostAdmissionBootstrapContext {
     profile_root: PathBuf,
-    profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
     session_runtime_registry: Arc<
         tokio::sync::OnceCell<
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
@@ -443,7 +444,7 @@ impl ProfileHostAdmissionBootstrapContext {
 /// A parked the first request for project B behind it, unbounded.
 #[derive(Clone)]
 pub(super) struct StoreAdministration {
-    profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    profile_identity: Option<profile_identity::LocalProfileIdentityAuthorityV1>,
     authenticated_profile_database_scopes:
         Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_runtime_core::db::DaemonDatabaseScope>>>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
@@ -549,7 +550,7 @@ impl StoreAdministration {
 
     pub(super) fn with_profile_identity(
         mut self,
-        profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+        profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
     ) -> Self {
         self.profile_identity = Some(profile_identity);
         self
@@ -557,7 +558,7 @@ impl StoreAdministration {
 
     pub(super) fn profile_identity(
         &self,
-    ) -> Result<&crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1> {
+    ) -> Result<&profile_identity::LocalProfileIdentityAuthorityV1> {
         self.profile_identity
             .as_ref()
             .ok_or_else(|| TraceDecayError::Config {
@@ -1892,8 +1893,7 @@ mod tests {
         // creates (and restricts to 0700) itself; a umask-default tempdir
         // trips the fail-closed private-root validation.
         let profile_root = temp.path().join("profile");
-        let profile_identity =
-            crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+        let profile_identity = profile_identity::load_or_create(&profile_root).unwrap();
         let database_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (meta_path, bytes_before) = write_future_spool_metadata(&database_path);
         let administration = StoreAdministration::default().with_profile_identity(profile_identity);

@@ -61,11 +61,12 @@ async fn open_registry_at(
     profile_root: &Path,
     purpose: &str,
 ) -> (
-    crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1,
     tracedecay_runtime_core::db::DaemonDatabaseScope,
     DaemonSessionRuntimeRegistryV1,
 ) {
-    let identity = crate::daemon::profile_identity::load_or_create(profile_root).unwrap();
+    let identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(profile_root).unwrap();
     let nonce = INGEST_TEST_NONCE.fetch_add(1, Ordering::Relaxed);
     let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),

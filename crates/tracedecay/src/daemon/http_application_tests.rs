@@ -280,7 +280,7 @@ async fn service_with_canonical_application(
     )
     .expect("canonical application handshake");
     let client = tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        super::DaemonConnection {
+        tracedecay_daemon_identity::DaemonConnection {
             endpoint: broker_endpoint,
             auth_token: None,
             authority_record: None,
@@ -1073,9 +1073,12 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     );
     #[cfg(not(unix))]
     let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
-    let daemon_authority =
-        super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
-            .expect("daemon authority");
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
@@ -1213,9 +1216,12 @@ async fn local_remote_status_reads_the_mounted_runtime() {
         tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-status.sock"));
     #[cfg(not(unix))]
     let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
-    let daemon_authority =
-        super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
-            .expect("daemon authority");
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,

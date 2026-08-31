@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tracedecay_code_index_runtime::code_index_scheduler;
+use tracedecay_daemon_identity::profile_identity;
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{

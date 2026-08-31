@@ -89,7 +89,7 @@ async fn project_sessions_convergence_fixture(
     let profile_root = root.join("profile");
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     // Production enters the daemon database scope before constructing the
     // session registry. Keep that authority alive for the whole fixture so
@@ -244,9 +244,12 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     #[cfg(not(unix))]
     let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
 
-    let first_authority =
-        crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
-            .expect("first daemon authority");
+    let first_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("first daemon authority");
     let first_database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         first_authority.record().epoch,
@@ -272,9 +275,12 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     drop(first_database_scope);
     drop(first_authority);
 
-    let second_authority =
-        crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
-            .expect("successor daemon authority");
+    let second_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("successor daemon authority");
     let _second_database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         second_authority.record().epoch,
@@ -306,7 +312,7 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
 async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage() {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
@@ -406,7 +412,7 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
 async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pin() {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
@@ -439,7 +445,7 @@ async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pi
 async fn concurrent_profile_sessions_mounts_singleflight_schema_admission() {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
@@ -479,9 +485,12 @@ async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
         tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-runtime.sock"));
     #[cfg(not(unix))]
     let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
-    let daemon_authority =
-        crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
-            .expect("daemon authority");
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
@@ -559,7 +568,7 @@ async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
 async fn profile_sessions_mount_rejects_incompatible_schema_through_registered_runtime() {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
@@ -611,7 +620,7 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
     let profile_root = root.join("profile");
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
@@ -973,7 +982,7 @@ async fn cached_project_sessions_reject_conflicting_enrollment_authority() {
     let conflicting_project_root = root.join("conflicting-project");
     std::fs::create_dir_all(&first_project_root).expect("project root");
     std::fs::create_dir_all(&conflicting_project_root).expect("conflicting project root");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
@@ -1019,7 +1028,7 @@ async fn worktree_graph_mount_does_not_require_git() {
     let profile_root = root.join("profile");
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("non-git project root");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.non-git-worktree").expect("project id");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
@@ -1068,7 +1077,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     let profile_root = root.join("profile");
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.generic-graph").expect("project id");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
@@ -1215,7 +1224,7 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
     let linked_root = root.join("linked");
     std::fs::create_dir_all(&primary_root).expect("primary project root");
     std::fs::create_dir_all(&linked_root).expect("linked project root");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.shared-code-graph").expect("project id");
     for project_root in [&primary_root, &linked_root] {
@@ -1302,7 +1311,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
     gix::init(&project_root).expect("initialize project repository");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.derived-graph-corrupt").expect("project id");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
@@ -1417,7 +1426,7 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
     gix::init(&project_root).expect("initialize project repository");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.session-relation-corrupt").expect("project id");
 
@@ -1481,7 +1490,7 @@ async fn background_session_relation_graph_reaches_the_published_relational_leas
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
     gix::init(&project_root).expect("initialize project repository");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.session-relation-late-bind").expect("project id");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -1512,7 +1521,7 @@ async fn background_project_memory_graph_reaches_the_published_session_lease() {
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
     gix::init(&project_root).expect("initialize project repository");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let project_id = ProjectId::new("project.memory-relation-late-bind").expect("project id");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -1547,7 +1556,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
     gix::init(&project_root).expect("initialize project repository");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
@@ -1653,7 +1662,7 @@ async fn read_only_worktree_mount_never_recreates_a_deleted_database() {
     let project_root = root.join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
     gix::init(&project_root).expect("initialize project repository");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,

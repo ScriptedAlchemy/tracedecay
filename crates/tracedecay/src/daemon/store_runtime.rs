@@ -4,7 +4,8 @@
 //! `session_registry` stays here because it stores `RegisteredGlobalDbLeaseV1`
 //! on its public surface, and `tracedecay-global-db` already depends on the
 //! kernel — taking that edge would be a Cargo cycle. It also reaches
-//! `daemon::{authority, profile_identity, transport}` and `log_daemon_event`.
+//! `daemon::transport`, `log_daemon_event`, and
+//! `tracedecay_daemon_identity::{authority, profile_identity}`.
 //! See `tracedecay_runtime_core`'s crate-level doc.
 
 pub(crate) use tracedecay_runtime_core::store_runtime::*;

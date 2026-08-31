@@ -396,7 +396,7 @@ fn daemon_protocol_probe_authenticates_to_managed_daemon() {
     let socket_path = profile.path().join("daemon.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
     let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket_path.clone());
-    let authority = super::super::authority::DaemonAuthority::acquire(
+    let authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
         profile.path(),
         &endpoint,
         env!("CARGO_PKG_VERSION"),
