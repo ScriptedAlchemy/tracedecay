@@ -5,13 +5,15 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_sha256;
 
-use crate::candidate_output::{
+use super::candidate_output::{
     CandidateWorkloadV1, EvaluationExecutionContractV1, GenerateCandidateOutputsResultV1,
     OptionalStageMeasurementsV1, ProductionCandidateOutputV1, compute_corpus_digest,
     compute_workload_digest,
 };
-use crate::semantic_native::{SemanticNativeStageResultV1, native_profile_requirements};
-use crate::{DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs_against_corpus};
+use super::evaluate::{
+    DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs_against_corpus,
+};
+use super::semantic_native::{SemanticNativeStageResultV1, native_profile_requirements};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -486,7 +488,7 @@ impl DirectEvaluationReportV1 {
                 profile.quality.duplicate_rate.denominator,
             );
         }
-        let diagnostic = crate::pairwise_candidate_failure_diagnostic(&self.profiles)
+        let diagnostic = super::evaluate::pairwise_candidate_failure_diagnostic(&self.profiles)
             .unwrap_or_else(|| "pairwise candidate quality failed".to_owned());
         self.pairwise_query_diagnostic()
             .map_or(diagnostic.clone(), |queries| {
@@ -496,11 +498,11 @@ impl DirectEvaluationReportV1 {
 
     fn pairwise_query_diagnostic(&self) -> Option<String> {
         for candidate in self.profiles.iter().filter(|profile| {
-            profile.profile_id == crate::SEMANTIC_PROFILE
-                || profile.profile_id == crate::RERANK_PROFILE
+            profile.profile_id == super::evaluate::SEMANTIC_PROFILE
+                || profile.profile_id == super::evaluate::RERANK_PROFILE
         }) {
             let baseline = self.profiles.iter().find(|profile| {
-                profile.profile_id == crate::QUERY_BASELINE_PROFILE
+                profile.profile_id == super::evaluate::QUERY_BASELINE_PROFILE
                     && profile.partition == candidate.partition
             })?;
             let baseline_natural = baseline
@@ -516,7 +518,7 @@ impl DirectEvaluationReportV1 {
             if candidate_natural
                 .ndcg_at_10_ppm
                 .saturating_sub(baseline_natural.ndcg_at_10_ppm)
-                >= crate::REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
+                >= super::evaluate::REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
             {
                 continue;
             }
@@ -601,8 +603,8 @@ impl DirectEvaluationReportV1 {
     pub fn semantic_activation_resource_pins(
         &self,
         evaluated_profile_id: &str,
-    ) -> Result<crate::semantic_native::SemanticActivationResourcePinsV1, SearchEvalError> {
-        use crate::semantic_native::{
+    ) -> Result<super::semantic_native::SemanticActivationResourcePinsV1, SearchEvalError> {
+        use super::semantic_native::{
             SemanticActivationResourcePinsV1, SemanticNativeStageResultV1,
         };
 
