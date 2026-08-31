@@ -20,7 +20,7 @@ use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 /// authority checks, and all transaction begin/commit/rollback decisions stay
 /// in the registered database implementation.
 /// The holder `D` is generic so callers that own a
-/// [`crate::RegisteredGlobalDbLeaseV1`]
+/// [`tracedecay_global_db::RegisteredGlobalDbLeaseV1`]
 /// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
 /// trait impls below apply only "for some specific lifetime", which turns any
 /// `Send` proof over a future holding one across an await into a higher-ranked

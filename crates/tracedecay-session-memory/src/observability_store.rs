@@ -11,7 +11,13 @@ use tracedecay_global_db::{
     RegisteredGlobalDb,
 };
 
-use super::{EVENT_LIMIT, OBSERVABILITY_PROVIDER, OBSERVABILITY_SCAN_PAGE};
+/// Hard cap on eligible envelopes served per observability query.
+pub const EVENT_LIMIT: usize = 10_000;
+/// Page size for the bounded analytics-row scan behind each query.
+pub const OBSERVABILITY_SCAN_PAGE: usize = 64;
+/// Analytics-row provider tag every canonical observability envelope is
+/// stored and queried under.
+pub const OBSERVABILITY_PROVIDER: &str = "tracedecay-observability";
 
 /// Production adapter for the canonical application record/query boundary.
 /// The complete versioned envelope is retained as JSON while indexed columns

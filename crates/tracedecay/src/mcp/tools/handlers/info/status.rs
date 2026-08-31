@@ -551,7 +551,8 @@ mod tests {
         SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     };
     use tracedecay_usecases::runtime_telemetry::{
-        GenerationCensusReader, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
+        GenerationCensusReader, GenerationCensusSnapshot, GenerationCensusStatistics,
+        GenerationCensusUnavailableReason,
     };
 
     use super::{
@@ -577,7 +578,7 @@ mod tests {
         );
 
         let observed = GenerationCensusSnapshot::Observed {
-            statistics: crate::code_index::production::CodeIndexGenerationStatisticsV1 {
+            statistics: GenerationCensusStatistics {
                 source_total_bytes: 1_024,
                 symbol_count: 12,
                 edge_count: 7,

@@ -64,7 +64,6 @@ pub(crate) fn register_test_schema_installer() {
 }
 
 pub mod advisory;
-pub mod anchor_resolution;
 pub mod code_index;
 pub mod config;
 pub mod configuration;
@@ -75,13 +74,9 @@ pub mod diagnose;
 pub mod diagnostics_publication;
 pub mod diagnostics_query;
 pub mod diagnostics_store;
-// Public because the root shim re-exports this crate, and root adapters
-// (`src/mcp`, `src/daemon`, `src/store`) publish onto the event lane.
-pub mod event_lane;
 // Public because `tracedecay-global-db` reaches the runtime external-source
 // store through the root shim.
 pub mod analytics_bridge;
-pub mod external_source_store;
 pub mod feedback;
 pub mod git_intelligence;
 pub mod git_query;
@@ -90,25 +85,28 @@ pub mod graph;
 mod hotpath_observe;
 pub mod lsp_runtime;
 mod lsp_support;
-pub mod memory;
 pub mod native_integration;
 pub mod observability;
 pub mod observation;
 pub mod operation_stream;
 pub mod primitives;
-pub mod provider_pricing;
-pub mod provider_usage;
-pub mod response_handles;
-pub mod runtime_telemetry;
 pub mod semantic_runtime;
-pub mod session;
 pub mod settings_control;
 pub mod source_authorization;
 pub mod stack_coordinator;
 pub mod store;
 pub mod tracedecay;
-pub mod user_config;
 pub mod work;
+
+// RE-EXPORT SEAM: these modules moved to `tracedecay-session-memory`. The
+// old `tracedecay_usecases::<module>` paths stay valid so the root crate,
+// `tracedecay-dashboard-api`, `tracedecay-agent-hosts`, and
+// `tracedecay-code-index-runtime` keep compiling unchanged; a later slice
+// re-points them at `tracedecay_session_memory` and deletes this block.
+pub use tracedecay_session_memory::{
+    anchor_resolution, event_lane, external_source_store, memory, provider_pricing,
+    provider_usage, response_handles, runtime_telemetry, session, user_config,
+};
 
 pub use lsp_support::analyzer_runtime_config_error;
 pub use source_authorization::{

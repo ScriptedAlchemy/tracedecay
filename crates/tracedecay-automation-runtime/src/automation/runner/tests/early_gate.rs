@@ -16,7 +16,7 @@ use crate::automation::config::{
 };
 use crate::automation::run_ledger::AutomationRunStatus;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_usecases::session::SessionTemporalQuery;
+use tracedecay_session_memory::session::SessionTemporalQuery;
 
 struct RecordingRetrieval {
     anchor_session_id: SessionId,

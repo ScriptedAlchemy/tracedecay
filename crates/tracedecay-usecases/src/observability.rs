@@ -17,7 +17,6 @@ mod read_model;
 #[cfg(test)]
 mod read_model_tests;
 mod retrieval_emit;
-mod store;
 mod work_blocked_interval_emit;
 mod work_conflict_emit;
 mod work_duplicate_emit;
@@ -71,7 +70,7 @@ pub use retrieval_emit::{
     record_retrieval_ablation, record_retrieval_planner, record_retrieval_source,
     record_retrieval_synthesis, record_retriever,
 };
-pub use store::RegisteredObservabilityPortV1;
+pub use tracedecay_session_memory::observability_store::RegisteredObservabilityPortV1;
 pub use tracedecay_global_db::{
     DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,
     PendingDeliverySourceReceiptV1,
@@ -106,9 +105,12 @@ use crate::feedback::observations::{
 };
 use tracedecay_application::feedback::observations::FeedbackCoverageV1;
 
-const EVENT_LIMIT: usize = 10_000;
-const OBSERVABILITY_SCAN_PAGE: usize = 64;
-const OBSERVABILITY_PROVIDER: &str = "tracedecay-observability";
+// The registered-store adapter owns these limits; they moved with it to
+// `tracedecay-session-memory` (re-export seam for the staying read paths).
+pub(crate) use tracedecay_session_memory::observability_store::{
+    EVENT_LIMIT, OBSERVABILITY_PROVIDER,
+};
+
 const ANALYTICS_DESCRIPTOR: &str = "analytics-events.v1";
 pub(super) const COST_DESCRIPTOR: &str = "provider-costs.v1";
 const FEEDBACK_DESCRIPTOR: &str = "feedback-system-quality.v1";

@@ -509,7 +509,7 @@ impl RuntimeExternalSourceStore {
     pub async fn drain_host_projection_replay(
         &self,
         max: usize,
-        cancellation: &crate::observation::ObservationCancellation,
+        cancellation: &tracedecay_sessions::observation::ObservationCancellation,
     ) -> Result<RuntimeProjectionReplayOutcomeV1, RuntimeExternalSourceErrorV1> {
         self.drain_projection_replay_outcome(
             None,
@@ -525,7 +525,7 @@ impl RuntimeExternalSourceStore {
         binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
         projector: ComponentVersion,
         max: usize,
-        cancellation: &crate::observation::ObservationCancellation,
+        cancellation: &tracedecay_sessions::observation::ObservationCancellation,
     ) -> Result<RuntimeProjectionReplayOutcomeV1, RuntimeExternalSourceErrorV1> {
         projector
             .validate()

@@ -17,9 +17,9 @@ hotpath = [
     "tracedecay-global-db/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
+    "tracedecay-session-memory/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-store/hotpath",
-    "tracedecay-usecases/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
@@ -28,9 +28,9 @@ hotpath-alloc = [
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
@@ -39,13 +39,15 @@ hotpath-cpu = [
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
 ]
-# Forwards sessions/usecases fixture surfaces for this crate's own tests.
-test-helpers = ["tracedecay-sessions/test-helpers", "tracedecay-usecases/test-helpers"]
-test-transport = ["test-helpers", "tracedecay-usecases/test-transport"]
+# Forwards the sessions fixture surface for this crate's own tests.
+test-helpers = ["tracedecay-sessions/test-helpers"]
+# Forwards the kernel test-transport seam for consumers that publish test
+# runtimes through this crate's feature graph.
+test-transport = ["test-helpers", "tracedecay-runtime-core/test-transport"]
 
 [dependencies]
 hotpath.workspace = true
@@ -58,13 +60,12 @@ tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0", features = ["test-helpers"] }

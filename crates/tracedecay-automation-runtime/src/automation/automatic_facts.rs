@@ -35,7 +35,7 @@ use crate::application::memory::{
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::privacy::sanitize_provider_metadata_text;
-use tracedecay_usecases::memory::{MemoryMutationError, ProjectMemoryFactAddRequest};
+use tracedecay_session_memory::memory::{MemoryMutationError, ProjectMemoryFactAddRequest};
 
 const SHIPPED_FACT_PROPOSALS_FILENAME: &str = "fact_proposals.json";
 

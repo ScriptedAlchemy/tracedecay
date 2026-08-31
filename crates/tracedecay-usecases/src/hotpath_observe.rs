@@ -147,14 +147,6 @@ pub(crate) fn vector_lineage_depth(depth: usize) {
     hotpath::gauge!("usecases.vector.lineage_depth").set(depth as f64);
 }
 
-/// Live activity bus state after one publish: queued records not yet seen by
-/// the slowest subscriber, and the current subscriber count.
-#[inline]
-pub(crate) fn event_lane_publish(queue_depth: usize, subscribers: usize) {
-    hotpath::gauge!("usecases.event_lane.queue_depth").set(queue_depth as f64);
-    hotpath::gauge!("usecases.event_lane.subscribers").set(subscribers as f64);
-}
-
 #[inline]
 pub(crate) fn diagnostics_query(records: usize, total: usize) {
     hotpath::gauge!("usecases.diagnostics.records").set(records as f64);
@@ -166,53 +158,3 @@ pub(crate) fn feedback_query(findings: usize) {
     hotpath::gauge!("usecases.feedback.findings").set(findings as f64);
 }
 
-/// Count one bounded session-retrieval budget stage. Keys stay static; the
-/// stage is never a dynamic label.
-#[inline]
-pub(crate) fn session_retrieval_budget_stage(stage: crate::session::SessionRetrievalBudgetStageV1) {
-    use crate::session::SessionRetrievalBudgetStageV1;
-    match stage {
-        SessionRetrievalBudgetStageV1::RequestResultLimit => {
-            hotpath::gauge!("session.retrieval.budget.request_results").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::RequestHydrationLimit => {
-            hotpath::gauge!("session.retrieval.budget.request_hydration_items").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::RequestContextBytes => {
-            hotpath::gauge!("session.retrieval.budget.request_context_bytes").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::RequestCandidateBytes => {
-            hotpath::gauge!("session.retrieval.budget.request_candidate_bytes").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::RequestRecordBytes => {
-            hotpath::gauge!("session.retrieval.budget.request_record_bytes").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::RequestHydrationBytes => {
-            hotpath::gauge!("session.retrieval.budget.request_hydration_bytes").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::EstimatorVersionMismatch => {
-            hotpath::gauge!("session.retrieval.budget.estimator_version").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
-            hotpath::gauge!("session.retrieval.budget.execution_work").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::KernelResultLimit => {
-            hotpath::gauge!("session.retrieval.budget.kernel_results").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
-            hotpath::gauge!("session.retrieval.budget.manifest_participants").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes => {
-            hotpath::gauge!("session.retrieval.budget.manifest_canonical_bytes").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::HydrationBytes => {
-            hotpath::gauge!("session.retrieval.budget.hydration_bytes").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::ContextBytes => {
-            hotpath::gauge!("session.retrieval.budget.context_bytes").inc(1.0);
-        }
-        SessionRetrievalBudgetStageV1::ContextTokens => {
-            hotpath::gauge!("session.retrieval.budget.context_tokens").inc(1.0);
-        }
-    }
-}

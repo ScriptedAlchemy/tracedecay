@@ -157,7 +157,14 @@ pub(crate) fn project_code_index_generation_census_reader(
             };
             match latest.generation().generation_statistics() {
                 Ok(statistics) => {
-                    tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot::Observed { statistics }
+                    tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot::Observed {
+                        statistics:
+                            tracedecay_usecases::runtime_telemetry::GenerationCensusStatistics {
+                                source_total_bytes: statistics.source_total_bytes,
+                                symbol_count: statistics.symbol_count,
+                                edge_count: statistics.edge_count,
+                            },
+                    }
                 }
                 Err(_) => tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
                     reason: tracedecay_usecases::runtime_telemetry::GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,

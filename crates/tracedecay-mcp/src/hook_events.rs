@@ -123,7 +123,7 @@ impl HookEvent {
         format!(
             "{}:{}",
             self.agent.as_wire(),
-            tracedecay_usecases::context::read_cache::digest_bytes(&identity)
+            tracedecay_session_memory::context::read_cache::digest_bytes(&identity)
         )
     }
 }

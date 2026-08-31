@@ -14,13 +14,13 @@ use tracedecay_domain::{
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::context::{
+use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     session_application_grant_digest,
 };
-use tracedecay_usecases::memory::MemoryApplication;
-use tracedecay_usecases::session::{
+use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_session_memory::session::{
     SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant, SessionFreshnessPolicy,
     SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
@@ -163,9 +163,9 @@ struct NeverAutomationExecution;
 impl SessionTemporalExecutionPort for NeverAutomationExecution {
     fn execute<'a, E>(
         &'a self,
-        _request: tracedecay_usecases::session::AuthorizedTemporalExecutionRequest,
+        _request: tracedecay_session_memory::session::AuthorizedTemporalExecutionRequest,
         _estimator: &'a E,
-    ) -> tracedecay_usecases::session::TemporalExecutionFuture<'a>
+    ) -> tracedecay_session_memory::session::TemporalExecutionFuture<'a>
     where
         E: VersionedTokenEstimator + Sync + 'a,
     {
@@ -284,7 +284,7 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
     for (outcome, expected_reason) in [
         (
             SessionRetrievalOutcome::<TemporalKernelResult>::Stale {
-                freshness: tracedecay_usecases::session::SessionDataFreshness::Stored {
+                freshness: tracedecay_session_memory::session::SessionDataFreshness::Stored {
                     generation_lag: 1,
                 },
             },
@@ -297,7 +297,7 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
         (
             SessionRetrievalOutcome::Partial {
                 items: Vec::new(),
-                freshness: tracedecay_usecases::session::SessionDataFreshness::Fresh,
+                freshness: tracedecay_session_memory::session::SessionDataFreshness::Fresh,
                 omitted: 1,
             },
             "session_evidence_partial",
@@ -305,7 +305,7 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
         (SessionRetrievalOutcome::Denied, "session_evidence_denied"),
         (
             SessionRetrievalOutcome::BudgetExhausted {
-                stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+                stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
             },
             "session_evidence_budget_exhausted",
         ),
@@ -315,7 +315,7 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
         ),
         (
             SessionRetrievalOutcome::CompleteZero {
-                freshness: tracedecay_usecases::session::SessionDataFreshness::Stored {
+                freshness: tracedecay_session_memory::session::SessionDataFreshness::Stored {
                     generation_lag: 2,
                 },
             },
@@ -330,7 +330,7 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
     assert!(matches!(
         accept_automation_temporal_outcome(
             SessionRetrievalOutcome::<TemporalKernelResult>::CompleteZero {
-                freshness: tracedecay_usecases::session::SessionDataFreshness::Fresh,
+                freshness: tracedecay_session_memory::session::SessionDataFreshness::Fresh,
             }
         ),
         AutomationTemporalRetrieval::CompleteZero
@@ -382,7 +382,7 @@ fn temporal_automation_evidence_preserves_cursor_manifest_refusal() {
 fn complete_temporal_outcome_independently_requires_fresh_coverage() {
     let stale = SessionRetrievalOutcome::<TemporalKernelResult>::Complete {
         items: Vec::new(),
-        freshness: tracedecay_usecases::session::SessionDataFreshness::Stored { generation_lag: 1 },
+        freshness: tracedecay_session_memory::session::SessionDataFreshness::Stored { generation_lag: 1 },
     };
     // Empty Complete is invalid at the type layer, but stale freshness must
     // still fail closed before any serialization or write path.
@@ -724,7 +724,7 @@ async fn proposal_validation_does_not_wait_for_the_writer_lane() {
     });
     let preflight = memory
         .preflight_project_memory_fact_add(
-            tracedecay_usecases::memory::ProjectMemoryFactAddRequest {
+            tracedecay_session_memory::memory::ProjectMemoryFactAddRequest {
                 content: "Committed memory baseline".to_string(),
                 category: tracedecay_domain::FactCategoryV1::Project,
                 source_label: None,
@@ -741,7 +741,7 @@ async fn proposal_validation_does_not_wait_for_the_writer_lane() {
         .add_preflighted_project_memory_fact(preflight, &write_control)
         .await
         .unwrap();
-    let tracedecay_usecases::memory::ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome
+    let tracedecay_session_memory::memory::ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome
     else {
         panic!("seed request must apply");
     };

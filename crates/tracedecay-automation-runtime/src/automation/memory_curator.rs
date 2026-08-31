@@ -30,7 +30,7 @@ use tracedecay_policy::{
     CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
 use tracedecay_store::ProjectMemoryFactCurationReceiptV1;
-use tracedecay_usecases::memory::{
+use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryApplicationError, MemoryMutationError, MemoryOperationContext,
 };
 

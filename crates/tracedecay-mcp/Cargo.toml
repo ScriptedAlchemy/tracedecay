@@ -22,6 +22,7 @@ hotpath = [
     "tracedecay-domain/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-runtime-core/hotpath",
+    "tracedecay-session-memory/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-tool-catalog/hotpath",
     "tracedecay-usecases/hotpath",
@@ -35,6 +36,7 @@ hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
     "tracedecay-usecases/hotpath-alloc",
@@ -48,6 +50,7 @@ hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
     "tracedecay-usecases/hotpath-cpu",
@@ -71,8 +74,12 @@ tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version =
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+# The graph handlers still consume `tracedecay_usecases::graph` and the
+# code-index-backed `context` readers; dropping this edge needs the verified
+# graph-query slice, not the session-memory one.
 tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 tracing = "0.1"
 

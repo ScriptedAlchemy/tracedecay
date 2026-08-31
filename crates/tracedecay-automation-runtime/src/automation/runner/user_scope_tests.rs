@@ -26,7 +26,7 @@ use crate::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 use tracedecay_store::{FactStoreError, ProjectMemoryGraphQueryV1};
-use tracedecay_usecases::memory::MemoryApplicationError;
+use tracedecay_session_memory::memory::MemoryApplicationError;
 
 mod user_scope_graph_runtime;
 use user_scope_graph_runtime::bind_profile_memory_graph_runtime;

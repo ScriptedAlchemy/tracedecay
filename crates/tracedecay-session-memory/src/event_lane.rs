@@ -20,7 +20,7 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 
-use crate::observability::RegisteredObservabilityPortV1;
+use crate::observability_store::RegisteredObservabilityPortV1;
 use tracedecay_global_db::RegisteredGlobalDb;
 
 const BUS_CAPACITY: usize = 1024;
@@ -343,7 +343,16 @@ pub async fn publish(
     };
     let bus = live_bus();
     let _ = bus.send(record);
-    crate::hotpath_observe::event_lane_publish(bus.len(), bus.receiver_count());
+    observe_publish(bus.len(), bus.receiver_count());
+}
+
+/// Live activity bus state after one publish: queued records not yet seen by
+/// the slowest subscriber, and the current subscriber count. Keys are static
+/// capability names; every gauge is a no-op unless `hotpath` is selected.
+#[inline]
+fn observe_publish(queue_depth: usize, subscribers: usize) {
+    hotpath::gauge!("usecases.event_lane.queue_depth").set(queue_depth as f64);
+    hotpath::gauge!("usecases.event_lane.subscribers").set(subscribers as f64);
 }
 
 pub async fn replay_after(
@@ -512,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn registered_activity_replays_without_retaining_project_paths() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
         let project_id = tracedecay_domain::ProjectId::new("project.activity").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
@@ -563,7 +572,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_dispatch_receipt_uses_the_bound_project_observability_authority() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
         let project_id =
             tracedecay_domain::ProjectId::new("project.mcp.dispatch").expect("project id");

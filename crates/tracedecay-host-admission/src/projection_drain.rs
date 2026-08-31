@@ -45,7 +45,7 @@ impl HostAdmissionFacade<'_> {
             });
         }
         let external_source =
-            tracedecay_usecases::external_source_store::RuntimeExternalSourceStore::new(
+            tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
                 database.runtime_client(),
             );
         let external_replay = external_source

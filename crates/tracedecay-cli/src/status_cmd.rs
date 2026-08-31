@@ -172,11 +172,11 @@ async fn handle_status_command_within(
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
         } else {
-            let snapshot: tracedecay_usecases::runtime_telemetry::RuntimeSnapshot =
+            let snapshot: tracedecay_session_memory::runtime_telemetry::RuntimeSnapshot =
                 serde_json::from_value(result)?;
             print!(
                 "{}",
-                tracedecay_usecases::runtime_telemetry::to_text_report(&snapshot)
+                tracedecay_session_memory::runtime_telemetry::to_text_report(&snapshot)
             );
         }
         return Ok(());
@@ -197,7 +197,7 @@ async fn handle_status_command_within(
     // the same Rust contracts (`GenerationCensusSnapshot`,
     // `CodeIndexWorktreeFreshnessV1`), so absence or drift is a typed decode
     // failure rather than a silently defaulted table.
-    let census: tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot =
+    let census: tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot =
         serde_json::from_value(daemon_status.get("graph_statistics").cloned().ok_or_else(
             || tracedecay_domain::errors::TraceDecayError::Config {
                 message: "daemon status response omitted graph_statistics".to_string(),
@@ -240,7 +240,7 @@ async fn handle_status_command_within(
             "timed out waiting for canonical worldwide-counter upload setting before status deadline"
                 .to_string(),
     })??;
-    let mut config = tracedecay_usecases::user_config::UserConfig::load();
+    let mut config = tracedecay_session_memory::user_config::UserConfig::load();
     let now = current_unix_timestamp();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();
