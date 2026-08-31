@@ -70,10 +70,7 @@ impl SemanticInvocationControlV1 {
             .then(ApplicationProblem::timed_out_before_admission)
     }
 
-    pub fn remaining(
-        &self,
-        now: UtcMicros,
-    ) -> Result<Duration, ApplicationProblem> {
+    pub fn remaining(&self, now: UtcMicros) -> Result<Duration, ApplicationProblem> {
         self.deadline
             .expires_at
             .0
@@ -392,9 +389,10 @@ fn semantic_qualification_key(
         tracedecay_query::search_quality::NativeQualificationModelKeyV1::from_admitted_projection(
             &candidate_semantic.projection,
         );
-    let current_model = tracedecay_query::search_quality::NativeQualificationModelKeyV1::from_admitted_projection(
-        &current_semantic.projection,
-    );
+    let current_model =
+        tracedecay_query::search_quality::NativeQualificationModelKeyV1::from_admitted_projection(
+            &current_semantic.projection,
+        );
     if candidate_semantic.implementation_revision != current_semantic.implementation_revision
         || candidate_semantic.fusion_revision != current_semantic.fusion_revision
         || candidate_semantic.artifact_manifest_digest != current_semantic.artifact_manifest_digest

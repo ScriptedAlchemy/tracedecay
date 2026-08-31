@@ -61,7 +61,7 @@ impl RegisteredGraphDbOperationV1 {
                 "graph operation lease no longer matches its mounted registry entry; \
                  the operation conflicts"
             );
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("publication_support.check"));
         }
         check_context(context)
     }
@@ -84,7 +84,9 @@ impl RegisteredGraphDbOperationV1 {
                 bound = ?self.binding.shard_id,
                 "publication projection names a foreign shard; the operation conflicts"
             );
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "publication_support.require_projection_binding",
+            ));
         }
         Ok(())
     }
@@ -148,7 +150,9 @@ impl GraphDbRegistry {
                         "graph operation lease belongs to an owner that is closing or \
                          retiring; the operation conflicts"
                     );
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "publication_support.registered_operation_with_lease",
+                    ));
                 }
                 super::RegistryEntry::Faulted {
                     owner: Some(owner),
@@ -353,7 +357,9 @@ pub(super) fn locator_from_dependency(
     dependency: &tracedecay_store::runtime::GraphDependencyGenerationIdentityV1,
 ) -> Result<GenerationLocator, GraphDbError> {
     if dependency.projection.shard_id != registration.binding().shard_id {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "publication_support.locator_from_dependency",
+        ));
     }
     Ok(GenerationLocator::new(
         GraphProjectionIdentity::new(
@@ -467,11 +473,15 @@ pub(super) fn validate_exact_dependency_closure(
         if let Some(existing) = observed.insert(lease.locator.projection.clone(), evidence.clone())
             && existing != evidence
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "publication_support.validate_exact_dependency_closure",
+            ));
         }
     }
     if observed != declared {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "publication_support.validate_exact_dependency_closure",
+        ));
     }
     Ok(())
 }
@@ -494,7 +504,9 @@ pub(super) fn require_projection_binding(
             bound = ?registration.binding().shard_id,
             "publication projection names a foreign shard; the operation conflicts"
         );
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "publication_support.require_projection_binding",
+        ));
     }
     Ok(())
 }

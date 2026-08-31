@@ -19,28 +19,28 @@ use tracedecay_application::{
     RetainedSurfaceExecutionFutureV1,
 };
 use tracedecay_domain::{SessionId, TemporalModeV1, UtcMicros};
-use tracedecay_session_temporal_store::{
-    SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
-};
 use tracedecay_lcm::LcmStatus;
 use tracedecay_lcm::types::LcmPayloadCoverageState;
-use tracedecay_sessions::runtime::{SessionMessageType, SessionSearchScope};
 use tracedecay_session_memory::session::lcm::{
     LcmAuthorityOperation, LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest,
     LcmAuthorityResponse, LcmAuthorityUnavailableReason, LcmDoctorQuery, LcmStatusQuery,
 };
+use tracedecay_session_temporal_store::{
+    SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
+};
+use tracedecay_sessions::runtime::{SessionMessageType, SessionSearchScope};
 
 use super::receipts::evidence_outcome;
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_runtime_core::timeutil::SearchTimeBound;
+use tracedecay_session_memory::context::ResolvedSessionIdentity;
+use tracedecay_session_memory::session::SessionTemporalQuery;
 use tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort;
 use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalService, LcmDescribeServiceCommand, LcmDescribeServiceFuture,
     LcmExpandServiceCommand, LcmExpandServiceFuture, SessionApplicationRetrievalFutureV1,
     SessionApplicationRetrievalPortV1, SessionRetrievalStoreScope,
 };
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_runtime_core::timeutil::SearchTimeBound;
-use tracedecay_session_memory::context::ResolvedSessionIdentity;
-use tracedecay_session_memory::session::SessionTemporalQuery;
 
 mod output;
 mod retrieval;

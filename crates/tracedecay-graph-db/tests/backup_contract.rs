@@ -211,7 +211,7 @@ fn backup_never_replaces_an_existing_destination() {
 
     let error = GraphDb::create_verified_backup(&source, &backup, &live()).unwrap_err();
 
-    assert_eq!(error, GraphDbError::Conflict);
+    assert!(matches!(error, GraphDbError::Conflict { .. }));
 }
 
 #[test]
@@ -334,7 +334,7 @@ fn restore_never_replaces_an_existing_destination() {
 
     let error = GraphDb::restore_verified_backup(&backup, &destination, &live()).unwrap_err();
 
-    assert_eq!(error, GraphDbError::Conflict);
+    assert!(matches!(error, GraphDbError::Conflict { .. }));
     assert_eq!(
         fs::read(&destination).unwrap(),
         b"operator-owned destination"

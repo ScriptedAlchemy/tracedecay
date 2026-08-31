@@ -48,6 +48,7 @@ pub use tracedecay_query::search_quality::{
     write_daemon_native_qualification, write_packaged_native_qualification,
 };
 
+pub use admitted_corpus::root_admitted_corpus_scope;
 pub use candidate_output::{
     AdmittedCorpusScopeFn, GenerateCandidateOutputsOptions, generate_candidate_outputs,
     generate_candidate_outputs_with_native, no_admitted_corpus_scope,
@@ -60,7 +61,6 @@ pub use controlled_workloads::{
     compare_controlled_workloads, run_cursor_parse_batch_workload,
     run_framed_log_durability_workload, write_controlled_workload_reports,
 };
-pub use admitted_corpus::root_admitted_corpus_scope;
 
 /// The workspace root that hosts the checked-in evaluator fixtures.
 ///

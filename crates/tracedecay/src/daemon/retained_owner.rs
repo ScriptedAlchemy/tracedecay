@@ -18,17 +18,17 @@ use tracedecay_domain::errors::TraceDecayError;
 mod automation;
 mod lcm;
 mod memory;
-mod memory_mapping;
-mod memory_mutation;
 mod memory_target;
-mod memory_tracking;
 mod profile;
-pub(crate) mod receipts;
 mod session;
-pub(crate) mod session_queries;
 pub(crate) mod session_refresh;
 
-pub(crate) use memory_mapping::search_page;
+pub(crate) use tracedecay_application::retained_receipts as receipts;
+pub(crate) use tracedecay_session_memory::memory_mapping;
+pub(crate) use tracedecay_session_memory::memory_mapping::search_page;
+pub(crate) use tracedecay_session_memory::memory_mutation;
+pub(crate) use tracedecay_session_memory::memory_tracking;
+pub(crate) use tracedecay_session_runtime::session_queries;
 pub(crate) use memory_target::{MemoryTargetAccessV1, open_project_retained_memory_target};
 
 pub(crate) use profile::{
@@ -49,10 +49,12 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) mounted_session_root_id: Option<tracedecay_session_memory::context::SessionRootId>,
     pub(crate) registered_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) project_refresh: Option<Arc<dyn session_refresh::RetainedSessionRefreshPortV1>>,
-    pub(crate) project_retrieval:
-        Option<Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>>,
+    pub(crate) project_retrieval: Option<
+        Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>,
+    >,
     pub(crate) project_workflow_index: Option<Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>>,
-    pub(crate) project_lcm: Option<Arc<dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>>,
+    pub(crate) project_lcm:
+        Option<Arc<dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>>,
     pub(crate) configuration_digest: ManifestDigest,
     pub(crate) invocation_service: Option<DaemonInvocationService>,
 }

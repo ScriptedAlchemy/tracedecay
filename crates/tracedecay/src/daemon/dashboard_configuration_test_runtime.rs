@@ -14,7 +14,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-use tracedecay_usecases::configuration::DirectConfigurationMutation;
+use tracedecay_configuration::DirectConfigurationMutation;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::{

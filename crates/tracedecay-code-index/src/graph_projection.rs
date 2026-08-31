@@ -16,10 +16,11 @@ use tracedecay_domain::{
     RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
-    GraphGenerationManifest, GraphIdempotencyKey, GraphLabel, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphProjectorRevision, GraphProperty, GraphPropertyName,
-    GraphTraversalDirection, SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
+    GraphCancellation, GraphConflictContextV1, GraphDbError, GraphEntity, GraphEntityId,
+    GraphEntityRef, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphLabel,
+    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
+    GraphProperty, GraphPropertyName, GraphTraversalDirection, SourceGeneration, TraversalRequest,
+    VerifiedGraphSnapshot,
 };
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use tracedecay_graph_db::{GraphWatermark, NeverCancelled};
@@ -75,8 +76,8 @@ pub enum CodeGraphProjectionError {
     BudgetExhausted { budget: String, limit: u64 },
     #[error("code graph operation deadline exceeded")]
     DeadlineExceeded,
-    #[error("code graph database conflict")]
-    Conflict,
+    #[error("code graph database conflict {context}")]
+    Conflict { context: GraphConflictContextV1 },
     #[error(
         "code graph projection `{namespace}/{projection}` is quarantined after recovery mismatch: {message}"
     )]
@@ -111,7 +112,7 @@ impl From<GraphDbError> for CodeGraphProjectionError {
         match error {
             GraphDbError::Cancelled => Self::Cancelled,
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
-            GraphDbError::Conflict => Self::Conflict,
+            GraphDbError::Conflict { context } => Self::Conflict { context },
             GraphDbError::BudgetExhausted { kind, limit } => Self::BudgetExhausted {
                 budget: kind.as_str().to_owned(),
                 limit,

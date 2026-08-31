@@ -87,11 +87,7 @@ pub struct DaemonAuthority {
 
 impl DaemonAuthority {
     #[hotpath::measure(label = "daemon.engine.authority.acquire")]
-    pub fn acquire(
-        profile_root: &Path,
-        endpoint: &DaemonEndpoint,
-        version: &str,
-    ) -> Result<Self> {
+    pub fn acquire(profile_root: &Path, endpoint: &DaemonEndpoint, version: &str) -> Result<Self> {
         #[cfg(windows)]
         let _ = validate_existing_profile_root(profile_root)?;
         let profile_root = canonical_identity_path(profile_root)?;

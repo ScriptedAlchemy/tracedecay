@@ -35,20 +35,20 @@ use tracedecay_store::{
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryMemoryStatusV1,
 };
-use tracedecay_session_memory::memory::{
+use crate::memory::{
     MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 
-pub(super) const MAX_RETAINED_FACT_LIMIT: usize = 200;
-pub(super) const MAX_RETAINED_FEEDBACK_HISTORY_LIMIT: usize = 1_000;
+pub const MAX_RETAINED_FACT_LIMIT: usize = 200;
+pub const MAX_RETAINED_FEEDBACK_HISTORY_LIMIT: usize = 1_000;
 
-pub(super) fn read_scope(
+pub fn read_scope(
     options: &FactReadOptionsV1,
 ) -> (Option<MemoryScopeV1>, Option<&RetainedProjectSelectorV1>) {
     (options.memory_scope, options.project_selector.as_ref())
 }
 
-pub(super) fn validate_reason_entities(
+pub fn validate_reason_entities(
     entities: &[String],
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
     if entities.is_empty() || entities.windows(2).any(|pair| pair.first() >= pair.get(1)) {
@@ -57,7 +57,7 @@ pub(super) fn validate_reason_entities(
     Ok(())
 }
 
-pub(super) fn ensure_profile_request_scope(
+pub fn ensure_profile_request_scope(
     memory_scope: Option<MemoryScopeV1>,
     selector: Option<&RetainedProjectSelectorV1>,
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
@@ -67,7 +67,7 @@ pub(super) fn ensure_profile_request_scope(
     Ok(())
 }
 
-pub(super) fn add_request(
+pub fn add_request(
     request: &FactStoreAddRequestV1,
 ) -> Result<ProjectMemoryFactAddRequest, RetainedSurfaceExecutionErrorV1> {
     Ok(ProjectMemoryFactAddRequest {
@@ -88,7 +88,7 @@ pub(super) fn add_request(
     })
 }
 
-pub(super) fn update_patch(
+pub fn update_patch(
     request: &FactStoreUpdateRequestV1,
 ) -> Result<ProjectMemoryFactUpdatePatchV1, RetainedSurfaceExecutionErrorV1> {
     let source_label = request.source_label.as_ref().map(|patch| match patch {
@@ -110,7 +110,7 @@ pub(super) fn update_patch(
     .map_err(map_store_error)
 }
 
-pub(super) fn update_logical_effect(
+pub fn update_logical_effect(
     owner: &FactOwnerV1,
     request: &FactStoreUpdateRequestV1,
 ) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
@@ -137,7 +137,7 @@ pub(super) fn update_logical_effect(
     })
 }
 
-pub(super) fn remove_logical_effect(
+pub fn remove_logical_effect(
     owner: &FactOwnerV1,
     request: &FactStoreRemoveRequestV1,
 ) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
@@ -156,7 +156,7 @@ pub(super) fn remove_logical_effect(
     })
 }
 
-pub(super) fn feedback_logical_effect(
+pub fn feedback_logical_effect(
     owner: &FactOwnerV1,
     request: &FactFeedbackRequestV1,
 ) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
@@ -178,7 +178,7 @@ pub(super) fn feedback_logical_effect(
     })
 }
 
-pub(super) fn search_logical_effect(
+pub fn search_logical_effect(
     owner: &FactOwnerV1,
     request: &FactStoreSearchRequestV1,
 ) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
@@ -198,7 +198,7 @@ pub(super) fn search_logical_effect(
     })
 }
 
-pub(super) fn update_command(
+pub fn update_command(
     owner: FactOwnerV1,
     request: &FactStoreUpdateRequestV1,
     operation_id: ProvenanceId,
@@ -216,7 +216,7 @@ pub(super) fn update_command(
     .map_err(map_store_error)
 }
 
-pub(super) fn remove_command(
+pub fn remove_command(
     owner: FactOwnerV1,
     request: &FactStoreRemoveRequestV1,
     operation_id: ProvenanceId,
@@ -233,7 +233,7 @@ pub(super) fn remove_command(
     .map_err(map_store_error)
 }
 
-pub(super) fn feedback_command(
+pub fn feedback_command(
     owner: FactOwnerV1,
     request: &FactFeedbackRequestV1,
     operation_id: ProvenanceId,
@@ -253,7 +253,7 @@ pub(super) fn feedback_command(
     .map_err(map_store_error)
 }
 
-pub(super) fn search_query(
+pub fn search_query(
     owner: FactOwnerV1,
     kind: ProjectMemoryFactSearchKindV1,
     query: Option<String>,
@@ -287,7 +287,7 @@ pub(super) fn search_query(
     .map_err(map_store_error)
 }
 
-pub(super) fn fact_limit(limit: Option<u64>) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
+pub fn fact_limit(limit: Option<u64>) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
     let limit = limit
         .map(usize::try_from)
         .transpose()
@@ -299,7 +299,7 @@ pub(super) fn fact_limit(limit: Option<u64>) -> Result<usize, RetainedSurfaceExe
     Ok(limit)
 }
 
-pub(super) fn confidence(
+pub fn confidence(
     value: Option<f64>,
 ) -> Result<Option<Confidence>, RetainedSurfaceExecutionErrorV1> {
     value
@@ -308,7 +308,7 @@ pub(super) fn confidence(
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
-pub(super) const fn feedback_action(
+pub const fn feedback_action(
     action: FactFeedbackActionV1,
 ) -> ProjectMemoryFactFeedbackActionV1 {
     match action {
@@ -324,7 +324,7 @@ fn public_feedback_action(action: ProjectMemoryFactFeedbackActionV1) -> FactFeed
     }
 }
 
-pub(super) fn public_owner(owner: &FactOwnerV1) -> FactCommitOwnerV1 {
+pub fn public_owner(owner: &FactOwnerV1) -> FactCommitOwnerV1 {
     match owner {
         FactOwnerV1::Profile => FactCommitOwnerV1::Profile,
         FactOwnerV1::Project { project_id } => FactCommitOwnerV1::Project {
@@ -333,7 +333,7 @@ pub(super) fn public_owner(owner: &FactOwnerV1) -> FactCommitOwnerV1 {
     }
 }
 
-pub(super) fn commit_receipt(receipt: &FactCommitReceipt, replayed: bool) -> FactCommitReceiptV1 {
+pub fn commit_receipt(receipt: &FactCommitReceipt, replayed: bool) -> FactCommitReceiptV1 {
     FactCommitReceiptV1 {
         disposition: if replayed {
             FactCommitDispositionV1::IdempotentReplay
@@ -348,7 +348,7 @@ pub(super) fn commit_receipt(receipt: &FactCommitReceipt, replayed: bool) -> Fac
     }
 }
 
-pub(super) fn projection(
+pub fn projection(
     projection: &ProjectMemoryFactProjectionV1,
 ) -> Result<FactProjectionV1, RetainedSurfaceExecutionErrorV1> {
     match projection {
@@ -361,7 +361,7 @@ pub(super) fn projection(
     }
 }
 
-pub(super) fn available_fact(
+pub fn available_fact(
     fact: &ProjectMemoryFactV1,
 ) -> Result<FactV1, RetainedSurfaceExecutionErrorV1> {
     let metadata = match fact.metadata() {
@@ -440,7 +440,7 @@ fn unavailable_fact(
     })
 }
 
-pub(crate) fn search_page(
+pub fn search_page(
     page: &ProjectMemoryFactSearchPageV1,
 ) -> Result<MappedSearchPageV1, RetainedSurfaceExecutionErrorV1> {
     Ok(MappedSearchPageV1 {
@@ -455,14 +455,14 @@ pub(crate) fn search_page(
     })
 }
 
-pub(crate) struct MappedSearchPageV1 {
-    pub(crate) owner: FactCommitOwnerV1,
-    pub(crate) hits: Vec<FactSearchHitV1>,
-    pub(crate) next_after: Option<FactSearchCursorV1>,
-    pub(crate) graph_coverage: FactSearchGraphCoverageV1,
+pub struct MappedSearchPageV1 {
+    pub owner: FactCommitOwnerV1,
+    pub hits: Vec<FactSearchHitV1>,
+    pub next_after: Option<FactSearchCursorV1>,
+    pub graph_coverage: FactSearchGraphCoverageV1,
 }
 
-pub(super) fn probe_result(page: MappedSearchPageV1) -> FactStoreProbeResultV1 {
+pub fn probe_result(page: MappedSearchPageV1) -> FactStoreProbeResultV1 {
     FactStoreProbeResultV1 {
         owner: page.owner,
         hits: page.hits,
@@ -471,7 +471,7 @@ pub(super) fn probe_result(page: MappedSearchPageV1) -> FactStoreProbeResultV1 {
     }
 }
 
-pub(super) fn related_result(page: MappedSearchPageV1) -> FactStoreRelatedResultV1 {
+pub fn related_result(page: MappedSearchPageV1) -> FactStoreRelatedResultV1 {
     FactStoreRelatedResultV1 {
         owner: page.owner,
         hits: page.hits,
@@ -480,7 +480,7 @@ pub(super) fn related_result(page: MappedSearchPageV1) -> FactStoreRelatedResult
     }
 }
 
-pub(super) fn reason_result(page: MappedSearchPageV1) -> FactStoreReasonResultV1 {
+pub fn reason_result(page: MappedSearchPageV1) -> FactStoreReasonResultV1 {
     FactStoreReasonResultV1 {
         owner: page.owner,
         hits: page.hits,
@@ -489,7 +489,7 @@ pub(super) fn reason_result(page: MappedSearchPageV1) -> FactStoreReasonResultV1
     }
 }
 
-pub(super) fn exact_search_result(
+pub fn exact_search_result(
     page: MappedSearchPageV1,
     retrieval_telemetry: FactRetrievalTelemetryV1,
 ) -> RetainedSurfaceResultV1 {
@@ -506,7 +506,7 @@ pub(super) fn exact_search_result(
 /// result absorbs as a typed state instead of a refusal. Request-scoped
 /// terminals (cancellation, timeout, invalid request) and store-health
 /// signals (reset required) still fail the operation.
-pub(super) fn retrieval_telemetry_degradation(
+pub fn retrieval_telemetry_degradation(
     error: &RetainedSurfaceExecutionErrorV1,
 ) -> Option<FactRetrievalTelemetryDegradationV1> {
     match error {
@@ -520,7 +520,7 @@ pub(super) fn retrieval_telemetry_degradation(
     }
 }
 
-pub(super) fn semantic_search_result(
+pub fn semantic_search_result(
     operation: RetainedSurfaceOperation,
     page: MappedSearchPageV1,
 ) -> Result<RetainedSurfaceResultV1, RetainedSurfaceExecutionErrorV1> {
@@ -538,7 +538,7 @@ pub(super) fn semantic_search_result(
     }
 }
 
-pub(super) fn refresh_search_hits(
+pub fn refresh_search_hits(
     page: &mut MappedSearchPageV1,
     projections: &[ProjectMemoryFactProjectionV1],
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
@@ -622,7 +622,7 @@ fn graph_coverage(coverage: ProjectMemoryFactSearchGraphCoverageV1) -> FactSearc
     }
 }
 
-pub(super) fn contradiction_page(
+pub fn contradiction_page(
     page: &ProjectMemoryFactContradictionPageV1,
 ) -> Result<FactStoreContradictResultV1, RetainedSurfaceExecutionErrorV1> {
     Ok(FactStoreContradictResultV1 {
@@ -642,7 +642,7 @@ pub(super) fn contradiction_page(
     })
 }
 
-pub(super) fn feedback_history(
+pub fn feedback_history(
     history: &ProjectMemoryFactFeedbackHistoryV1,
 ) -> Result<Vec<TrustHistoryEntryV1>, RetainedSurfaceExecutionErrorV1> {
     if history.next_after().is_some() {
@@ -674,7 +674,7 @@ pub(super) fn feedback_history(
         .collect())
 }
 
-pub(super) fn get_result(
+pub fn get_result(
     fact_projection: &ProjectMemoryFactProjectionV1,
     history: &ProjectMemoryFactFeedbackHistoryV1,
 ) -> Result<RetainedSurfaceResultV1, RetainedSurfaceExecutionErrorV1> {
@@ -686,17 +686,17 @@ pub(super) fn get_result(
     ))
 }
 
-pub(super) fn status_result(status: &ProjectMemoryMemoryStatusV1) -> RetainedSurfaceResultV1 {
+pub fn status_result(status: &ProjectMemoryMemoryStatusV1) -> RetainedSurfaceResultV1 {
     RetainedSurfaceResultV1::MemoryStatus(memory_status_result(status))
 }
 
-pub(crate) fn memory_status_result(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatusResultV1 {
+pub fn memory_status_result(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatusResultV1 {
     MemoryStatusResultV1 {
         memory: memory_status(status),
     }
 }
 
-pub(super) fn list_page(
+pub fn list_page(
     page: &ProjectMemoryFactPageV1,
 ) -> Result<FactStoreListResultV1, RetainedSurfaceExecutionErrorV1> {
     Ok(FactStoreListResultV1 {
@@ -710,7 +710,7 @@ pub(super) fn list_page(
     })
 }
 
-pub(super) fn add_result(
+pub fn add_result(
     outcome: &ProjectMemoryFactAddRequestOutcome,
 ) -> Result<FactStoreAddResultV1, RetainedSurfaceExecutionErrorV1> {
     let ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome else {
@@ -774,7 +774,7 @@ fn near_duplicate_missing_similarity() -> RetainedSurfaceExecutionErrorV1 {
     )
 }
 
-pub(super) fn add_committed_state(
+pub fn add_committed_state(
     outcome: &ProjectMemoryFactAddRequestOutcome,
 ) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
     let ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome else {
@@ -812,7 +812,7 @@ pub(super) fn add_committed_state(
     })
 }
 
-pub(super) fn update_result(
+pub fn update_result(
     outcome: &ProjectMemoryFactUpdateOutcomeV1,
 ) -> Result<FactStoreUpdateResultV1, RetainedSurfaceExecutionErrorV1> {
     Ok(FactStoreUpdateResultV1 {
@@ -822,7 +822,7 @@ pub(super) fn update_result(
     })
 }
 
-pub(super) fn remove_result(
+pub fn remove_result(
     outcome: &ProjectMemoryFactRemoveOutcomeV1,
 ) -> Result<FactStoreRemoveResultV1, RetainedSurfaceExecutionErrorV1> {
     match (
@@ -852,7 +852,7 @@ pub(super) fn remove_result(
     }
 }
 
-pub(super) fn feedback_result(
+pub fn feedback_result(
     outcome: &tracedecay_store::ProjectMemoryFactFeedbackOutcomeV1,
     action: FactFeedbackActionV1,
 ) -> Result<
@@ -877,7 +877,7 @@ pub(super) fn feedback_result(
     )
 }
 
-pub(crate) fn memory_status(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatusV1 {
+pub fn memory_status(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatusV1 {
     let algebra = status.algebra();
     let funnel = status.feedback_funnel();
     MemoryStatusV1 {
@@ -907,7 +907,7 @@ pub(crate) fn memory_status(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatu
     }
 }
 
-pub(super) fn map_memory_error(error: MemoryApplicationError) -> RetainedSurfaceExecutionErrorV1 {
+pub fn map_memory_error(error: MemoryApplicationError) -> RetainedSurfaceExecutionErrorV1 {
     match error {
         MemoryApplicationError::InvalidOwner(_) | MemoryApplicationError::InvalidInput { .. } => {
             RetainedSurfaceExecutionErrorV1::InvalidRequest
@@ -924,7 +924,7 @@ pub(super) fn map_memory_error(error: MemoryApplicationError) -> RetainedSurface
     }
 }
 
-pub(super) fn map_store_error(error: FactStoreError) -> RetainedSurfaceExecutionErrorV1 {
+pub fn map_store_error(error: FactStoreError) -> RetainedSurfaceExecutionErrorV1 {
     match error {
         FactStoreError::InvalidQueryLimit { .. } | FactStoreError::Contract(_) => {
             RetainedSurfaceExecutionErrorV1::InvalidRequest

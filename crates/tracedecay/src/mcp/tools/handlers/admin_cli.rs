@@ -627,8 +627,9 @@ async fn cost_summary(
         let denominator = tokens_saved.checked_add(consumed)?;
         (denominator > 0).then_some(tokens_saved as f64 / denominator as f64)
     });
-    let today_since = tracedecay_session_memory::provider_usage::provider_usage_range_start("today")
-        .map_err(accounting_error)?;
+    let today_since =
+        tracedecay_session_memory::provider_usage::provider_usage_range_start("today")
+            .map_err(accounting_error)?;
     let today_since_seconds = i64::try_from(today_since).map_err(|_| TraceDecayError::Config {
         message: "provider usage range exceeds the supported timestamp domain".to_owned(),
     })?;

@@ -17,7 +17,9 @@ use crate::admission::HostAdmission;
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
-use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
+use crate::runtime::source::{
+    TranscriptIngestError, TranscriptIngestResult, run_blocking_transcript_section,
+};
 
 use super::capture::{
     build_cursor_composer_capture_request_for_project,
@@ -48,6 +50,49 @@ pub(super) fn path_is_regular_file_no_follow(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
+fn discover_chat_store_dbs(
+    chats_dir: &Path,
+    workspace_paths: &HashMap<String, String>,
+    scope_matcher: &TranscriptScopeMatcher,
+    project_scoped: bool,
+) -> Vec<(PathBuf, String)> {
+    let Ok(ws_entries) = std::fs::read_dir(chats_dir) else {
+        return Vec::new();
+    };
+    let mut stores = Vec::new();
+    for ws_entry in ws_entries.flatten() {
+        if !directory_entry_is_real_dir(&ws_entry) {
+            continue;
+        }
+        let ws_hash = ws_entry.file_name().to_string_lossy().to_string();
+        let Some(path) = workspace_paths.get(&ws_hash) else {
+            continue;
+        };
+        if scope_matcher.membership(Some(Path::new(path))) != ProjectMembership::Match {
+            continue;
+        }
+        let project_path = if project_scoped {
+            path.clone()
+        } else {
+            "user".to_string()
+        };
+        let Ok(agent_entries) = std::fs::read_dir(ws_entry.path()) else {
+            continue;
+        };
+        for agent_entry in agent_entries.flatten() {
+            if !directory_entry_is_real_dir(&agent_entry) {
+                continue;
+            }
+            let store_path = agent_entry.path().join("store.db");
+            if !path_is_regular_file_no_follow(&store_path) {
+                continue;
+            }
+            stores.push((store_path, project_path.clone()));
+        }
+    }
+    stores
+}
+
 struct ComposerIngestContext<'facade, 'root> {
     facade: &'facade dyn HostAdmission,
     scope: ObservationScopeV1,
@@ -59,6 +104,7 @@ struct ComposerIngestContext<'facade, 'root> {
     matchers: &'root ProjectRootMatcherCache,
 }
 
+#[hotpath::measure_all]
 impl ComposerIngestContext<'_, '_> {
     /// Resolve this sweep's scope boundary once, rather than per composer
     /// envelope and per workspace directory.
@@ -153,6 +199,7 @@ pub struct CursorComposerSource {
     project_matchers: ProjectRootMatcherCache,
 }
 
+#[hotpath::measure_all]
 impl CursorComposerSource {
     /// Source rooted at the real user home. `None` when it cannot be resolved.
     pub fn new() -> Option<Self> {
@@ -301,7 +348,10 @@ impl CursorComposerSource {
         if context.cancellation.is_cancelled() {
             return;
         }
-        if !self.state_db_path.is_file() {
+        if !hotpath::measure_block!(
+            "sessions.hosts.cursor_composer.state_db_stat_blocking",
+            run_blocking_transcript_section(|| self.state_db_path.is_file())
+        ) {
             return;
         }
         let ro = match open_readonly_immutable(&self.state_db_path).await {
@@ -317,7 +367,14 @@ impl CursorComposerSource {
             }
         };
         let conn = &ro.conn;
-        let scope_matcher = context.scope_matcher();
+        let state_generation = hotpath::measure_block!(
+            "sessions.hosts.cursor_composer.state_generation_blocking",
+            run_blocking_transcript_section(|| snapshot_generation(&self.state_db_path))
+        );
+        let scope_matcher = hotpath::measure_block!(
+            "sessions.hosts.cursor_composer.state_scope_blocking",
+            run_blocking_transcript_section(|| context.scope_matcher())
+        );
         // Indexed prefix scan of keys + byte lengths only — never SELECT full
         // envelope text here. Point-fetch materializes only when the UTF-8 byte
         // length fits both ceilings. Keyset pagination over the `cursorDiskKV`
@@ -430,9 +487,14 @@ impl CursorComposerSource {
                 // `Unknown` (bounded git timeout) skips the envelope without
                 // advancing its watermark, so the next sweep re-resolves the
                 // membership instead of misfiling the session.
-                if scope_matcher.membership(Some(Path::new(&project.path)))
-                    != ProjectMembership::Match
-                {
+                let project_matches = hotpath::measure_block!(
+                    "sessions.hosts.cursor_composer.envelope_scope_blocking",
+                    run_blocking_transcript_section(|| {
+                        scope_matcher.membership(Some(Path::new(&project.path)))
+                            == ProjectMembership::Match
+                    })
+                );
+                if !project_matches {
                     continue;
                 }
                 let selected_project = ComposerProject {
@@ -457,7 +519,7 @@ impl CursorComposerSource {
                     byte_budget.defer();
                     continue;
                 }
-                let Some(generation) = snapshot_generation(&self.state_db_path) else {
+                let Some(generation) = state_generation.clone() else {
                     continue;
                 };
                 let mut session_accepted = false;
@@ -728,43 +790,23 @@ impl CursorComposerSource {
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
     ) {
-        let Ok(ws_entries) = std::fs::read_dir(&self.chats_dir) else {
-            return;
-        };
-        let scope_matcher = context.scope_matcher();
-        for ws_entry in ws_entries.flatten() {
+        let stores = hotpath::measure_block!(
+            "sessions.hosts.cursor_composer.discover_stores_blocking",
+            run_blocking_transcript_section(|| {
+                discover_chat_store_dbs(
+                    &self.chats_dir,
+                    workspace_paths,
+                    &context.scope_matcher(),
+                    context.project_root.is_some(),
+                )
+            })
+        );
+        for (store_path, project_path) in stores {
             if context.cancellation.is_cancelled() {
                 return;
             }
-            if !directory_entry_is_real_dir(&ws_entry) {
-                continue;
-            }
-            let ws_hash = ws_entry.file_name().to_string_lossy().to_string();
-            // Scope by ws-hash -> project mapping harvested from the envelopes.
-            let Some(path) = workspace_paths.get(&ws_hash) else {
-                continue;
-            };
-            if scope_matcher.membership(Some(Path::new(path))) != ProjectMembership::Match {
-                continue;
-            }
-            let project_path = context.scoped_project_label(path);
-            let Ok(agent_entries) = std::fs::read_dir(ws_entry.path()) else {
-                continue;
-            };
-            for agent_entry in agent_entries.flatten() {
-                if context.cancellation.is_cancelled() {
-                    return;
-                }
-                if !directory_entry_is_real_dir(&agent_entry) {
-                    continue;
-                }
-                let store_path = agent_entry.path().join("store.db");
-                if !path_is_regular_file_no_follow(&store_path) {
-                    continue;
-                }
-                self.ingest_one_store_db(context, &store_path, &project_path, byte_budget, outcome)
-                    .await;
-            }
+            self.ingest_one_store_db(context, &store_path, &project_path, byte_budget, outcome)
+                .await;
         }
     }
 
@@ -837,7 +879,10 @@ impl CursorComposerSource {
             return;
         }
 
-        let Some(generation) = snapshot_generation(store_path) else {
+        let Some(generation) = hotpath::measure_block!(
+            "sessions.hosts.cursor_composer.store_generation_blocking",
+            run_blocking_transcript_section(|| snapshot_generation(store_path))
+        ) else {
             return;
         };
         let Ok(source) = cursor_composer_source(&session_id) else {

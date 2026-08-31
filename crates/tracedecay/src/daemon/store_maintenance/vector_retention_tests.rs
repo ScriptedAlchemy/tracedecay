@@ -16,6 +16,7 @@ use crate::daemon::maintenance::{
 };
 use crate::daemon::store_writer_gate::{StoreWriterGates, WriterScope};
 use crate::tracedecay::TraceDecay;
+use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, DurableGenerationIndexEntryV1,

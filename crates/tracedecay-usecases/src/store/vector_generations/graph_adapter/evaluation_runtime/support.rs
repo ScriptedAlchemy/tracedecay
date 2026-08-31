@@ -131,7 +131,9 @@ pub(super) fn map_staging_error(error: SemanticVectorStagingStoreError) -> Graph
             }
         }
         SemanticVectorStagingStoreError::AuthorityLost
-        | SemanticVectorStagingStoreError::ReusedOperationContext => GraphDbError::Conflict,
+        | SemanticVectorStagingStoreError::ReusedOperationContext => {
+            GraphDbError::conflict("support.map_staging_error")
+        }
         SemanticVectorStagingStoreError::Corrupt(message) => GraphDbError::Corrupt { message },
     }
 }
@@ -140,8 +142,9 @@ pub(super) fn map_code_graph_error(error: CodeGraphProjectionError) -> GraphDbEr
     match error {
         CodeGraphProjectionError::Cancelled => GraphDbError::Cancelled,
         CodeGraphProjectionError::DeadlineExceeded => GraphDbError::DeadlineExceeded,
-        CodeGraphProjectionError::Conflict | CodeGraphProjectionError::GenerationMismatch => {
-            GraphDbError::Conflict
+        CodeGraphProjectionError::Conflict { context } => GraphDbError::Conflict { context },
+        CodeGraphProjectionError::GenerationMismatch => {
+            GraphDbError::conflict("vector_generations.map_code_graph_error.generation_mismatch")
         }
         CodeGraphProjectionError::BudgetExhausted { budget, limit } => {
             // Preserve budget identity; unrecognized names are

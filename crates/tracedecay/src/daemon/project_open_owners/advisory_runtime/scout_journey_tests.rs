@@ -186,7 +186,7 @@ fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
     )
     .expect("configuration snapshot");
     ContextScoutConfigurationPinV1::from_current(
-        &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+        &tracedecay_configuration::ConfigurationCurrentStateV1 {
             revision_id: revision,
             snapshot,
         },
@@ -427,7 +427,7 @@ async fn stock_disabled_configuration_produces_nothing() {
     )
     .expect("configuration snapshot");
     let pin = ContextScoutConfigurationPinV1::from_current(
-        &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+        &tracedecay_configuration::ConfigurationCurrentStateV1 {
             revision_id: revision,
             snapshot,
         },

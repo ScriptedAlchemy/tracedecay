@@ -22,7 +22,7 @@ use tracedecay_domain::configuration::{
 };
 
 use super::DashboardState;
-use crate::application::configuration::DirectConfigurationMutation;
+use tracedecay_configuration::DirectConfigurationMutation;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{
