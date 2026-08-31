@@ -61,8 +61,7 @@ fn worker_reservation_bytes() -> u64 {
 
 fn expected_worker_reservation_on(remaining_bytes: u64) -> u64 {
     let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
-    let affordable =
-        tracedecay_code_index::parallelism::memory_safe_worker_count(remaining_bytes);
+    let affordable = tracedecay_code_index::parallelism::memory_safe_worker_count(remaining_bytes);
     tracedecay_code_index::parallelism::worker_reservation_bytes(
         planned_workers.min(affordable).max(1),
     )
@@ -282,8 +281,7 @@ fn worker_memory_reservation_is_charged_and_released_by_raii() {
 fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
     let _installed = worker_reservation_bytes();
     let project = fixture();
-    let project_id =
-        ProjectId::new("project.code-index-worker-headroom").expect("valid project");
+    let project_id = ProjectId::new("project.code-index-worker-headroom").expect("valid project");
     let store = TempDir::new().expect("store root");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
         project_id,

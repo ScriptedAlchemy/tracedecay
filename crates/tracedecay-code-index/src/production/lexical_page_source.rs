@@ -1743,9 +1743,10 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 "sealed lexical memory range produced no published files".to_owned(),
             ));
         }
-        let admitted = super::collect_bounded_ordered(&inputs, |(_start, file, next_offset), _| {
-            admit_file_generation_artifacts(file, *next_offset, control)
-        })?;
+        let admitted =
+            super::collect_bounded_ordered(&inputs, |(_start, file, next_offset), _| {
+                admit_file_generation_artifacts(file, *next_offset, control)
+            })?;
         for ((start, _, _), admitted) in inputs.into_iter().zip(admitted) {
             self.admitted_window.insert(start, Arc::new(admitted));
         }
