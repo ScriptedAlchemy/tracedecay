@@ -390,9 +390,7 @@ mod tests {
     use tracedecay_session_memory::context::{
         ProfileId, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     };
-    use tracedecay_session_runtime::session_retrieval::{
-        DaemonSessionRetrievalRoot, SessionRetrievalServingIdentityV1,
-    };
+    use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
 
     use super::*;
 
