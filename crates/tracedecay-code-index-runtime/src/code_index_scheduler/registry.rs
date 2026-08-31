@@ -489,6 +489,15 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// is not owner-private) and clears it when a pass progresses, so status
     /// and doctor report a typed parked state instead of indefinite warming.
     convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
+    /// Owner-configuration recovery observed by the scheduler. This stays
+    /// readable while a replacement build owns the scheduler mutex.
+    generation_recovery: Arc<
+        RwLock<
+            Option<
+                tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryV1,
+            >,
+        >,
+    >,
     /// Durable id from the last `Published` broadcast. Serving and text can
     /// lag until graph/text seating; observers of "latest" must not stay on
     /// the prior seated generation after a new id is published.
@@ -2665,6 +2674,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
+        let generation_recovery = opened.generation_recovery();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
         let build_progress = opened.build_progress_slot();
         let historical_generation_owner = opened.historical_generation_owner();
@@ -3818,6 +3828,7 @@ impl CodeIndexSchedulerRegistryV1 {
             last_reconciled_at_micros,
             text_generation,
             convergence_park,
+            generation_recovery,
             published_generation_id,
             serving_source_witness,
             build_progress,
@@ -4597,6 +4608,7 @@ impl CodeIndexSchedulerRegistryV1 {
             last_reconciled_at_micros,
             text_generation,
             convergence_park,
+            generation_recovery,
             build_progress,
             hints,
             pending_wake,
@@ -4611,6 +4623,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.last_reconciled_at_micros),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.convergence_park),
+                Arc::clone(&worktree.generation_recovery),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.pending_wake),
@@ -4644,6 +4657,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     .micros
                     != 0;
             let parked = convergence_park
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let generation_recovery = generation_recovery
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
@@ -4723,6 +4740,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .to_owned(),
                         progress,
                         parked,
+                        generation_recovery,
                         ..identity
                     };
                 }
@@ -4795,6 +4813,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .to_owned(),
                 progress,
                 parked,
+                generation_recovery,
                 ..identity
             }
         })

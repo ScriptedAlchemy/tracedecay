@@ -717,6 +717,19 @@ export const CodeIndexFreshnessPayloadV1Schema = z.object({
 });
 export type CodeIndexFreshnessPayloadV1 = z.infer<typeof CodeIndexFreshnessPayloadV1Schema>;
 
+/** Serving disposition of an incompatible generation during recovery. */
+export const CodeIndexGenerationRecoveryServingV1Schema = z.enum(["preserved", "refused"]);
+export type CodeIndexGenerationRecoveryServingV1 = z.infer<typeof CodeIndexGenerationRecoveryServingV1Schema>;
+
+/** Recovery state for a durable generation sealed under a different production
+owner configuration. */
+export const CodeIndexGenerationRecoveryV1Schema = z.object({
+  incompatibilities: z.array(z.string()),
+  incompatible_generation_id: z.string(),
+  serving: z.lazy(() => CodeIndexGenerationRecoveryServingV1Schema),
+});
+export type CodeIndexGenerationRecoveryV1 = z.infer<typeof CodeIndexGenerationRecoveryV1Schema>;
+
 export const CodeIndexWorkerLimitingReasonV1Schema = z.enum(["automatic_all_cores", "automatic_half_cores", "configured_exact", "environment_override", "resident_memory"]);
 export type CodeIndexWorkerLimitingReasonV1 = z.infer<typeof CodeIndexWorkerLimitingReasonV1Schema>;
 
@@ -758,6 +771,7 @@ keeping one authority for the freshness shape. */
 export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   code_graph_serving: z.union([z.lazy(() => CodeGraphServingReadinessV1Schema), z.null()]).optional(),
   coverage: z.string(),
+  generation_recovery: z.union([z.lazy(() => CodeIndexGenerationRecoveryV1Schema), z.null()]).optional(),
   hook_hint_count: z.number().int().safe().min(0).nullable(),
   last_reconcile_micros: z.number().int().safe().nullable(),
   latest_generation_id: z.string().nullable(),
