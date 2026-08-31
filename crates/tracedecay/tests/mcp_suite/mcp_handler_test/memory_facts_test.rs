@@ -66,11 +66,9 @@ async fn invoke_exact_tool(
     let payload = response_value
         .pointer("/outcome/value/payload")
         .cloned()
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("{tool_name} omitted its canonical application payload"),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("{tool_name} omitted its canonical application payload"),
+        })?;
     Ok(payload)
 }
 

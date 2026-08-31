@@ -77,11 +77,11 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::ObservationSourceCursorV1;
 use tracedecay_store::observation::ObservationCoverageV1;
 
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadConnection, DatabaseWriteTransaction,
     engine::{Executor, IntoParams, Params, QueryExecutor, Value, opt_text, params},
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 

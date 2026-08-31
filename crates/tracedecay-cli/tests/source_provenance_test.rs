@@ -103,7 +103,9 @@ fn an_uncommitted_change_marks_the_worktree_dirty() {
 
     std::fs::write(dir.path().join("tracked.txt"), "two").expect("modify tracked file");
     assert!(
-        resolve_local(dir.path()).expect("dirty worktree resolves").dirty,
+        resolve_local(dir.path())
+            .expect("dirty worktree resolves")
+            .dirty,
         "a modified tracked file is dirty"
     );
 
@@ -123,8 +125,7 @@ fn a_verified_worktree_outranks_the_release_env_sha() {
     let dir = tempfile::tempdir().expect("temp dir");
     committed_repo(dir.path());
 
-    let resolved =
-        resolve(dir.path(), dir.path(), Some(ENV_SHA)).expect("worktree resolves");
+    let resolved = resolve(dir.path(), dir.path(), Some(ENV_SHA)).expect("worktree resolves");
 
     assert_eq!(resolved.origin, ProvenanceOrigin::VerifiedGit);
     assert_eq!(resolved.full_sha, head_sha(dir.path()));
@@ -268,10 +269,7 @@ fn a_subdirectory_of_another_repository_has_no_git_identity() {
 
     // With packaged VCS metadata present, the same nested unpack resolves —
     // from Cargo's journal, not from the enclosing repository.
-    write_vcs_info(
-        &unpacked,
-        &format!(r#"{{"git":{{"sha1":"{VCS_SHA}"}}}}"#),
-    );
+    write_vcs_info(&unpacked, &format!(r#"{{"git":{{"sha1":"{VCS_SHA}"}}}}"#));
     let resolved = resolve_local(&unpacked).expect("packaged metadata resolves");
     assert_eq!(resolved.full_sha, VCS_SHA);
     assert_ne!(resolved.full_sha, head_sha(dir.path()));
@@ -433,14 +431,13 @@ impl CargoFixture {
     }
 
     fn cargo(&self, args: &[&str]) {
-        let status = std::process::Command::new(
-            std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
-        )
-        .args(args)
-        .current_dir(&self.root)
-        .env("CARGO_TARGET_DIR", &self.target)
-        .status()
-        .expect("fixture cargo should run");
+        let status =
+            std::process::Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+                .args(args)
+                .current_dir(&self.root)
+                .env("CARGO_TARGET_DIR", &self.target)
+                .status()
+                .expect("fixture cargo should run");
         assert!(status.success(), "fixture cargo {args:?} failed");
     }
 }

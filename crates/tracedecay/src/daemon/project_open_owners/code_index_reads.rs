@@ -52,9 +52,7 @@ struct ProjectCodeGraphProjectionReadPortV1 {
     scope: ResolvedScope,
 }
 
-impl tracedecay_graph_query::CodeGraphProjectionReadPort
-    for ProjectCodeGraphProjectionReadPortV1
-{
+impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphProjectionReadPortV1 {
     fn open<'a>(
         &'a self,
         request: tracedecay_graph_query::CodeGraphReadRequest<'a>,

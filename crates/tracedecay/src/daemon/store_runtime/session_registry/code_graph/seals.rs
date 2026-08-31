@@ -133,7 +133,9 @@ pub(super) fn stage_project_graph_replay_unlink(
                     .map_err(|error| GraphDbError::unavailable(error.to_string()))?,
             )?;
             if !staged_identity_matches(&path, &file, &fingerprint)? {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict(
+                    "seals.stage_project_graph_replay_unlink",
+                ));
             }
             let sequence = STAGED_SEAL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let staged = replay_root.join(format!(
@@ -153,7 +155,9 @@ pub(super) fn stage_project_graph_replay_unlink(
                     .map_err(|error| GraphDbError::unavailable(error.to_string()))?,
             )?;
             if !staged_identity_matches(&staged, &file, &fingerprint)? {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict(
+                    "seals.stage_project_graph_replay_unlink",
+                ));
             }
             Ok(Some(StagedReplayUnlink {
                 path: staged,
@@ -180,7 +184,9 @@ pub(super) fn finalize_project_graph_replay_unlink(
     let verified = verify_seal_digest(&staged.path, digest, check);
     let _pool = lock_project_graph_replay_pool(replay_root, check)?;
     if !staged_identity_matches(&staged.path, &staged.file, &staged.fingerprint)? {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "seals.finalize_project_graph_replay_unlink",
+        ));
     }
     let StagedReplayUnlink { path, file, .. } = staged;
     drop(file);
@@ -458,10 +464,10 @@ mod tests {
         std::fs::rename(&staged_path, &retained).unwrap();
         std::fs::write(&staged_path, bytes).unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             finalize_project_graph_replay_unlink(staged, &replay_root, &digest, &|| Ok(())),
-            Err(GraphDbError::Conflict)
-        );
+            Err(GraphDbError::Conflict { .. })
+        ));
         assert_eq!(std::fs::read(staged_path).unwrap(), bytes);
         assert_eq!(std::fs::read(retained).unwrap(), bytes);
         assert!(!canonical.exists());
