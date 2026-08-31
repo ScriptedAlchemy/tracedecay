@@ -1001,6 +1001,14 @@ impl Drop for PendingWakeClaimV1 {
     }
 }
 
+/// Seat handles the ready probe validates outside the mounted-map lock:
+/// scheduler, serving generation slot, and the exact-source currency witness.
+type ReadyProbeServingPartsV1 = (
+    Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    Arc<RwLock<Option<super::ServingSourceWitnessV1>>>,
+);
+
 #[derive(Clone)]
 pub struct CodeIndexSchedulerRegistryV1 {
     pub max_worktrees: usize,
@@ -5105,20 +5113,40 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
-        let (scheduler, serving_generation, serving_source_witness) = {
+        // A synchronous census abstains under map contention; the verified
+        // read path awaits the map instead (see
+        // [`Self::latest_complete_ready_decoded_for_root_scope`]).
+        let parts = {
             let mounted = self.mounted.try_lock().ok()?;
-            let worktree = mounted.get(&project_root)?;
-            if worktree.repository_id != scope.repository_id
-                || worktree.worktree_id != scope.worktree_id
-            {
-                return None;
-            }
-            (
-                Arc::clone(&worktree.scheduler),
-                Arc::clone(&worktree.serving_generation),
-                Arc::clone(&worktree.serving_source_witness),
-            )
+            Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?
         };
+        Self::ready_decoded_from_serving_parts(parts, &project_root, scope)
+    }
+
+    /// Extract the seat handles the ready probe needs from one mounted route.
+    fn serving_parts_for_root_scope(
+        mounted: &BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<ReadyProbeServingPartsV1> {
+        let worktree = mounted.get(project_root)?;
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return None;
+        }
+        Some((
+            Arc::clone(&worktree.scheduler),
+            Arc::clone(&worktree.serving_generation),
+            Arc::clone(&worktree.serving_source_witness),
+        ))
+    }
+
+    fn ready_decoded_from_serving_parts(
+        (scheduler, serving_generation, serving_source_witness): ReadyProbeServingPartsV1,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
         // The census asks only whether a fully decoded generation is already
         // seated. A graph-off mount deliberately leaves this slot empty while
         // its authenticated text owner is warming. Return that known answer
@@ -5210,11 +5238,18 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let registry = self.clone();
-        let project_root = project_root.to_path_buf();
+        let project_root = project_root.canonicalize().ok()?;
+        // Await the map mutex rather than try-locking it: its critical
+        // sections are brief map reads, while an abstention under contention
+        // here falsely demotes a proven-current answer to the stale serving
+        // arm for that read.
+        let parts = {
+            let mounted = self.mounted.lock().await;
+            Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?
+        };
         let scope = scope.clone();
         tokio::task::spawn_blocking(move || {
-            registry.current_ready_decoded_for_root_scope(&project_root, &scope)
+            Self::ready_decoded_from_serving_parts(parts, &project_root, &scope)
         })
         .await
         .ok()
@@ -5442,6 +5477,38 @@ impl CodeIndexSchedulerRegistryV1 {
         // Relaxed identity gate: this arm is stale by construction, so a moved
         // reference is exactly the condition it exists to survive.
         latest_matches_scope_identity(&latest, scope).then_some(latest)
+    }
+
+    /// Whether a rebuild remedy is actually in motion for the exact mounted
+    /// root: a reconcile pass owns the worktree right now, or a wake is
+    /// pending for the background worker. A caller serving the stale seat
+    /// quotes this so a wedged route — days-old seat, nothing progressing —
+    /// is distinguishable from a routine rebuild window.
+    pub async fn rebuild_pass_in_flight_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return false;
+        }
+        worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
+            || worktree
+                .pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .micros
+                != 0
     }
 
     /// Whether an exact mounted route has no admissible generation because its

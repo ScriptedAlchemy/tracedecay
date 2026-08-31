@@ -259,7 +259,12 @@ mod tests {
     /// must refuse a stale-served open with a typed, retryable error.
     #[tokio::test]
     async fn a_stale_served_graph_open_is_refused_by_the_edit_path() {
-        let Err(error) = open_admitted(CodeGraphReadFreshnessV1::LastCompleteStale).await else {
+        let Err(error) = open_admitted(CodeGraphReadFreshnessV1::LastCompleteStale {
+            sealed_at: tracedecay_domain::UtcMicros(1),
+            rebuild_in_flight: true,
+        })
+        .await
+        else {
             panic!("stale-served evidence must not reach the edit planner");
         };
         match error {

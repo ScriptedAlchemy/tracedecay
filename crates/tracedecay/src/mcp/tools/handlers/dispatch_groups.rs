@@ -80,13 +80,21 @@ async fn admitted_graph_query(
         label = "mcp.dispatch.graph_query_admission"
     )
     .await?;
-    if query.freshness().is_stale() {
+    if let tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+        sealed_at,
+        rebuild_in_flight,
+    } = query.freshness()
+    {
         // Every graph-backed tool funnels through this open, so this is the
         // single point that reports serve-old-while-rebuilding back to the
         // dispatch boundary for the typed response trailer.
         let _ = options
             .served_stale_graph_generation
-            .set(query.generation().as_str().to_owned());
+            .set(super::ServedStaleCodeGraphReadV1 {
+                generation: query.generation().as_str().to_owned(),
+                sealed_at,
+                rebuild_in_flight,
+            });
     }
     Ok(query)
 }

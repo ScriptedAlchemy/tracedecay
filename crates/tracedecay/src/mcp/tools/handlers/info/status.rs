@@ -63,8 +63,15 @@ fn status_arg_flag(args: &Value, key: &str, default: bool) -> bool {
 /// gated on a sealed complete generation existing, and the typed
 /// `retrieval_serving` field carries the lane-level answer either way.
 enum CodeIndexRetrievalServingV1 {
-    /// A sealed complete generation exists for the exact worktree.
-    Serving,
+    /// A sealed complete generation exists for the exact worktree. The ages
+    /// distinguish a routine rebuild window from a wedged route: a seat
+    /// sealed days ago whose last reconcile observation is equally old is a
+    /// daemon serving stale answers with nothing progressing, and "serving"
+    /// alone must not mask that.
+    Serving {
+        seated_generation_age_seconds: Option<i64>,
+        last_reconcile_age_seconds: Option<i64>,
+    },
     /// The daemon census answered and nothing is servable yet.
     NotServing { reason: &'static str },
     /// No census authority is attached (non-daemon server); status cannot
@@ -75,8 +82,18 @@ enum CodeIndexRetrievalServingV1 {
 impl CodeIndexRetrievalServingV1 {
     fn attach(&self, output: &mut Value) -> bool {
         match self {
-            Self::Serving => {
-                output["retrieval_serving"] = json!({"status": "serving"});
+            Self::Serving {
+                seated_generation_age_seconds,
+                last_reconcile_age_seconds,
+            } => {
+                let mut serving = json!({"status": "serving"});
+                if let Some(age) = seated_generation_age_seconds {
+                    serving["seated_generation_age_seconds"] = json!(age);
+                }
+                if let Some(age) = last_reconcile_age_seconds {
+                    serving["last_reconcile_age_seconds"] = json!(age);
+                }
+                output["retrieval_serving"] = serving;
                 true
             }
             Self::NotServing { reason } => {
@@ -89,6 +106,17 @@ impl CodeIndexRetrievalServingV1 {
             Self::AuthorityUnattached => true,
         }
     }
+}
+
+/// Whole seconds elapsed since a recorded microsecond timestamp, clamped at
+/// zero. `None` when the source never recorded the observation.
+fn age_seconds(recorded_at_micros: Option<i64>) -> Option<i64> {
+    let recorded = recorded_at_micros?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_micros() as i64)
+        .unwrap_or(recorded);
+    Some(now.saturating_sub(recorded).max(0) / 1_000_000)
 }
 
 fn attach_compact_branch_summary(
@@ -232,7 +260,10 @@ pub(crate) async fn handle_status(
                 // exists for the worktree; until the first seal every
                 // retrieval lane refuses `generation_rebuilding`.
                 let retrieval_serving = if freshness.latest_generation_id.is_some() {
-                    CodeIndexRetrievalServingV1::Serving
+                    CodeIndexRetrievalServingV1::Serving {
+                        seated_generation_age_seconds: age_seconds(freshness.sealed_at_micros),
+                        last_reconcile_age_seconds: age_seconds(freshness.last_reconcile_micros),
+                    }
                 } else {
                     CodeIndexRetrievalServingV1::NotServing {
                         reason: "generation_rebuilding",

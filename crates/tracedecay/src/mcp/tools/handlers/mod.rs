@@ -223,6 +223,21 @@ pub async fn handle_tool_call(
     .await
 }
 
+/// Evidence for the `code_graph_freshness` response trailer when a
+/// graph-backed tool served the last complete seated generation instead of a
+/// proven-current one.
+#[derive(Clone, Debug)]
+pub(crate) struct ServedStaleCodeGraphReadV1 {
+    /// Identity of the generation that answered.
+    pub(crate) generation: String,
+    /// When that generation was durably sealed.
+    pub(crate) sealed_at: tracedecay_domain::UtcMicros,
+    /// Whether a reconcile pass or pending scheduler wake existed at open
+    /// time. False means nothing is progressing: the route is stalled, not
+    /// mid-rebuild, and the trailer must not claim a rebuild.
+    pub(crate) rebuild_in_flight: bool,
+}
+
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
     pub(crate) global_db: Option<&'a RegisteredGlobalDbLeaseV1>,
@@ -308,11 +323,12 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<&'a dyn tracedecay_application::session_sync::SessionSyncServicePort>,
     /// One-shot report from the single verified-graph open funnel
     /// (`dispatch_groups::admitted_graph_query`) back to the top-level
-    /// dispatch boundary: set to the serving generation id when a graph-backed
-    /// tool answered from the last complete seated generation while the
-    /// scheduler rebuilds, so the response gains a typed
-    /// `code_graph_freshness` trailer. Constructed fresh per tool call.
-    pub(crate) served_stale_graph_generation: std::sync::Arc<std::sync::OnceLock<String>>,
+    /// dispatch boundary: set when a graph-backed tool answered from the last
+    /// complete seated generation, so the response gains a typed
+    /// `code_graph_freshness` trailer carrying the seat's age and whether a
+    /// rebuild pass is actually in flight. Constructed fresh per tool call.
+    pub(crate) served_stale_graph_generation:
+        std::sync::Arc<std::sync::OnceLock<ServedStaleCodeGraphReadV1>>,
     pub session_authorities: SessionAuthorities<'a>,
 }
 
@@ -709,16 +725,26 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 // The verified-graph open funnel reports serve-old-while-
                 // rebuilding through the one-shot options slot; the answer is
                 // sound for the served generation but may trail the live
-                // worktree, and the response must say so.
-                if let Some(generation) = served_stale_graph_generation.get()
+                // worktree, and the response must say so — including whether
+                // a rebuild is actually in motion, so a wedged route serving
+                // days-old answers is visibly wedged, not "rebuilding".
+                if let Some(served) = served_stale_graph_generation.get()
                     && let Some(content) = result
                         .value
                         .get_mut("content")
                         .and_then(|content| content.as_array_mut())
                 {
+                    let generation = &served.generation;
+                    let age = seated_generation_age_label(served.sealed_at);
+                    let remedy = if served.rebuild_in_flight {
+                        "while the code index rebuilds"
+                    } else {
+                        "with no rebuild pass in flight — the scheduler is not \
+                         replacing this generation"
+                    };
                     content.push(json!({"type": "text", "text": format!(
                         "\ncode_graph_freshness: stale — serving the last complete generation \
-                         {generation} while the code index rebuilds; results may trail the \
+                         {generation} (sealed {age} ago) {remedy}; results may trail the \
                          live worktree"
                     )}));
                 }
@@ -728,6 +754,26 @@ pub fn handle_tool_call_with_registry_options<'a>(
         }
     };
     Box::pin(hotpath::future!(dispatch, label = "mcp.tool_call"))
+}
+
+/// Coarse human duration between a generation's seal time and now, for the
+/// freshness trailer. A routine rebuild window reads in seconds or minutes; a
+/// wedged route reads in hours or days.
+fn seated_generation_age_label(sealed_at: tracedecay_domain::UtcMicros) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_micros() as i64)
+        .unwrap_or(sealed_at.0);
+    let seconds = now.saturating_sub(sealed_at.0).max(0) / 1_000_000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3_600)
+    } else {
+        format!("{}d", seconds / 86_400)
+    }
 }
 
 /// The single rejection every dispatch group returns for a name it does not own.
