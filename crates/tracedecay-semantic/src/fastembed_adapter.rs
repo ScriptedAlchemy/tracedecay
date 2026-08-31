@@ -226,6 +226,7 @@ struct LifecycleInstallArtifactV1 {
     members: std::collections::BTreeMap<String, CatalogMemberPinV1>,
 }
 
+#[hotpath::measure_all]
 impl VerifiedEmbeddingArtifactV1 {
     #[cfg(any(test, feature = "semantic-fastembed"))]
     fn embedding_key(&self) -> &tracedecay_domain::EmbeddingProjectionKeyV1 {
@@ -341,6 +342,7 @@ pub struct AdmittedProjectionArtifactV1 {
     runtime_artifact: VerifiedEmbeddingArtifactV1,
 }
 
+#[hotpath::measure_all]
 impl AdmittedProjectionArtifactV1 {
     pub fn admit(
         artifact: &AdmittedArtifactV1,
@@ -695,6 +697,7 @@ impl AdmittedProjectionArtifactV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl LifecycleInstallArtifactV1 {
     #[cfg(feature = "semantic-fastembed")]
     fn declares_member(&self, role: ArtifactMemberRoleV1) -> bool {
@@ -832,6 +835,7 @@ pub struct EmbeddingVectorV1 {
     pub normalization: EmbeddingNormalizationV1,
 }
 
+#[hotpath::measure_all]
 impl EmbeddingVectorV1 {
     /// Echo validation: declared dimension matches the payload and every
     /// value is finite (Plan 31: publication verifies dimensions and finite
@@ -868,6 +872,7 @@ pub struct BoundedSanitizedTextBatchV1 {
     total_bytes: usize,
 }
 
+#[hotpath::measure_all]
 impl BoundedSanitizedTextBatchV1 {
     pub fn try_new(
         texts: Vec<String>,
@@ -1087,6 +1092,7 @@ pub struct FastEmbedEmbeddingRuntime;
 pub enum UnavailableEmbeddingSession {}
 
 #[cfg(not(feature = "semantic-fastembed"))]
+#[hotpath::measure_all]
 impl EmbeddingSession for UnavailableEmbeddingSession {
     fn authority(&self) -> &AdmittedProjectionArtifactV1 {
         match *self {}
@@ -1106,6 +1112,7 @@ impl EmbeddingSession for UnavailableEmbeddingSession {
 }
 
 #[cfg(not(feature = "semantic-fastembed"))]
+#[hotpath::measure_all]
 impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = UnavailableEmbeddingSession;
 
@@ -1136,6 +1143,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
 }
 
 #[cfg(feature = "semantic-fastembed")]
+#[hotpath::measure_all]
 impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = FastEmbedEmbeddingSession;
 
@@ -1240,6 +1248,7 @@ pub struct FastEmbedEmbeddingSession {
 }
 
 #[cfg(feature = "semantic-fastembed")]
+#[hotpath::measure_all]
 impl EmbeddingSession for FastEmbedEmbeddingSession {
     fn authority(&self) -> &AdmittedProjectionArtifactV1 {
         &self.authority
