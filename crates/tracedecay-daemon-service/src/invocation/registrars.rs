@@ -223,10 +223,8 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         change: &'a tracedecay_domain::configuration::ProtectedChange,
-    ) -> tracedecay_configuration::ConfigurationOperationFuture<
-        'a,
-        ScopeRevalidationEvidenceV1,
-    > {
+    ) -> tracedecay_configuration::ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
+    {
         let allowed = actor.actor_id == self.actor && change.validate().is_ok();
         let evidence = self.evidence.clone();
         Box::pin(async move {
@@ -240,10 +238,8 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         plan: &'a tracedecay_domain::configuration::ProtectedChangePlan,
-    ) -> tracedecay_configuration::ConfigurationOperationFuture<
-        'a,
-        ScopeRevalidationEvidenceV1,
-    > {
+    ) -> tracedecay_configuration::ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
+    {
         let allowed = actor.actor_id == self.actor && plan.validate().is_ok();
         let evidence = self.evidence.clone();
         Box::pin(async move {

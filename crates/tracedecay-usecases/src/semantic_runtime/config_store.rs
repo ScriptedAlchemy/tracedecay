@@ -9,7 +9,6 @@ use crate::config::retrieval::{
     RetrievalProfileMutationCapabilityV1, RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1,
     RetrievalRuntimeCompatibilityV1,
 };
-use tracedecay_configuration::{ConfigurationMutationAuthority, DirectConfigurationMutation};
 use crate::semantic_runtime::{
     CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
     SemanticConfigurationBackendErrorV1, SemanticConfigurationPinV1,
@@ -17,6 +16,7 @@ use crate::semantic_runtime::{
     SemanticLinkedTransitionV1, SemanticRetrievalConfigurationPortV1, SemanticRollbackCommandV1,
     SemanticRuntimeFuture,
 };
+use tracedecay_configuration::{ConfigurationMutationAuthority, DirectConfigurationMutation};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
@@ -187,11 +187,15 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         .await
         .map_err(|error| {
             let outcome = match &error {
-                tracedecay_configuration::ConfigurationError::TargetUnavailable => "target_unavailable",
+                tracedecay_configuration::ConfigurationError::TargetUnavailable => {
+                    "target_unavailable"
+                }
                 tracedecay_configuration::ConfigurationError::AuthorizedTargetAmbiguous => {
                     "target_ambiguous"
                 }
-                tracedecay_configuration::ConfigurationError::RevisionConflict => "revision_conflict",
+                tracedecay_configuration::ConfigurationError::RevisionConflict => {
+                    "revision_conflict"
+                }
                 tracedecay_configuration::ConfigurationError::PlanExpired => "plan_expired",
                 tracedecay_configuration::ConfigurationError::PlanStale => "plan_stale",
                 tracedecay_configuration::ConfigurationError::PolicyWideningForbidden => {
@@ -207,7 +211,9 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
                     "mutation_authority_rejected"
                 }
                 tracedecay_configuration::ConfigurationError::Validation(_) => "validation",
-                tracedecay_configuration::ConfigurationError::ResetRequired { .. } => "reset_required",
+                tracedecay_configuration::ConfigurationError::ResetRequired { .. } => {
+                    "reset_required"
+                }
                 tracedecay_configuration::ConfigurationError::Unavailable => "unavailable",
             };
             tracing::warn!(

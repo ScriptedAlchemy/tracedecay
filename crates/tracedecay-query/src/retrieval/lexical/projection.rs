@@ -1177,7 +1177,9 @@ impl CodeLexicalProjectionAdapterV1 {
         for field in row.field_lengths.keys() {
             if *field != LexicalFieldV1::Subtoken {
                 for (query_term, normalized_query) in &prepared.whole_terms {
-                    let exact_tf = self.postings.term_frequency(*field, normalized_query, document);
+                    let exact_tf = self
+                        .postings
+                        .term_frequency(*field, normalized_query, document);
                     if exact_tf > 0 {
                         add_score(
                             &mut field_scores,
@@ -1245,8 +1247,8 @@ impl CodeLexicalProjectionAdapterV1 {
             add_score(&mut field_scores, field, score);
             matched_phrases.insert((*phrase).to_owned());
         }
-        let echo_penalty_applied = !prepared.echo_query.is_empty()
-            && prepared.echo_query == row.normalized_text.trim();
+        let echo_penalty_applied =
+            !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text.trim();
         if echo_penalty_applied {
             for score in field_scores.values_mut() {
                 *score = score.saturating_mul(ECHO_SCORE_MILLIS) / 1_000;

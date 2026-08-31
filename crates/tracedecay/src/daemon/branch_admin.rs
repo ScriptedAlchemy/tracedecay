@@ -475,9 +475,8 @@ pub(super) struct StoreAdministration {
     /// admitted opens are joined. Waiters observe this receipt instead of
     /// polling the profile database through the writer that still holds the
     /// remainder of the deletion.
-    remote_account_deletion_tombstone_persist: Arc<
-        tokio::sync::watch::Sender<Option<tracedecay_global_db::RemoteDeletionTombstone>>,
-    >,
+    remote_account_deletion_tombstone_persist:
+        Arc<tokio::sync::watch::Sender<Option<tracedecay_global_db::RemoteDeletionTombstone>>>,
 }
 
 /// Waitable receipt for the durable account-deletion tombstone persist.
@@ -491,9 +490,7 @@ pub(super) struct RemoteAccountDeletionTombstonePersistReceipt {
 
 #[cfg(test)]
 impl RemoteAccountDeletionTombstonePersistReceipt {
-    pub(super) async fn wait(
-        mut self,
-    ) -> Result<tracedecay_global_db::RemoteDeletionTombstone> {
+    pub(super) async fn wait(mut self) -> Result<tracedecay_global_db::RemoteDeletionTombstone> {
         loop {
             if let Some(tombstone) = self.receiver.borrow().clone() {
                 return Ok(tombstone);

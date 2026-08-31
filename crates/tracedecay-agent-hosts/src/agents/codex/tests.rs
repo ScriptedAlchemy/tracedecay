@@ -532,7 +532,9 @@ fn sync_codex_hook_trust_all_skipped_is_ok_without_hollow_state() {
             continue;
         };
         for group in groups {
-            let Some(handlers) = group.get_mut("hooks").and_then(|value| value.as_array_mut())
+            let Some(handlers) = group
+                .get_mut("hooks")
+                .and_then(|value| value.as_array_mut())
             else {
                 continue;
             };

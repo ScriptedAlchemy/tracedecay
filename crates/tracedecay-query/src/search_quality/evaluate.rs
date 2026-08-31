@@ -6,14 +6,14 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::candidate_output;
 use super::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, DirectEvaluatedProfileMaterialV1,
     GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-    ProductionCandidateOutputV1, ResourceMeasurementStatusV1,
-    WorkloadQueryV1, compute_corpus_digest, compute_profile_material_digest,
-    compute_workload_digest, direct_evaluated_profile_material, validate_workload_for_tuning,
+    ProductionCandidateOutputV1, ResourceMeasurementStatusV1, WorkloadQueryV1,
+    compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
+    direct_evaluated_profile_material, validate_workload_for_tuning,
 };
-use super::candidate_output as candidate_output;
 use super::packaged;
 use super::report;
 use super::report::{
@@ -99,8 +99,8 @@ impl DirectActivationEvaluationV1 {
     }
 }
 
-
-pub fn load_authoritative_default_workload_metadata() -> Result<CandidateWorkloadV1, SearchEvalError> {
+pub fn load_authoritative_default_workload_metadata() -> Result<CandidateWorkloadV1, SearchEvalError>
+{
     let workload = packaged::load_workload()?;
     validate_activation_profile_matrix(&workload)?;
     Ok(workload)

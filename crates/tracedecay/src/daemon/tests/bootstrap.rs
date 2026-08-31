@@ -1421,10 +1421,11 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
             )
             .await
     });
-    let persisted = tokio::time::timeout(tokio::time::Duration::from_secs(5), persist_receipt.wait())
-        .await
-        .expect("account tombstone persist receipt was not settled")
-        .expect("account tombstone persist receipt");
+    let persisted =
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), persist_receipt.wait())
+            .await
+            .expect("account tombstone persist receipt was not settled")
+            .expect("account tombstone persist receipt");
     assert_eq!(persisted.tombstone_id, "tombstone.remote-account-race");
     assert_eq!(
         persisted.target,

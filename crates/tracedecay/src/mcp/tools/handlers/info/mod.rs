@@ -3,7 +3,6 @@
 //! Portable file-inspection and registry/config/remote-status/simplify tools
 //! live in `tracedecay_mcp::handlers::info`.
 
-mod status;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -13,6 +12,7 @@ mod status;
     clippy::uninlined_format_args
 )]
 mod remote_status_dispatch_tests;
+mod status;
 
 pub(crate) use status::graph_statistics_value;
 pub(super) use status::{handle_active_project, handle_admin_sync, handle_status};

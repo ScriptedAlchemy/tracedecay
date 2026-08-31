@@ -59,8 +59,8 @@ use tracedecay_domain::{
     RetrievalBudget, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
     RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
     SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1,
-    SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace,
-    TemporalModeV1, TreeId, UtcMicros, VectorWatermark,
+    SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace, TemporalModeV1,
+    TreeId, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -443,7 +443,14 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 
 #[derive(Default)]
 struct MemoryPublicationStore {
-    active: Arc<Mutex<std::collections::BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
+    active: Arc<
+        Mutex<
+            std::collections::BTreeMap<
+                CodeIndexGenerationScopeV1,
+                Arc<CodeIndexPublishedGenerationV1>,
+            >,
+        >,
+    >,
 }
 
 impl CodeIndexAtomicPublicationPort for MemoryPublicationStore {
@@ -1106,8 +1113,7 @@ impl Scratch {
 fn hash_file(path: &Path) -> Result<(ManifestDigest, u64), String> {
     use sha2::Digest as _;
 
-    let bytes =
-        std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     let digest = ManifestDigest::from_sha256_bytes(&sha2::Sha256::digest(&bytes))
         .map_err(|error| format!("artifact digest: {error}"))?;
     Ok((digest, bytes.len() as u64))

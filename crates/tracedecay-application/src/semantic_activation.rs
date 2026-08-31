@@ -66,9 +66,8 @@ pub trait SemanticActivationCoordinationPort: Send + Sync {
         &'a self,
     ) -> Pin<
         Box<
-            dyn Future<
-                    Output = Result<Self::ProfileState, SemanticActivationCoordinationErrorV1>,
-                > + Send
+            dyn Future<Output = Result<Self::ProfileState, SemanticActivationCoordinationErrorV1>>
+                + Send
                 + 'a,
         >,
     >;
@@ -80,9 +79,8 @@ pub trait SemanticActivationCoordinationPort: Send + Sync {
         expected_revision: &'a ConfigurationRevisionId,
     ) -> Pin<
         Box<
-            dyn Future<
-                    Output = Result<Self::PreviewOutcome, SemanticActivationCoordinationErrorV1>,
-                > + Send
+            dyn Future<Output = Result<Self::PreviewOutcome, SemanticActivationCoordinationErrorV1>>
+                + Send
                 + 'a,
         >,
     >;
@@ -103,10 +101,7 @@ pub trait SemanticActivationCoordinationPort: Send + Sync {
     ) -> Pin<
         Box<
             dyn Future<
-                    Output = Result<
-                        Self::ActivationReceipt,
-                        SemanticActivationCoordinationErrorV1,
-                    >,
+                    Output = Result<Self::ActivationReceipt, SemanticActivationCoordinationErrorV1>,
                 > + Send
                 + 'a,
         >,

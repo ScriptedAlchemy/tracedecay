@@ -826,14 +826,13 @@ fn prepare_query_fallback_publication(
     report: &DirectEvaluationReportV1,
     observed_runtime: &RetrievalRuntimeCompatibilityV1,
 ) -> Result<PreparedQueryFallbackPublicationV1, SemanticActivationCoordinationErrorV1> {
-    let material = tracedecay_query::search_quality::load_default_evaluated_profile_material(
-        "query-fallback",
-    )
-    .map_err(|error| {
-        SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
-            "query fallback material is unavailable: {error}"
-        ))
-    })?;
+    let material =
+        tracedecay_query::search_quality::load_default_evaluated_profile_material("query-fallback")
+            .map_err(|error| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                    "query fallback material is unavailable: {error}"
+                ))
+            })?;
     let evaluation =
         PassingRetrievalEvaluationV1::from_report(report, "query-fallback").map_err(|error| {
             SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
@@ -1687,11 +1686,14 @@ mod tests {
     #[test]
     fn packaged_semantic_pass_prepares_the_exact_query_fallback() {
         let qualification: tracedecay_query::search_quality::PackagedNativeQualificationV1 =
-            serde_json::from_slice(tracedecay_query::search_quality::packaged_native_qualification_bytes())
-                .expect("reviewed packaged qualification");
-        let material =
-            tracedecay_query::search_quality::load_default_evaluated_profile_material(EVALUATED_PROFILE_ID)
-                .expect("checked-in query fallback material");
+            serde_json::from_slice(
+                tracedecay_query::search_quality::packaged_native_qualification_bytes(),
+            )
+            .expect("reviewed packaged qualification");
+        let material = tracedecay_query::search_quality::load_default_evaluated_profile_material(
+            EVALUATED_PROFILE_ID,
+        )
+        .expect("checked-in query fallback material");
         let observed_runtime = RetrievalRuntimeCompatibilityV1 {
             retrieval_ceiling: material.profile.retrieval_budget,
             semantic: Some(semantic_compatibility(semantic_resources(10))),
@@ -1747,7 +1749,10 @@ mod tests {
             config: tracedecay_configuration::config::TraceDecayConfig::default(),
         };
         let (configuration, _) = ProjectConfigurationRuntime::open(
-            tracedecay_configuration::config::OpenedRuntimeConfiguration::new(configuration, database.clone()),
+            tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
+                configuration,
+                database.clone(),
+            ),
         )
         .expect("configuration runtime");
         ProductionSemanticConfigurationOperationV1::new(
