@@ -147,14 +147,6 @@ pub(crate) fn vector_lineage_depth(depth: usize) {
     hotpath::gauge!("usecases.vector.lineage_depth").set(depth as f64);
 }
 
-/// Live activity bus state after one publish: queued records not yet seen by
-/// the slowest subscriber, and the current subscriber count.
-#[inline]
-pub(crate) fn event_lane_publish(queue_depth: usize, subscribers: usize) {
-    hotpath::gauge!("usecases.event_lane.queue_depth").set(queue_depth as f64);
-    hotpath::gauge!("usecases.event_lane.subscribers").set(subscribers as f64);
-}
-
 #[inline]
 pub(crate) fn diagnostics_query(records: usize, total: usize) {
     hotpath::gauge!("usecases.diagnostics.records").set(records as f64);

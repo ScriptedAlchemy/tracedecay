@@ -6776,6 +6776,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-session-memory"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "hex",
+ "hotpath",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "tracedecay-application",
+ "tracedecay-automation",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-lcm",
+ "tracedecay-query",
+ "tracedecay-runtime-core",
+ "tracedecay-session-temporal-store",
+ "tracedecay-sessions",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+]
+
+[[package]]
 name = "tracedecay-session-temporal-store"
 version = "0.1.0"
 dependencies = [
@@ -6942,6 +6972,7 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-search-eval",
  "tracedecay-semantic",
+ "tracedecay-session-memory",
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
