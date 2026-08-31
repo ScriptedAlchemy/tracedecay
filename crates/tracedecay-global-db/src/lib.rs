@@ -58,7 +58,8 @@ pub use observability_rollup::{
 };
 pub use observation_adapter::GlobalDbObservationStore;
 pub use observation_projection::{
-    converge_projection_predecessor, project_observation, rebuild_projection,
+    converge_projection_predecessor, project_observation, project_queued_observations,
+    rebuild_projection,
 };
 #[cfg(test)]
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};

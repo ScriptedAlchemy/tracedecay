@@ -630,6 +630,25 @@ impl ProjectionStoreError {
 
 pub type ProjectionStoreResult<T> = Result<T, ProjectionStoreError>;
 
+/// One projected queue item from a batched drain window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectionBatchItem {
+    pub outcome: ProjectionPersistOutcome,
+    /// Session identity of the projected observation, read inside the same
+    /// transaction so drains need no follow-up point read per item.
+    pub session_id: String,
+}
+
+/// Outcome of one batched projection window committed in one transaction.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProjectionDrainBatch {
+    /// Items in authoritative sequence order.
+    pub items: Vec<ProjectionBatchItem>,
+    /// Whether queued work remains after this window — either ready items
+    /// past the window budget or a retry-deferred queue head.
+    pub has_more: bool,
+}
+
 pub trait ObservationProjectionStore: Send + Sync {
     /// Returns at most one queued observation in authoritative sequence order.
     /// Callers retain cancellation and batch-budget control between items.
@@ -641,6 +660,25 @@ pub trait ObservationProjectionStore: Send + Sync {
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> impl Future<Output = ProjectionStoreResult<ProjectionPersistOutcome>> + Send;
+
+    /// Projects up to `max` ready queue-head observations inside one
+    /// authoritative write transaction, preserving strict sequence order and
+    /// every per-item gap/queue check of [`Self::project_observation`].
+    ///
+    /// Any per-item failure rolls the whole window back and surfaces the
+    /// error; callers then fall back to per-item draining, whose durable
+    /// retry and skip dispositions remain the authority for failure handling.
+    /// `Ok(None)` means the store has no batched path and callers must drain
+    /// per item.
+    fn project_queued_observations(
+        &self,
+        max: usize,
+    ) -> impl Future<Output = ProjectionStoreResult<Option<ProjectionDrainBatch>>> + Send {
+        async move {
+            let _ = max;
+            Ok(None)
+        }
+    }
 
     fn projection_checkpoint(
         &self,

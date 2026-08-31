@@ -160,9 +160,10 @@ pub use observation::{
 pub use projection::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
     ClaudeSessionMessageProjection, ObservationProjection, ObservationProjectionStore,
-    PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation, ProjectionCheckpoint,
-    ProjectionPersistOutcome, ProjectionPredecessorConvergence, ProjectionProvenance,
-    ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
+    PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation, ProjectionBatchItem,
+    ProjectionCheckpoint, ProjectionDrainBatch, ProjectionPersistOutcome,
+    ProjectionPredecessorConvergence, ProjectionProvenance, ProjectionRebuildOutcome,
+    ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     SESSION_MESSAGE_PROJECTOR_VERSION_V5, SessionMessageProjection, WorkflowFactProjection,
     WorkflowFactRecord,

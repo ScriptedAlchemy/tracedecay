@@ -5,6 +5,10 @@ use tracedecay_store::ProjectionPersistOutcome;
 
 use super::*;
 
+/// Queue items projected per write transaction by the batched drain path.
+/// Bounds both the write-lease hold and the cancellation-check granularity.
+const PROJECTION_DRAIN_TXN_WINDOW: usize = 32;
+
 impl HostAdmissionFacade<'_> {
     #[hotpath::measure(label = "usecases.admission.drain_projection", future = true)]
     pub async fn drain_projection_queue(
@@ -65,7 +69,66 @@ impl HostAdmissionFacade<'_> {
         let mut session_ids = BTreeSet::new();
         let mut observation_deferred = false;
         let mut observation_queue_exhausted = false;
-        for _ in 0..max {
+        let mut remaining = max;
+        // Batched fast path: each window projects up to
+        // `PROJECTION_DRAIN_TXN_WINDOW` queue heads in one write transaction.
+        // Any window error falls back to the per-item drain below, whose
+        // durable retry and skip dispositions stay the failure authority.
+        let mut per_item_drain_required = false;
+        while remaining > 0 {
+            if cancellation.is_cancelled() {
+                return Err(classify_error(&ObservationApplicationError::Cancelled));
+            }
+            let window = PROJECTION_DRAIN_TXN_WINDOW.min(remaining);
+            match store.project_queued_observations(window).await {
+                Ok(Some(batch)) => {
+                    let item_count = batch.items.len();
+                    for item in batch.items {
+                        match item.outcome {
+                            ProjectionPersistOutcome::Projected(projected) => {
+                                outcome.projected = outcome.projected.saturating_add(1);
+                                outcome.projected_outputs =
+                                    outcome.projected_outputs.saturating_add(
+                                        u64::try_from(projected.output_count())
+                                            .unwrap_or(u64::MAX),
+                                    );
+                                session_ids.insert(item.session_id);
+                            }
+                            ProjectionPersistOutcome::Skipped { .. } => {
+                                outcome.skipped = outcome.skipped.saturating_add(1);
+                            }
+                            ProjectionPersistOutcome::ExactDuplicate(_) => {
+                                outcome.exact_duplicates =
+                                    outcome.exact_duplicates.saturating_add(1);
+                            }
+                        }
+                    }
+                    remaining = remaining.saturating_sub(item_count);
+                    if item_count < window || remaining == 0 {
+                        // The window undershot its budget (empty queue or a
+                        // retry-deferred head) or the drain budget is spent;
+                        // `has_more` is the in-transaction suffix truth.
+                        observation_deferred = batch.has_more;
+                        observation_queue_exhausted = !batch.has_more;
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    per_item_drain_required = true;
+                    break;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error.durable_detail(),
+                        "batched projection window failed; falling back to per-item drain"
+                    );
+                    per_item_drain_required = true;
+                    break;
+                }
+            }
+        }
+        while per_item_drain_required && remaining > 0 {
+            remaining = remaining.saturating_sub(1);
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }

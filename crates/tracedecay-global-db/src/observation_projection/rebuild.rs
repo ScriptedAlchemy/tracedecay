@@ -12,11 +12,11 @@ use tracedecay_runtime_core::db::{
 };
 use tracedecay_store::{
     ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation,
-    ProjectionPersistOutcome, ProjectionPredecessorConvergence, ProjectionRebuildOutcome,
-    ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    SessionMessageProjection, SessionMessageRecord, SessionRecord, WorkflowFactProjection,
-    workflow_semantic_kind,
+    ProjectionBatchItem, ProjectionDrainBatch, ProjectionPersistOutcome,
+    ProjectionPredecessorConvergence, ProjectionRebuildOutcome, ProjectionSkipReason,
+    ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, SessionMessageRecord,
+    SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
 };
 
 use super::apply::{
@@ -179,6 +179,117 @@ pub async fn project_observation(
             Err(error)
         }
     }
+}
+
+/// Projects up to `max` ready queue-head observations inside one write
+/// transaction, in strict sequence order, committing once for the window.
+///
+/// Each item runs the exact per-item projection ([`project_observation_in_transaction`]
+/// with its gap, queue, and duplicate checks). A retry-deferred queue head
+/// stops the window before consuming it, mirroring the scalar head-of-queue
+/// gate. Any per-item error rolls the whole window back and surfaces the
+/// error, so callers fall back to per-item draining whose durable retry and
+/// skip dispositions stay authoritative for failures.
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_projection.persist.project_window"
+)]
+pub async fn project_queued_observations(
+    database: &Database,
+    max: usize,
+) -> ProjectionStoreResult<ProjectionDrainBatch> {
+    if max == 0 {
+        return Ok(ProjectionDrainBatch::default());
+    }
+    let transaction = database
+        .begin_write_transaction("begin projection window transaction")
+        .await
+        .map_err(|error| storage("begin projection window transaction", error))?;
+    let now_micros = tracedecay_application::clock::now_micros().0;
+    let mut items = Vec::new();
+    while items.len() < max {
+        let Some(observation_id) = next_ready_projection_head(&transaction, now_micros).await?
+        else {
+            break;
+        };
+        // Boxed for the same reason as the scalar drain: the collision-guarded
+        // apply subtree overflows the base-opt worker stack when inlined.
+        match Box::pin(project_observation_in_transaction_with_session(
+            &transaction,
+            &observation_id,
+        ))
+        .await
+        {
+            Ok((outcome, session_id)) => items.push(ProjectionBatchItem {
+                outcome,
+                session_id,
+            }),
+            Err(error) => {
+                transaction.rollback().await.map_err(|rollback_error| {
+                    storage("rollback failed projection window", rollback_error)
+                })?;
+                return Err(error);
+            }
+        }
+    }
+    let has_more = projection_queue_has_items(&transaction).await?;
+    crate::hotpath_observe::record_transaction_rows(items.len() as u64);
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage("commit projection window transaction", error))?;
+    Ok(ProjectionDrainBatch { items, has_more })
+}
+
+/// Ready queue head under the same gate as the runtime's
+/// `NextQueuedProjection` read: strict minimum sequence, retry deadline
+/// passed, and no active projection rebuild generation.
+async fn next_ready_projection_head(
+    conn: &impl QueryExecutor,
+    now_micros: i64,
+) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
+    let mut rows = conn
+        .query(
+            "SELECT observation_id FROM projection_queue
+             WHERE next_retry_at_micros <= ?2
+               AND observation_sequence = (
+                 SELECT MIN(observation_sequence) FROM projection_queue
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM observation_projection_rebuilds
+                 WHERE projector_version = ?1
+               )
+             LIMIT 1",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, now_micros],
+        )
+        .await
+        .map_err(|error| storage("read projection queue head", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection queue head", error))?
+    else {
+        return Ok(None);
+    };
+    let observation_id = row
+        .get::<String>(0)
+        .map_err(|error| storage("decode projection queue head", error))?;
+    Ok(Some(
+        CanonicalObservationIdV1::new(observation_id)
+            .map_err(ProjectionStoreError::Contract)?,
+    ))
+}
+
+async fn projection_queue_has_items(conn: &impl QueryExecutor) -> ProjectionStoreResult<bool> {
+    let mut rows = conn
+        .query("SELECT 1 FROM projection_queue LIMIT 1", ())
+        .await
+        .map_err(|error| storage("probe projection queue", error))?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| storage("probe projection queue", error))?
+        .is_some())
 }
 
 #[cfg(test)]
@@ -682,11 +793,24 @@ async fn project_observation_in_transaction(
     transaction: &impl Executor,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
+    project_observation_in_transaction_with_session(transaction, observation_id)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
+/// Like [`project_observation_in_transaction`], additionally returning the
+/// observation's session identity so batched drains need no follow-up point
+/// read per projected item.
+async fn project_observation_in_transaction_with_session(
+    transaction: &impl Executor,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<(ProjectionPersistOutcome, String)> {
     ensure_projection_output_state_cache(transaction).await?;
     let checkpoint = read_checkpoint(transaction).await?;
     let Some((sequence, observation)) = read_observation(transaction, observation_id).await? else {
         return Err(ProjectionStoreError::ObservationNotFound);
     };
+    let session_id = observation.source().session_id().as_str().to_owned();
     let mut effect = derive_projection_with_alias(transaction, &observation).await?;
     if sequence <= checkpoint.last_sequence() {
         verify_effect(transaction, &observation, &effect).await?;
@@ -698,7 +822,10 @@ async fn project_observation_in_transaction(
                 .await?;
         }
         consume_projection_queue_item(transaction, observation_id).await?;
-        return Ok(ProjectionPersistOutcome::ExactDuplicate(checkpoint));
+        return Ok((
+            ProjectionPersistOutcome::ExactDuplicate(checkpoint),
+            session_id,
+        ));
     }
     let expected = checkpoint.last_sequence().saturating_add(1);
     if sequence != expected {
@@ -730,14 +857,15 @@ async fn project_observation_in_transaction(
     consume_projection_queue_item(transaction, observation_id).await?;
     let checkpoint = write_checkpoint(transaction, sequence).await?;
     let output_count = effect.output_count();
-    Ok(match effect {
+    let outcome = match effect {
         ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
             ProjectionPersistOutcome::Projected(ProjectedObservation::new(checkpoint, output_count))
         }
         ObservationProjection::Skipped(reason) => {
             ProjectionPersistOutcome::Skipped { checkpoint, reason }
         }
-    })
+    };
+    Ok((outcome, session_id))
 }
 
 async fn start_or_resume_projection_rebuild_transaction(

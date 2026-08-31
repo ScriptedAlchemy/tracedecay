@@ -1930,6 +1930,15 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         crate::project_observation(&self.database, observation_id).await
     }
 
+    async fn project_queued_observations(
+        &self,
+        max: usize,
+    ) -> ProjectionStoreResult<Option<tracedecay_store::ProjectionDrainBatch>> {
+        crate::project_queued_observations(&self.database, max)
+            .await
+            .map(Some)
+    }
+
     async fn projection_checkpoint(&self) -> ProjectionStoreResult<ProjectionCheckpoint> {
         match dispatch_runtime_observation_read(
             &self.runtime,
