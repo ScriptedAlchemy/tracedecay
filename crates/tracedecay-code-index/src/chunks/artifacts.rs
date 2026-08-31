@@ -170,6 +170,7 @@ pub struct CodeFileIndexArtifactsV1 {
     /// References this file could not bind locally, canonically ordered.
     /// Generation sealing derives cross-file edges from these against the
     /// whole staged file set; they never bind within one file alone.
+    #[serde(default)]
     pub unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 

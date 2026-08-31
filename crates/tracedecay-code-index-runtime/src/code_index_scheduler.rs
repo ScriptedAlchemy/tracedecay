@@ -4555,7 +4555,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             repository: repository_id.clone(),
             sanitizer_revision,
             policy_revision: id::<PolicyRevisionId>("policy.daemon.v1")?,
-            chunker_revision: id::<ChunkerRevision>("chunker.daemon.v2")?,
+            // V3 retains unresolved per-file references and derives
+            // conservative cross-file edges at generation sealing. V2
+            // artifacts remain decodable, but cannot be reused as a current
+            // graph because they never recorded that evidence.
+            chunker_revision: id::<ChunkerRevision>("chunker.daemon.v3")?,
             privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
             privacy_key_epoch: 1,
             max_snapshot_age_micros: None,
