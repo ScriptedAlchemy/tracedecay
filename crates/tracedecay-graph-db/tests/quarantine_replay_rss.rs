@@ -198,7 +198,7 @@ fn quarantine_replay_residency_probe() {
         sample(&format!("staged scope {scope} ({wall:.1?})"));
         if release {
             let started = Instant::now();
-            let released = db.release_apply_state_now().unwrap();
+            let released = db.release_apply_state(&|| Ok(())).unwrap();
             assert!(released, "a live staging store must release");
             sample(&format!("released scope {scope} ({:.1?})", started.elapsed()));
         }
@@ -237,7 +237,7 @@ fn quarantine_replay_residency_probe() {
         sample(&format!("replayed scope {scope} ({wall:.1?})"));
         if release {
             let started = Instant::now();
-            let released = db.release_apply_state_now().unwrap();
+            let released = db.release_apply_state(&|| Ok(())).unwrap();
             assert!(released, "a live staging store must release");
             sample(&format!(
                 "released replay {scope} ({:.1?})",

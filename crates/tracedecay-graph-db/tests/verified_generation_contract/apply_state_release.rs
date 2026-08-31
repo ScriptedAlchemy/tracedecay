@@ -138,7 +138,7 @@ fn a_release_preserves_serving_on_the_live_handle() {
     assert_eq!(graph.applied_mutations_since_release(), before);
 
     assert!(
-        graph.release_apply_state_now().unwrap(),
+        graph.release_apply_state(&|| Ok(())).unwrap(),
         "a live staging store must release on demand"
     );
     assert_eq!(
@@ -161,7 +161,7 @@ fn a_remount_after_a_release_recovers_and_serves() {
     let namespace = "release:remount";
     let mut published = publish_one_open(namespace);
     let graph = resolve(&published);
-    assert!(graph.release_apply_state_now().unwrap());
+    assert!(graph.release_apply_state(&|| Ok(())).unwrap());
     drop(graph);
     assert!(published.registered.close().unwrap());
 

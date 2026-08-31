@@ -9,7 +9,7 @@ use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1,
     GraphDbRegistration, GraphGenerationDependency, GraphGenerationManifest, GraphIdempotencyKey,
     GraphProjectionIdentity, GraphProjectorRevision, GraphPublicationPreparationV1,
-    GraphReplayCollectionOutcome, GraphWriteBatch, SealedCodeGenerationReplay,
+    GraphReplayCollectionOutcome, GraphWriteBatch, NeverCancelled, SealedCodeGenerationReplay,
     VerifiedGenerationBatchCommit, VerifiedGraphCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::store_runtime::registry::{
@@ -1322,29 +1322,29 @@ impl RetainedCodeGraphRuntimeV1 {
             // otherwise overlap into an unbounded replay working set.
             let _build = self.publication_locks.claim_build(&interruption)?;
             let _flight = self.publication_locks.flight.claim(key, &interruption)?;
-            // The already-built projection manifest rides along so first
-            // publication does not re-read and re-project the sealed artifact
-            // through the replay manifest provider; a pending predecessor
-            // journaled by an interrupted publisher carries no in-hand
-            // manifest, so publication reconstructs it from the journaled
-            // canonical replay source.
-            //
-            // Prepare — native staging, the sealed-store build, and the
-            // durable digest proof — runs with no gate held; only the
-            // CAS-plus-install swap below takes the serving gate.
-            let preparation = self.graph_registry.prepare_verified_publication(
-                publish_registration(),
-                storage,
-                &context,
-                key,
-                manifest,
-                prepared.durable_stage_boundary,
-            )?;
-            let proven = match preparation {
-                GraphPublicationPreparationV1::Settled(commit) => return Ok(*commit),
-                GraphPublicationPreparationV1::Proven(proven) => proven,
-            };
-            let commit = {
+            let attempt = (|| {
+                // The already-built projection manifest rides along so first
+                // publication does not re-read and re-project the sealed
+                // artifact through the replay manifest provider; a pending
+                // predecessor journaled by an interrupted publisher carries
+                // no in-hand manifest, so publication reconstructs it from
+                // the journaled canonical replay source.
+                //
+                // Prepare — native staging, the sealed-store build, and the
+                // durable digest proof — runs with no gate held; only the
+                // CAS-plus-install swap below takes the serving gate.
+                let preparation = self.graph_registry.prepare_verified_publication(
+                    publish_registration(),
+                    storage,
+                    &context,
+                    key,
+                    manifest,
+                    prepared.durable_stage_boundary,
+                )?;
+                let proven = match preparation {
+                    GraphPublicationPreparationV1::Settled(commit) => return Ok(*commit),
+                    GraphPublicationPreparationV1::Proven(proven) => proven,
+                };
                 let completion = publish_registration();
                 let _gate = self.hold_publication_gate();
                 hotpath::measure_block!(
@@ -1356,19 +1356,41 @@ impl RetainedCodeGraphRuntimeV1 {
                         *proven,
                     )
                 )
-            }?;
-            // Post-settlement maintenance with every gate released: prune
-            // the staging store's accumulated apply-state once enough corpus
-            // has been staged since the last release. The publication above
-            // is durably linearized, so a release failure never converts
-            // this commit into a failure.
-            match self.graph_registry.resolve(publish_registration()) {
+            })();
+            // Post-attempt maintenance with every gate released, on success
+            // and failure alike: an interrupted corpus attempt (deadline,
+            // cancellation, conflict) frees the same decoded-generation,
+            // manifest, and page transients a settled one does, and the
+            // incident retry loop re-attempts every minute — without the
+            // release those freed arenas accumulate across retries exactly
+            // like settled staging. Maintenance is the daemon's own work,
+            // so it is gated on daemon lifecycle, never on the request's
+            // already-spent interruption; a settled publication above is
+            // durably linearized either way.
+            let maintenance = GraphDbRegistration {
+                authority_lease: Arc::clone(&authority_lease),
+                cancellation: Arc::new(NeverCancelled),
+                lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                    &self.lifecycle_cancelled,
+                ))),
+                deadline: Instant::now() + GRAPH_OPERATION_DEADLINE,
+            };
+            let lifecycle_live = || {
+                if self.lifecycle_cancelled.load(Ordering::Acquire) {
+                    Err(GraphDbError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            };
+            match self.graph_registry.resolve(maintenance) {
                 Ok(graph) => {
-                    if let Err(error) = graph.maybe_release_apply_state(&|| interruption()) {
+                    // Unconditional, not budget-gated: a sealed publication
+                    // attempt is corpus-sized by construction.
+                    if let Err(error) = graph.release_apply_state(&lifecycle_live) {
                         tracing::warn!(
                             event = "graph_apply_state_release_failed",
                             %error,
-                            "apply-state release after a sealed publication failed"
+                            "apply-state release after a sealed publication attempt failed"
                         );
                     }
                 }
@@ -1380,7 +1402,7 @@ impl RetainedCodeGraphRuntimeV1 {
                     );
                 }
             }
-            Ok(commit)
+            attempt
         };
         // Classification slice: the manifest-provider bind (a shared-map
         // write the gate orders before the publish/recover reads that resolve

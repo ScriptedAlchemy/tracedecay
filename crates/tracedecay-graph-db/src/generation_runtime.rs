@@ -947,20 +947,18 @@ impl GraphDb {
         self.release_apply_state(check)
     }
 
-    /// Unconditional release for measurement probes and contract tests.
-    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
-    pub fn release_apply_state_now(&self) -> Result<bool, GraphDbError> {
-        self.release_apply_state(&|| Ok(()))
-    }
-
-    /// The unconditional release behind [`Self::maybe_release_apply_state`].
+    /// The unconditional release behind [`Self::maybe_release_apply_state`],
+    /// public for callers whose attempts are corpus-sized by construction
+    /// (the sealed code-generation publish flow releases per attempt, since
+    /// even a failed attempt churns a decoded generation, a projection
+    /// manifest, and staging pages through the allocator).
     ///
     /// Skips sealed read-only readers (immutable stores never accumulate
     /// apply-state). The GC prunes only versions below the minimum active
     /// transaction epoch, so concurrent readers keep every version they can
     /// still observe.
     #[hotpath::measure(label = "graph_db.generation.release_apply_state", impl_type = "GraphDb")]
-    pub(crate) fn release_apply_state(
+    pub fn release_apply_state(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<bool, GraphDbError> {
