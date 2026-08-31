@@ -57,7 +57,7 @@ the real defects were projection throughput and writer contention.)
 - Tokio: register the already-built runtime once with `hotpath::tokio_runtime!(runtime.handle())`.
 - Counts/current state: static `hotpath::gauge!` keys; use additive lifecycle guards for shared state and clean them up in `Drop`.
 - Debug values: avoid in production unless values are bounded and non-sensitive.
-- Direct rusqlite: manual phase/queue/transaction instrumentation; Hotpath 0.24 has no rusqlite adapter.
+- Direct rusqlite: manual phase/queue/transaction instrumentation; Hotpath 0.24 has no rusqlite adapter. Its `sql` report is fed only by third-party front-ends — `sqlx_tracing_layer()` / `toasty_tracing_layer()` are `tracing_subscriber` layers that harvest those ORMs' completed-query tracing events (emitter-measured elapsed, statements normalized into parameter-insensitive buckets, attributed to the innermost measured frame), and diesel hooks its own instrumentation trait. Use a tracing bridge only for a third-party emitter that already pays tracing's cost; first-party code keeps compile-out macros. Each bridge needs its cargo feature, and a global `EnvFilter` can suppress `sqlx::query` events for the whole stack — attach filters per layer.
 
 ## Instrumentation rules
 
@@ -67,6 +67,7 @@ the real defects were projection throughput and writer contention.)
 - Record failed/cancelled work too; success-only counters hide the waste being diagnosed.
 - Use RAII for active/queued/running gauges so cancellation, panic, abort, and shutdown cannot leak them.
 - Do not wrap tiny getters or inner-loop nodes without measured need. Enabled probes still have event/drain overhead even when timing is sampled out.
+- Keep the observability layers distinct. `tracing` events are the always-compiled operator log surface: they cost callsite checks even unsubscribed, are invisible in tests without a subscriber, and typed error mappings may collapse their messages. Hotpath macros are the compile-to-no-op measurement surface. A warn and a gauge on one path serve different consumers — neither replaces the other, and harvesting first-party logs into metrics couples placement decisions to log-field schemas. `eprintln!` is investigation scaffolding; it never merges.
 - Treat Hotpath 0.24 as flat aggregation: it has caller attribution for selected resources, but no parent call tree and no exclusive wall-time subtraction.
 - For parallel extraction/indexing, report one outer sweep wall span plus per-worker service demand, queue depth, effective worker count, memory reservation, and limiting reason.
 
