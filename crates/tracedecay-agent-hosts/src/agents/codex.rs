@@ -356,13 +356,16 @@ impl AgentIntegration for CodexIntegration {
         // the ownership manifest (and prior-manifest direct children) so a
         // transaction that retires stale exports can still roll them back.
         if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
-            match tracedecay_automation_runtime::automation::agent_targets::managed_agent_transaction_paths(
+            // `agent_targets` lives in automation-runtime and reads agent
+            // bytes through the host-io port this crate owns. Bind it before
+            // inventory so preview/backup see the same surface activate mutates
+            // (composition-root and in-crate tests that skip `main` both rely
+            // on this ensure — registration is idempotent).
+            crate::register_automation_host_io();
+            if let Ok(managed) = tracedecay_automation_runtime::automation::agent_targets::managed_agent_transaction_paths(
                 home,
             ) {
-                Ok(managed) => paths.extend(managed),
-                // Host I/O ports unregistered: keep non-agent registration
-                // paths rather than inventing an empty agents inventory.
-                Err(_) => {}
+                paths.extend(managed);
             }
         }
         paths
@@ -376,6 +379,7 @@ impl AgentIntegration for CodexIntegration {
         // current exports and retire previous-bundle stale ones — otherwise
         // Core install through the receipt-backed lifecycle never writes them
         // and never retires them (byte-for-byte rollback then fails).
+        crate::register_automation_host_io();
         tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
             &ctx.home,
         )?;
@@ -415,6 +419,7 @@ impl AgentIntegration for CodexIntegration {
         // Managed agent exports are Core registration surface (not artifacts).
         // Clear them here so uninstall verification can reach Missing and so
         // a rolled-back deactivate restores the pre-op exports byte-for-byte.
+        crate::register_automation_host_io();
         tracedecay_automation_runtime::automation::agent_targets::remove_managed_agents(
             &ctx.home.join(".codex/agents"),
         )?;
