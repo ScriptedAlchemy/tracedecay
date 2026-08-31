@@ -477,20 +477,12 @@ impl LatestCompleteCodeIndexV1 {
             .sweep_aborted_read_bundle_temporaries()
             .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         let authority = retained.authority();
-        let snapshot = match hotpath::measure_block!(
+        let snapshot = hotpath::measure_block!(
             "code_graph.activation.publish_verified_snapshot",
-            retained.publish_verified_snapshot(&self.generation, Arc::clone(&cancellation))
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                // Interrupted publication is resumable: sweep only this
-                // attempt's aborted bundle temps so the next seat retry
-                // adopts the journaled replay against a clean artifact
-                // directory. The journal and verified head stay untouched.
-                let _ = retained.sweep_aborted_read_bundle_temporaries();
-                return Err(CodeGraphProjectionError::from(error).into());
-            }
-        };
+            retained
+                .publish_verified_snapshot(&self.generation, Arc::clone(&cancellation))
+                .map_err(CodeGraphProjectionError::from)
+        )?;
         let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
             snapshot,
             generation_id.clone(),
