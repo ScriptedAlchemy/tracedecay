@@ -484,10 +484,12 @@ pub(super) struct StoreAdministration {
 ///
 /// Subscribe before starting deletion. `wait` fails closed if the
 /// administration is dropped without settling the tombstone.
+#[cfg(test)]
 pub(super) struct RemoteAccountDeletionTombstonePersistReceipt {
     receiver: tokio::sync::watch::Receiver<Option<tracedecay_global_db::RemoteDeletionTombstone>>,
 }
 
+#[cfg(test)]
 impl RemoteAccountDeletionTombstonePersistReceipt {
     pub(super) async fn wait(
         mut self,
@@ -708,6 +710,7 @@ impl StoreAdministration {
     /// The receipt settles when remote account deletion records or replays a
     /// tombstone — before admitted project opens are joined. If the
     /// administration is dropped without settling, wait fails closed.
+    #[cfg(test)]
     pub(super) fn remote_account_deletion_tombstone_persist_receipt(
         &self,
     ) -> RemoteAccountDeletionTombstonePersistReceipt {
