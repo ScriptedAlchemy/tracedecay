@@ -1327,7 +1327,7 @@ fn fastembed_model(
     artifact: &VerifiedEmbeddingArtifactV1,
     interruption: &dyn SemanticExecutionAuthority,
 ) -> Result<UserDefinedEmbeddingModel, EmbedError> {
-    let mut member_bytes = |role: ArtifactMemberRoleV1| {
+    let member_bytes = |role: ArtifactMemberRoleV1| {
         check_execution_authority(interruption)?;
         artifact.required_member_bytes(role)
     };
