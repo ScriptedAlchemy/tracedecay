@@ -75,7 +75,9 @@ pub struct CaptureProgressV1 {
     captured_bytes: AtomicU64,
 }
 
+#[hotpath::measure_all]
 impl CaptureProgressV1 {
+    #[hotpath::skip]
     pub const fn new() -> Self {
         Self {
             #[cfg(feature = "hotpath")]
@@ -212,6 +214,7 @@ impl CodeIndexExecutionControlV1 for branch_generations::BranchGenerationReadCon
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonCodeIndexPublicationStoreV1 {
     pub fn exact_git_evidence(
         &self,
@@ -288,6 +291,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn capture_candidate_bytes_with_progress(
         &self,
@@ -663,11 +667,14 @@ mod tests {
     }
 
     fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(tracedecay_runtime_core::git::git_program())
-            .current_dir(root)
-            .args(arguments)
-            .status()
-            .expect("run git fixture command");
+        let status = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .current_dir(root)
+        .args(arguments)
+        .status()
+        .expect("run git fixture command");
         assert!(
             status.success(),
             "git fixture command failed: {arguments:?}"
@@ -675,11 +682,14 @@ mod tests {
     }
 
     fn git_output(root: &Path, arguments: &[&str]) -> String {
-        let output = Command::new(tracedecay_runtime_core::git::git_program())
-            .current_dir(root)
-            .args(arguments)
-            .output()
-            .expect("run git fixture command");
+        let output = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .current_dir(root)
+        .args(arguments)
+        .output()
+        .expect("run git fixture command");
         assert!(
             output.status.success(),
             "git fixture command failed: {arguments:?}: {}",

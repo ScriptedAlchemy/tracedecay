@@ -75,6 +75,7 @@ pub struct CodeIndexIgnoredDependencyBuildV1 {
     pub publication: CodeIndexPublishEvidenceV1,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexWorktreeSchedulerV1 {
     pub fn index_verified_ignored_dependency(
         &mut self,
@@ -337,6 +338,7 @@ fn one_verified_external_type_import<'a>(
     Ok(import)
 }
 
+#[hotpath::measure]
 fn validated_module_path(module: &str) -> Result<PathBuf, CodeIndexSchedulerErrorV1> {
     if module.is_empty() || module.contains('\\') || module.contains('\0') {
         return Err(CodeIndexIgnoredDependencyRefusalV1::PathEscape.into());
@@ -366,6 +368,7 @@ fn validated_module_path(module: &str) -> Result<PathBuf, CodeIndexSchedulerErro
     Ok(path.to_path_buf())
 }
 
+#[hotpath::measure]
 fn resolve_package_entrypoint(
     package_root: &Path,
     canonical_package: &Path,
@@ -438,10 +441,12 @@ pub fn read_bounded_admitted_source(
     )
 }
 
+#[hotpath::measure]
 fn is_ignored_dependency_admission_path(logical_path: &str) -> bool {
     logical_path == "node_modules" || logical_path.starts_with("node_modules/")
 }
 
+#[hotpath::measure]
 fn read_contained_project_source(
     project_root: &Path,
     logical_path: &str,
@@ -471,6 +476,7 @@ fn read_contained_project_source(
     read_bounded_snapshot_source(&canonical, control)
 }
 
+#[hotpath::measure]
 fn canonical_package_root(
     project_root: &Path,
     package_root: &Path,
@@ -484,6 +490,7 @@ fn canonical_package_root(
     Ok(canonical)
 }
 
+#[hotpath::measure]
 fn package_root_for_admitted_path(
     project_root: &Path,
     logical_path: &str,
@@ -530,6 +537,7 @@ fn package_root_for_admitted_path(
         }))
 }
 
+#[hotpath::measure]
 fn validate_admitted_source(
     project_root: &Path,
     canonical_package: &Path,
@@ -570,6 +578,7 @@ fn validate_admitted_source(
     Ok(bytes)
 }
 
+#[hotpath::measure]
 fn read_bounded_source(
     path: &Path,
     control: Option<&dyn CodeIndexExecutionControlV1>,
@@ -616,6 +625,7 @@ pub fn read_bounded_snapshot_source(
     Ok(bytes)
 }
 
+#[hotpath::measure]
 fn validated_package_entrypoint(value: &str) -> Result<PathBuf, CodeIndexSchedulerErrorV1> {
     if value.is_empty() || value.contains('\\') || value.contains('\0') {
         return Err(CodeIndexIgnoredDependencyRefusalV1::PathEscape.into());
@@ -636,6 +646,7 @@ fn validated_package_entrypoint(value: &str) -> Result<PathBuf, CodeIndexSchedul
     Ok(relative)
 }
 
+#[hotpath::measure]
 fn logical_path_for(root: &Path, path: &Path) -> Result<String, CodeIndexSchedulerErrorV1> {
     let relative = path
         .strip_prefix(root)
@@ -654,6 +665,7 @@ fn logical_path_for(root: &Path, path: &Path) -> Result<String, CodeIndexSchedul
     Ok(components.join("/"))
 }
 
+#[hotpath::measure]
 fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSchedulerErrorV1> {
     let repository =
         gix::open(root).map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
@@ -684,6 +696,7 @@ fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSch
     }
 }
 
+#[hotpath::measure]
 fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeIndexSchedulerErrorV1> {
     if control.is_cancelled() {
         Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into())
@@ -703,6 +716,7 @@ pub fn checkpoint_if_present(
     }
 }
 
+#[hotpath::measure]
 fn map_production_interruption(error: CodeIndexProductionErrorV1) -> CodeIndexSchedulerErrorV1 {
     match error {
         CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled) => {
@@ -715,6 +729,7 @@ fn map_production_interruption(error: CodeIndexProductionErrorV1) -> CodeIndexSc
     }
 }
 
+#[hotpath::measure]
 fn publication_evidence(
     reextracted_files: usize,
     generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,

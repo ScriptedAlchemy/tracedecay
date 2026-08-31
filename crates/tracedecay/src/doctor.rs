@@ -9,12 +9,11 @@ use tracedecay_application::{ApplicationOutcome, ResolvedSetting};
 use tracedecay_domain::configuration::{
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
 };
-use tracedecay_tool_catalog::BindingSurface;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::application_surface::{
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
-    resolve_application_surface_dispatch,
+    ApplicationSurfaceRequest, execute_application_surface, resolve_application_surface_dispatch,
 };
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
@@ -219,8 +218,7 @@ fn render_doctor_finding(
 
 fn canonical_daemon_doctor_report(
     status: &serde_json::Value,
-) -> tracedecay_domain::errors::Result<Option<tracedecay_application::doctor::DoctorReportV1>>
-{
+) -> tracedecay_domain::errors::Result<Option<tracedecay_application::doctor::DoctorReportV1>> {
     let Some(doctor_report) = status.get("doctor_report") else {
         return Ok(None);
     };
@@ -641,9 +639,7 @@ fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
 }
 
 #[hotpath::measure(label = "doctor.config.upload", future = true)]
-async fn configured_upload_enabled(
-    project_path: &Path,
-) -> tracedecay_domain::errors::Result<bool> {
+async fn configured_upload_enabled(project_path: &Path) -> tracedecay_domain::errors::Result<bool> {
     let operation = ApplicationSurfaceOperation::ConfigurationGet;
     let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -672,23 +668,20 @@ async fn configured_upload_enabled(
         )),
         RequestedOutputFormat::Json,
     )
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        },
-    )?;
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
     let result = execute_application_surface(operation, dispatched, Some(&client))
         .await
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: error.to_string(),
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    let envelope =
+        result.result.map_err(
+            |problem| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("{}: {}", problem.problem.code, problem.problem.message),
             },
         )?;
-    let envelope = result.result.map_err(|problem| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("{}: {}", problem.problem.code, problem.problem.message),
-        }
-    })?;
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "configuration get returned a non-evidence outcome".to_owned(),
@@ -699,11 +692,9 @@ async fn configured_upload_enabled(
             message: "configuration get omitted its payload".to_owned(),
         }
     })?)
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("configuration get returned an invalid setting: {error}"),
-        },
-    )?;
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("configuration get returned an invalid setting: {error}"),
+    })?;
     if setting.key != key {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "configuration get returned the wrong setting".to_owned(),

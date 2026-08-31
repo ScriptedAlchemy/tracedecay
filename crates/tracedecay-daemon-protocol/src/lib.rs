@@ -100,7 +100,7 @@ pub use lsp_wire::{
 };
 pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use surface::{
-    ApplicationSurfaceOperation, ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
+    ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
     ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
     ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,

@@ -5,16 +5,15 @@ use axum::extract::Extension;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 use tracedecay::application_surface::{
-    AffectedTestsSurfaceRequest, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
-    FeedbackImpactSurfaceRequest, FeedbackSurfaceRequest, GitApplySurfaceRequest,
-    GitPreviewSurfaceRequest, GitReadSurfaceRequest, TestResultsSurfaceRequest,
-    parse_application_surface_request, resolve_application_surface_dispatch,
-    resolve_http_application_surface_dispatch,
+    AffectedTestsSurfaceRequest, ApplicationSurfaceRequest, FeedbackImpactSurfaceRequest,
+    FeedbackSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
+    GitReadSurfaceRequest, TestResultsSurfaceRequest, parse_application_surface_request,
+    resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
 };
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
 use tracedecay_api::{
-    CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
-    HttpApplicationRequest, HttpSseEvent, application_router,
+    CanonicalInvocationResult, HttpApplicationControls, HttpApplicationRequest, HttpSseEvent,
+    application_router,
 };
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, CancellationSignal, Deadline,
@@ -31,7 +30,9 @@ use tracedecay_domain::{
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
 use tracedecay_mcp::get_tool_definitions;
-use tracedecay_tool_catalog::{BindingSurface, ProfileId, SchemaId, SurfaceOperationName};
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, BindingSurface, ProfileId, SchemaId, SurfaceOperationName,
+};
 
 const PARITY_FIXTURE: &str = include_str!(
     "../../../../benchmark_data/transport-boundary/goldens/application-surface-parity.json"
@@ -117,15 +118,21 @@ async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner
     for (route, operation) in [
         (
             "/feedback/diagnostics",
-            HttpApplicationOperation::FeedbackDiagnostics,
+            ApplicationSurfaceOperation::FeedbackDiagnostics,
         ),
-        ("/feedback/get", HttpApplicationOperation::FeedbackGet),
-        ("/feedback/expand", HttpApplicationOperation::FeedbackExpand),
-        ("/feedback/list", HttpApplicationOperation::FeedbackList),
-        ("/feedback/impact", HttpApplicationOperation::FeedbackImpact),
+        ("/feedback/get", ApplicationSurfaceOperation::FeedbackGet),
+        (
+            "/feedback/expand",
+            ApplicationSurfaceOperation::FeedbackExpand,
+        ),
+        ("/feedback/list", ApplicationSurfaceOperation::FeedbackList),
+        (
+            "/feedback/impact",
+            ApplicationSurfaceOperation::FeedbackImpact,
+        ),
         (
             "/feedback/advisory_cycle",
-            HttpApplicationOperation::FeedbackAdvisoryCycle,
+            ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
         ),
     ] {
         let resolution = BindingResolution {
@@ -161,27 +168,27 @@ async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner
     for (route, operation) in [
         (
             "/github-stack/signal-expand",
-            HttpApplicationOperation::GitHubStackSignalExpand,
+            ApplicationSurfaceOperation::GitHubStackSignalExpand,
         ),
         (
             "/native-integration/worktree_inventory",
-            HttpApplicationOperation::NativeIntegrationWorktreeInventory,
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory,
         ),
         (
             "/native-integration/worktree_cleanup_inspect",
-            HttpApplicationOperation::NativeIntegrationWorktreeInspect,
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect,
         ),
         (
             "/native-integration/worktree_cleanup_confirm",
-            HttpApplicationOperation::NativeIntegrationWorktreeConfirm,
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm,
         ),
         (
             "/native-integration/worktree_cleanup_remove",
-            HttpApplicationOperation::NativeIntegrationWorktreeRemove,
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove,
         ),
         (
             "/native-integration/worktree_cleanup_reconcile",
-            HttpApplicationOperation::NativeIntegrationWorktreeReconcile,
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile,
         ),
     ] {
         let resolution = BindingResolution {

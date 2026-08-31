@@ -11,6 +11,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphPublicationDigest(String);
 
+#[hotpath::measure_all]
 impl GraphPublicationDigest {
     pub(crate) fn from_persisted(value: String) -> Result<Self, GraphDbError> {
         if value.len() != 64
@@ -34,6 +35,7 @@ impl GraphPublicationDigest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphPublicationInputDigest(String);
 
+#[hotpath::measure_all]
 impl GraphPublicationInputDigest {
     pub fn new(value: impl Into<String>) -> Result<Self, GraphDbError> {
         let value = value.into();
@@ -116,6 +118,7 @@ pub(crate) struct GraphPublicationDigests {
     pub(crate) batch: String,
 }
 
+#[hotpath::measure_all]
 impl GraphPublication {
     pub(crate) fn validate_and_digest(&mut self) -> Result<GraphPublicationDigests, GraphDbError> {
         if self.cancellation.is_cancelled() || self.batch.cancellation.is_cancelled() {

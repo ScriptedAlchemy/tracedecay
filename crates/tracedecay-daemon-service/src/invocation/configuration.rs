@@ -3,9 +3,9 @@
 use super::*;
 
 use super::registrars::registry_registration_refusal;
-use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
 use tracedecay_global_db::configuration::semantic::{SemanticConfig, SemanticProfileSelection};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod settlement;
 
@@ -553,12 +553,9 @@ fn semantic_profile_transition(
                     "semantic runtime configuration must be canonical JSON text",
                 ));
             };
-            let semantic: SemanticConfig =
-                serde_json::from_str(value).map_err(|_| {
-                    ConfigurationError::validation_message(
-                        "semantic runtime configuration is invalid",
-                    )
-                })?;
+            let semantic: SemanticConfig = serde_json::from_str(value).map_err(|_| {
+                ConfigurationError::validation_message("semantic runtime configuration is invalid")
+            })?;
             semantic.validate().map_err(|_| {
                 ConfigurationError::validation_message("semantic runtime configuration is invalid")
             })?;

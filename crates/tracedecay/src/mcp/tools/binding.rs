@@ -869,9 +869,9 @@ pub(super) fn registered_project_reader_tool_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use tracedecay_application::RetainedSurfaceOperation;
+    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
     use super::*;
-    use crate::application_surface::ApplicationSurfaceOperation;
 
     #[test]
     fn every_tool_is_bound_once() {

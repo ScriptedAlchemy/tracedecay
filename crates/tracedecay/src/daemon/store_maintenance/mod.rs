@@ -415,6 +415,20 @@ fn classify_vector_readable_sources(
     }
 }
 
+/// Outcome of one bounded code-generation retention pass.
+///
+/// `MoreWork` reports bounded progress with a remaining backlog — another
+/// collectable superseded generation, or unconsumed graph-replay release
+/// evidence — so the maintenance owner keeps the short cadence until the
+/// store converges instead of parking multi-GiB debris behind the full
+/// maintenance interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::daemon) enum CodeGenerationRetentionOutcomeV1 {
+    Complete,
+    MoreWork,
+    Failed,
+}
+
 /// Collect superseded code-index generations for one mounted project.
 ///
 /// Sealed generations are ordinary files, so no database retention or
@@ -437,15 +451,15 @@ fn classify_vector_readable_sources(
     label = "daemon.git.maintenance.code_generation_retention",
     future = true
 )]
-pub(super) async fn run_code_generation_retention(
+pub(in crate::daemon) async fn run_code_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_session_memory::context::CancellationToken,
-) -> bool {
+) -> CodeGenerationRetentionOutcomeV1 {
     if cancellation.is_cancelled() {
         log_code_generation_retention_degraded("retention_cancelled");
-        return false;
+        return CodeGenerationRetentionOutcomeV1::Failed;
     }
     let layout = graph.hook_store_layout();
     let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
@@ -456,11 +470,12 @@ pub(super) async fn run_code_generation_retention(
     // store — before this, such orphaned partial generations were unreachable
     // by every retention pass while their worktree root stayed live.
     if !store_root.is_dir() {
-        return true;
+        return CodeGenerationRetentionOutcomeV1::Complete;
     }
     let vector_inventory =
         resolve_vector_retention_inventory(graph, schedulers, observations).await;
-    apply_code_generation_retention(graph, schedulers, vector_inventory, cancellation).await
+    apply_code_generation_retention(graph, schedulers, observations, vector_inventory, cancellation)
+        .await
 }
 
 /// The offline protection pin: the generation the mounted scheduler is
@@ -493,9 +508,10 @@ async fn serving_generation_pins(
 async fn apply_code_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
+    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     vector_inventory: VectorRetentionInventoryV1,
     cancellation: &tracedecay_session_memory::context::CancellationToken,
-) -> bool {
+) -> CodeGenerationRetentionOutcomeV1 {
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
         DEFAULT_SUPERSEDED_GENERATION_FLOOR, execute_code_generation_retention_cancellable,
@@ -527,13 +543,32 @@ async fn apply_code_generation_retention(
             serving_generation_pins(schedulers, &layout.project_root).await,
             "semantic_unseated",
         ),
-        VectorRetentionInventoryV1::CensusScanning => return true,
+        VectorRetentionInventoryV1::CensusScanning => {
+            return CodeGenerationRetentionOutcomeV1::Complete;
+        }
         VectorRetentionInventoryV1::Offline { .. } => (
             serving_generation_pins(schedulers, &layout.project_root).await,
             "offline",
         ),
-        VectorRetentionInventoryV1::Refused { .. } => return false,
+        VectorRetentionInventoryV1::Refused { .. } => {
+            return CodeGenerationRetentionOutcomeV1::Failed;
+        }
     };
+    // A held replay pool makes every later phase of this pass either fail or
+    // block: the release reconcile's pool acquisition would burn its whole
+    // graph-operation deadline discovering the holder (the live wedge logged
+    // that as `graph_replay_release_failed error=DeadlineExceeded` on every
+    // tick), and the collection executor would then park on the same lock's
+    // deadline-free blocking flock while holding the daemon writer gate. One
+    // non-blocking probe defers the pass for this tick instead — before the
+    // multi-GiB full-digest planning below is paid — and arms the bounded
+    // release backoff so a long-held pool is re-probed, not polled.
+    if graph_replay::replay_pool_is_held(&graph_replay_pool_root) {
+        observations.record_graph_replay_release_unhealthy(graph.project_root());
+        hotpath::gauge!("daemon.git.maintenance.replay_pool_busy_total").inc(1_u64);
+        log_code_generation_retention_degraded("graph_replay_pool_busy");
+        return CodeGenerationRetentionOutcomeV1::Failed;
+    }
     // Full digest verification routinely reads several GiB. Run it before
     // entering the graph transaction and preserve the daemon shutdown token
     // through the blocking boundary; the planner checks it after every bounded
@@ -558,7 +593,7 @@ async fn apply_code_generation_retention(
             tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionErrorV1::Cancelled,
         )) => {
             log_code_generation_retention_degraded("retention_cancelled");
-            return false;
+            return CodeGenerationRetentionOutcomeV1::Failed;
         }
         Ok(Err(error)) => {
             // The bare label proved undiagnosable on a live profile: without
@@ -572,37 +607,60 @@ async fn apply_code_generation_retention(
                     ("error", error.to_string()),
                 ],
             );
-            return false;
+            return CodeGenerationRetentionOutcomeV1::Failed;
         }
         Err(_) => {
             log_code_generation_retention_degraded("retention_task_panicked");
-            return false;
+            return CodeGenerationRetentionOutcomeV1::Failed;
         }
     };
-    // A failed or retained replay reconcile keeps its durable release
-    // evidence for a later graph-available pass. Deleting newly planned files
-    // stays safe in every inventory mode — retention hard-links each retired
-    // generation into the replay pool before its release event becomes
-    // durable, so the graph can always finish its retirement later. The pass
-    // therefore keeps collecting instead of letting sealed generations and
-    // their multi-GiB text artifacts accumulate without bound whenever the
-    // graph is dark, wedged, or busy (a recurring `graph_replay_release_failed`
-    // used to abort every pass here and grew one store by tens of GiB in a
-    // single crash-rebuild night). A failure still reports degraded and fails
-    // the pass so the retry cadence stays short.
+    // A failed, deferred, or retained replay reconcile keeps its durable
+    // release evidence for a later graph-available pass. Deleting newly
+    // planned files stays safe in every inventory mode — retention hard-links
+    // each retired generation into the replay pool before its release event
+    // becomes durable, so the graph can always finish its retirement later.
+    // The pass therefore keeps collecting instead of letting sealed
+    // generations and their multi-GiB text artifacts accumulate without bound
+    // whenever the graph is dark, wedged, or busy (a recurring
+    // `graph_replay_release_failed` used to abort every pass here and grew
+    // one store by tens of GiB in a single crash-rebuild night). A failure
+    // still reports degraded and fails the pass so the retry cadence stays
+    // short; a deferral fails the pass quietly under the bounded backoff.
     let mut replay_reconcile_failed = false;
-    match graph_replay::reconcile_graph_replay_releases(graph, &store_root, cancellation).await {
-        graph_replay::ReconcileOutcome::Complete | graph_replay::ReconcileOutcome::Retained => {}
-        graph_replay::ReconcileOutcome::Failed => {
-            replay_reconcile_failed = true;
+    let mut release_backlog_remains = false;
+    let replay_reconcile_attemptable = match graph_replay::reconcile_graph_replay_releases(
+        graph,
+        &store_root,
+        observations,
+        cancellation,
+    )
+    .await
+    {
+        graph_replay::ReconcileOutcome::Complete | graph_replay::ReconcileOutcome::Retained => true,
+        graph_replay::ReconcileOutcome::MoreWork => {
+            release_backlog_remains = true;
+            true
         }
-    }
+        // A deferred or failed attempt must not be repeated by the
+        // post-collection reconcile below: the graph runtime already proved
+        // it cannot serve this tick.
+        graph_replay::ReconcileOutcome::Deferred | graph_replay::ReconcileOutcome::Failed => {
+            replay_reconcile_failed = true;
+            false
+        }
+    };
     if !plan.has_collectable_work() {
-        return !replay_reconcile_failed;
+        return if replay_reconcile_failed {
+            CodeGenerationRetentionOutcomeV1::Failed
+        } else if release_backlog_remains {
+            CodeGenerationRetentionOutcomeV1::MoreWork
+        } else {
+            CodeGenerationRetentionOutcomeV1::Complete
+        };
     }
     if cancellation.is_cancelled() {
         log_code_generation_retention_degraded("retention_cancelled");
-        return false;
+        return CodeGenerationRetentionOutcomeV1::Failed;
     }
 
     // Freeze the vector writer, then re-read the committed active+rollback
@@ -622,7 +680,7 @@ async fn apply_code_generation_retention(
             )
         else {
             log_code_generation_retention_degraded("vector_writer_unavailable");
-            return false;
+            return CodeGenerationRetentionOutcomeV1::Failed;
         };
         let vector_writer_freeze = vector_runtime.freeze_vector_mutations().await;
         let pinned_vector_sources =
@@ -644,7 +702,7 @@ async fn apply_code_generation_retention(
                     log_code_generation_retention_degraded(&format!(
                         "vector_inventory_reset_required:{reason}"
                     ));
-                    return false;
+                    return CodeGenerationRetentionOutcomeV1::Failed;
                 }
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
                     reason,
@@ -652,7 +710,7 @@ async fn apply_code_generation_retention(
                     log_code_generation_retention_degraded(&format!(
                         "vector_inventory_corrupt:{reason}"
                     ));
-                    return false;
+                    return CodeGenerationRetentionOutcomeV1::Failed;
                 }
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
                     reason,
@@ -660,7 +718,7 @@ async fn apply_code_generation_retention(
                     log_code_generation_retention_degraded(&format!(
                         "vector_inventory_unavailable:{reason}"
                     ));
-                    return false;
+                    return CodeGenerationRetentionOutcomeV1::Failed;
                 }
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
                     reason,
@@ -668,12 +726,12 @@ async fn apply_code_generation_retention(
                     log_code_generation_retention_degraded(&format!(
                         "vector_inventory_denied:{reason}"
                     ));
-                    return false;
+                    return CodeGenerationRetentionOutcomeV1::Failed;
                 }
             };
         if pinned_vector_sources != vector_readable_sources {
             log_code_generation_retention_degraded("vector_inventory_changed");
-            return false;
+            return CodeGenerationRetentionOutcomeV1::Failed;
         }
         tracedecay_usecases::semantic_runtime::retain_project_semantic_code_sources(
             &layout.project_root,
@@ -695,7 +753,7 @@ async fn apply_code_generation_retention(
                     // reads this exact source. It was absent from the root-only
                     // planning inventory, so retain it and let vector convergence
                     // make the next maintenance tick eligible.
-                    return true;
+                    return CodeGenerationRetentionOutcomeV1::Complete;
                 }
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(
                     false,
@@ -706,7 +764,7 @@ async fn apply_code_generation_retention(
                     log_code_generation_retention_degraded(&format!(
                         "vector_source_liveness_unavailable:{reason}"
                     ));
-                    return false;
+                    return CodeGenerationRetentionOutcomeV1::Failed;
                 }
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Denied(
                     reason,
@@ -714,7 +772,7 @@ async fn apply_code_generation_retention(
                     log_code_generation_retention_degraded(&format!(
                         "vector_source_liveness_denied:{reason}"
                     ));
-                    return false;
+                    return CodeGenerationRetentionOutcomeV1::Failed;
                 }
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::ResetRequired(
                     reason,
@@ -722,7 +780,7 @@ async fn apply_code_generation_retention(
                     log_code_generation_retention_degraded(&format!(
                         "vector_source_liveness_reset_required:{reason}"
                     ));
-                    return false;
+                    return CodeGenerationRetentionOutcomeV1::Failed;
                 }
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Corrupt(
                     reason,
@@ -730,7 +788,7 @@ async fn apply_code_generation_retention(
                     log_code_generation_retention_degraded(&format!(
                         "vector_source_liveness_corrupt:{reason}"
                     ));
-                    return false;
+                    return CodeGenerationRetentionOutcomeV1::Failed;
                 }
             }
         }
@@ -740,7 +798,7 @@ async fn apply_code_generation_retention(
     };
     if cancellation.is_cancelled() {
         log_code_generation_retention_degraded("retention_cancelled");
-        return false;
+        return CodeGenerationRetentionOutcomeV1::Failed;
     }
     // `current_timestamp()` counts seconds; wrapping it in `UtcMicros` stamped
     // every deletion receipt with a seconds value in a micros-typed field
@@ -804,14 +862,49 @@ async fn apply_code_generation_retention(
                     ],
                 );
             }
-            graph_replay::reconcile_graph_replay_releases(graph, &store_root, cancellation)
+            // The just-collected generation queued fresh release evidence;
+            // offer it to the graph immediately — but only when this tick's
+            // earlier reconcile was actually served. A deferred or failed
+            // runtime must not be probed twice in one tick.
+            let mut release_reconcile_failed = replay_reconcile_failed;
+            if replay_reconcile_attemptable {
+                match graph_replay::reconcile_graph_replay_releases(
+                    graph,
+                    &store_root,
+                    observations,
+                    cancellation,
+                )
                 .await
-                .succeeded()
-                && !replay_reconcile_failed
+                {
+                    graph_replay::ReconcileOutcome::Complete
+                    | graph_replay::ReconcileOutcome::Retained => {}
+                    graph_replay::ReconcileOutcome::MoreWork => {
+                        release_backlog_remains = true;
+                    }
+                    graph_replay::ReconcileOutcome::Deferred
+                    | graph_replay::ReconcileOutcome::Failed => {
+                        release_reconcile_failed = true;
+                    }
+                }
+            }
+            if release_reconcile_failed {
+                CodeGenerationRetentionOutcomeV1::Failed
+            } else if release_backlog_remains
+                || !report.deleted_generations.is_empty()
+                || !report.deleted_text_artifacts.is_empty()
+            {
+                // Something was collected, so the next bounded census may find
+                // another collectable unit; stay on the short cadence until a
+                // pass proves the store converged. A census that finds nothing
+                // returns Complete one tick later at metadata cost only.
+                CodeGenerationRetentionOutcomeV1::MoreWork
+            } else {
+                CodeGenerationRetentionOutcomeV1::Complete
+            }
         }
         Ok(Err(CodeGenerationRetentionErrorV1::Cancelled)) => {
             log_code_generation_retention_degraded("retention_cancelled");
-            false
+            CodeGenerationRetentionOutcomeV1::Failed
         }
         Ok(Err(error)) => {
             // Same diagnosability contract as the plan failure above: the
@@ -825,11 +918,11 @@ async fn apply_code_generation_retention(
                     ("error", error.to_string()),
                 ],
             );
-            false
+            CodeGenerationRetentionOutcomeV1::Failed
         }
         Err(_) => {
             log_code_generation_retention_degraded("retention_task_panicked");
-            false
+            CodeGenerationRetentionOutcomeV1::Failed
         }
     }
 }
@@ -1831,9 +1924,7 @@ enum RetainedCompactionStore<'a> {
 }
 
 impl RetainedCompactionStore<'_> {
-    async fn storage_page_counts(
-        &self,
-    ) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
+    async fn storage_page_counts(&self) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
         match self {
             Self::Registered(database) => database.storage_page_counts().await,
             Self::Project(database) => database.storage_page_counts().await,
@@ -2159,11 +2250,14 @@ mod code_index_root_alignment_tests {
     }
 
     fn scope_fixture_git(root: &Path, args: &[&str]) {
-        let status = Command::new(tracedecay_runtime_core::git::git_program())
-            .current_dir(root)
-            .args(args)
-            .status()
-            .expect("run git fixture command");
+        let status = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .current_dir(root)
+        .args(args)
+        .status()
+        .expect("run git fixture command");
         assert!(status.success(), "git fixture command failed: {args:?}");
     }
 

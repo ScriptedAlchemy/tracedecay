@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::runner::ServiceRunner;
+use super::runner::ServicePlatform;
 use super::{
     DaemonServiceSpec, LAUNCHD_PLIST_NAME, SERVICE_TEMP_SEQUENCE, home_for_service_env,
     plist_xml_escape, plist_xml_unescape, windows_task,
@@ -118,9 +118,9 @@ pub(super) fn atomic_replace_service_unit_with(
 pub(super) fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
     let service_path = service_unit_path()?;
     let unit = spec.render_unit()?;
-    match ServiceRunner::current()? {
-        ServiceRunner::WindowsTask => windows_task::register_task_xml(&unit)?,
-        ServiceRunner::Systemd | ServiceRunner::Launchd => {
+    match ServicePlatform::current()? {
+        ServicePlatform::WindowsTask => windows_task::register_task_xml(&unit)?,
+        ServicePlatform::Systemd | ServicePlatform::Launchd => {
             atomic_replace_service_unit_with(&service_path, &unit, &mut |_| Ok(()))?;
         }
     }
@@ -138,31 +138,32 @@ pub fn installed_service_socket_path() -> Result<Option<PathBuf>> {
 }
 
 pub(super) fn read_service_unit(service_path: &Path) -> Result<String> {
-    match ServiceRunner::current()? {
-        ServiceRunner::WindowsTask => {
+    match ServicePlatform::current()? {
+        ServicePlatform::WindowsTask => {
             windows_task::registered_task_xml()?.ok_or_else(|| TraceDecayError::Config {
                 message: format!("daemon task '{}' is not registered", service_path.display()),
             })
         }
-        ServiceRunner::Systemd | ServiceRunner::Launchd => std::fs::read_to_string(service_path)
-            .map_err(|e| TraceDecayError::Config {
+        ServicePlatform::Systemd | ServicePlatform::Launchd => {
+            std::fs::read_to_string(service_path).map_err(|e| TraceDecayError::Config {
                 message: format!("failed to read service '{}': {e}", service_path.display()),
-            }),
+            })
+        }
     }
 }
 
 pub(super) fn service_unit_exists(service_path: &Path) -> Result<bool> {
-    match ServiceRunner::current()? {
-        ServiceRunner::WindowsTask => windows_task::task_exists(),
-        ServiceRunner::Systemd | ServiceRunner::Launchd => Ok(service_path.exists()),
+    match ServicePlatform::current()? {
+        ServicePlatform::WindowsTask => windows_task::task_exists(),
+        ServicePlatform::Systemd | ServicePlatform::Launchd => Ok(service_path.exists()),
     }
 }
 
 #[hotpath::measure(label = "daemon.service.unit.remove")]
 pub(super) fn remove_service_unit(service_path: &Path) -> Result<()> {
-    match ServiceRunner::current()? {
-        ServiceRunner::WindowsTask => windows_task::delete(),
-        ServiceRunner::Systemd | ServiceRunner::Launchd => {
+    match ServicePlatform::current()? {
+        ServicePlatform::WindowsTask => windows_task::delete(),
+        ServicePlatform::Systemd | ServicePlatform::Launchd => {
             match std::fs::remove_file(service_path) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -396,27 +397,27 @@ fn plist_string_values(text: &str) -> Vec<String> {
 }
 
 pub(super) fn socket_path_from_unit_text(unit: &str) -> Option<PathBuf> {
-    match ServiceRunner::current().ok()? {
-        ServiceRunner::Systemd => socket_path_from_service_unit(unit),
-        ServiceRunner::Launchd => socket_path_from_launchd_plist(unit),
-        ServiceRunner::WindowsTask => windows_task::profile_root_from_task_xml(unit)
+    match ServicePlatform::current().ok()? {
+        ServicePlatform::Systemd => socket_path_from_service_unit(unit),
+        ServicePlatform::Launchd => socket_path_from_launchd_plist(unit),
+        ServicePlatform::WindowsTask => windows_task::profile_root_from_task_xml(unit)
             .map(|profile_root| profile_root.join("daemon.sock")),
     }
 }
 
 pub(super) fn remote_tls_from_unit_text(unit: &str) -> Result<Option<crate::RemoteBrainTlsConfig>> {
-    match ServiceRunner::current()? {
-        ServiceRunner::Systemd => remote_tls_from_service_unit(unit),
-        ServiceRunner::Launchd => remote_tls_from_launchd_plist(unit),
-        ServiceRunner::WindowsTask => windows_task::remote_tls_from_task_xml(unit),
+    match ServicePlatform::current()? {
+        ServicePlatform::Systemd => remote_tls_from_service_unit(unit),
+        ServicePlatform::Launchd => remote_tls_from_launchd_plist(unit),
+        ServicePlatform::WindowsTask => windows_task::remote_tls_from_task_xml(unit),
     }
 }
 
 pub(super) fn service_unit_path() -> Result<PathBuf> {
-    match ServiceRunner::current()? {
-        ServiceRunner::Systemd => systemd_user_service_path(),
-        ServiceRunner::Launchd => launchd_user_service_path(),
-        ServiceRunner::WindowsTask => windows_task::task_path(),
+    match ServicePlatform::current()? {
+        ServicePlatform::Systemd => systemd_user_service_path(),
+        ServicePlatform::Launchd => launchd_user_service_path(),
+        ServicePlatform::WindowsTask => windows_task::task_path(),
     }
 }
 

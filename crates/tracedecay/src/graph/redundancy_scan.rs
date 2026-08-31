@@ -953,11 +953,23 @@ fn is_generated_path(path: &str) -> bool {
 
 /// Returns a request-owned map from `node_id` to its current fingerprint.
 /// Each supported source file is opened and parsed at most once per scan.
+///
+/// The fingerprint pass reads and tree-sitter-parses every candidate source
+/// file, so it runs on the blocking pool instead of pinning the async worker
+/// that dispatched the MCP request for the whole scan.
+#[hotpath::measure(label = "graph.redundancy_scan.fingerprint_offload", future = true)]
 async fn ensure_fingerprints(
     cg: &TraceDecay,
     candidates: &[RedundancyCandidate],
 ) -> Result<HashMap<String, Fingerprint>> {
-    Ok(compute_fingerprints(cg.project_root(), candidates)?.fingerprints)
+    let project_root = cg.project_root().to_path_buf();
+    let candidates = candidates.to_vec();
+    let load = tokio::task::spawn_blocking(move || compute_fingerprints(&project_root, &candidates))
+        .await
+        .map_err(|error| {
+            redundancy_graph_problem(&format!("fingerprint worker did not complete: {error}"))
+        })??;
+    Ok(load.fingerprints)
 }
 
 #[derive(Debug)]

@@ -4,7 +4,8 @@ use tracedecay::catalog_composition::{
     CatalogCompositionError, build_application_catalog_snapshot, validate_application_catalog,
 };
 use tracedecay_api::{
-    HttpApplicationOperation, http_route_documents, retained_application_route_path,
+    http_application_full_route_path, http_route_documents, is_http_application_operation_exposed,
+    retained_application_route_path,
 };
 use tracedecay_application::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationHandlerDescriptors,
@@ -13,8 +14,8 @@ use tracedecay_application::{
     retrieval::catalog::symbol_search_contribution,
 };
 use tracedecay_tool_catalog::{
-    BindingSurface, CapabilityId, ProfileBudget, ProfileId, ProfileKind, SchemaId, SchemaRef,
-    ScopeDimension, UseCaseId,
+    ApplicationSurfaceOperation, BindingSurface, CapabilityId, ProfileBudget, ProfileId,
+    ProfileKind, SchemaId, SchemaRef, ScopeDimension, UseCaseId,
 };
 
 #[test]
@@ -221,8 +222,8 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
     let unrouted = visible_http_bindings
         .iter()
         .filter(|(binding, _)| {
-            match HttpApplicationOperation::from_catalog_name(binding.operation().as_str()) {
-                Some(operation) => !operation.is_http_exposed(),
+            match ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str()) {
+                Some(operation) => !is_http_application_operation_exposed(operation),
                 None => RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
                     .is_none_or(|operation| !operation.is_callable()),
             }
@@ -237,8 +238,8 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
     );
     assert_eq!(documents.len(), visible_http_bindings.len());
     assert!(documents.iter().all(|document| {
-        HttpApplicationOperation::from_catalog_name(&document.operation)
-            .is_some_and(|operation| operation.application_route_path() == document.path)
+        ApplicationSurfaceOperation::from_catalog_name(&document.operation)
+            .is_some_and(|operation| http_application_full_route_path(operation) == document.path)
             || RetainedSurfaceOperation::from_operation_name(&document.operation).is_some_and(
                 |operation| {
                     operation.is_callable()

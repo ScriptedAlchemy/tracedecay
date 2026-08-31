@@ -43,6 +43,7 @@ struct PendingHookPathsV1 {
     overflow: bool,
 }
 
+#[hotpath::measure_all]
 impl PendingHookPathsV1 {
     fn extend(&mut self, paths: impl IntoIterator<Item = String>) {
         for path in paths {
@@ -69,6 +70,7 @@ struct CodeIndexActivationRetirementV1 {
     callbacks: Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexActivationRetirementV1 {
     fn new() -> Self {
         Self {
@@ -371,11 +373,14 @@ mod tests {
     use super::*;
 
     fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(tracedecay_runtime_core::git::git_program())
-            .current_dir(root)
-            .args(arguments)
-            .status()
-            .expect("run git");
+        let status = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .current_dir(root)
+        .args(arguments)
+        .status()
+        .expect("run git");
         assert!(status.success(), "git {arguments:?}");
     }
 

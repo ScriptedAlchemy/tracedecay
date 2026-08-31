@@ -10,6 +10,7 @@ pub struct CallableGraphExecutionControl {
     started_at: Instant,
 }
 
+#[hotpath::measure_all]
 impl CallableGraphExecutionControl {
     pub fn for_request(request: &RequestContext) -> Arc<dyn GraphExecutionControl> {
         Arc::new(Self {

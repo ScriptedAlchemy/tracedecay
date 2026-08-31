@@ -2,10 +2,11 @@
 
 use serde_json::Value;
 use tracedecay_application::git::GitReadRequestV1;
-use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
-
-use super::{ApplicationSurfaceAdapterError, ApplicationSurfaceOperation};
 use tracedecay_daemon_protocol::GitReadSurfaceRequest;
+use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
+use super::ApplicationSurfaceAdapterError;
 
 #[hotpath::measure(label = "application_surface.git.parse")]
 pub(super) fn parse_git_read_surface_request(

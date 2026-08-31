@@ -52,11 +52,14 @@ impl CodeIndexExecutionControlV1 for PauseAfterCandidatePublication {
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> String {
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(arguments)
-        .output()
-        .expect("run Git fixture command");
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(arguments)
+    .output()
+    .expect("run Git fixture command");
     assert!(
         output.status.success(),
         "Git fixture command failed: {arguments:?}: {}",
@@ -278,9 +281,8 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
     let profile_root = profile.path().join("profile");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(fixture.path(), PROJECT_ID)
         .expect("project enrollment");
-    let identity =
-        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
-            .expect("profile identity");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         92,

@@ -43,10 +43,11 @@ pub use handoff::{
     handoff_application_router, handoff_invalid_request_response,
 };
 pub use http::{
-    HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
-    HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1,
-    adapter_problem_response, application_problem_response, application_router,
-    configuration_application_router, feedback_application_router, http_route_documents,
+    HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOwnerKind,
+    HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1, adapter_problem_response,
+    application_problem_response, application_router, configuration_application_router,
+    feedback_application_router, http_application_full_route_path, http_application_owner_kind,
+    http_application_route_path, http_route_documents, is_http_application_operation_exposed,
 };
 pub use multi_root::{
     MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
@@ -267,8 +268,9 @@ mod tests {
 
     use super::http::invalid_request_problem;
     use super::{
-        CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
-        HttpApplicationOwnerKind, HttpSseEvent, application_router,
+        CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOwnerKind, HttpSseEvent,
+        application_router, http_application_full_route_path, http_application_owner_kind,
+        http_application_route_path,
     };
     use tracedecay_application::{
         ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
@@ -276,7 +278,7 @@ mod tests {
         StreamEvent, StreamEventKind,
     };
     use tracedecay_domain::UtcMicros;
-    use tracedecay_tool_catalog::{BindingId, SchemaId};
+    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
 
     #[test]
     fn sse_preserves_canonical_item_and_progress_events() {
@@ -312,7 +314,7 @@ mod tests {
     #[test]
     fn http_operations_dispatch_to_concrete_owner_families() {
         assert_eq!(
-            HttpApplicationOperation::DiagnosticsRead.owner_kind(),
+            http_application_owner_kind(ApplicationSurfaceOperation::DiagnosticsRead),
             HttpApplicationOwnerKind::Primitive
         );
         for operation in [
@@ -321,7 +323,7 @@ mod tests {
             "multi_root_execute",
         ] {
             assert!(
-                HttpApplicationOperation::from_catalog_name(operation).is_none(),
+                ApplicationSurfaceOperation::from_catalog_name(operation).is_none(),
                 "{operation} must not be catalog-addressable"
             );
         }
@@ -432,15 +434,21 @@ mod tests {
         let routes = [
             (
                 "/feedback/diagnostics",
-                HttpApplicationOperation::FeedbackDiagnostics,
+                ApplicationSurfaceOperation::FeedbackDiagnostics,
             ),
-            ("/feedback/get", HttpApplicationOperation::FeedbackGet),
-            ("/feedback/expand", HttpApplicationOperation::FeedbackExpand),
-            ("/feedback/list", HttpApplicationOperation::FeedbackList),
-            ("/feedback/impact", HttpApplicationOperation::FeedbackImpact),
+            ("/feedback/get", ApplicationSurfaceOperation::FeedbackGet),
+            (
+                "/feedback/expand",
+                ApplicationSurfaceOperation::FeedbackExpand,
+            ),
+            ("/feedback/list", ApplicationSurfaceOperation::FeedbackList),
+            (
+                "/feedback/impact",
+                ApplicationSurfaceOperation::FeedbackImpact,
+            ),
             (
                 "/feedback/advisory_cycle",
-                HttpApplicationOperation::FeedbackAdvisoryCycle,
+                ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
             ),
         ];
 
@@ -505,14 +513,16 @@ mod tests {
             cancellation: cancellation.clone(),
         };
 
-        for (index, operation) in HttpApplicationOperation::ALL
+        for (index, operation) in ApplicationSurfaceOperation::ALL
             .into_iter()
-            .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::Configuration)
+            .filter(|operation| {
+                http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Configuration
+            })
             .enumerate()
         {
             let idempotency_key = format!("configuration.idempotency.http.{index}");
             let body = serde_json::json!({"idempotency_key": idempotency_key});
-            let mut request = Request::post(operation.route_path())
+            let mut request = Request::post(http_application_route_path(operation))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .expect("HTTP request");
@@ -542,8 +552,8 @@ mod tests {
                 &cancellation.context().token_id
             );
             assert_eq!(
-                operation.application_route_path(),
-                format!("/application{}", operation.route_path())
+                http_application_full_route_path(*operation),
+                format!("/application{}", http_application_route_path(*operation))
             );
         }
     }

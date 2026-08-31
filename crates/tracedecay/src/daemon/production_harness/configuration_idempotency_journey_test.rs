@@ -16,7 +16,8 @@ use tracedecay_domain::configuration::{
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{ApplicationConfigurationSet, TypedOperation};
 use tracedecay_tool_catalog::{
-    EffectClass, IdempotencyContract, ReceiptContract, ReconciliationContract, TerminalState,
+    ApplicationSurfaceOperation, EffectClass, IdempotencyContract, ReceiptContract,
+    ReconciliationContract, TerminalState,
 };
 
 use super::journey_test_support::tool_payload;
@@ -60,9 +61,11 @@ async fn cli_configuration_set(
 ) -> ApplicationResult<Value> {
     let graph = harness.server(project).expect("project server").cg().await;
     let target = graph.configuration_runtime().configuration_target().clone();
-    let scope =
-        tracedecay_code_index_runtime::resolved_scope_for_project(graph.project_root(), &target.project_id)
-            .expect("project application scope");
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+        graph.project_root(),
+        &target.project_id,
+    )
+    .expect("project application scope");
     let project_root = graph.project_root().to_path_buf();
     drop(graph);
     let resources = harness
@@ -75,7 +78,7 @@ async fn cli_configuration_set(
         project_root,
         scope,
     );
-    let operation = crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet;
+    let operation = ApplicationSurfaceOperation::ConfigurationSet;
     let application_operation =
         tracedecay_application::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
@@ -148,9 +151,11 @@ async fn configuration_batch_via_surface(
 ) -> ApplicationResult<Value> {
     let graph = harness.server(project).expect("project server").cg().await;
     let target = graph.configuration_runtime().configuration_target().clone();
-    let scope =
-        tracedecay_code_index_runtime::resolved_scope_for_project(graph.project_root(), &target.project_id)
-            .expect("project application scope");
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+        graph.project_root(),
+        &target.project_id,
+    )
+    .expect("project application scope");
     let project_root = graph.project_root().to_path_buf();
     drop(graph);
     let resources = harness
@@ -163,7 +168,7 @@ async fn configuration_batch_via_surface(
         project_root,
         scope,
     );
-    let operation = crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch;
+    let operation = ApplicationSurfaceOperation::ConfigurationBatch;
     let application_operation =
         tracedecay_application::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
@@ -242,9 +247,11 @@ async fn configuration_http_sdk(
 ) {
     let graph = harness.server(project).expect("project server").cg().await;
     let target = graph.configuration_runtime().configuration_target().clone();
-    let scope =
-        tracedecay_code_index_runtime::resolved_scope_for_project(graph.project_root(), &target.project_id)
-            .expect("project application scope");
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+        graph.project_root(),
+        &target.project_id,
+    )
+    .expect("project application scope");
     let project_root = graph.project_root().to_path_buf();
     drop(graph);
     let resources = harness

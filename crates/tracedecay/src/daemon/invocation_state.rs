@@ -14,6 +14,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use tracedecay_daemon_service::{
     DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
@@ -1050,7 +1051,7 @@ pub(super) enum ParsedMultiRootOperationV1 {
     /// of these is cloned per admitted root.
     Work(Box<WorkApplicationInvocationV1>),
     Surface {
-        operation: crate::application_surface::ApplicationSurfaceOperation,
+        operation: ApplicationSurfaceOperation,
         request: Value,
     },
 }

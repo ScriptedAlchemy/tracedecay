@@ -15,8 +15,10 @@ pub enum GraphBudgetKind {
     Mutation,
 }
 
+#[hotpath::measure_all]
 impl GraphBudgetKind {
     #[must_use]
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
@@ -93,6 +95,7 @@ pub enum GraphDbError {
     Closed,
 }
 
+#[hotpath::measure_all]
 impl GraphDbError {
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::InvalidRequest {
@@ -107,6 +110,7 @@ impl GraphDbError {
     }
 
     #[must_use]
+    #[hotpath::skip]
     pub const fn budget_exhausted(kind: GraphBudgetKind, limit: u64) -> Self {
         Self::BudgetExhausted { kind, limit }
     }

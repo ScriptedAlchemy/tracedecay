@@ -30,11 +30,14 @@ const SHARED_TERM: &str = "quicksilver";
 const UNIQUE_TERM: &str = "pangolin";
 
 fn git(root: &std::path::Path, args: &[&str]) {
-    let status = std::process::Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(args)
-        .status()
-        .expect("git command should run");
+    let status = std::process::Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(args)
+    .status()
+    .expect("git command should run");
     assert!(status.success(), "git {args:?} failed");
 }
 

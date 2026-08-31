@@ -17,11 +17,13 @@ use tracedecay_application::{
     SafeDiagnostic,
 };
 use tracedecay_tool_catalog::{
-    BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId, ProfileId, SchemaId, ScopeDimension,
+    ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId,
+    ProfileId, SchemaId, ScopeDimension,
 };
 
 use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
 mod application_operation_owner;
+pub use application_operation_owner::http_application_owner_kind;
 
 pub(crate) const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
@@ -92,93 +94,6 @@ const fn default_http_page_size() -> u32 {
     DEFAULT_HTTP_PAGE_SIZE
 }
 
-/// Canonical operation identity shared by every retained application surface.
-/// Transport bindings select the exposed subset without defining another
-/// operation enum or name conversion.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum HttpApplicationOperation {
-    GitStatus,
-    GitDiff,
-    GitHistory,
-    GitBlame,
-    GitHunks,
-    GitPreview,
-    GitApply,
-    GitHubStackSignalExpand,
-    NativeIntegrationStackSnapshot,
-    NativeIntegrationPreflight,
-    NativeIntegrationApprove,
-    NativeIntegrationApply,
-    NativeIntegrationStatus,
-    NativeIntegrationCancel,
-    NativeIntegrationWorktreeInventory,
-    NativeIntegrationWorktreeInspect,
-    NativeIntegrationWorktreeConfirm,
-    NativeIntegrationWorktreeRemove,
-    NativeIntegrationWorktreeReconcile,
-    FeedbackDiagnostics,
-    FeedbackGet,
-    FeedbackExpand,
-    FeedbackList,
-    FeedbackImpact,
-    FeedbackAdvisoryCycle,
-    AffectedTests,
-    TestResults,
-    CodeExactOccurrence,
-    CodePhraseSearch,
-    CodeSymbolSearch,
-    CodeSignatureSearch,
-    CodeImplementations,
-    CodeTypeHierarchy,
-    CodeCallers,
-    CodeCallees,
-    CodeFacets,
-    CodeTimeline,
-    CodeDeclaration,
-    CodeDefinition,
-    CodeTypeDefinition,
-    CodeReferences,
-    SessionLookup,
-    QualifiedName,
-    CallChain,
-    FileDependents,
-    SourceLines,
-    SourceBody,
-    SourceOutline,
-    ModuleApi,
-    FileMetadata,
-    HealthRead,
-    HealthDelta,
-    StorageStatus,
-    DiagnosticsRead,
-    ObservatoryRead,
-    ConfigurationList,
-    ConfigurationExplain,
-    ConfigurationGet,
-    ConfigurationSet,
-    ConfigurationUnset,
-    ConfigurationBatch,
-    ConfigurationWriteCredential,
-    ConfigurationObservedState,
-    ConfigurationProtectedPreview,
-    ConfigurationProtectedApply,
-    ConfigurationRollbackPreview,
-    ConfigurationRollbackApply,
-    ConfigurationAudit,
-    ContextScoutStatus,
-    ContextScoutRecent,
-    ContextScoutExplain,
-    ContextScoutCapability,
-    ContextScoutBudget,
-    ContextScoutPause,
-    ContextScoutResume,
-    ContextScoutCancel,
-    ContextScoutClaim,
-    ContextScoutDelivery,
-    ContextScoutFeedback,
-}
-
 /// The canonical application owner family responsible for one HTTP binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HttpApplicationOwnerKind {
@@ -192,280 +107,146 @@ pub enum HttpApplicationOwnerKind {
     ContextScout,
 }
 
-impl HttpApplicationOperation {
-    pub const ALL: [Self; 79] = [
-        Self::GitStatus,
-        Self::GitDiff,
-        Self::GitHistory,
-        Self::GitBlame,
-        Self::GitHunks,
-        Self::GitPreview,
-        Self::GitApply,
-        Self::GitHubStackSignalExpand,
-        Self::NativeIntegrationStackSnapshot,
-        Self::NativeIntegrationPreflight,
-        Self::NativeIntegrationApprove,
-        Self::NativeIntegrationApply,
-        Self::NativeIntegrationStatus,
-        Self::NativeIntegrationCancel,
-        Self::NativeIntegrationWorktreeInventory,
-        Self::NativeIntegrationWorktreeInspect,
-        Self::NativeIntegrationWorktreeConfirm,
-        Self::NativeIntegrationWorktreeRemove,
-        Self::NativeIntegrationWorktreeReconcile,
-        Self::FeedbackDiagnostics,
-        Self::FeedbackGet,
-        Self::FeedbackExpand,
-        Self::FeedbackList,
-        Self::FeedbackImpact,
-        Self::FeedbackAdvisoryCycle,
-        Self::AffectedTests,
-        Self::TestResults,
-        Self::CodeExactOccurrence,
-        Self::CodePhraseSearch,
-        Self::CodeSymbolSearch,
-        Self::CodeSignatureSearch,
-        Self::CodeImplementations,
-        Self::CodeTypeHierarchy,
-        Self::CodeCallers,
-        Self::CodeCallees,
-        Self::CodeFacets,
-        Self::CodeTimeline,
-        Self::CodeDeclaration,
-        Self::CodeDefinition,
-        Self::CodeTypeDefinition,
-        Self::CodeReferences,
-        Self::SessionLookup,
-        Self::QualifiedName,
-        Self::CallChain,
-        Self::FileDependents,
-        Self::SourceLines,
-        Self::SourceBody,
-        Self::SourceOutline,
-        Self::ModuleApi,
-        Self::FileMetadata,
-        Self::HealthRead,
-        Self::HealthDelta,
-        Self::StorageStatus,
-        Self::DiagnosticsRead,
-        Self::ObservatoryRead,
-        Self::ConfigurationList,
-        Self::ConfigurationExplain,
-        Self::ConfigurationGet,
-        Self::ConfigurationSet,
-        Self::ConfigurationUnset,
-        Self::ConfigurationBatch,
-        Self::ConfigurationWriteCredential,
-        Self::ConfigurationObservedState,
-        Self::ConfigurationProtectedPreview,
-        Self::ConfigurationProtectedApply,
-        Self::ConfigurationRollbackPreview,
-        Self::ConfigurationRollbackApply,
-        Self::ConfigurationAudit,
-        Self::ContextScoutStatus,
-        Self::ContextScoutRecent,
-        Self::ContextScoutExplain,
-        Self::ContextScoutCapability,
-        Self::ContextScoutBudget,
-        Self::ContextScoutPause,
-        Self::ContextScoutResume,
-        Self::ContextScoutCancel,
-        Self::ContextScoutClaim,
-        Self::ContextScoutDelivery,
-        Self::ContextScoutFeedback,
-    ];
+/// Whether the operation is addressed under `/code/{operation}`.
+///
+/// This is not an owner-kind question: the callable-code router also carries
+/// search operations a Primitive owner answers.
+const fn is_callable_code_route(operation: ApplicationSurfaceOperation) -> bool {
+    matches!(
+        operation,
+        ApplicationSurfaceOperation::CodeExactOccurrence
+            | ApplicationSurfaceOperation::CodePhraseSearch
+            | ApplicationSurfaceOperation::CodeSymbolSearch
+            | ApplicationSurfaceOperation::CodeSignatureSearch
+            | ApplicationSurfaceOperation::CodeImplementations
+            | ApplicationSurfaceOperation::CodeTypeHierarchy
+            | ApplicationSurfaceOperation::CodeCallers
+            | ApplicationSurfaceOperation::CodeCallees
+            | ApplicationSurfaceOperation::CodeFacets
+            | ApplicationSurfaceOperation::CodeTimeline
+            | ApplicationSurfaceOperation::CodeDeclaration
+            | ApplicationSurfaceOperation::CodeDefinition
+            | ApplicationSurfaceOperation::CodeTypeDefinition
+            | ApplicationSurfaceOperation::CodeReferences
+    )
+}
 
-    pub fn from_catalog_name(name: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|operation| operation.as_str() == name)
-    }
+/// Whether this canonical operation has a public HTTP catalog binding.
+pub const fn is_http_application_operation_exposed(operation: ApplicationSurfaceOperation) -> bool {
+    !matches!(
+        operation,
+        ApplicationSurfaceOperation::GitPreview
+            | ApplicationSurfaceOperation::GitApply
+            | ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+            | ApplicationSurfaceOperation::NativeIntegrationPreflight
+            | ApplicationSurfaceOperation::NativeIntegrationApprove
+            | ApplicationSurfaceOperation::NativeIntegrationApply
+            | ApplicationSurfaceOperation::NativeIntegrationStatus
+            | ApplicationSurfaceOperation::NativeIntegrationCancel
+            | ApplicationSurfaceOperation::ObservatoryRead
+    )
+}
 
-    pub fn from_tool_name(tool_name: &str) -> Option<Self> {
-        let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
-        if operation == "diagnostics" {
-            return Some(Self::DiagnosticsRead);
+/// Relative Axum route for a canonical application operation.
+pub fn http_application_route_path(operation: ApplicationSurfaceOperation) -> String {
+    match operation {
+        ApplicationSurfaceOperation::GitStatus => "/git/status".to_owned(),
+        ApplicationSurfaceOperation::GitDiff => "/git/diff".to_owned(),
+        ApplicationSurfaceOperation::GitHistory => "/git/history".to_owned(),
+        ApplicationSurfaceOperation::GitBlame => "/git/blame".to_owned(),
+        ApplicationSurfaceOperation::GitHunks => "/git/hunks".to_owned(),
+        ApplicationSurfaceOperation::GitPreview => "/git/preview".to_owned(),
+        ApplicationSurfaceOperation::GitApply => "/git/apply".to_owned(),
+        ApplicationSurfaceOperation::GitHubStackSignalExpand => {
+            "/github-stack/signal-expand".to_owned()
         }
-        Self::from_catalog_name(operation)
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::GitStatus => "git_status",
-            Self::GitDiff => "git_diff",
-            Self::GitHistory => "git_history",
-            Self::GitBlame => "git_blame",
-            Self::GitHunks => "git_hunks",
-            Self::GitPreview => "git_preview",
-            Self::GitApply => "git_apply",
-            Self::GitHubStackSignalExpand => "github_stack_signal_expand",
-            Self::NativeIntegrationStackSnapshot => "stack_snapshot",
-            Self::NativeIntegrationPreflight => "preflight_native_integration",
-            Self::NativeIntegrationApprove => "approve_native_integration",
-            Self::NativeIntegrationApply => "apply_native_integration",
-            Self::NativeIntegrationStatus => "native_integration_status",
-            Self::NativeIntegrationCancel => "cancel_native_integration",
-            Self::NativeIntegrationWorktreeInventory => "worktree_inventory",
-            Self::NativeIntegrationWorktreeInspect => "worktree_cleanup_inspect",
-            Self::NativeIntegrationWorktreeConfirm => "worktree_cleanup_confirm",
-            Self::NativeIntegrationWorktreeRemove => "worktree_cleanup_remove",
-            Self::NativeIntegrationWorktreeReconcile => "worktree_cleanup_reconcile",
-            Self::FeedbackDiagnostics => "feedback_diagnostics",
-            Self::FeedbackGet => "feedback_get",
-            Self::FeedbackExpand => "feedback_expand",
-            Self::FeedbackList => "feedback_list",
-            Self::FeedbackImpact => "feedback_impact",
-            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
-            Self::AffectedTests => "affected_tests",
-            Self::TestResults => "test_results",
-            Self::CodeExactOccurrence => "code_exact_occurrence",
-            Self::CodePhraseSearch => "code_phrase_search",
-            Self::CodeSymbolSearch => "code_symbol_search",
-            Self::CodeSignatureSearch => "code_signature_search",
-            Self::CodeImplementations => "code_implementations",
-            Self::CodeTypeHierarchy => "code_type_hierarchy",
-            Self::CodeCallers => "code_callers",
-            Self::CodeCallees => "code_callees",
-            Self::CodeFacets => "code_facets",
-            Self::CodeTimeline => "code_timeline",
-            Self::CodeDeclaration => "code_declaration",
-            Self::CodeDefinition => "code_definition",
-            Self::CodeTypeDefinition => "code_type_definition",
-            Self::CodeReferences => "code_references",
-            Self::SessionLookup => "session_lookup",
-            Self::QualifiedName => "qualified_name",
-            Self::CallChain => "call_chain",
-            Self::FileDependents => "file_dependents",
-            Self::SourceLines => "source_lines",
-            Self::SourceBody => "source_body",
-            Self::SourceOutline => "source_outline",
-            Self::ModuleApi => "module_api",
-            Self::FileMetadata => "file_metadata",
-            Self::HealthRead => "health_read",
-            Self::HealthDelta => "health_delta",
-            Self::StorageStatus => "storage_status",
-            Self::DiagnosticsRead => "diagnostics_read",
-            Self::ObservatoryRead => "observatory_read",
-            Self::ConfigurationList => "configuration_list",
-            Self::ConfigurationExplain => "configuration_explain",
-            Self::ConfigurationGet => "configuration_get",
-            Self::ConfigurationSet => "configuration_set",
-            Self::ConfigurationUnset => "configuration_unset",
-            Self::ConfigurationBatch => "configuration_batch",
-            Self::ConfigurationWriteCredential => "configuration_write_credential",
-            Self::ConfigurationObservedState => "configuration_observed_state",
-            Self::ConfigurationProtectedPreview => "configuration_protected_preview",
-            Self::ConfigurationProtectedApply => "configuration_protected_apply",
-            Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
-            Self::ConfigurationRollbackApply => "configuration_rollback_apply",
-            Self::ConfigurationAudit => "configuration_audit",
-            Self::ContextScoutStatus => "context_scout_status",
-            Self::ContextScoutRecent => "context_scout_recent",
-            Self::ContextScoutExplain => "context_scout_explain",
-            Self::ContextScoutCapability => "context_scout_capability",
-            Self::ContextScoutBudget => "context_scout_budget",
-            Self::ContextScoutPause => "context_scout_pause",
-            Self::ContextScoutResume => "context_scout_resume",
-            Self::ContextScoutCancel => "context_scout_cancel",
-            Self::ContextScoutClaim => "context_scout_claim",
-            Self::ContextScoutDelivery => "context_scout_delivery",
-            Self::ContextScoutFeedback => "context_scout_feedback",
+        operation @ (ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+        | ApplicationSurfaceOperation::NativeIntegrationApprove
+        | ApplicationSurfaceOperation::NativeIntegrationApply
+        | ApplicationSurfaceOperation::NativeIntegrationStatus
+        | ApplicationSurfaceOperation::NativeIntegrationCancel
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile) => {
+            format!("/native-integration/{}", operation.as_str())
+        }
+        ApplicationSurfaceOperation::AffectedTests => "/tests/affected".to_owned(),
+        ApplicationSurfaceOperation::TestResults => "/tests/results".to_owned(),
+        ApplicationSurfaceOperation::FeedbackDiagnostics => "/feedback/diagnostics".to_owned(),
+        ApplicationSurfaceOperation::FeedbackGet => "/feedback/get".to_owned(),
+        ApplicationSurfaceOperation::FeedbackExpand => "/feedback/expand".to_owned(),
+        ApplicationSurfaceOperation::FeedbackList => "/feedback/list".to_owned(),
+        ApplicationSurfaceOperation::FeedbackImpact => "/feedback/impact".to_owned(),
+        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => "/feedback/advisory_cycle".to_owned(),
+        operation @ (ApplicationSurfaceOperation::CodeExactOccurrence
+        | ApplicationSurfaceOperation::CodePhraseSearch
+        | ApplicationSurfaceOperation::CodeSymbolSearch
+        | ApplicationSurfaceOperation::CodeSignatureSearch
+        | ApplicationSurfaceOperation::CodeImplementations
+        | ApplicationSurfaceOperation::CodeTypeHierarchy
+        | ApplicationSurfaceOperation::CodeCallers
+        | ApplicationSurfaceOperation::CodeCallees
+        | ApplicationSurfaceOperation::CodeFacets
+        | ApplicationSurfaceOperation::CodeTimeline
+        | ApplicationSurfaceOperation::CodeDeclaration
+        | ApplicationSurfaceOperation::CodeDefinition
+        | ApplicationSurfaceOperation::CodeTypeDefinition
+        | ApplicationSurfaceOperation::CodeReferences) => {
+            format!("/code/{}", operation.as_str())
+        }
+        operation @ (ApplicationSurfaceOperation::SessionLookup
+        | ApplicationSurfaceOperation::QualifiedName
+        | ApplicationSurfaceOperation::CallChain
+        | ApplicationSurfaceOperation::FileDependents
+        | ApplicationSurfaceOperation::SourceLines
+        | ApplicationSurfaceOperation::SourceBody
+        | ApplicationSurfaceOperation::SourceOutline
+        | ApplicationSurfaceOperation::ModuleApi
+        | ApplicationSurfaceOperation::FileMetadata
+        | ApplicationSurfaceOperation::HealthRead
+        | ApplicationSurfaceOperation::HealthDelta
+        | ApplicationSurfaceOperation::StorageStatus
+        | ApplicationSurfaceOperation::DiagnosticsRead) => {
+            format!("/primitives/{}", operation.as_str())
+        }
+        operation @ (ApplicationSurfaceOperation::ConfigurationList
+        | ApplicationSurfaceOperation::ConfigurationExplain
+        | ApplicationSurfaceOperation::ConfigurationGet
+        | ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationUnset
+        | ApplicationSurfaceOperation::ConfigurationBatch
+        | ApplicationSurfaceOperation::ConfigurationWriteCredential
+        | ApplicationSurfaceOperation::ConfigurationObservedState
+        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        | ApplicationSurfaceOperation::ConfigurationProtectedApply
+        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        | ApplicationSurfaceOperation::ConfigurationRollbackApply
+        | ApplicationSurfaceOperation::ConfigurationAudit) => {
+            format!("/configuration/{}", operation.as_str())
+        }
+        ApplicationSurfaceOperation::ObservatoryRead => "/observatory/read".to_owned(),
+        operation @ (ApplicationSurfaceOperation::ContextScoutStatus
+        | ApplicationSurfaceOperation::ContextScoutRecent
+        | ApplicationSurfaceOperation::ContextScoutExplain
+        | ApplicationSurfaceOperation::ContextScoutCapability
+        | ApplicationSurfaceOperation::ContextScoutBudget
+        | ApplicationSurfaceOperation::ContextScoutPause
+        | ApplicationSurfaceOperation::ContextScoutResume
+        | ApplicationSurfaceOperation::ContextScoutCancel
+        | ApplicationSurfaceOperation::ContextScoutClaim
+        | ApplicationSurfaceOperation::ContextScoutDelivery
+        | ApplicationSurfaceOperation::ContextScoutFeedback) => {
+            format!("/context-scout/{}", operation.as_str())
         }
     }
+}
 
-    /// Whether the operation is addressed under `/code/{operation}`.
-    ///
-    /// This is not an owner-kind question: the callable-code router also
-    /// carries the five search operations a Primitive owner answers, so the
-    /// route membership has to be stated once and consulted in both
-    /// polarities.
-    pub const fn is_callable_code_route(self) -> bool {
-        matches!(
-            self,
-            Self::CodeExactOccurrence
-                | Self::CodePhraseSearch
-                | Self::CodeSymbolSearch
-                | Self::CodeSignatureSearch
-                | Self::CodeImplementations
-                | Self::CodeTypeHierarchy
-                | Self::CodeCallers
-                | Self::CodeCallees
-                | Self::CodeFacets
-                | Self::CodeTimeline
-                | Self::CodeDeclaration
-                | Self::CodeDefinition
-                | Self::CodeTypeDefinition
-                | Self::CodeReferences
-        )
-    }
-
-    /// Whether this canonical operation has a public HTTP catalog binding.
-    ///
-    /// Git preview/apply remain in the shared operation family but are
-    /// intentionally exposed through CLI/MCP mutation bindings only.
-    pub const fn is_http_exposed(self) -> bool {
-        !matches!(
-            self,
-            Self::GitPreview
-                | Self::GitApply
-                | Self::NativeIntegrationStackSnapshot
-                | Self::NativeIntegrationPreflight
-                | Self::NativeIntegrationApprove
-                | Self::NativeIntegrationApply
-                | Self::NativeIntegrationStatus
-                | Self::NativeIntegrationCancel
-                | Self::ObservatoryRead
-        )
-    }
-
-    pub fn route_path(self) -> String {
-        match self {
-            Self::GitHubStackSignalExpand => "/github-stack/signal-expand".to_owned(),
-            operation if operation.owner_kind() == HttpApplicationOwnerKind::Git => {
-                format!(
-                    "/git/{}",
-                    operation
-                        .as_str()
-                        .strip_prefix("git_")
-                        .expect("Git HTTP operation names use the git_ prefix")
-                )
-            }
-            operation if operation.owner_kind() == HttpApplicationOwnerKind::NativeIntegration => {
-                format!("/native-integration/{}", operation.as_str())
-            }
-            Self::AffectedTests => "/tests/affected".to_owned(),
-            Self::TestResults => "/tests/results".to_owned(),
-            operation if operation.owner_kind() == HttpApplicationOwnerKind::Feedback => {
-                format!(
-                    "/feedback/{}",
-                    operation
-                        .as_str()
-                        .strip_prefix("feedback_")
-                        .expect("feedback HTTP operation names use the feedback_ prefix")
-                )
-            }
-            operation if operation.is_callable_code_route() => {
-                format!("/code/{}", operation.as_str())
-            }
-            operation if operation.owner_kind() == HttpApplicationOwnerKind::Primitive => {
-                format!("/primitives/{}", operation.as_str())
-            }
-            operation if operation.owner_kind() == HttpApplicationOwnerKind::Configuration => {
-                format!("/configuration/{}", operation.as_str())
-            }
-            Self::ObservatoryRead => "/observatory/read".to_owned(),
-            operation => format!("/context-scout/{}", operation.as_str()),
-        }
-    }
-
-    /// Public route mounted beneath the per-project application prefix.
-    ///
-    /// [`route_path`](Self::route_path) remains the relative Axum route used
-    /// by [`application_router`]. SDK and discovery contracts need the full
-    /// path accepted by the daemon HTTP service.
-    pub fn application_route_path(self) -> String {
-        format!("/application{}", self.route_path())
-    }
+/// Public route mounted beneath the per-project application prefix.
+pub fn http_application_full_route_path(operation: ApplicationSurfaceOperation) -> String {
+    format!("/application{}", http_application_route_path(operation))
 }
 
 /// Generated route documentation derived from the same catalog snapshot and
@@ -503,19 +284,22 @@ pub fn http_route_documents(
         authorized_capabilities,
         available_scope,
     ) {
-        let path = match HttpApplicationOperation::from_catalog_name(binding.operation().as_str()) {
-            Some(operation) if operation.is_http_exposed() => operation.application_route_path(),
-            Some(_) => continue,
-            None => {
-                let Some(operation) =
-                    RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
-                        .filter(|operation| operation.is_callable())
-                else {
-                    continue;
-                };
-                crate::retained::retained_application_route_path(operation)
-            }
-        };
+        let path =
+            match ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str()) {
+                Some(operation) if is_http_application_operation_exposed(operation) => {
+                    http_application_full_route_path(operation)
+                }
+                Some(_) => continue,
+                None => {
+                    let Some(operation) =
+                        RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
+                            .filter(|operation| operation.is_callable())
+                    else {
+                        continue;
+                    };
+                    crate::retained::retained_application_route_path(operation)
+                }
+            };
         documents.push(HttpRouteDocumentV1 {
             method: "POST",
             path,
@@ -540,7 +324,7 @@ pub struct HttpApplicationControls {
 
 #[derive(Clone, Debug)]
 pub struct HttpApplicationRequest {
-    pub operation: HttpApplicationOperation,
+    pub operation: ApplicationSurfaceOperation,
     pub request_id: RequestId,
     pub page: PageRequest,
     pub deadline: Option<Deadline>,
@@ -834,24 +618,25 @@ where
         .with_state(owners)
 }
 
-fn parse_git_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
+fn parse_git_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     match operation {
-        "status" => Some(HttpApplicationOperation::GitStatus),
-        "diff" => Some(HttpApplicationOperation::GitDiff),
-        "history" => Some(HttpApplicationOperation::GitHistory),
-        "blame" => Some(HttpApplicationOperation::GitBlame),
-        "hunks" => Some(HttpApplicationOperation::GitHunks),
+        "status" => Some(ApplicationSurfaceOperation::GitStatus),
+        "diff" => Some(ApplicationSurfaceOperation::GitDiff),
+        "history" => Some(ApplicationSurfaceOperation::GitHistory),
+        "blame" => Some(ApplicationSurfaceOperation::GitBlame),
+        "hunks" => Some(ApplicationSurfaceOperation::GitHunks),
         _ => None,
     }
 }
 
-fn parse_feedback_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
+fn parse_feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     crate::feedback::feedback_read_operation(operation)
 }
 
-fn parse_public_feedback_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    HttpApplicationOperation::from_catalog_name(&format!("feedback_{operation}"))
-        .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::Feedback)
+fn parse_public_feedback_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_catalog_name(&format!("feedback_{operation}")).filter(
+        |operation| http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Feedback,
+    )
 }
 
 constant_operation_handlers! {
@@ -864,32 +649,34 @@ constant_operation_handlers! {
         page: Result<Query<HttpPageQuery>, QueryRejection>,
         body: Result<Json<Value>, JsonRejection>,
     },
-    affected_tests => HttpApplicationOperation::AffectedTests;
-    test_results => HttpApplicationOperation::TestResults;
-    github_stack_signal_expand => HttpApplicationOperation::GitHubStackSignalExpand;
+    affected_tests => ApplicationSurfaceOperation::AffectedTests;
+    test_results => ApplicationSurfaceOperation::TestResults;
+    github_stack_signal_expand => ApplicationSurfaceOperation::GitHubStackSignalExpand;
 }
 
-fn parse_primitive_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    HttpApplicationOperation::from_catalog_name(operation).filter(|operation| {
-        operation.owner_kind() == HttpApplicationOwnerKind::Primitive
-            && *operation != HttpApplicationOperation::TestResults
-            && !operation.is_callable_code_route()
+fn parse_primitive_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
+        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Primitive
+            && *operation != ApplicationSurfaceOperation::TestResults
+            && !is_callable_code_route(*operation)
     })
 }
 
-fn parse_callable_code_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    HttpApplicationOperation::from_catalog_name(operation)
-        .filter(|operation| operation.is_callable_code_route())
+fn parse_callable_code_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_catalog_name(operation)
+        .filter(|operation| is_callable_code_route(*operation))
 }
 
-fn parse_configuration_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    HttpApplicationOperation::from_catalog_name(operation)
-        .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::Configuration)
+fn parse_configuration_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
+        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Configuration
+    })
 }
 
-fn parse_context_scout_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    HttpApplicationOperation::from_catalog_name(operation)
-        .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::ContextScout)
+fn parse_context_scout_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
+        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::ContextScout
+    })
 }
 
 /// Define the `/{operation}` handlers, which differ only in how the path
@@ -935,14 +722,16 @@ parsed_operation_handlers! {
     native_integration_operation => parse_native_integration_operation;
 }
 
-fn parse_native_integration_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    HttpApplicationOperation::from_catalog_name(operation)
-        .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::NativeIntegration)
-        .filter(|operation| operation.is_http_exposed())
+fn parse_native_integration_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_catalog_name(operation)
+        .filter(|operation| {
+            http_application_owner_kind(*operation) == HttpApplicationOwnerKind::NativeIntegration
+        })
+        .filter(|operation| is_http_application_operation_exposed(*operation))
 }
 
 async fn invoke_route<O>(
-    operation: HttpApplicationOperation,
+    operation: ApplicationSurfaceOperation,
     State(owners): State<O>,
     Extension(request_id): Extension<RequestId>,
     Extension(controls): Extension<HttpApplicationControls>,
@@ -958,7 +747,7 @@ where
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let owner_kind = request.operation.owner_kind();
+    let owner_kind = http_application_owner_kind(request.operation);
     let invocation = match owner_kind {
         HttpApplicationOwnerKind::Git => owners.invoke_git(request),
         HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
@@ -978,7 +767,7 @@ where
 /// The rejection `Response` dwarfs the admitted request, so it is boxed: the
 /// allocation lands only on the rejection path, which is the rare one.
 fn admit_http_application_request(
-    operation: HttpApplicationOperation,
+    operation: ApplicationSurfaceOperation,
     request_id: RequestId,
     controls: HttpApplicationControls,
     page: Result<Query<HttpPageQuery>, QueryRejection>,

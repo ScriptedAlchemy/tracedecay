@@ -33,6 +33,7 @@ pub(super) struct RegisteredGraphDbOperationV1 {
     request: Option<GraphDbRegistration>,
 }
 
+#[hotpath::measure_all]
 impl RegisteredGraphDbOperationV1 {
     pub(super) fn database(&self) -> &GraphDbLeaseV1 {
         &self.database
@@ -89,6 +90,7 @@ impl RegisteredGraphDbOperationV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDbRegistry {
     pub(super) fn registered_operation(
         &self,
@@ -168,70 +170,113 @@ impl GraphDbRegistry {
         let canonical_path = canonical_graph_database_file(registration.canonical_path())?;
         let mut state = self.state_lock()?;
         let requested_shard = &registration.binding().shard_id;
-        // Collected before the mutable borrow so the error can name what *is*
-        // mounted alongside what was asked for.
-        let mounted_shards = state
-            .entries
-            .keys()
-            .map(|shard| format!("{shard:?}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let entry = state
-            .entries
-            .get_mut(requested_shard)
-            .ok_or_else(|| {
-                // Name the shard that is missing and the ones that are
-                // mounted: this failure is otherwise indistinguishable from
-                // "the graph is down", when in practice it means the caller
-                // resolved a different shard than the one it attached.
-                GraphDbError::unavailable(format!(
-                    "graph runtime is not registered for shard {requested_shard:?}; mounted shards: [{mounted_shards}]"
-                ))
-            })?;
-        match entry {
-            super::RegistryEntry::Ready {
-                binding,
-                verified_locator,
-                path,
-                expected_format,
-                owner,
-                last_used,
-                ..
-            } => {
-                super::require_binding(
-                    (binding, verified_locator, path, *expected_format),
-                    (
-                        registration.binding(),
-                        registration.verified_locator(),
-                        &canonical_path,
-                        crate::GraphFormatVersion::current(),
-                    ),
-                )?;
-                *last_used = std::time::Instant::now();
-                owner.issue_registered_lease(registration)
+        loop {
+            // Collected before the mutable borrow so the error can name what
+            // *is* mounted alongside what was asked for.
+            let mounted_shards = state
+                .entries
+                .keys()
+                .map(|shard| format!("{shard:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let entry = state
+                .entries
+                .get_mut(requested_shard)
+                .ok_or_else(|| {
+                    // Name the shard that is missing and the ones that are
+                    // mounted: this failure is otherwise indistinguishable from
+                    // "the graph is down", when in practice it means the caller
+                    // resolved a different shard than the one it attached.
+                    GraphDbError::unavailable(format!(
+                        "graph runtime is not registered for shard {requested_shard:?}; mounted shards: [{mounted_shards}]"
+                    ))
+                })?;
+            match entry {
+                super::RegistryEntry::Ready {
+                    binding,
+                    verified_locator,
+                    path,
+                    expected_format,
+                    owner,
+                    last_used,
+                    ..
+                } => {
+                    super::require_binding(
+                        (binding, verified_locator, path, *expected_format),
+                        (
+                            registration.binding(),
+                            registration.verified_locator(),
+                            &canonical_path,
+                            crate::GraphFormatVersion::current(),
+                        ),
+                    )?;
+                    *last_used = std::time::Instant::now();
+                    return owner.issue_registered_lease(registration);
+                }
+                super::RegistryEntry::Faulted {
+                    binding,
+                    verified_locator,
+                    path,
+                    expected_format,
+                    error,
+                    ..
+                } => {
+                    super::require_binding(
+                        (binding, verified_locator, path, *expected_format),
+                        (
+                            registration.binding(),
+                            registration.verified_locator(),
+                            &canonical_path,
+                            crate::GraphFormatVersion::current(),
+                        ),
+                    )?;
+                    return Err(error.clone());
+                }
+                // An in-flight open or close always settles within its owning
+                // call (Ready, Faulted, or removed). A verified operation that
+                // races such a transition — e.g. a first activation whose
+                // graph runtime is still binding asynchronously — waits it out
+                // under its own deadline, exactly like the resolve path, so a
+                // mid-transition mount is never surfaced as unavailability.
+                super::RegistryEntry::Opening {
+                    binding,
+                    verified_locator,
+                    path,
+                    expected_format,
+                    ..
+                }
+                | super::RegistryEntry::Closing {
+                    binding,
+                    verified_locator,
+                    path,
+                    expected_format,
+                    ..
+                } => {
+                    super::require_binding(
+                        (binding, verified_locator, path, *expected_format),
+                        (
+                            registration.binding(),
+                            registration.verified_locator(),
+                            &canonical_path,
+                            crate::GraphFormatVersion::current(),
+                        ),
+                    )?;
+                }
+                // A `Retiring` entry may be an armed pre-close retirement
+                // reservation held across calls; denying new operations is its
+                // all-or-none contract, so it stays a typed refusal instead of
+                // a wait.
+                super::RegistryEntry::Retiring { .. } => {
+                    return not_ready_for_verified_reads("retiring");
+                }
             }
-            super::RegistryEntry::Faulted {
-                binding,
-                verified_locator,
-                path,
-                expected_format,
-                error,
-                ..
-            } => {
-                super::require_binding(
-                    (binding, verified_locator, path, *expected_format),
-                    (
-                        registration.binding(),
-                        registration.verified_locator(),
-                        &canonical_path,
-                        crate::GraphFormatVersion::current(),
-                    ),
-                )?;
-                Err(error.clone())
-            }
-            super::RegistryEntry::Opening { .. } => not_ready_for_verified_reads("opening"),
-            super::RegistryEntry::Closing { .. } => not_ready_for_verified_reads("closing"),
-            super::RegistryEntry::Retiring { .. } => not_ready_for_verified_reads("retiring"),
+            check_registration_request(registration, "publication.wait_transition")?;
+            let (next, _) = self
+                .inner
+                .changed
+                .wait_timeout(state, super::OPEN_WAIT_POLL)
+                .map_err(|_| GraphDbError::unavailable("graph registry wait lock is poisoned"))?;
+            state = next;
         }
     }
 
@@ -491,6 +536,7 @@ pub(super) fn check_context(
     Ok(())
 }
 
+#[hotpath::measure]
 fn interruption_error(context: &GraphPublicationOperationContextV1<'_>) -> Option<GraphDbError> {
     context
         .interruption()

@@ -12,6 +12,7 @@ mod hotpath_observe;
 mod id;
 mod manifest;
 mod mcp;
+mod operation;
 mod profile;
 mod retrieval;
 mod snapshot;
@@ -47,6 +48,7 @@ pub use mcp::{
     McpDispatchContractV1, McpDispatchUnavailableReason, McpIdempotencyContract,
     McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
+pub use operation::ApplicationSurfaceOperation;
 pub use profile::{
     ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind,
     RoutingFixtureExpectation, RoutingFixtureV1,

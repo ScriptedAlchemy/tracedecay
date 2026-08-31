@@ -113,6 +113,7 @@ pub struct SealedReadBundleWriterV1 {
     committed: bool,
 }
 
+#[hotpath::measure_all]
 impl SealedReadBundleWriterV1 {
     pub fn create(root: &Path, sealed: &SealedGraphStateDigest) -> Result<Self, GraphDbError> {
         if !root.is_dir() {
@@ -539,6 +540,7 @@ pub fn sweep_aborted_sealed_read_bundle_temporaries(
     Ok(())
 }
 
+#[hotpath::measure]
 fn verify_manifest_binding(
     manifest: &SealedReadBundleManifestV1,
     sealed: &SealedGraphStateDigest,
@@ -611,6 +613,7 @@ impl Write for HashingFileWriter {
     }
 }
 
+#[hotpath::measure]
 fn bundle_tmp_path(root: &Path, hex: &str, name: &str) -> PathBuf {
     let seq = BUNDLE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     root.join(format!(
@@ -619,6 +622,7 @@ fn bundle_tmp_path(root: &Path, hex: &str, name: &str) -> PathBuf {
     ))
 }
 
+#[hotpath::measure]
 fn sealed_hex(sealed: &SealedGraphStateDigest) -> Result<String, GraphDbError> {
     sealed
         .as_str()
@@ -627,14 +631,17 @@ fn sealed_hex(sealed: &SealedGraphStateDigest) -> Result<String, GraphDbError> {
         .ok_or_else(|| GraphDbError::invalid("sealed graph state digest is not sha256"))
 }
 
+#[hotpath::measure]
 fn manifest_file_name(hex: &str) -> String {
     format!("read-bundle-{hex}.json")
 }
 
+#[hotpath::measure]
 fn artifact_file_name(hex: &str, name: &str) -> String {
     format!("read-bundle-{hex}.{name}.bin")
 }
 
+#[hotpath::measure]
 fn validate_artifact_name(name: &str) -> Result<(), GraphDbError> {
     if name.is_empty()
         || name.len() > 64
@@ -649,6 +656,7 @@ fn validate_artifact_name(name: &str) -> Result<(), GraphDbError> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn remove_stale_regular_file(path: &Path) -> Result<(), GraphDbError> {
     match path.symlink_metadata() {
         Ok(metadata) if metadata.file_type().is_file() => {
@@ -668,6 +676,7 @@ fn remove_stale_regular_file(path: &Path) -> Result<(), GraphDbError> {
     }
 }
 
+#[hotpath::measure]
 fn remove_bundle_file(path: &Path) -> Result<bool, GraphDbError> {
     match path.symlink_metadata() {
         Ok(metadata) if metadata.file_type().is_file() => {
@@ -688,6 +697,7 @@ fn remove_bundle_file(path: &Path) -> Result<bool, GraphDbError> {
     }
 }
 
+#[hotpath::measure]
 fn sync_bundle_directory(root: &Path) -> Result<(), GraphDbError> {
     tracedecay_private_fs::framed_log::sync_directory(
         root,

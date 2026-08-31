@@ -11,12 +11,12 @@ use tracedecay_application::{
     WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::UtcMicros;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::{
     enter_test_daemon_database_scope, initialize_test_project, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
-use crate::application_surface::ApplicationSurfaceOperation;
 use crate::daemon::{
     DaemonEngine, DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
     execute_daemon_invocation,
