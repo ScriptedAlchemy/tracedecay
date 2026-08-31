@@ -24,12 +24,12 @@ use tracedecay_sessions::runtime::codex::CodexDiscoveryHub;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_store::StoreShardScopeV1;
 
@@ -1340,7 +1340,15 @@ fn prepare_host_admission_test_project_root(
         ),
     })?;
     if tracedecay_runtime_core::worktree::git_common_dir(project_root).is_none() {
-        let status = std::process::Command::new("git")
+        let git = tracedecay_runtime_core::git::try_git_program().map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "git executable unavailable for host-admission test project '{}': {error}",
+                    project_root.display()
+                ),
+            }
+        })?;
+        let status = std::process::Command::new(git)
             .args(["init", "--quiet"])
             .current_dir(project_root)
             .status()

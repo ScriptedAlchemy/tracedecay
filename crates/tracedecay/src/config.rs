@@ -1717,7 +1717,10 @@ fn is_ignored_by_git(project_path: &Path, git_config_global: Option<&Path>) -> O
             .and_then(|path| is_ignored_by_explicit_global_excludes(project_path, path))
     };
     let dir_name = active_data_dir_name(project_path);
-    let mut command = Command::new(tracedecay_runtime_core::git::git_program());
+    let Ok(git) = tracedecay_runtime_core::git::try_git_program() else {
+        return fallback_global_excludes();
+    };
+    let mut command = Command::new(git);
     command
         .arg("-C")
         .arg(project_path)

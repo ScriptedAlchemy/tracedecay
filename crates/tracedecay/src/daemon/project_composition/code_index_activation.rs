@@ -322,11 +322,14 @@ mod tests {
     use super::*;
 
     fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(tracedecay_runtime_core::git::git_program())
-            .current_dir(root)
-            .args(arguments)
-            .status()
-            .expect("run git");
+        let status = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .current_dir(root)
+        .args(arguments)
+        .status()
+        .expect("run git");
         assert!(status.success(), "git {arguments:?}");
     }
 

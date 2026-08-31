@@ -163,20 +163,26 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 fn git(root: &Path, args: &[&str]) {
-    let status = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(args)
-        .status()
-        .expect("run git fixture command");
+    let status = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(args)
+    .status()
+    .expect("run git fixture command");
     assert!(status.success(), "git fixture command failed: {args:?}");
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> String {
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(args)
-        .output()
-        .expect("run git fixture command");
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(args)
+    .output()
+    .expect("run git fixture command");
     assert!(
         output.status.success(),
         "git fixture command failed: {args:?}"

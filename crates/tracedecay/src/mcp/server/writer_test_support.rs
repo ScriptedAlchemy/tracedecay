@@ -9,11 +9,14 @@ use crate::mcp::server::McpServerConstructionContext;
 use crate::tracedecay::TraceDecay;
 
 pub(super) fn git(root: &Path, args: &[&str]) {
-    let output = std::process::Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(args)
-        .output()
-        .expect("git runs");
+    let output = std::process::Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(args)
+    .output()
+    .expect("git runs");
     assert!(
         output.status.success(),
         "git {args:?} failed: {}",
