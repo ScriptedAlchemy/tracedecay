@@ -44,6 +44,7 @@ use tracedecay_application::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationProblem, LegalAction, RequestId, RetryDirective,
     SafeDiagnostic,
 };
+use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_domain::{EnrollmentGrantV1, ProjectId};
 
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -489,7 +490,7 @@ fn missing_daemon_authority() -> TraceDecayError {
 }
 
 fn remote_status_daemon_unavailable() -> TraceDecayError {
-    match super::default_socket_path() {
+    match tracedecay_daemon_control::default_socket_path() {
         Ok(socket_path) => super::unavailable_error(&socket_path),
         Err(error) => error,
     }
@@ -778,7 +779,7 @@ impl DaemonHttpApplicationService {
     pub(super) async fn bind_with_remote_tls(
         registry: DaemonHttpApplicationRegistry,
         auth_token: &str,
-        remote_tls: Option<&super::bootstrap::RemoteBrainTlsConfig>,
+        remote_tls: Option<&RemoteBrainTlsConfig>,
     ) -> Result<Self> {
         let remote_tls_server = match remote_tls {
             Some(config) => {
@@ -992,7 +993,7 @@ struct RemoteBrainTlsListener {
 }
 
 impl RemoteBrainTlsListener {
-    async fn bind(config: &super::bootstrap::RemoteBrainTlsConfig) -> Result<Self> {
+    async fn bind(config: &RemoteBrainTlsConfig) -> Result<Self> {
         let certificates = CertificateDer::pem_file_iter(config.certificate_chain())
             .map_err(|error| tls_configuration_error("open Remote Brain TLS certificate", error))?
             .collect::<std::result::Result<Vec<_>, _>>()
