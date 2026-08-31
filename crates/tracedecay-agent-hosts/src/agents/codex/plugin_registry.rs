@@ -104,9 +104,10 @@ fn plugin_selector(marketplace_name: &str) -> String {
 ///
 /// The region snapshot is a preservation guard: Codex owns the merge, but a
 /// buggy or changed host command must not discard an operator's other plugins,
-/// MCP servers, or hook-trust records. The exact post-command bytes are
+/// MCP servers, or hook-trust records. The exact post-command bytes of
+/// `config.toml` and of every managed versioned-cache registration path are
 /// recorded through the active host transaction so rollback can restore the
-/// pre-command document when the command fails or a later step rejects it.
+/// pre-command surface when the command fails or a later step rejects it.
 #[hotpath::measure(label = "hosts.agent.codex.plugin_registry_step")]
 fn run_codex_plugin_step(
     codex_cli: &Path,
@@ -131,6 +132,13 @@ fn run_codex_plugin_step(
         });
     }
     crate::agents::record_host_config_observation_bytes(&config_path, observed_bytes.as_deref())?;
+    // `codex plugin add`/`remove` also materialize or drop the versioned
+    // cache tree. Those paths are Core registration inventory, but the host
+    // CLI writes them outside TraceDecay's safe_write, so without an explicit
+    // observation rollback's intent check refuses with StalePreview and never
+    // restores sibling registration files (including the managed-agent
+    // ownership manifest) byte-for-byte.
+    super::record_codex_cached_plugin_registration_intents(home)?;
     if outcome.succeeded() {
         return Ok(());
     }

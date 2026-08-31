@@ -31,7 +31,7 @@ pub(crate) mod registry_drift;
 #[cfg(test)]
 pub(crate) struct DoctorTestRuntime {
     database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    _registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    _registry: tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
     _scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
 }
 
@@ -57,7 +57,7 @@ impl DoctorTestRuntime {
             tracedecay_runtime_core::db::enter_daemon_database_scope(profile_root, nonce, label)
                 .expect("enter Doctor test database scope");
         let registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                 identity,
             )
             .await

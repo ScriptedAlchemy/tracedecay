@@ -701,7 +701,7 @@ fn query_material_for_activated(
     Ok(QueryAuthorityMaterialV1 {
         scope: activated.scope.clone(),
         evaluation: AcceptedQueryEvaluationV1 {
-            status: tracedecay_search_eval::DirectEvaluationStatusV1::Pass,
+            status: tracedecay_query::search_quality::DirectEvaluationStatusV1::Pass,
             scope_digest: activated.scope.scope_digest.clone(),
             profile_id: query.profile().profile_id.clone(),
             evaluation_result_anchor: query.profile().evaluation_result_anchor.clone(),

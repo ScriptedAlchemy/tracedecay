@@ -186,7 +186,7 @@ fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
     )
     .expect("configuration snapshot");
     ContextScoutConfigurationPinV1::from_current(
-        &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+        &tracedecay_configuration::ConfigurationCurrentStateV1 {
             revision_id: revision,
             snapshot,
         },
@@ -197,7 +197,7 @@ fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
 async fn test_scout_owner(
     temporary: &tempfile::TempDir,
 ) -> Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1> {
-    crate::daemon::store_runtime::register_registered_schema_installer();
+    tracedecay_store_runtime::register_registered_schema_installer();
     let database_path = temporary.path().join("edit-stop-feedback.db");
     let database_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &database_path,
@@ -427,7 +427,7 @@ async fn stock_disabled_configuration_produces_nothing() {
     )
     .expect("configuration snapshot");
     let pin = ContextScoutConfigurationPinV1::from_current(
-        &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+        &tracedecay_configuration::ConfigurationCurrentStateV1 {
             revision_id: revision,
             snapshot,
         },

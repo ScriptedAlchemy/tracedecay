@@ -12,7 +12,7 @@ use super::{
     SemanticRuntimeBackendV1, SemanticRuntimeFuture, SemanticRuntimeOwnerV1,
     SemanticRuntimeRouteV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
-use crate::configuration::{
+use tracedecay_configuration::{
     ConfigurationCurrentStateV1, ConfigurationError, ConfigurationOperationFuture,
 };
 
