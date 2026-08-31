@@ -7,6 +7,9 @@ use std::time::Duration;
 #[path = "../tests/observability_runtime_contract.rs"]
 mod observability_runtime_contract;
 
+#[path = "hotpath_coverage.rs"]
+mod hotpath_coverage;
+
 use observability_runtime_contract::work_rollup_harness::{
     READ_TRIPWIRE, SOURCE_COUNT, TRIPWIRE, WORK_ROLLUP_BENCHMARK_ARTIFACT_SCHEMA_VERSION,
     WorkRollupBenchmarkArtifactV1, WorkRollupFixtureV1, WorkRollupFreshStoreMeasurementV1,
@@ -91,6 +94,9 @@ fn validate_completion(report: &WorkRollupReport) {
 }
 
 fn main() {
+    // First statement on purpose: may set Hotpath environment for the guard,
+    // which is sound only before the runtime or any other thread exists.
+    let coverage = hotpath_coverage::init("tracedecay-work-rollup");
     let artifact_path = explicit_artifact_path();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -253,4 +259,35 @@ fn main() {
     };
     write_jsonl_artifact(&artifact_path, &artifact).expect("write Work rollup JSONL artifact");
     println!("work_rollup artifact={}", artifact_path.display());
+
+    // Post-measurement label coverage, self-verified runs only (never during
+    // operator profiling): one canonical Observatory read over a fresh
+    // registered store traverses `usecases.observability.read_model`, the
+    // static span already stamped on the shared read composition this
+    // bench's rollup surface belongs to, so the exit report must carry it.
+    #[cfg(feature = "hotpath")]
+    if coverage.verifying() {
+        runtime.block_on(async {
+            let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+            let db_runtime =
+                tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+                    tracedecay_runtime_core::storage::default_profile_root()
+                        .expect("hotpath coverage profile root"),
+                )
+                .await
+                .expect("hotpath coverage registered runtime");
+            let database = db_runtime.profile_database_arc();
+            let read_model = tracedecay_usecases::observability::observatory_read_model(
+                database.as_ref(),
+                None,
+                0,
+            )
+            .await;
+            assert!(
+                !read_model.metrics.is_empty(),
+                "observatory read model must project metrics"
+            );
+        });
+    }
+    hotpath_coverage::finish(coverage, &["usecases.observability.read_model"]);
 }

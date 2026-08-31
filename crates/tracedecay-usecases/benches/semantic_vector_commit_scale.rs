@@ -23,6 +23,9 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
+#[path = "hotpath_coverage.rs"]
+mod hotpath_coverage;
+
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, build_batch_receipt, expected_request_digest,
@@ -214,7 +217,20 @@ fn report(label: &str, batch: usize, rows: usize, started: &Instant) {
     );
 }
 
+// This workload deliberately drives the in-memory reference machine
+// (`VectorGenerationStateMachineV1`), which carries no instrumentation of its
+// own; the `usecases.store.*` spans and `usecases.vector.*` gauges live on
+// the graph adapter, which needs a live graph runtime this bench must not
+// mount. Coverage here is therefore the feature toggle itself: feature off,
+// the macros are no-ops and no report may appear; feature on, the guard
+// lifecycle completes with the metrics server forced off and a parseable
+// exit report. Extend this list when the machine itself gains labels.
+const EXPECTED_HOTPATH_LABELS: &[&str] = &[];
+
 fn main() {
+    // First statement on purpose: may set Hotpath environment for the guard,
+    // which is sound only before any other thread exists.
+    let coverage = hotpath_coverage::init("tracedecay-semantic-vector-commit-scale");
     let chunks = env_scale("TD_SCALE_CHUNKS", 120_000);
     let dimensions = env_scale("TD_SCALE_DIMS", 768);
     let batch_len = env_scale("TD_SCALE_BATCH", 512);
@@ -301,4 +317,5 @@ fn main() {
     assert_eq!(generation_rows, chunks, "published corpus is complete");
     drop(state);
     report("dropped", batch_count, committed_rows, &started);
+    hotpath_coverage::finish(coverage, EXPECTED_HOTPATH_LABELS);
 }
