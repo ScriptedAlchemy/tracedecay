@@ -157,4 +157,3 @@ pub(crate) fn diagnostics_query(records: usize, total: usize) {
 pub(crate) fn feedback_query(findings: usize) {
     hotpath::gauge!("usecases.feedback.findings").set(findings as f64);
 }
-
