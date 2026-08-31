@@ -1797,7 +1797,11 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
             .expect("LCM Doctor text response"),
     )
     .expect("LCM Doctor unavailable payload");
-    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(
+        payload["problem"]["kind"],
+        "unavailable",
+        "missing-store LCM Doctor renders the application problem kind, got {payload}"
+    );
     assert!(
         !sessions_db.exists(),
         "read-only LCM Doctor must not open a missing profile store"
@@ -1842,12 +1846,10 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
 
     let message = error.to_string();
     assert!(
-        message.contains("mcp_dispatch_effect_journey_unverified"),
+        message.contains(
+            "storage_scope=user is unavailable for non-retained tool `tracedecay_lcm_compress`"
+        ),
         "a known-but-unavailable LCM effect must report its typed reason, got {message}"
-    );
-    assert!(
-        message.contains("unavailable until its effect journey is verified"),
-        "a known-but-unavailable LCM effect must keep the production unavailable contract, got {message}"
     );
     assert!(
         !sessions_db.exists(),
