@@ -220,23 +220,40 @@ pub fn scan_incident_debris(
                 continue;
             }
         };
-        if file_type.is_dir() {
-            continue;
-        }
-        if !file_type.is_file() {
-            listing_complete = false;
-            continue;
-        }
         let Some(kind) = IncidentDebrisKindV1::classify(name) else {
+            // Ordinary live files and store subdirectories (branches/,
+            // payloads/, ...) are not debris; anything else unclassifiable
+            // makes the listing partial.
+            if !file_type.is_dir() && !file_type.is_file() {
+                listing_complete = false;
+            }
             continue;
         };
-        let Ok(metadata) = listed.metadata() else {
+        let size_bytes = if file_type.is_file() {
+            match listed.metadata() {
+                Ok(metadata) => metadata.len(),
+                Err(_) => {
+                    listing_complete = false;
+                    continue;
+                }
+            }
+        } else if file_type.is_dir() {
+            // A store-quarantine directory (for example the graph mount's
+            // `tracedecay.grafeo.corrupt-<micros>/` family with its WAL and
+            // receipt) is one debris artifact whose recursive payload is the
+            // retained forensic evidence.
+            match capability.root.open_dir_nofollow(name) {
+                Ok(directory) => directory_debris_bytes(&directory, &mut listing_complete),
+                Err(_) => {
+                    listing_complete = false;
+                    continue;
+                }
+            }
+        } else {
             listing_complete = false;
             continue;
         };
-        if let Some(artifact) =
-            application_artifact(&store, name, kind, metadata.len(), observed_at)
-        {
+        if let Some(artifact) = application_artifact(&store, name, kind, size_bytes, observed_at) {
             artifacts.push(artifact);
         } else {
             listing_complete = false;
@@ -282,6 +299,46 @@ pub fn scan_incident_debris(
         artifacts,
         listing_complete,
     })
+}
+
+/// Recursive byte total of one quarantined debris directory. Symlinks are
+/// never followed; anything unreadable makes the surrounding scan partial so
+/// an incomplete walk can never assert a clean or fully-sized result.
+fn directory_debris_bytes(directory: &Dir, listing_complete: &mut bool) -> u64 {
+    let entries = match directory.read_dir(".") {
+        Ok(entries) => entries,
+        Err(_) => {
+            *listing_complete = false;
+            return 0;
+        }
+    };
+    let mut total = 0_u64;
+    for listed in entries {
+        let Ok(listed) = listed else {
+            *listing_complete = false;
+            continue;
+        };
+        let Ok(file_type) = listed.file_type() else {
+            *listing_complete = false;
+            continue;
+        };
+        if file_type.is_file() {
+            match listed.metadata() {
+                Ok(metadata) => total = total.saturating_add(metadata.len()),
+                Err(_) => *listing_complete = false,
+            }
+        } else if file_type.is_dir() {
+            match directory.open_dir_nofollow(listed.file_name()) {
+                Ok(child) => {
+                    total = total.saturating_add(directory_debris_bytes(&child, listing_complete));
+                }
+                Err(_) => *listing_complete = false,
+            }
+        } else {
+            *listing_complete = false;
+        }
+    }
+    total
 }
 
 fn failure(entry: &StoreCensusEntry, kind: IncidentDebrisFailureKind) -> IncidentDebrisFailure {
@@ -882,6 +939,52 @@ mod tests {
         assert_eq!(
             scan.artifacts[0].path.as_str(),
             "sessions.db.corrupt-incident"
+        );
+    }
+
+    /// The graph mount's corruption quarantine (issue #763) moves the
+    /// container family into a `.corrupt-<micros>` directory beside the
+    /// fresh store. Doctor must surface that directory as one typed Corrupt
+    /// debris artifact sized by its retained forensic payload, and the sweep
+    /// must leave it in place — it is already quarantined evidence, never
+    /// loose debris to relocate or collect.
+    #[test]
+    fn scan_surfaces_a_graph_store_quarantine_directory_and_sweep_retains_it() {
+        let profile = tempfile::tempdir().unwrap();
+        let store_root = profile.path().join("stores/store.debris");
+        let quarantine = store_root.join("tracedecay.grafeo.corrupt-1721692800000000");
+        std::fs::create_dir_all(quarantine.join("tracedecay.grafeo.wal")).unwrap();
+        std::fs::write(store_root.join("sessions.db"), b"live database").unwrap();
+        std::fs::write(quarantine.join("tracedecay.grafeo"), b"corrupt container").unwrap();
+        std::fs::write(
+            quarantine.join("tracedecay.grafeo.wal").join("wal_00000001.log"),
+            b"torn wal segment",
+        )
+        .unwrap();
+        std::fs::write(quarantine.join("store-quarantined.json"), b"{}").unwrap();
+        let expected_bytes = (b"corrupt container".len()
+            + b"torn wal segment".len()
+            + b"{}".len()) as u64;
+
+        let scan = scan_incident_debris(&entry(&store_root), profile.path(), NOW).unwrap();
+
+        assert!(scan.listing_complete);
+        assert_eq!(scan.artifact_count(), 1);
+        assert_eq!(
+            scan.artifacts[0].path.as_str(),
+            "tracedecay.grafeo.corrupt-1721692800000000"
+        );
+        assert_eq!(scan.artifacts[0].kind, IncidentDebrisKindV1::Corrupt);
+        assert_eq!(scan.artifacts[0].size_bytes.get(), expected_bytes);
+
+        let report = sweep_incident_debris(&[entry(&store_root)], profile.path(), 7 * DAY, NOW);
+        assert_eq!(report.quarantined, 0, "the directory is already quarantined");
+        assert_eq!(report.collected, 0);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            std::fs::read(quarantine.join("tracedecay.grafeo")).unwrap(),
+            b"corrupt container",
+            "forensic evidence must survive the sweep untouched"
         );
     }
 

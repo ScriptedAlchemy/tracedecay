@@ -60,13 +60,13 @@ pub(super) const OBSERVATION_AUDIT_PAGE_ROWS: i64 = 48;
 
 pub async fn authority_invariant_triggers_intact(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     trigger_contracts_intact(conn).await
 }
 
 pub async fn require_foreign_key_audit(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     conn.execute(
         "INSERT INTO authority_foreign_key_audit_progress (audit_name, last_table)
          VALUES (?1, '')
@@ -80,7 +80,7 @@ pub async fn require_foreign_key_audit(
 
 async fn foreign_key_audit_required(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM authority_foreign_key_audit_progress
@@ -97,7 +97,7 @@ async fn foreign_key_audit_required(
 
 async fn projection_checkpoint(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<i64> {
+) -> tracedecay_domain::errors::Result<i64> {
     let mut rows = conn
         .query(
             "SELECT COALESCE((
@@ -118,7 +118,7 @@ async fn projection_checkpoint(
 
 pub async fn ensure_authority_invariant_schema(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     ensure_audit_checkpoint_schema(conn).await?;
     let trigger_contracts_were_intact = trigger_contracts_intact(conn).await?;
     for invariant in INVARIANTS {
@@ -131,7 +131,7 @@ pub async fn ensure_authority_invariant_schema(
 
 pub async fn ensure_authority_audit_checkpoint_schema(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     ensure_audit_checkpoint_schema(conn).await
 }
 
@@ -139,7 +139,7 @@ pub async fn ensure_authority_invariants(
     conn: &impl Executor,
     force_exhaustive: bool,
     is_fresh: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let trigger_contracts_were_intact = ensure_authority_invariant_schema(conn).await?;
     if is_fresh {
         // This open created the authority schema from an empty database, so
@@ -359,7 +359,7 @@ pub async fn ensure_authority_invariants(
 
 pub(super) async fn validate_invariant_rows(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     for invariant in INVARIANTS {
         if observation_row_audit_covers(invariant) {
             continue;
@@ -376,7 +376,7 @@ pub(super) async fn validate_invariant_rows(
 
 async fn foreign_key_violation_exists_resumable(
     conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     loop {
         let mut rows = conn
             .query(
@@ -458,7 +458,7 @@ async fn foreign_key_violation_exists_resumable(
 
 async fn foreign_key_violation_exists_read_only(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT DISTINCT schema.name
@@ -505,7 +505,7 @@ async fn foreign_key_violation_exists_read_only(
 
 pub async fn validate_authority_rows_exhaustive(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     validate_receipt_authority_rows(conn, 0).await?;
     validate_observation_authority_rows(conn, 0).await?;
     validate_source_cursor_authority_rows(conn).await?;

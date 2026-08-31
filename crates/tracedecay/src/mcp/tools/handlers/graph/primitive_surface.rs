@@ -8,7 +8,7 @@ use tracedecay_application::retrieval::{
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::super::support::text_tool_result;
 use super::verified::{graph_symbol_end_line, required_graph_file_path, required_graph_metadata};

@@ -56,7 +56,7 @@ use tracedecay_automation_runtime::automation::effect_runtime::{
     AutomationSettledProblem, AutomationSettledTerminal, contract_error, digest, journal,
     retirement,
 };
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 mod authority;
 pub(crate) mod recovery_index;
@@ -105,13 +105,13 @@ pub(crate) struct RetainedSettlementWaiter<T> {
 }
 
 pub(crate) struct ReusedSchedulerSkipStartError {
-    error: tracedecay_runtime_core::errors::TraceDecayError,
+    error: tracedecay_domain::errors::TraceDecayError,
     _authority: AutomationEffectAuthority,
     _guard: AutomationRunSettlementGuard,
 }
 
 impl ReusedSchedulerSkipStartError {
-    pub(crate) fn into_error(self) -> tracedecay_runtime_core::errors::TraceDecayError {
+    pub(crate) fn into_error(self) -> tracedecay_domain::errors::TraceDecayError {
         self.error
     }
 }
@@ -302,8 +302,8 @@ struct RetainedPairOwnerOutcome {
 pub(crate) struct RetainedSettlementPairWaiter {
     first: RetainedSettlementWaiter<Result<RetainedPairOwnerOutcome>>,
     second: RetainedSettlementWaiter<Result<RetainedPairOwnerOutcome>>,
-    first_submission_error: Option<tracedecay_runtime_core::errors::TraceDecayError>,
-    second_submission_error: Option<tracedecay_runtime_core::errors::TraceDecayError>,
+    first_submission_error: Option<tracedecay_domain::errors::TraceDecayError>,
+    second_submission_error: Option<tracedecay_domain::errors::TraceDecayError>,
 }
 
 impl RetainedSettlementPairWaiter {
@@ -385,7 +385,7 @@ fn submit_pair_request(
     sender: Option<SyncSender<DeferredSettlementRequest>>,
     request: DeferredSettlementRequest,
     leg: &'static str,
-) -> Option<tracedecay_runtime_core::errors::TraceDecayError> {
+) -> Option<tracedecay_domain::errors::TraceDecayError> {
     let Some(sender) = sender else {
         return Some(contract_error(format!(
             "retained settlement pair {leg} request channel was already transferred"
@@ -1010,7 +1010,7 @@ impl AutomationEffectAuthority {
     fn finish_projection_failure<T>(
         self,
         guard: RetainedSettlementGuardOwner,
-        error: tracedecay_runtime_core::errors::TraceDecayError,
+        error: tracedecay_domain::errors::TraceDecayError,
     ) -> Result<T> {
         let terminal =
             AutomationSettledTerminal::Problem(self.admission.recovery_problem().clone());

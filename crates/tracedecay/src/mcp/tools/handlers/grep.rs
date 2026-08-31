@@ -18,7 +18,7 @@ use tracedecay_code_index::grep_search::{
 };
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::support::{filter_by_scope, run_bounded_search, unique_file_paths};
 use tracedecay_mcp::ToolResult;

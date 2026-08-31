@@ -323,7 +323,7 @@ pub(crate) async fn run_combined_review_with_backend(
     run_control: &AutomationRunControl,
     backend: &dyn AgentTaskBackend,
     options: CombinedReviewAutomationOptions,
-) -> tracedecay_runtime_core::errors::Result<CombinedReviewDispatch> {
+) -> tracedecay_domain::errors::Result<CombinedReviewDispatch> {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
     tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
         cg,

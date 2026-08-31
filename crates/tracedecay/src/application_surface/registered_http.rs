@@ -78,6 +78,16 @@ where
                 message: format!("The {family} application transport is unavailable"),
             }))
         }
+        // Registered HTTP handlers run inside the daemon process, so a
+        // connect-phase failure cannot occur here; the projection still keeps
+        // the connect diagnostic truthful for completeness.
+        Err(DaemonInvocationError::Unreachable {
+            reason_code,
+            detail,
+        }) => Err(ApplicationProblem::unavailable(SafeDiagnostic {
+            code: reason_code,
+            message: detail,
+        })),
     }
 }
 

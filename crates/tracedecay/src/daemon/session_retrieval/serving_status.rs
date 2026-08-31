@@ -2,7 +2,7 @@ use super::contract::{
     SessionRetrievalUnavailable, SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
     SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
 };
-use tracedecay_usecases::session::{
+use tracedecay_sessions::serving::{
     SessionProjectionServingState, SessionProjectionServingStatus,
     SessionProjectionServingStatusPort, SessionProjectionStaleReason,
     SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,

@@ -152,7 +152,7 @@ pub(crate) enum SessionTemporalSchemaAdmission {
 pub(crate) async fn require_admissible_session_temporal_schema(
     conn: &impl QueryExecutor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,
-) -> tracedecay_runtime_core::errors::Result<SessionTemporalSchemaAdmission> {
+) -> tracedecay_domain::errors::Result<SessionTemporalSchemaAdmission> {
     let version = schema_version(conn)
         .await
         .map_err(|error| session_temporal_reset_required(error.to_string()))?;
@@ -177,7 +177,7 @@ pub(crate) async fn require_admissible_session_temporal_schema(
 
 pub(super) async fn validate_current_session_temporal_schema(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let tables = TEMPORAL_TABLE_COLUMNS
         .iter()
         .map(|(table, _)| *table)
@@ -202,7 +202,7 @@ pub(super) async fn validate_current_session_temporal_schema(
 
 pub(super) async fn validate_released_v3_session_temporal_schema(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let tables = TEMPORAL_TABLE_COLUMNS
         .iter()
         .map(|(table, _)| *table)
@@ -242,7 +242,7 @@ pub(super) async fn validate_released_v3_session_temporal_schema(
 
 async fn validate_released_v3_temporal_table_definitions(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let expected_tables = TEMPORAL_TABLE_COLUMNS
         .iter()
         .map(|(table, _)| *table)
@@ -290,7 +290,7 @@ async fn validate_released_v3_temporal_table_definitions(
 
 async fn validate_released_v3_temporal_trigger_inventory(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let temporal_tables = TEMPORAL_TABLE_COLUMNS
         .iter()
         .map(|(table, _)| *table)
@@ -337,7 +337,7 @@ async fn validate_released_v3_temporal_trigger_inventory(
 
 async fn validate_temporal_namespace_tables(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let expected = TEMPORAL_TABLE_COLUMNS
         .iter()
         .map(|(table, _)| *table)
@@ -396,8 +396,8 @@ fn belongs_to_temporal_namespace(name: &str) -> bool {
 
 pub(super) fn session_temporal_reset_required(
     reason: impl Into<String>,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::reset_required(
         SESSION_TEMPORAL_AUTHORITY,
         reason,
     )
@@ -405,7 +405,7 @@ pub(super) fn session_temporal_reset_required(
 
 pub(super) async fn validate_temporal_fts_contracts(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     for (table, expected_sql) in TEMPORAL_FTS_CONTRACTS {
         let mut rows = conn
             .query(
@@ -451,7 +451,7 @@ fn normalize_schema_sql(sql: &str) -> String {
 
 pub(super) async fn validate_temporal_fts_match(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     for (table, _) in TEMPORAL_FTS_CONTRACTS {
         conn.query(
             &format!("SELECT rowid FROM {table} WHERE {table} MATCH ?1 LIMIT 1"),
@@ -465,7 +465,7 @@ pub(super) async fn validate_temporal_fts_match(
 
 async fn schema_version(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<Option<i64>> {
+) -> tracedecay_domain::errors::Result<Option<i64>> {
     let mut tables = conn
         .query(
             "SELECT 1 FROM sqlite_master

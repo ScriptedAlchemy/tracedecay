@@ -27,6 +27,7 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_usecases::session::{SessionRetrievalScope, SessionTemporalQuery};
 
 use super::super::receipts::evidence_outcome;
+use super::super::session_retrieval_unavailable_detail;
 use super::output;
 use super::{
     cursor, message_type, optional_provider, optional_usize, relationship_scope, required,
@@ -61,7 +62,11 @@ pub(super) async fn execute_load_session(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &LcmLoadSessionRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let service = service.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let service = service.ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session retrieval authority is not mounted for this scope",
+        )
+    })?;
     let session_id = session_id(&request.session_id)?;
     let provider = optional_provider(request.provider.as_deref())?;
     let requested_content_limit =
@@ -152,7 +157,11 @@ pub(super) async fn execute_grep(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &LcmGrepRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let service = service.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let service = service.ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session retrieval authority is not mounted for this scope",
+        )
+    })?;
     let query_text = required(&request.query)?;
     if !matches!(request.sort, None | Some(LcmGrepSortV1::Relevance)) {
         return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
@@ -253,7 +262,11 @@ pub(super) async fn execute_describe(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &LcmDescribeRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let service = service.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let service = service.ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session retrieval authority is not mounted for this scope",
+        )
+    })?;
     let provider = specific_provider(&request.provider)?;
     let session_id = session_id(&request.session_id)?;
     let (target, grain) = match request.target.as_ref() {
@@ -366,7 +379,11 @@ pub(super) async fn execute_expand(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &LcmExpandRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let service = service.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let service = service.ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session retrieval authority is not mounted for this scope",
+        )
+    })?;
     let provider = specific_provider(&request.provider)?;
     let session_id = session_id(&request.session_id)?;
     let (target, grain, summary) = match &request.target {
@@ -439,7 +456,11 @@ pub(super) async fn execute_expand_query(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &LcmExpandQueryRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let service = service.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let service = service.ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session retrieval authority is not mounted for this scope",
+        )
+    })?;
     let provider = specific_provider(&request.provider)?;
     let session_id = session_id(&request.session_id)?;
     // The synthesis contract clamps oversized prompt and query inputs to the
@@ -649,13 +670,22 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
         SessionRetrievalServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,
         ),
-        SessionRetrievalServiceOutcome::Locked
-        | SessionRetrievalServiceOutcome::Unavailable(_)
-        | SessionRetrievalServiceOutcome::Complete { .. }
+        SessionRetrievalServiceOutcome::Locked => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session store is locked for retrieval",
+        ),
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+            RetainedSurfaceExecutionErrorV1::unavailable(session_retrieval_unavailable_detail(
+                &unavailable,
+            ))
+        }
+        // Page-shaped outcomes are consumed by the caller before this mapper.
+        SessionRetrievalServiceOutcome::Complete { .. }
         | SessionRetrievalServiceOutcome::CompleteZero { .. }
         | SessionRetrievalServiceOutcome::Partial { .. }
         | SessionRetrievalServiceOutcome::Stale { .. } => {
-            RetainedSurfaceExecutionErrorV1::Unavailable
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the session retrieval service returned an unexpected page-shaped outcome",
+            )
         }
     }
 }
@@ -690,11 +720,20 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
         LcmDescribeServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,
         ),
-        LcmDescribeServiceOutcome::Locked
-        | LcmDescribeServiceOutcome::Unavailable(_)
-        | LcmDescribeServiceOutcome::Complete { .. }
+        LcmDescribeServiceOutcome::Locked => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session store is locked for retrieval",
+        ),
+        LcmDescribeServiceOutcome::Unavailable(unavailable) => {
+            RetainedSurfaceExecutionErrorV1::unavailable(session_retrieval_unavailable_detail(
+                &unavailable,
+            ))
+        }
+        // Page-shaped outcomes are consumed by the caller before this mapper.
+        LcmDescribeServiceOutcome::Complete { .. }
         | LcmDescribeServiceOutcome::Partial { .. }
-        | LcmDescribeServiceOutcome::Stale { .. } => RetainedSurfaceExecutionErrorV1::Unavailable,
+        | LcmDescribeServiceOutcome::Stale { .. } => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the LCM describe service returned an unexpected page-shaped outcome",
+        ),
     }
 }
 
@@ -726,11 +765,20 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
         LcmExpandServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,
         ),
-        LcmExpandServiceOutcome::Locked
-        | LcmExpandServiceOutcome::Unavailable(_)
-        | LcmExpandServiceOutcome::Complete { .. }
+        LcmExpandServiceOutcome::Locked => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session store is locked for retrieval",
+        ),
+        LcmExpandServiceOutcome::Unavailable(unavailable) => {
+            RetainedSurfaceExecutionErrorV1::unavailable(session_retrieval_unavailable_detail(
+                &unavailable,
+            ))
+        }
+        // Page-shaped outcomes are consumed by the caller before this mapper.
+        LcmExpandServiceOutcome::Complete { .. }
         | LcmExpandServiceOutcome::Partial { .. }
-        | LcmExpandServiceOutcome::Stale { .. } => RetainedSurfaceExecutionErrorV1::Unavailable,
+        | LcmExpandServiceOutcome::Stale { .. } => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the LCM expand service returned an unexpected page-shaped outcome",
+        ),
     }
 }
 

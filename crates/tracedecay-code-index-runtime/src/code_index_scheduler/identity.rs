@@ -14,7 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_domain::{CommitId, RefId, RepositoryId, TreeId, WorktreeId};
+use tracedecay_application::{ApplicationContractError, ResolvedScope};
+use tracedecay_domain::{CommitId, ProjectId, RefId, RepositoryId, TreeId, WorktreeId};
 
 /// Failure to resolve an exact indexing identity from a checkout.
 #[derive(Debug, thiserror::Error)]
@@ -310,6 +311,31 @@ pub fn worktree_id_for(project_root: &Path) -> Result<WorktreeId, IdentityErrorV
         super::sha256_hex(project_root.to_string_lossy().as_bytes())
     ))
     .map_err(|error| IdentityErrorV1::Domain(error.to_string()))
+}
+
+/// Resolve the code-index `ResolvedScope` for one project checkout.
+///
+/// Repository and worktree identities come from this module; the current
+/// branch is best-effort (`None` when HEAD is unborn or detached).
+pub fn resolved_scope_for_project(
+    project_root: &Path,
+    project_id: &ProjectId,
+) -> std::result::Result<ResolvedScope, ApplicationContractError> {
+    let repository_id =
+        repository_id_for(project_root).map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open repository id",
+        })?;
+    let worktree_id =
+        worktree_id_for(project_root).map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open worktree id",
+        })?;
+    let reference = tracedecay_runtime_core::branch::current_branch(project_root)
+        .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
+    ResolvedScope::new(project_id.clone(), repository_id, worktree_id, reference).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "project-open resolved scope",
+        }
+    })
 }
 
 #[cfg(test)]

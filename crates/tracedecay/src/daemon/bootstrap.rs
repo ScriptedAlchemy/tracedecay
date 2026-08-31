@@ -8,7 +8,7 @@ use tokio::task::JoinSet;
 
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchMaintenanceWakeV1, git_watch};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::*;
 
@@ -267,6 +267,7 @@ async fn run_foreground_loopback(
         ));
     }
     lifecycle.begin_draining();
+    shutdown_watchdog::arm_shutdown_exit_bound();
     drop(listener);
     cancel_retained_session_history(&store_administration).await;
     let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
@@ -732,6 +733,7 @@ async fn run_foreground_unix(
         ));
     }
     engine.lifecycle.begin_draining();
+    shutdown_watchdog::arm_shutdown_exit_bound();
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
     // via `connect_with_restart_grace`) instead of a queued connection that

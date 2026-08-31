@@ -76,7 +76,7 @@ async fn project_owner_wait_stops_when_the_client_disconnects() {
     let probe = DropProbe(Arc::clone(&dropped));
     let open = async move {
         let _probe = probe;
-        std::future::pending::<tracedecay_runtime_core::errors::Result<()>>().await
+        std::future::pending::<tracedecay_domain::errors::Result<()>>().await
     };
 
     let error = tokio::time::timeout(
@@ -100,7 +100,7 @@ async fn project_owner_half_close_can_still_receive_a_bounded_result() {
     drop(input);
     let result = super::super::await_project_owner_or_disconnect(&mut transport, async {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>(17)
+        Ok::<_, tracedecay_domain::errors::TraceDecayError>(17)
     })
     .await
     .expect("half-closed owner lookup");

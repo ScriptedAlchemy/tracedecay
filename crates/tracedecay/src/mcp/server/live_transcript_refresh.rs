@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use tracedecay_application::SessionTemporalRefreshWakePort;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const LIVE_TRANSCRIPT_REFRESH_DEADLINE: Duration = Duration::from_secs(5);
 

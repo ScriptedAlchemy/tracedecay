@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 
 #[test]
 fn hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
@@ -896,7 +897,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
         FeedbackCycleInput,
     }
 
-    let _pin = crate::config::PinnedUserDataDir::new();
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.feedback.atomic-publication").expect("project id");
     let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
@@ -979,10 +980,12 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
                     .publish(
                         project.path().to_path_buf(),
                         RegisteredCallableCodeRuntime {
-                            authorization: DaemonCallableCodeAuthorizationSource::production(
-                                project.path().to_path_buf(),
-                                scope.clone(),
-                                Arc::clone(graph.configuration_runtime()),
+                            authorization: Arc::new(
+                                DaemonCallableCodeAuthorizationSource::production(
+                                    project.path().to_path_buf(),
+                                    scope.clone(),
+                                    Arc::clone(graph.configuration_runtime()),
+                                ),
                             ),
                             scope: scope.clone(),
                         },
@@ -1026,7 +1029,11 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
                 project.path().to_path_buf(),
                 scope.clone(),
                 access.clone(),
-                Arc::clone(graph.configuration_runtime()),
+                Arc::new(DaemonCallableCodeAuthorizationSource::production(
+                    project.path().to_path_buf(),
+                    scope.clone(),
+                    Arc::clone(graph.configuration_runtime()),
+                )),
             )
             .await;
         assert!(
@@ -1106,10 +1113,14 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
         publisher_registrar
             .open_and_register(
                 publisher_database,
-                publisher_root,
-                publisher_scope,
+                publisher_root.clone(),
+                publisher_scope.clone(),
                 publisher_access,
-                publisher_configuration,
+                Arc::new(DaemonCallableCodeAuthorizationSource::production(
+                    publisher_root,
+                    publisher_scope,
+                    publisher_configuration,
+                )),
             )
             .await
     });

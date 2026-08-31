@@ -6,9 +6,9 @@ use grafeo_engine::{GrafeoDB, Session};
 
 use crate::error::rollback_failure;
 use crate::schema::{
-    ENTITY_KEY_PROPERTY, ENTITY_LABEL, FORMAT_LABEL, PROJECTION_KEY_PROPERTY, PROJECTION_LABEL,
-    PUBLICATION_KEY_PROPERTY, PUBLICATION_LABEL, RELATION_KEY_PROPERTY, RELATION_LABEL,
-    SEQUENCE_PROPERTY, edge_properties, encoded_namespace_key, entity_labels, entity_properties,
+    ENTITY_KEY_PROPERTY, ENTITY_LABEL, PROJECTION_KEY_PROPERTY, PROJECTION_LABEL,
+    PUBLICATION_KEY_PROPERTY, PUBLICATION_LABEL, RELATION_KEY_PROPERTY, SEQUENCE_PROPERTY,
+    edge_properties, encoded_namespace_key, entity_labels, entity_properties,
     projection_properties, publication_properties, relation_locator_labels, relation_properties,
     relation_type_for_kind, stable_key_from_encoded,
 };
@@ -260,7 +260,6 @@ fn apply_in_transaction(
         .map_err(|_| GraphDbError::unavailable("graph commit sequence exceeds i64"))?;
     tracked_set_property(
         session,
-        FORMAT_LABEL,
         state.marker,
         SEQUENCE_PROPERTY,
         Value::from(sequence),
@@ -344,22 +343,38 @@ fn replace_entity(
     )
 }
 
+/// Deletes one tracked node through the session's direct-id path.
+///
+/// A GQL `MATCH … WHERE id(n) = …` statement enumerates and sorts every
+/// visible node id before filtering, so a statement-per-row deletion is
+/// O(store) per row — generation retirement at corpus scale exceeded every
+/// deadline it ran under (issue #762). The session delete is the same
+/// transactional, WAL-logged mutation at O(row).
+///
+/// The target was resolved from the store under the exclusive write gate in
+/// this same transaction, so an absent node is store corruption, not a race.
+fn tracked_delete_node(
+    session: &Session,
+    node: grafeo_common::types::NodeId,
+    batch: &GraphWriteBatch,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
+    check_cancelled(batch, check)?;
+    if !session.delete_node(node) {
+        return Err(GraphDbError::Corrupt {
+            message: "a tracked node resolved under the write gate refused deletion".to_owned(),
+        });
+    }
+    check_cancelled(batch, check)
+}
+
 fn delete_entity(
     session: &Session,
     stored: &StoredEntity,
     batch: &GraphWriteBatch,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    execute_tracked(
-        session,
-        &format!(
-            "MATCH (n:{ENTITY_LABEL}) WHERE id(n) = {} DELETE n",
-            stored.node.as_u64()
-        ),
-        HashMap::new(),
-        batch,
-        check,
-    )
+    tracked_delete_node(session, stored.node, batch, check)
 }
 
 fn delete_relation(
@@ -368,27 +383,14 @@ fn delete_relation(
     batch: &GraphWriteBatch,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    execute_tracked(
-        session,
-        &format!(
-            "MATCH ()-[r:{}]->() WHERE id(r) = {} DELETE r",
-            relation_type_for_kind(&stored.relation.kind),
-            stored.edge.as_u64()
-        ),
-        HashMap::new(),
-        batch,
-        check,
-    )?;
-    execute_tracked(
-        session,
-        &format!(
-            "MATCH (n:{RELATION_LABEL}) WHERE id(n) = {} DELETE n",
-            stored.locator.as_u64()
-        ),
-        HashMap::new(),
-        batch,
-        check,
-    )
+    check_cancelled(batch, check)?;
+    if !session.delete_edge(stored.edge) {
+        return Err(GraphDbError::Corrupt {
+            message: "a stored relation edge resolved under the write gate refused deletion"
+                .to_owned(),
+        });
+    }
+    tracked_delete_node(session, stored.locator, batch, check)
 }
 
 fn tracked_replace_node_properties(
@@ -480,26 +482,22 @@ fn tracked_replace_labels(
     execute_tracked(session, &query, HashMap::new(), batch, check)
 }
 
+/// Sets one property through the session's direct-id path; the GQL
+/// `MATCH … WHERE id(n) = …` equivalent scans every visible node id per
+/// statement, which this marker bump would otherwise pay on every batch.
 fn tracked_set_property(
     session: &Session,
-    label: &str,
     node: grafeo_common::types::NodeId,
     property: &str,
     value: Value,
     batch: &GraphWriteBatch,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    let query = format!(
-        "MATCH (n:{label}) WHERE id(n) = {} SET n.{property} = $value",
-        node.as_u64()
-    );
-    execute_tracked(
-        session,
-        &query,
-        HashMap::from([("value".to_owned(), value)]),
-        batch,
-        check,
-    )
+    check_cancelled(batch, check)?;
+    session
+        .set_node_property(node, property, value)
+        .map_err(map_commit_error)?;
+    check_cancelled(batch, check)
 }
 
 fn tracked_create_node(

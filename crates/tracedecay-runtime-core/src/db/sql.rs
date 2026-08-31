@@ -1,5 +1,5 @@
 use crate::db::engine::{Error, Row, Value};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 // ---------------------------------------------------------------------------
 // Helper: build SQL placeholder string `?, ?, ?, …` in one allocation.

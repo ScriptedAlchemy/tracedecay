@@ -35,7 +35,7 @@ use crate::daemon::session_retrieval::{
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::{DaemonSessionRefreshService, DaemonWorkflowIndexReadService};
-use crate::mcp::tools::{SessionRefreshServiceOutcome, SessionRefreshServicePort};
+use tracedecay_mcp::{SessionRefreshServiceOutcome, SessionRefreshServicePort};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 

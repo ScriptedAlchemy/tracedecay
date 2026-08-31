@@ -7,14 +7,13 @@ use std::process::Command;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use crate::daemon::project_open_owners::{
-    project_code_index_generation_census_reader, resolved_scope_for_project,
-};
+use crate::daemon::project_open_owners::project_code_index_generation_census_reader;
 use crate::mcp::tools::handlers::{
     ToolCallRegistryOptions, handle_tool_call_with_registry_options,
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_runtime_core::config::PinnedUserDataDir;
 use tracedecay_usecases::runtime_telemetry::{
     GenerationCensusSnapshot, GenerationCensusUnavailableReason,

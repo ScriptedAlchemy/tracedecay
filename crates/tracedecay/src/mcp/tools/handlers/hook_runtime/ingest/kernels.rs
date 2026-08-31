@@ -24,7 +24,7 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::HostAdmissionFacade;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
@@ -35,7 +35,7 @@ use tracedecay_usecases::session::lcm::{
 };
 
 use super::super::super::SessionAuthorities;
-use super::super::errors::{map_claude_observation_ingest_error, map_transcript_ingest_error};
+use tracedecay_mcp::{map_claude_observation_ingest_error, map_transcript_ingest_error};
 use super::super::{required_str, required_user_db};
 use super::{
     admit_codex_project_rollouts, compaction_unavailable_reason,

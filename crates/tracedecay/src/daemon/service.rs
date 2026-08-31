@@ -8,11 +8,12 @@ use std::time::Duration;
 #[cfg(unix)]
 use sha2::Digest;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::SOCKET_ENV;
 
 pub(crate) mod invocation;
+pub(crate) mod request_cancellation;
 mod multi_root;
 mod probe;
 pub(crate) mod project_runtime;

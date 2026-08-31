@@ -91,8 +91,7 @@ impl GraphVectorGenerationStoreV1 {
             last_publication_digest: None,
         };
         let checkpoint_digest = canonical_sha256(&initial_checkpoint).map_err(storage_error)?;
-        let expected_chunk_count =
-            u64::try_from(descriptor.members.len()).map_err(storage_error)?;
+        let expected_chunk_count = descriptor.expected_chunk_count;
         let embedding_dimension = u16::try_from(descriptor.projection.embedding_key().dimensions)
             .map_err(storage_error)?;
         let recipe = SemanticVectorReconstructionRecipe {
@@ -120,9 +119,7 @@ impl GraphVectorGenerationStoreV1 {
             privacy_domain_digest: SemanticPrivacyDomainDigestV1::new(privacy_digest.as_str())
                 .map_err(storage_error)?,
             privacy_key_epoch: descriptor.projection.privacy_key_epoch(),
-            expected_chunk_manifest_digest:
-                tracedecay_store::semantic_vector_chunk_manifest_digest(&descriptor.members)
-                    .map_err(storage_error)?,
+            expected_chunk_manifest_digest: descriptor.expected_chunk_manifest_digest.clone(),
         };
         let expected_prior_verified_head = self
             .runtime

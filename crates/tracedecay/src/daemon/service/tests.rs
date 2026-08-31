@@ -13,7 +13,10 @@ use tempfile::TempDir;
 use super::runner::ServiceRunner;
 use super::runner::{LaunchctlFailureMode, LaunchdCommand};
 use super::{DaemonServiceSpec, DaemonServiceState};
-use crate::config::lock_user_data_dir_test_env;
+use tracedecay_daemon_protocol::SOCKET_ENV;
+use tracedecay_runtime_core::config::{
+    USER_DATA_DIR_ENV, lock_user_data_dir_test_env, user_data_dir,
+};
 
 struct EnvVarGuard {
     key: &'static str,
@@ -123,10 +126,10 @@ fn service_status_includes_journalctl_debug_command() {
 fn service_status_includes_launchd_debug_commands() {
     let _env_lock = lock_user_data_dir_test_env();
     let profile = tempfile::TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, profile.path());
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
 
     let status = super::service_status(&PathBuf::from("/tmp/tracedecay.sock"));
-    let expected_log = crate::config::user_data_dir()
+    let expected_log = user_data_dir()
         .expect("user data dir")
         .join("daemon.err.log");
 
@@ -355,7 +358,7 @@ fn serve_probe_response(
 fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     let _env_lock = lock_user_data_dir_test_env();
     let profile = TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, profile.path());
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
 
     let ready_socket = profile.path().join("ready.sock");
     let ready_listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
@@ -389,7 +392,7 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
 fn daemon_protocol_probe_authenticates_to_managed_daemon() {
     let _env_lock = lock_user_data_dir_test_env();
     let profile = TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, profile.path());
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
     let socket_path = profile.path().join("daemon.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
     let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket_path.clone());
@@ -653,7 +656,7 @@ fn render_launchd_plist_escapes_xml_and_parser_unescapes_socket_path() {
     let profile = tempfile::TempDir::new().expect("profile temp dir");
     let home = tempfile::TempDir::new().expect("home temp dir");
     let _home_guard = EnvVarGuard::set("HOME", home.path());
-    let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, profile.path());
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
     let socket_path = PathBuf::from("/tmp/trace<decay>&\"socket'.sock");
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/trace&decay/bin/tracedecay"),
@@ -720,7 +723,7 @@ fn launchd_plist_env_value_round_trips_data_dir_override() {
     let plist = spec.render_launchd_plist().expect("launchd plist");
 
     assert_eq!(
-        super::unit_file::launchd_plist_env_value(&plist, crate::config::USER_DATA_DIR_ENV),
+        super::unit_file::launchd_plist_env_value(&plist, USER_DATA_DIR_ENV),
         Some(profile.path().display().to_string())
     );
     assert_eq!(
@@ -736,7 +739,7 @@ fn launchd_plist_env_value_ignores_plist_without_override() {
     let profile = tempfile::TempDir::new().expect("profile temp dir");
     let home = tempfile::TempDir::new().expect("home temp dir");
     let _home_guard = EnvVarGuard::set("HOME", home.path());
-    let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, profile.path());
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: profile.path().join("daemon.sock"),
@@ -747,7 +750,7 @@ fn launchd_plist_env_value_ignores_plist_without_override() {
     let plist = spec.render_launchd_plist().expect("launchd plist");
 
     assert_eq!(
-        super::unit_file::launchd_plist_env_value(&plist, crate::config::USER_DATA_DIR_ENV),
+        super::unit_file::launchd_plist_env_value(&plist, USER_DATA_DIR_ENV),
         None
     );
 }
@@ -979,7 +982,7 @@ fn atomic_service_write_faults_preserve_the_forward_boundary() {
             &mut |step| {
                 observed.push(step);
                 if step == failed_step {
-                    Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    Err(tracedecay_domain::errors::TraceDecayError::Config {
                         message: format!("injected {step:?} failure"),
                     })
                 } else {
@@ -1053,7 +1056,7 @@ fn refresh_installed_service_skips_missing_unit() {
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard =
-        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
@@ -1082,9 +1085,9 @@ fn post_update_rejects_reachable_unmanaged_daemon() {
     let data_dir = dir.path().join("profile");
     let config_home = dir.path().join("config");
     std::fs::create_dir_all(&data_dir).expect("data dir");
-    let _data_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &data_dir);
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &data_dir);
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _socket_guard = EnvVarGuard::unset(crate::daemon::SOCKET_ENV);
+    let _socket_guard = EnvVarGuard::unset(SOCKET_ENV);
     let socket_path = super::default_socket_path().expect("default socket");
     let _listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
 
@@ -1120,7 +1123,7 @@ fn refresh_installed_service_preserves_existing_socket_path() {
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard =
-        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let _stopped_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped);
@@ -1206,7 +1209,7 @@ fn refresh_installed_service_migrates_overlong_generated_socket_path() {
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &profile);
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile);
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
 
     let legacy_socket = profile.join("daemon.sock");
@@ -1268,7 +1271,7 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard =
-        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let service_path = config_home
@@ -1324,7 +1327,7 @@ fn restore_after_update_starts_a_dead_installed_unit() {
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard =
-        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let service_path = config_home
@@ -1381,7 +1384,7 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard =
-        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
 
@@ -1438,7 +1441,7 @@ fn refresh_installed_service_preserves_stopped_state() {
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard =
-        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let service_path = config_home
@@ -1533,12 +1536,12 @@ fn default_socket_path_is_profile_scoped_not_project_scoped() {
     let project_a = tempfile::TempDir::new().expect("project a temp dir");
     let project_b = tempfile::TempDir::new().expect("project b temp dir");
     let override_socket = profile.path().join("override.sock");
-    let _socket_guard = EnvVarGuard::unset(crate::daemon::SOCKET_ENV);
+    let _socket_guard = EnvVarGuard::unset(SOCKET_ENV);
     let _data_dir_guard = EnvVarGuard::set(
-        crate::config::USER_DATA_DIR_ENV,
+        USER_DATA_DIR_ENV,
         profile.path().join(".tracedecay"),
     );
-    let expected_socket = crate::config::user_data_dir()
+    let expected_socket = user_data_dir()
         .expect("user data dir")
         .join("daemon.sock");
 
@@ -1557,7 +1560,7 @@ fn default_socket_path_is_profile_scoped_not_project_scoped() {
         );
     }
 
-    let _override_guard = EnvVarGuard::set(crate::daemon::SOCKET_ENV, &override_socket);
+    let _override_guard = EnvVarGuard::set(SOCKET_ENV, &override_socket);
     assert_eq!(
         super::default_socket_path().expect("override socket path"),
         override_socket
@@ -1572,13 +1575,13 @@ fn default_socket_path_is_profile_scoped_not_project_scoped() {
 #[test]
 fn over_long_profile_socket_path_falls_back_to_a_short_deterministic_path() {
     let _env_lock = lock_user_data_dir_test_env();
-    let _socket_guard = EnvVarGuard::unset(crate::daemon::SOCKET_ENV);
+    let _socket_guard = EnvVarGuard::unset(SOCKET_ENV);
     let root = tempfile::TempDir::new().expect("profile temp dir");
     let deep_profile = root.path().join("p".repeat(120)).join(".tracedecay");
     let sibling_profile = root.path().join("q".repeat(120)).join(".tracedecay");
 
     let first = {
-        let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &deep_profile);
+        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &deep_profile);
         let first = super::default_socket_path().expect("fallback socket path");
         assert_eq!(
             first,
@@ -1599,7 +1602,7 @@ fn over_long_profile_socket_path_falls_back_to_a_short_deterministic_path() {
     );
 
     let sibling = {
-        let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &sibling_profile);
+        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &sibling_profile);
         super::default_socket_path().expect("sibling fallback socket path")
     };
     assert_ne!(
@@ -1612,11 +1615,11 @@ fn over_long_profile_socket_path_falls_back_to_a_short_deterministic_path() {
 #[test]
 fn short_socket_derivation_uses_the_installed_profile_not_the_shell_profile() {
     let _env_lock = lock_user_data_dir_test_env();
-    let _socket_guard = EnvVarGuard::unset(crate::daemon::SOCKET_ENV);
+    let _socket_guard = EnvVarGuard::unset(SOCKET_ENV);
     let root = tempfile::TempDir::new().expect("profile temp dir");
     let installed_profile = root.path().join("i".repeat(120)).join(".tracedecay");
     let shell_profile = root.path().join("shell-profile");
-    let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &shell_profile);
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &shell_profile);
 
     let installed_socket = super::default_socket_path_for_profile(&installed_profile);
     let shell_socket = super::default_socket_path().expect("shell socket path");

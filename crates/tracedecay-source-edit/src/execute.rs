@@ -8,7 +8,7 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 use tracedecay_graph_db::GraphCancellation;
 
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
@@ -141,13 +141,35 @@ fn fail_pre_effect(
     input_digest: &ManifestDigest,
     state: PreEffectState,
 ) -> Result<SourceEditApplicationResult> {
+    fail_pre_effect_with_outcome(
+        durability,
+        operation,
+        request,
+        authority,
+        input_digest,
+        state,
+        failed_pre_effect_outcome(),
+    )
+}
+
+/// [`fail_pre_effect`] carrying the guard's own typed failure detail, so a
+/// caller sees which pre-effect stage refused instead of one generic label.
+fn fail_pre_effect_with_outcome(
+    durability: &SourceEditDurability,
+    operation: &ApplicationOperation,
+    request: &SourceEditEffectRequestV1,
+    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    input_digest: &ManifestDigest,
+    state: PreEffectState,
+    outcome: SourceEditOutcome,
+) -> Result<SourceEditApplicationResult> {
     persist_pre_effect_result(
         durability,
         operation,
         request,
         authority,
         input_digest,
-        failed_pre_effect_outcome(),
+        outcome,
         state,
         EffectTermination::Failed,
         None,
@@ -320,14 +342,17 @@ where
     .await
     {
         Ok(preview) => preview,
-        Err(_) => {
-            return fail_pre_effect(
+        Err(error) => {
+            return fail_pre_effect_with_outcome(
                 &durability,
                 operation,
                 &request,
                 &current_authority,
                 &input_digest,
                 PreEffectState::unpreviewed(request.expected_state.clone()),
+                SourceEditOutcome::Failed {
+                    message: format!("source edit failed before the effect: {error}"),
+                },
             );
         }
     };

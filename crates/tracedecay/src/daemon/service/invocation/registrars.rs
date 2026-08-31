@@ -414,7 +414,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         project_root: PathBuf,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
-        configuration: Arc<ProjectConfigurationRuntime>,
+        authorization: Arc<dyn CallableCodeAuthorizationSourcePort>,
     ) -> Result<ProjectFeedbackStore, DaemonFeedbackRuntimeRegistrationError> {
         let runtime_root = project_root.clone();
         #[cfg(test)]
@@ -437,11 +437,7 @@ impl DaemonFeedbackRuntimeRegistrar {
                     runtime.source_observation_port(),
                 ));
                 publication.stage(RegisteredCallableCodeRuntime {
-                    authorization: DaemonCallableCodeAuthorizationSource::production(
-                        runtime_root,
-                        scope.clone(),
-                        configuration,
-                    ),
+                    authorization,
                     scope,
                 })?;
                 publication.stage(RegisteredFeedbackRuntime {
@@ -933,8 +929,9 @@ impl DaemonWorkRuntimeRegistrar {
         configuration_digest: ManifestDigest,
         work_topology_policy: tracedecay_domain::configuration::WorkTopologyPolicyV1,
         proposal_routing: DaemonWorkProposalRoutingAuthorityV1,
-        evidence_retrieval: crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1,
+        evidence_retrieval: impl WorkEvidenceRetrievalPortV1 + 'static,
     ) -> Result<(), TraceDecayError> {
+        let evidence_retrieval = evidence_retrieval.clone_arc();
         if authority.project_id() != &grant.scope.project_id
             || authority.repository_id() != &grant.scope.repository_id
             || authority.worktree_id() != &grant.scope.worktree_id
@@ -973,7 +970,9 @@ impl DaemonWorkRuntimeRegistrar {
                         && registered
                             .proposal_routing
                             .same_configuration_as(&proposal_routing)
-                        && registered.evidence_retrieval.same_authority(&evidence_retrieval)
+                        && registered
+                            .evidence_retrieval
+                            .same_retrieval_authority(evidence_retrieval.as_ref())
                     {
                         // The same authority re-registering only renews its grant.
                         if registered.grant != grant {

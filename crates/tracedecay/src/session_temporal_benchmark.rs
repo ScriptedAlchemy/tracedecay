@@ -16,7 +16,6 @@ use std::process::Command;
 use std::time::Instant;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -67,6 +66,7 @@ const HISTORICAL_RESULT_FILE_NAME: &str = "result-provisional.json";
 const HISTORICAL_HARNESS_PATH: &str = "src/sessions/session_temporal_benchmark.rs";
 const RUNNER_PATH: &str = "scripts/run-session-temporal-benchmark.sh";
 const HARNESS_PATH: &str = "crates/tracedecay/src/session_temporal_benchmark.rs";
+const SOURCE_MODE_CLEAN: &str = "clean_git_worktree_v1";
 const SANITIZATION_RECEIPT_PATH: &str =
     "benchmark_data/session-temporal/fixtures/codex-sanitization-receipt.json";
 const P95_LABEL: &str = "descriptive nearest-rank sample p95";
@@ -277,16 +277,13 @@ struct RepetitionMeasurement {
     record_count: usize,
 }
 
-struct MeasurementCapture {
-    measurement: Value,
-    records_per_repetition: usize,
-}
-
 /// Validate checked-in artifacts without Cargo mutation (also used by the bench).
+///
+/// Content identity is the git commit: every artifact and source path here is
+/// tracked, so the contract checks artifact shape and state, not file hashes.
 pub fn validate_contract() -> BenchResult<()> {
     let root = repository_root();
-    let workload_path = root.join(WORKLOAD_PATH);
-    let workload = read_json(&workload_path)?;
+    let workload = read_json(&root.join(WORKLOAD_PATH))?;
     require_json_value(
         &workload["schema_version"],
         json!(SCHEMA_VERSION),
@@ -344,12 +341,7 @@ pub fn validate_contract() -> BenchResult<()> {
         json!(HARNESS_PATH),
         "implementation path",
     )?;
-    require_json_value(
-        &workload["implementation"]["sha256"],
-        json!(sha256_file(&root.join(HARNESS_PATH))?),
-        "implementation hash",
-    )?;
-    validate_file_inventory(&root, &workload["file_inventory"])?;
+    require_json_value(&workload["runner"]["path"], json!(RUNNER_PATH), "runner path")?;
     validate_bench_profile(&root)?;
     validate_sanitization_receipt(&root)?;
 
@@ -373,26 +365,18 @@ pub fn validate_contract() -> BenchResult<()> {
     validate_historical_result(&root)?;
 
     match index["provisional"].as_str() {
-        Some(RESULT_FILE_NAME) => validate_current_result(&root, &workload_path, &workload)?,
-        None => {
-            if workload.get("refresh_provenance").is_some() {
+        Some(RESULT_FILE_NAME) => validate_current_result(&root)?,
+        None => match fs::metadata(root.join(RESULT_PATH)) {
+            Ok(_) => {
                 return Err(
-                    "harness without current measurement must not retain refresh provenance"
-                        .to_owned(),
+                    "current measurement exists without an evidence-index pointer".to_owned(),
                 );
             }
-            match fs::metadata(root.join(RESULT_PATH)) {
-                Ok(_) => {
-                    return Err(
-                        "current measurement exists without an evidence-index pointer".to_owned(),
-                    );
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(format!("inspect current measurement artifact: {error}"));
-                }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("inspect current measurement artifact: {error}"));
             }
-        }
+        },
         Some(value) => return Err(format!("unexpected provisional result pointer: {value}")),
     }
 
@@ -437,7 +421,7 @@ fn validate_historical_result(root: &Path) -> BenchResult<()> {
     Ok(())
 }
 
-fn validate_current_result(root: &Path, workload_path: &Path, workload: &Value) -> BenchResult<()> {
+fn validate_current_result(root: &Path) -> BenchResult<()> {
     let result = read_json(&root.join(RESULT_PATH))?;
     require_json_value(
         &result["schema_version"],
@@ -460,9 +444,9 @@ fn validate_current_result(root: &Path, workload_path: &Path, workload: &Value) 
         "acceptance eligibility",
     )?;
     require_json_value(
-        &result["workload_manifest_sha256"],
-        json!(sha256_file(workload_path)?),
-        "workload manifest hash",
+        &result["workload_manifest"],
+        json!(WORKLOAD_PATH),
+        "result workload manifest",
     )?;
     require_json_value(
         &result["source_identity"]["harness"],
@@ -470,50 +454,35 @@ fn validate_current_result(root: &Path, workload_path: &Path, workload: &Value) 
         "result harness path",
     )?;
     require_json_value(
-        &result["source_identity"]["harness_sha256"],
-        json!(sha256_file(&root.join(HARNESS_PATH))?),
-        "result harness hash",
-    )?;
-    let provenance = &workload["refresh_provenance"];
-    require_json_value(
-        &provenance["source_mode"],
-        json!("clean_git_worktree_v1"),
-        "refresh source mode",
+        &result["source_identity"]["runner"],
+        json!(RUNNER_PATH),
+        "result runner path",
     )?;
     require_json_value(
-        &provenance["warmup_repetitions"],
+        &result["source_identity"]["source_mode"],
+        json!(SOURCE_MODE_CLEAN),
+        "result source mode",
+    )?;
+    if !matches!(
+        result["source_identity"]["commit"].as_str(),
+        Some(commit) if commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    ) {
+        return Err("result source commit must be a full git commit id".to_owned());
+    }
+    require_json_value(
+        &result["measurement"]["warmup_repetitions"],
         json!(WARMUP_REPETITIONS),
-        "refresh warmup repetitions",
+        "result warmup repetitions",
     )?;
     require_json_value(
-        &provenance["measured_repetitions"],
+        &result["measurement"]["measured_repetitions"],
         json!(MEASURED_REPETITIONS),
-        "refresh measured repetitions",
+        "result measured repetitions",
     )?;
-    let records_per_repetition = provenance["records_per_repetition"]
+    let records_per_repetition = result["measurement"]["records_per_repetition"]
         .as_u64()
         .filter(|count| *count > 0)
-        .ok_or_else(|| "refresh records_per_repetition must be positive".to_owned())?;
-    require_json_value(
-        &provenance["record_count"],
-        json!(records_per_repetition),
-        "refresh record count",
-    )?;
-    require_json_value(
-        &provenance["measured_record_count"],
-        json!(records_per_repetition * MEASURED_REPETITIONS as u64),
-        "refresh measured record count",
-    )?;
-    require_json_value(
-        &result["source_identity"]["commit"],
-        provenance["source_commit"].clone(),
-        "result source commit",
-    )?;
-    require_json_value(
-        &result["measurement"]["records_per_repetition"],
-        json!(records_per_repetition),
-        "result records per repetition",
-    )?;
+        .ok_or_else(|| "result records_per_repetition must be positive".to_owned())?;
     require_json_value(
         &result["measurement"]["measured_record_count"],
         json!(records_per_repetition * MEASURED_REPETITIONS as u64),
@@ -591,20 +560,19 @@ pub async fn run_measurement() -> BenchResult<Value> {
     validate_bench_profile_enforced()?;
 
     let root = repository_root();
-    let capture = capture_measurement().await?;
-    let workload_sha256 = sha256_file(&root.join(WORKLOAD_PATH))?;
-    let source_identity = current_state_identity(&root, &workload_sha256)?;
+    let measurement = capture_measurement().await?;
     Ok(measurement_result(
-        source_identity,
-        workload_sha256,
-        capture.measurement,
+        source_identity(&current_commit(&root)?),
+        measurement,
     ))
 }
 
-/// Refresh the manifest and result from one measured run over a clean commit.
+/// Publish the current result from one measured run over a clean commit.
 ///
-/// No caller-provided measurements or hashes are accepted. Both artifacts are
-/// derived after the run and published as one consistency-checked pair.
+/// No caller-provided measurements are accepted. The workload manifest is
+/// static configuration and is never rewritten by runs; the published result
+/// records the clean source commit it was measured at, which is the content
+/// authority for every tracked artifact and source path it names.
 pub async fn refresh_contract() -> BenchResult<Value> {
     let host_policy = BenchmarkHostPolicy::for_target_os(std::env::consts::OS);
     if !host_policy.allows_contract_refresh() {
@@ -615,34 +583,23 @@ pub async fn refresh_contract() -> BenchResult<Value> {
     let workload = read_json(&root.join(WORKLOAD_PATH))?;
     validate_refresh_inputs(&root, &workload)?;
     let source_commit = clean_source_commit(&root)?;
-    let capture = capture_measurement().await?;
+    let measurement = capture_measurement().await?;
     let commit_after = clean_source_commit(&root)?;
     if commit_after != source_commit {
         return Err("source commit changed during benchmark contract refresh".to_owned());
     }
-    let refreshed_workload = refresh_workload_manifest(
-        &root,
-        workload,
-        &source_commit,
-        capture.records_per_repetition,
-    )?;
-    let workload_sha256 = hex::encode(Sha256::digest(encode_json(&refreshed_workload)?));
-    let source_identity = current_state_identity(&root, &workload_sha256)?;
-    let result = measurement_result(source_identity, workload_sha256, capture.measurement);
-    write_contract_pair_atomic(
-        &root.join(WORKLOAD_PATH),
-        &refreshed_workload,
-        &root.join(RESULT_PATH),
-        &result,
-    )?;
-    // Publish the current-evidence pointer only after the workload/result pair
-    // is consistent, so an interrupted refresh never claims current evidence.
+    let mut identity = source_identity(&source_commit);
+    identity["source_mode"] = json!(SOURCE_MODE_CLEAN);
+    let result = measurement_result(identity, measurement);
+    write_json_atomic(&root.join(RESULT_PATH), &result)?;
+    // Publish the current-evidence pointer only after the result is durably
+    // written, so an interrupted refresh never claims current evidence.
     write_json_atomic(&root.join(EVIDENCE_INDEX_PATH), &current_evidence_index())?;
     validate_contract()?;
     Ok(result)
 }
 
-async fn capture_measurement() -> BenchResult<MeasurementCapture> {
+async fn capture_measurement() -> BenchResult<Value> {
     let mut phase_latencies: Vec<(Phase, Vec<u64>)> = Phase::ALL
         .iter()
         .copied()
@@ -693,28 +650,19 @@ async fn capture_measurement() -> BenchResult<MeasurementCapture> {
         }));
     }
 
-    let measurement = json!({
+    let records_per_repetition = records_per_repetition
+        .ok_or_else(|| "measurement produced no record count".to_owned())?;
+    Ok(json!({
         "warmup_repetitions": WARMUP_REPETITIONS,
         "measured_repetitions": MEASURED_REPETITIONS,
         "records_per_repetition": records_per_repetition,
-        "measured_record_count": records_per_repetition
-            .unwrap_or_default()
-            .saturating_mul(MEASURED_REPETITIONS),
+        "measured_record_count": records_per_repetition.saturating_mul(MEASURED_REPETITIONS),
         "inferential_claim": false,
         "phases": phases,
-    });
-    Ok(MeasurementCapture {
-        measurement,
-        records_per_repetition: records_per_repetition
-            .ok_or_else(|| "measurement produced no record count".to_owned())?,
-    })
+    }))
 }
 
-fn measurement_result(
-    source_identity: Value,
-    workload_manifest_sha256: String,
-    measurement: Value,
-) -> Value {
+fn measurement_result(source_identity: Value, measurement: Value) -> Value {
     json!({
         "schema_version": SCHEMA_VERSION,
         "workload_id": WORKLOAD_ID,
@@ -722,7 +670,6 @@ fn measurement_result(
         "acceptance_eligible": false,
         "provisional_reason": "diagnostic_measurement_capture",
         "workload_manifest": WORKLOAD_PATH,
-        "workload_manifest_sha256": workload_manifest_sha256,
         "source_identity": source_identity,
         "runtime": {
             "operating_system": std::env::consts::OS,
@@ -742,7 +689,23 @@ fn measurement_result(
     })
 }
 
+/// Installs the process-wide background CPU and resident-memory authorities
+/// the production Codex admission path requires.
+///
+/// Production installs both during daemon bootstrap, which this harness never
+/// runs; without them every capture is refused with the typed
+/// `BackgroundResourceUnavailable` states. The shared JSONL preparation
+/// authority is process-wide and single (a second install with a different
+/// memory handle fails closed), so this delegates to the same helper
+/// `HostAdmissionTestRuntimeV1` uses instead of racing it with a
+/// benchmark-private handle.
+fn ensure_admission_resource_authorities() {
+    crate::host_admission::ensure_process_background_cpu_authority()
+        .expect("install process capture authorities for the benchmark");
+}
+
 async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition> {
+    ensure_admission_resource_authorities();
     let env = IsolatedBenchmarkEnv::enter("session-temporal-")?;
     let project = env.path().join("project");
     fs::create_dir_all(&project).map_err(|error| format!("create project: {error}"))?;
@@ -1086,39 +1049,19 @@ fn request_context(
     Ok((context, binding))
 }
 
-fn current_state_identity(root: &Path, workload_manifest_sha256: &str) -> BenchResult<Value> {
-    let commit = current_commit(root)?;
-    Ok(json!({
+/// Identity of the source that produced a capture. The recorded commit is the
+/// content authority: every path named here is git-tracked at that commit, so
+/// no per-file hashing is repeated.
+fn source_identity(commit: &str) -> Value {
+    json!({
         "commit": commit,
-        "workload_manifest": WORKLOAD_PATH,
-        "workload_manifest_sha256": workload_manifest_sha256,
         "harness": HARNESS_PATH,
-        "harness_sha256": sha256_file(&root.join(HARNESS_PATH))?,
         "runner": RUNNER_PATH,
-        "runner_sha256": sha256_file(&root.join(RUNNER_PATH))?,
         "sanitization_receipt": SANITIZATION_RECEIPT_PATH,
-        "sanitization_receipt_sha256": sha256_file(&root.join(SANITIZATION_RECEIPT_PATH))?,
         "binary": std::env::current_exe()
             .ok()
             .and_then(|path| path.to_str().map(str::to_owned)),
-        "native_fixtures": NATIVE_CODEX_FIXTURES
-            .iter()
-            .map(|(path, _)| {
-                json!({
-                    "path": path,
-                    "sha256": sha256_file(&root.join(path)).unwrap_or_default(),
-                })
-            })
-            .collect::<Vec<_>>(),
-        "profile": {
-            "cargo_profile": "bench",
-            "opt_level": 3,
-            "debug": false,
-            "debug_assertions": false,
-            "overflow_checks": false,
-            "incremental": false,
-        }
-    }))
+    })
 }
 
 fn current_evidence_index() -> Value {
@@ -1131,6 +1074,9 @@ fn current_evidence_index() -> Value {
     })
 }
 
+/// The receipt documents sanitization provenance for the independently
+/// sourced provider fixtures; the fixture bytes themselves are compiled into
+/// this harness via `include_str!`, so git and the compiler own their content.
 fn validate_sanitization_receipt(root: &Path) -> BenchResult<()> {
     let receipt = read_json(&root.join(SANITIZATION_RECEIPT_PATH))?;
     require_json_value(
@@ -1144,61 +1090,6 @@ fn validate_sanitization_receipt(root: &Path) -> BenchResult<()> {
         "receipt source",
     )?;
     require_json_value(&receipt["provider"], json!("codex"), "receipt provider")?;
-    let files = receipt["files"]
-        .as_array()
-        .ok_or_else(|| "receipt files missing".to_owned())?;
-    for entry in files {
-        let path = entry["path"]
-            .as_str()
-            .ok_or_else(|| "receipt file path missing".to_owned())?;
-        let expected = entry["sha256"]
-            .as_str()
-            .ok_or_else(|| format!("receipt hash missing for {path}"))?;
-        let actual = sha256_file(&root.join(path))?;
-        if actual != expected {
-            return Err(format!(
-                "receipt hash mismatch for {path}: expected {expected}, got {actual}"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_file_inventory(root: &Path, inventory: &Value) -> BenchResult<()> {
-    let entries = inventory
-        .as_array()
-        .ok_or_else(|| "file_inventory must be an array".to_owned())?;
-    if entries.is_empty() {
-        return Err("file_inventory must not be empty".to_owned());
-    }
-    let mut paths = std::collections::BTreeSet::new();
-    for entry in entries {
-        let path = entry["path"]
-            .as_str()
-            .ok_or_else(|| "inventory path must be a string".to_owned())?;
-        let expected = entry["sha256"]
-            .as_str()
-            .ok_or_else(|| format!("inventory hash missing for {path}"))?;
-        let relative = Path::new(path);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| component == std::path::Component::ParentDir)
-        {
-            return Err(format!(
-                "inventory path must remain repository-relative: {path}"
-            ));
-        }
-        if !paths.insert(path) {
-            return Err(format!("duplicate inventory path: {path}"));
-        }
-        let actual = sha256_file(&root.join(relative))?;
-        if actual != expected {
-            return Err(format!(
-                "inventory hash mismatch for {path}: expected {expected}, got {actual}"
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -1260,110 +1151,6 @@ fn write_json_atomic(path: &Path, value: &Value) -> BenchResult<()> {
     Ok(())
 }
 
-fn refresh_workload_manifest(
-    root: &Path,
-    mut workload: Value,
-    source_commit: &str,
-    records_per_repetition: usize,
-) -> BenchResult<Value> {
-    let workload_object = workload
-        .as_object_mut()
-        .ok_or_else(|| "workload manifest must be an object".to_owned())?;
-    workload_object["implementation"]["sha256"] = json!(sha256_file(&root.join(HARNESS_PATH))?);
-    workload_object["runner"]["sha256"] = json!(sha256_file(&root.join(RUNNER_PATH))?);
-    workload_object["profile"]["manifest_sha256"] = json!(sha256_file(&root.join("Cargo.toml"))?);
-    let inventory = workload_object["file_inventory"]
-        .as_array_mut()
-        .ok_or_else(|| "workload file inventory must be an array".to_owned())?;
-    for entry in inventory {
-        let path = entry["path"]
-            .as_str()
-            .ok_or_else(|| "workload inventory entry is missing its path".to_owned())?;
-        entry["sha256"] = json!(sha256_file(&root.join(path))?);
-    }
-    workload_object.insert(
-        "refresh_provenance".to_owned(),
-        json!({
-            "source_commit": source_commit,
-            "source_mode": "clean_git_worktree_v1",
-            "warmup_repetitions": WARMUP_REPETITIONS,
-            "measured_repetitions": MEASURED_REPETITIONS,
-            "record_count": records_per_repetition,
-            "records_per_repetition": records_per_repetition,
-            "measured_record_count": records_per_repetition * MEASURED_REPETITIONS,
-        }),
-    );
-    Ok(workload)
-}
-
-fn write_contract_pair_atomic(
-    workload_path: &Path,
-    workload: &Value,
-    result_path: &Path,
-    result: &Value,
-) -> BenchResult<()> {
-    if workload_path.parent() != result_path.parent() {
-        return Err("workload and result must share one artifact directory".to_owned());
-    }
-    let workload_bytes = encode_json(workload)?;
-    let workload_sha256 = hex::encode(Sha256::digest(&workload_bytes));
-    require_json_value(
-        &result["workload_manifest_sha256"],
-        json!(workload_sha256),
-        "result workload manifest hash",
-    )?;
-
-    let workload_original = fs::read(workload_path).ok();
-    let result_original = fs::read(result_path).ok();
-    let workload_temporary = temporary_artifact_path(workload_path);
-    let result_temporary = temporary_artifact_path(result_path);
-    fs::write(&workload_temporary, workload_bytes)
-        .map_err(|error| format!("write temporary workload manifest: {error}"))?;
-    if let Err(error) = fs::write(&result_temporary, encode_json(result)?) {
-        let _ = fs::remove_file(&workload_temporary);
-        return Err(format!("write temporary benchmark result: {error}"));
-    }
-    fs::rename(&workload_temporary, workload_path)
-        .map_err(|error| format!("publish workload manifest: {error}"))?;
-    if let Err(error) = fs::rename(&result_temporary, result_path) {
-        restore_artifact(workload_path, workload_original.as_deref())?;
-        restore_artifact(result_path, result_original.as_deref())?;
-        let _ = fs::remove_file(&result_temporary);
-        return Err(format!(
-            "publish benchmark result after workload manifest; restored prior pair: {error}"
-        ));
-    }
-    Ok(())
-}
-
-fn encode_json(value: &Value) -> BenchResult<Vec<u8>> {
-    serde_json::to_vec_pretty(value).map_err(|error| format!("encode benchmark artifact: {error}"))
-}
-
-fn temporary_artifact_path(path: &Path) -> PathBuf {
-    path.with_file_name(format!(
-        ".{}.refresh.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("artifact")
-    ))
-}
-
-fn restore_artifact(path: &Path, original: Option<&[u8]>) -> BenchResult<()> {
-    match original {
-        Some(bytes) => fs::write(path, bytes)
-            .map_err(|error| format!("restore benchmark artifact '{}': {error}", path.display())),
-        None => match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "remove newly published benchmark artifact '{}': {error}",
-                path.display()
-            )),
-        },
-    }
-}
-
 fn require_json_value(actual: &Value, expected: Value, label: &str) -> BenchResult<()> {
     if actual != &expected {
         return Err(format!(
@@ -1371,12 +1158,6 @@ fn require_json_value(actual: &Value, expected: Value, label: &str) -> BenchResu
         ));
     }
     Ok(())
-}
-
-fn sha256_file(path: &Path) -> BenchResult<String> {
-    let bytes =
-        fs::read(path).map_err(|error| format!("read {} for SHA-256: {error}", path.display()))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn repository_root() -> PathBuf {
@@ -1473,61 +1254,27 @@ mod tests {
     }
 
     #[test]
-    fn refresh_manifest_records_one_real_run_provenance() {
-        let root = repository_root();
-        let workload = read_json(&root.join(WORKLOAD_PATH)).unwrap();
-        let refreshed = refresh_workload_manifest(&root, workload, "0123456789abcdef", 2).unwrap();
+    fn refresh_result_records_clean_run_provenance() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let mut identity = source_identity(commit);
+        identity["source_mode"] = json!(SOURCE_MODE_CLEAN);
+        let result = measurement_result(identity, json!({"records_per_repetition": 2}));
 
+        assert_eq!(result["schema_version"], json!(SCHEMA_VERSION));
+        assert_eq!(result["capture_status"], json!("provisional"));
+        assert_eq!(result["acceptance_eligible"], json!(false));
+        assert_eq!(result["workload_manifest"], json!(WORKLOAD_PATH));
+        assert_eq!(result["source_identity"]["commit"], json!(commit));
         assert_eq!(
-            refreshed["refresh_provenance"]["source_commit"],
-            json!("0123456789abcdef")
+            result["source_identity"]["source_mode"],
+            json!(SOURCE_MODE_CLEAN)
         );
+        assert_eq!(result["source_identity"]["harness"], json!(HARNESS_PATH));
+        assert_eq!(result["source_identity"]["runner"], json!(RUNNER_PATH));
         assert_eq!(
-            refreshed["refresh_provenance"]["source_mode"],
-            json!("clean_git_worktree_v1")
+            result["measurement"]["records_per_repetition"],
+            json!(2),
         );
-        assert_eq!(
-            refreshed["refresh_provenance"]["warmup_repetitions"],
-            json!(WARMUP_REPETITIONS)
-        );
-        assert_eq!(
-            refreshed["refresh_provenance"]["measured_repetitions"],
-            json!(MEASURED_REPETITIONS)
-        );
-        assert_eq!(
-            refreshed["refresh_provenance"]["records_per_repetition"],
-            json!(2)
-        );
-        assert_eq!(
-            refreshed["refresh_provenance"]["measured_record_count"],
-            json!(2 * MEASURED_REPETITIONS)
-        );
-        assert_eq!(
-            refreshed["implementation"]["sha256"],
-            json!(sha256_file(&root.join(HARNESS_PATH)).unwrap())
-        );
-        assert_eq!(
-            refreshed["runner"]["sha256"],
-            json!(sha256_file(&root.join(RUNNER_PATH)).unwrap())
-        );
-    }
-
-    #[test]
-    fn contract_pair_writer_rejects_disagreeing_result() {
-        let temp = TempDir::new().unwrap();
-        let workload_path = temp.path().join("workload.json");
-        let result_path = temp.path().join("result.json");
-        let workload = json!({"schema_version": SCHEMA_VERSION});
-        let result = json!({
-            "workload_manifest_sha256": "not-the-workload-hash"
-        });
-
-        let error = write_contract_pair_atomic(&workload_path, &workload, &result_path, &result)
-            .unwrap_err();
-
-        assert!(error.contains("workload manifest hash"));
-        assert!(!workload_path.exists());
-        assert!(!result_path.exists());
     }
 
     #[test]

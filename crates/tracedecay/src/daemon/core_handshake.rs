@@ -5,12 +5,21 @@
 
 use std::path::PathBuf;
 
-use tracedecay_daemon_protocol::{
-    DaemonHandshake, MovedStoreAdoption, current_daemon_client_identity,
-};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake, MovedStoreAdoption};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::config::{global_db_path, user_data_dir};
 
 pub use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
+
+fn current_daemon_client_identity() -> Result<DaemonClientIdentity> {
+    let profile_root = user_data_dir().ok_or_else(|| TraceDecayError::Config {
+        message: "could not determine TraceDecay user data directory".to_string(),
+    })?;
+    let global_db_path = global_db_path().ok_or_else(|| TraceDecayError::Config {
+        message: "could not determine TraceDecay global database path".to_string(),
+    })?;
+    Ok(DaemonClientIdentity::new(profile_root, global_db_path))
+}
 
 /// Handshake for this process's current client identity and binary version.
 pub fn handshake_for_current_client(

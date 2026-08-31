@@ -661,6 +661,62 @@ fn batch_outgoing_reads_are_filtered_ordered_and_budgeted() {
     );
 }
 
+#[test]
+fn outgoing_target_visitor_streams_rows_and_observes_cancellation() {
+    let db = memory_db();
+    db.apply_unverified(batch(
+        "code",
+        "g1",
+        "w1",
+        vec![
+            GraphMutation::UpsertEntity(entity("a")),
+            GraphMutation::UpsertEntity(entity("b")),
+            GraphMutation::UpsertEntity(entity("c")),
+            GraphMutation::UpsertRelation(relation("ab", "a", "b", "calls")),
+            GraphMutation::UpsertRelation(relation("ac", "a", "c", "calls")),
+        ],
+    ))
+    .unwrap();
+    let kinds = BTreeSet::from([GraphRelationKind::new("calls").unwrap()]);
+    let mut visited = Vec::new();
+    let count = db
+        .visit_outgoing_relation_targets(
+            &namespace(),
+            &entity_id("a"),
+            &kinds,
+            live(),
+            &mut |target| {
+                visited.push((
+                    target.relation.identity.as_str().to_owned(),
+                    target.target.identity.as_str().to_owned(),
+                ));
+            },
+        )
+        .unwrap();
+    visited.sort();
+    assert_eq!(count, 2);
+    assert_eq!(
+        visited,
+        vec![
+            ("ab".to_owned(), "b".to_owned()),
+            ("ac".to_owned(), "c".to_owned()),
+        ]
+    );
+
+    let mut visited_before_cancel = 0_usize;
+    let error = db
+        .visit_outgoing_relation_targets(
+            &namespace(),
+            &entity_id("a"),
+            &kinds,
+            Arc::new(CancelOnPoll::new(3)),
+            &mut |_| visited_before_cancel += 1,
+        )
+        .unwrap_err();
+    assert_eq!(error, GraphDbError::Cancelled);
+    assert_eq!(visited_before_cancel, 1);
+}
+
 /// Plan 39 G7b: reverse adjacency must be readable in bulk through the graph
 /// store, with the same kind filter, batch shape, budget, and cancellation
 /// contract as the outgoing form — and it must actually read the opposite

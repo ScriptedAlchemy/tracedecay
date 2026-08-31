@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::remote_deletion::{
     RemoteDeletionExecutionError, RemoteDeletionFailureCode, RemoteDeletionPhase,

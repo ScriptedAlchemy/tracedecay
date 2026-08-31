@@ -307,9 +307,8 @@ fn decode_session_refresh(
     body: serde_json::Value,
     action: SessionRefreshActionV1,
 ) -> Result<RetainedSurfaceRequestV1, serde_json::Error> {
-    let request =
-        serde_path_to_error::deserialize::<_, SessionRefreshActionRequestV1>(body)
-            .map_err(named_argument_error)?;
+    let request = serde_path_to_error::deserialize::<_, SessionRefreshActionRequestV1>(body)
+        .map_err(named_argument_error)?;
     Ok(RetainedSurfaceRequestV1::SessionRefresh(
         SessionRefreshRequestV1::with_action(action, request),
     ))
@@ -466,5 +465,19 @@ mod tests {
                 "decode rejection must name `{admitted}`: {message}"
             );
         }
+    }
+
+    #[test]
+    fn decode_rejection_names_wrong_type_argument() {
+        let error = decode_request(
+            RetainedSurfaceOperation::FactStoreAdd,
+            json!({ "content": 17, "category": "general" }),
+        )
+        .expect_err("non-string content must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("content"),
+            "wrong-type rejection must name the offending argument: {message}"
+        );
     }
 }

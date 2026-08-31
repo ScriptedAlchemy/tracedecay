@@ -1412,16 +1412,43 @@ fn reset_required_fault_is_retained_and_cannot_reopen() {
     ));
 }
 
+/// A preexisting zero-byte container is the corruption class a crash or a
+/// full disk leaves behind. It is still never a silent reopen: the mount
+/// re-proves the deterministic verdict, quarantines the empty file with its
+/// receipt for forensics, and serves a fresh store that the canonical replay
+/// authorities re-project — instead of the pre-#763 terminal fault retried
+/// on every activation forever.
 #[test]
-fn preexisting_empty_graph_file_is_corrupt() {
+fn preexisting_empty_graph_file_is_quarantined_and_remounted_fresh() {
     let temp = TempDir::new().unwrap();
     std::fs::File::create(graph_path(temp.path())).unwrap();
 
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let request = registration(identity("profile-a", "project-a"), temp.path());
 
-    assert!(matches!(
-        mount_and_resolve(&registry, request),
-        Err(GraphDbError::Corrupt { .. })
-    ));
+    let database = mount_and_resolve(&registry, request).unwrap();
+    drop(database);
+
+    let quarantine = std::fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| {
+            entry.file_type().unwrap().is_dir()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("graph.grafeo.corrupt-"))
+        })
+        .expect("the empty container must be quarantined, not silently replaced")
+        .path();
+    assert_eq!(
+        std::fs::metadata(quarantine.join("graph.grafeo")).unwrap().len(),
+        0,
+        "the forensic zero-byte container is retained"
+    );
+    assert!(quarantine.join("store-quarantined.json").is_file());
+    assert!(
+        graph_path(temp.path()).is_file(),
+        "a fresh store now serves at the canonical path"
+    );
 }

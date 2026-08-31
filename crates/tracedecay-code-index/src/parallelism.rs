@@ -185,8 +185,13 @@ pub fn indexing_worker_target(total_cores: usize) -> usize {
     if total <= 8 { total } else { total / 2 }
 }
 
+/// Worker width that still leaves the typed non-worker headroom on this
+/// remaining authority. Source snapshots and other canonical resident
+/// components are charged separately while a worker reservation is held, so
+/// callers must not treat `available / INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1`
+/// as an affordable width.
 #[must_use]
-fn memory_safe_worker_count(available_bytes: u64) -> usize {
+pub fn memory_safe_worker_count(available_bytes: u64) -> usize {
     usize::try_from(
         worker_memory_budget_bytes(available_bytes) / INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
     )

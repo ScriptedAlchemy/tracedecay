@@ -11,10 +11,11 @@ use tracedecay_store::{
 };
 
 use crate::GraphDbRegistration;
-use crate::location::PersistentGraphStoreState;
+#[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+use crate::GraphDbOpenOptions;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use crate::{GraphCancellation, GraphDbLocation, GraphDurability, GraphFormatVersion};
-use crate::{GraphDb, GraphDbError, GraphDbOpenOptions, GraphDbRuntimeState, GraphSnapshot};
+use crate::{GraphDb, GraphDbError, GraphDbRuntimeState, GraphSnapshot};
 
 static NEXT_GRAPH_DB_OWNER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -399,13 +400,14 @@ impl GraphDbOwner {
         GraphDb::open(options).and_then(|database| Self::from_database(database, None))
     }
 
-    pub(crate) fn open_registered(
-        options: GraphDbOpenOptions,
-        persistent_store_state: PersistentGraphStoreState,
+    /// Wraps an already-opened registry database as its exclusive map owner.
+    /// The registry mount path opens the database itself so a corrupt open
+    /// can run the quarantine protocol before any owner exists.
+    pub(crate) fn register_database(
+        database: Arc<GraphDb>,
         authority_attachment: Box<dyn RetainedGraphStoreOwnerAttachmentV1>,
     ) -> Result<Self, GraphDbError> {
-        GraphDb::open_with_store_state(options, Some(persistent_store_state))
-            .and_then(|database| Self::from_database(database, Some(authority_attachment)))
+        Self::from_database(database, Some(authority_attachment))
     }
 
     /// Issues an ordinary counted client lease while the owner is ready.

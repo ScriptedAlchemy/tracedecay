@@ -200,5 +200,5 @@ impl DaemonSessionRuntimeRegistryV1 {
 
 pub(crate) struct MemoryGraphRuntimeOpenFailureV1 {
     pub(crate) database: tracedecay_runtime_core::db::DatabaseOwnerV1,
-    pub(crate) error: tracedecay_runtime_core::errors::TraceDecayError,
+    pub(crate) error: tracedecay_domain::errors::TraceDecayError,
 }

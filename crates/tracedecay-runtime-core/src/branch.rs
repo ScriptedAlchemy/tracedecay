@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod admin;
 mod tracking;

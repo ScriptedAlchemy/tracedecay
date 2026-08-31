@@ -7,7 +7,7 @@
 
 use crate::db::connection::DatabaseEngineWriteConnection;
 use crate::db::engine::{Connection, Executor, QueryExecutor};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod final_shape;
 

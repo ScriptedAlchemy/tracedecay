@@ -81,7 +81,7 @@ use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadConnection, DatabaseWriteTransaction,
     engine::{Executor, IntoParams, Params, QueryExecutor, Value, opt_text, params},
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 

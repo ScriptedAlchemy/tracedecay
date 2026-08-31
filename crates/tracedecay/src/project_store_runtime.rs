@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_usecases::tracedecay::ProjectStoreRuntimeV1;
 

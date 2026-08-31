@@ -142,7 +142,7 @@ impl GitHubStackSignalAppendOutcomeV1 {
 /// as well as fresh stores; no previous registered schema is rewritten.
 pub(crate) async fn ensure_github_stack_delivery_schema(
     connection: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS github_stack_delivery_signals (

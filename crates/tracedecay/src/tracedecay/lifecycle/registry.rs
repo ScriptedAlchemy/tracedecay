@@ -12,7 +12,7 @@ use tracedecay_global_db::{
     GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use tracedecay_runtime_core::branch_meta;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::TraceDecay;

@@ -4,7 +4,7 @@ use tracedecay_application::ProfileIdentityReadPort;
 use tracedecay_automation_runtime::ports::project_runtime::ProfileIdentity;
 use tracedecay_domain::{BrainId, UserProfileId};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{
     PROFILE_IDENTITY_FILENAME, PROFILE_IDENTITY_RECORD_NAME, PROFILE_IDENTITY_SCHEMA_VERSION,
     ProfileIdentityRecordV1, read_existing_profile_identity_record,

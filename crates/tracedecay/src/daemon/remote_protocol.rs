@@ -70,7 +70,7 @@ use tracedecay_tool_catalog::SchemaId;
 
 use crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
 use crate::daemon::service::invocation::DaemonInvocationService;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod observability;
 

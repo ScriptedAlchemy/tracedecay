@@ -59,6 +59,14 @@ fn worker_reservation_bytes() -> u64 {
     ))
 }
 
+fn expected_worker_reservation_on(remaining_bytes: u64) -> u64 {
+    let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
+    let affordable = tracedecay_code_index::parallelism::memory_safe_worker_count(remaining_bytes);
+    tracedecay_code_index::parallelism::worker_reservation_bytes(
+        planned_workers.min(affordable).max(1),
+    )
+}
+
 #[test]
 fn large_host_authority_admits_worker_scratch_lexical_build_and_snapshot() {
     let host_memory_bytes = 88 * 1024 * 1024 * 1024;
@@ -249,17 +257,66 @@ fn worker_memory_reservation_is_charged_and_released_by_raii() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let reservation_bytes = worker_reservation_bytes();
+    let _installed = worker_reservation_bytes();
     let authority = Arc::new(ProcessResidentMemoryV1::new(
-        NonZeroU64::new(reservation_bytes).expect("worker reservation is nonzero"),
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     ));
     scheduler.bind_resident_memory(Arc::clone(&authority));
     let reservation = scheduler
         .reserve_worker_memory()
         .expect("reserve worker memory");
-    assert_eq!(authority.snapshot().used_bytes, reservation_bytes);
+    assert_eq!(
+        authority.snapshot().used_bytes,
+        expected_worker_reservation_on(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get())
+    );
     drop(reservation);
     assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+/// A host-sized process-global plan must not spend the 6 GiB default
+/// authority's typed snapshot headroom. The live failure was remount seating
+/// gen 00000001, then refusing a 31-byte successor snapshot because
+/// `reserve_worker_memory` had reserved `remaining / 128MiB` and used==limit.
+#[test]
+fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
+    let _installed = worker_reservation_bytes();
+    let project = fixture();
+    let project_id = ProjectId::new("project.code-index-worker-headroom").expect("valid project");
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id,
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let authority = Arc::new(ProcessResidentMemoryV1::new(
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+    ));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+
+    let _worker = scheduler
+        .reserve_worker_memory()
+        .expect("6 GiB authority admits a memory-safe worker slab");
+    let used = authority.snapshot().used_bytes;
+    let limit = DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get();
+    assert_eq!(used, expected_worker_reservation_on(limit));
+    assert!(
+        used < limit,
+        "worker reserve must leave the typed non-worker headroom: used={used} limit={limit}"
+    );
+
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("31-byte-class snapshot must admit beside the worker slab");
+    assert!(
+        !captured.retained_bytes.is_empty(),
+        "the fixture source must charge snapshot bytes"
+    );
+    assert!(
+        authority.snapshot().used_bytes > used,
+        "snapshot charge is a separate ledger entry, not a silent borrow of worker scratch"
+    );
 }
 
 #[test]
@@ -274,9 +331,12 @@ fn worker_memory_reservation_refusal_is_typed() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let reservation_bytes = worker_reservation_bytes();
+    let _installed = worker_reservation_bytes();
     let authority = Arc::new(ProcessResidentMemoryV1::new(
-        NonZeroU64::new(reservation_bytes - 1).expect("positive test limit"),
+        NonZeroU64::new(
+            tracedecay_code_index::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1 - 1,
+        )
+        .expect("positive test limit"),
     ));
     scheduler.bind_resident_memory(authority);
     assert!(matches!(

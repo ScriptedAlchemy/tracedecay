@@ -10,6 +10,10 @@ fn cursor_sweep_test_fixture_with_messages(
     CursorSweepSource,
     ProjectId,
 ) {
+    // Production installs the process-wide capture authorities during daemon
+    // bootstrap; capture refuses with a typed `BackgroundResourceUnavailable`
+    // without them.
+    crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
     let project = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let project_id = ProjectId::new("project.cursor-cancelled-startup").unwrap();

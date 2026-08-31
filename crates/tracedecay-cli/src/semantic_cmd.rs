@@ -6,7 +6,7 @@
 
 use crate::cli::SemanticAction;
 
-pub(crate) async fn run(action: SemanticAction) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn run(action: SemanticAction) -> tracedecay_domain::errors::Result<()> {
     match action {
         SemanticAction::Activate {
             profile,
@@ -23,7 +23,7 @@ async fn activate(
     set_rollback: bool,
     project: Option<String>,
     json: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let project_root = tracedecay::config::resolve_path_with_discovery(project);
     let handshake = tracedecay::daemon::handshake_for_current_client(
         Some(project_root.clone()),

@@ -14,7 +14,7 @@ use tracedecay_domain::{
 };
 use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;
 use super::file_authority::SourceEditFileAuthority;

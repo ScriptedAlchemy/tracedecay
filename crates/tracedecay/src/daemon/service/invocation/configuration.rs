@@ -3,6 +3,9 @@
 use super::*;
 
 use super::registrars::registry_registration_refusal;
+use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
+use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
+use tracedecay_global_db::configuration::semantic::{SemanticConfig, SemanticProfileSelection};
 
 mod settlement;
 
@@ -12,7 +15,7 @@ use settlement::{configuration_effect, reconcile_configuration_runtime};
 pub(super) async fn execute_configuration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
-    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+    surface_operation: ApplicationSurfaceOperation,
     request: ConfigurationWireRequestV1,
     observed_at: UtcMicros,
     deadline: Deadline,
@@ -51,7 +54,7 @@ pub(super) async fn execute_configuration(
     let result: Result<ApplicationOutcome<serde_json::Value>, ConfigurationError> = async {
         match (surface_operation, request) {
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationList,
+                ApplicationSurfaceOperation::ConfigurationList,
                 ConfigurationWireRequestV1::List(_),
             ) => configuration_evidence(
                 serde_json::to_value(Box::pin(client.list(actor)).await?)
@@ -61,7 +64,7 @@ pub(super) async fn execute_configuration(
                 deadline,
             ),
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationExplain,
+                ApplicationSurfaceOperation::ConfigurationExplain,
                 ConfigurationWireRequestV1::Explain(request),
             ) => configuration_evidence(
                 serde_json::to_value(Box::pin(client.explain(actor, request.key)).await?)
@@ -71,7 +74,7 @@ pub(super) async fn execute_configuration(
                 deadline,
             ),
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet,
+                ApplicationSurfaceOperation::ConfigurationGet,
                 ConfigurationWireRequestV1::Get(request),
             ) => configuration_evidence(
                 serde_json::to_value(Box::pin(client.get(actor, request.key)).await?)
@@ -81,7 +84,7 @@ pub(super) async fn execute_configuration(
                 deadline,
             ),
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationObservedState,
+                ApplicationSurfaceOperation::ConfigurationObservedState,
                 ConfigurationWireRequestV1::ObservedState(_),
             ) => configuration_evidence(
                 serde_json::to_value(Box::pin(client.observed_state(actor)).await?)
@@ -91,7 +94,7 @@ pub(super) async fn execute_configuration(
                 deadline,
             ),
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit,
+                ApplicationSurfaceOperation::ConfigurationAudit,
                 ConfigurationWireRequestV1::Audit(request),
             ) => configuration_evidence(
                 serde_json::to_value(
@@ -110,7 +113,7 @@ pub(super) async fn execute_configuration(
                 deadline,
             ),
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+                ApplicationSurfaceOperation::ConfigurationSet,
                 ConfigurationWireRequestV1::Set(request),
             ) => {
                 let idempotency_key = request.idempotency_key;
@@ -151,7 +154,7 @@ pub(super) async fn execute_configuration(
                 )
             }
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset,
+                ApplicationSurfaceOperation::ConfigurationUnset,
                 ConfigurationWireRequestV1::Unset(request),
             ) => {
                 let idempotency_key = request.idempotency_key;
@@ -191,7 +194,7 @@ pub(super) async fn execute_configuration(
                 )
             }
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
+                ApplicationSurfaceOperation::ConfigurationBatch,
                 ConfigurationWireRequestV1::Batch(request),
             ) => {
                 let idempotency_key = request.idempotency_key;
@@ -243,7 +246,7 @@ pub(super) async fn execute_configuration(
                 )
             }
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationWriteCredential,
+                ApplicationSurfaceOperation::ConfigurationWriteCredential,
                 ConfigurationWireRequestV1::WriteCredential(request),
             ) => {
                 let idempotency_key = request.idempotency_key;
@@ -286,7 +289,7 @@ pub(super) async fn execute_configuration(
                 )
             }
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationProtectedPreview,
+                ApplicationSurfaceOperation::ConfigurationProtectedPreview,
                 ConfigurationWireRequestV1::ProtectedPreview(request),
             ) => {
                 let mutation_authority = issue_configuration_mutation_authority(
@@ -318,7 +321,7 @@ pub(super) async fn execute_configuration(
                 )
             }
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationProtectedApply,
+                ApplicationSurfaceOperation::ConfigurationProtectedApply,
                 ConfigurationWireRequestV1::ProtectedApply(request),
             ) => {
                 let mutation_authority = issue_configuration_mutation_authority(
@@ -365,7 +368,7 @@ pub(super) async fn execute_configuration(
                 )
             }
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackPreview,
+                ApplicationSurfaceOperation::ConfigurationRollbackPreview,
                 ConfigurationWireRequestV1::RollbackPreview(request),
             ) => {
                 let current = Box::pin(client.current()).await?;
@@ -400,7 +403,7 @@ pub(super) async fn execute_configuration(
                 )
             }
             (
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackApply,
+                ApplicationSurfaceOperation::ConfigurationRollbackApply,
                 ConfigurationWireRequestV1::RollbackApply(request),
             ) => {
                 let mutation_authority = issue_configuration_mutation_authority(
@@ -538,10 +541,10 @@ pub(super) fn requires_coordinated_semantic_profile_transition(
 
 fn semantic_profile_transition(
     mutation: &DirectConfigurationMutation,
-) -> Result<Option<Option<crate::config::SemanticProfileSelection>>, ConfigurationError> {
+) -> Result<Option<Option<SemanticProfileSelection>>, ConfigurationError> {
     match mutation {
         DirectConfigurationMutation::Set { key, value, .. }
-            if key.as_str() == crate::config::SEMANTIC_RUNTIME_SETTING_KEY =>
+            if key.as_str() == SEMANTIC_RUNTIME_SETTING_KEY =>
         {
             let tracedecay_domain::configuration::ConfigurationValueV1::Text(value) =
                 value.as_ref()
@@ -550,7 +553,7 @@ fn semantic_profile_transition(
                     "semantic runtime configuration must be canonical JSON text",
                 ));
             };
-            let semantic: crate::config::SemanticConfig =
+            let semantic: SemanticConfig =
                 serde_json::from_str(value).map_err(|_| {
                     ConfigurationError::validation_message(
                         "semantic runtime configuration is invalid",
@@ -562,7 +565,7 @@ fn semantic_profile_transition(
             Ok(Some(semantic.active_profile))
         }
         DirectConfigurationMutation::Unset { key, .. }
-            if key.as_str() == crate::config::SEMANTIC_RUNTIME_SETTING_KEY =>
+            if key.as_str() == SEMANTIC_RUNTIME_SETTING_KEY =>
         {
             Ok(Some(None))
         }
@@ -658,7 +661,7 @@ pub(super) fn issue_direct_configuration_mutation_authority(
 fn configuration_request_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
-    operation: crate::application_surface::ApplicationSurfaceOperation,
+    operation: ApplicationSurfaceOperation,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -721,7 +724,7 @@ fn configuration_request_authority(
 pub(super) fn context_scout_request_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
-    operation: crate::application_surface::ApplicationSurfaceOperation,
+    operation: ApplicationSurfaceOperation,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,

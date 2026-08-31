@@ -14,7 +14,7 @@ use tracedecay_code_index::graph_projection::{
 };
 use tracedecay_domain::{CodeGenerationId, UtcMicros};
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum CodeGraphReadError {

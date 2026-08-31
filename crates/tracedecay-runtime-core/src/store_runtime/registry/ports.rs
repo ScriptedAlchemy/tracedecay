@@ -210,7 +210,7 @@ async fn verify_final_schema_before_existing_publication(
     crate::db::migrations::verify_final_schema_connection(&connection)
         .await
         .map_err(|error| match error {
-            crate::errors::TraceDecayError::ResetRequired { authority, reason } => {
+            tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, reason } => {
                 StoreRuntimeRegistryFailure::ResetRequired { authority, reason }
             }
             error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {

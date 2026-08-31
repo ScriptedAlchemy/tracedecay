@@ -28,7 +28,7 @@ pub(super) enum RemoteDeletionBootMode {
 #[hotpath::measure(label = "daemon.remote.deletion_boot", future = true)]
 pub(super) async fn resume_remote_account_deletion_for_boot(
     owners: &RemoteDeletionRuntimeOwners,
-) -> tracedecay_runtime_core::errors::Result<RemoteDeletionBootMode> {
+) -> tracedecay_domain::errors::Result<RemoteDeletionBootMode> {
     let Some(tombstone) = owners
         .administration
         .remote_account_deletion_tombstone()
@@ -249,7 +249,7 @@ pub(super) async fn dispatch_remote_deletion(
 #[derive(Debug)]
 pub(super) struct RemoteDeletionExecutionError {
     pub(super) receipt: RemoteDeletionReceipt,
-    pub(super) source: tracedecay_runtime_core::errors::TraceDecayError,
+    pub(super) source: tracedecay_domain::errors::TraceDecayError,
 }
 
 impl RemoteDeletionExecutionError {
@@ -258,7 +258,7 @@ impl RemoteDeletionExecutionError {
         code: RemoteDeletionFailureCode,
         phase: RemoteDeletionPhase,
         retryable: bool,
-        source: tracedecay_runtime_core::errors::TraceDecayError,
+        source: tracedecay_domain::errors::TraceDecayError,
     ) -> Self {
         receipt.status = if receipt.tombstone_recorded {
             if matches!(
@@ -303,7 +303,7 @@ async fn execute_remote_deletion(
                     RemoteDeletionFailureCode::InvalidRequest,
                     RemoteDeletionPhase::ValidateRequest,
                     false,
-                    tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    tracedecay_domain::errors::TraceDecayError::Config {
                         message: format!("remote deletion project identity is invalid: {error}"),
                     },
                 )

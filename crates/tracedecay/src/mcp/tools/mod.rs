@@ -27,14 +27,8 @@ pub(crate) use handlers::retained_catalog::{
     execute_profile_retained_mcp_tool, retained_mcp_operation,
 };
 pub(crate) use handlers::{
-    ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
-    ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
-    ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
-    ProjectRegistryReadPort, ProjectRegistrySelector, SessionRefreshAction, SessionRefreshCommand,
-    SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshProgressView,
-    SessionRefreshReceiptView, SessionRefreshServiceOutcome, SessionRefreshServicePort,
     handle_projectless_admin_cli, handle_projectless_hook_runtime,
-    replay_projectless_hermes_host_admission, utc_micros_value,
+    replay_projectless_hermes_host_admission,
 };
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,

@@ -2,7 +2,7 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::log_daemon_event;
 
@@ -52,7 +52,7 @@ mod tests {
     use tracedecay_store::{ProjectId, StoreIncarnationV1, StoreShardIdV1, VerifiedStoreLocatorV1};
 
     use super::join_independent_session_opens;
-    use tracedecay_runtime_core::errors::TraceDecayError;
+    use tracedecay_domain::errors::TraceDecayError;
 
     type ExactSessionIdentity = (StoreShardIdV1, VerifiedStoreLocatorV1);
 
@@ -151,7 +151,7 @@ mod tests {
             async move {
                 let _drop_receipt = DropReceipt(Some(dropped));
                 project_entered.wait().await;
-                std::future::pending::<tracedecay_runtime_core::errors::Result<ExactSessionIdentity>>().await
+                std::future::pending::<tracedecay_domain::errors::Result<ExactSessionIdentity>>().await
             },
             async move {
                 profile_entered.wait().await;

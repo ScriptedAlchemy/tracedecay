@@ -9,7 +9,7 @@ use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
 use crate::daemon::store_writer_gate::WriterAdmissionGuard;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     brain_id: BrainId,

@@ -12,7 +12,7 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 mod automation;
 mod lcm;
@@ -156,6 +156,17 @@ where
     }
 }
 
+/// One rendering of the typed session-retrieval unavailability reason shared
+/// by every retained family that consumes the retrieval service.
+pub(in crate::daemon) fn session_retrieval_unavailable_detail(
+    unavailable: &crate::daemon::session_retrieval::SessionRetrievalUnavailable,
+) -> String {
+    format!(
+        "the session retrieval service is unavailable: {:?}",
+        unavailable.reason
+    )
+}
+
 pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionErrorV1 {
     match error {
         TraceDecayError::Config { .. } => RetainedSurfaceExecutionErrorV1::InvalidRequest,
@@ -168,7 +179,10 @@ pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExec
         TraceDecayError::ResetRequired { .. } => {
             RetainedSurfaceExecutionErrorV1::ProjectResetRequired
         }
-        TraceDecayError::SyncLock { .. }
+        // The Display text already reaches operators on other surfaces (CLI
+        // config errors print it), so threading it here keeps the retained
+        // problem diagnostic equally honest about what actually failed.
+        error @ (TraceDecayError::SyncLock { .. }
         | TraceDecayError::ProjectRoute { .. }
         | TraceDecayError::Database { .. }
         | TraceDecayError::Search { .. }
@@ -177,7 +191,9 @@ pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExec
         | TraceDecayError::Io(_)
         | TraceDecayError::Sqlite(_)
         | TraceDecayError::Json(_)
-        | TraceDecayError::Automation(_) => RetainedSurfaceExecutionErrorV1::Unavailable,
+        | TraceDecayError::Automation(_)) => {
+            RetainedSurfaceExecutionErrorV1::unavailable(error.to_string())
+        }
     }
 }
 
@@ -192,9 +208,36 @@ mod tests {
             lifecycle: "kiro MCP registry lifecycle".to_string(),
         };
 
+        let RetainedSurfaceExecutionErrorV1::Unavailable { detail } = map_execution_error(error)
+        else {
+            panic!("host CLI unavailability must map to the unavailable terminal");
+        };
+        assert!(
+            detail.contains("kiro-cli"),
+            "the detail must name the missing host CLI, got: {detail}"
+        );
+    }
+
+    #[test]
+    fn unavailable_execution_problem_names_the_underlying_cause() {
+        let error = map_execution_error(TraceDecayError::Database {
+            message: "lcm store open failed: profile shard missing".to_owned(),
+            operation: "lcm_store_open".to_owned(),
+        });
+
+        let problem = tracedecay_application::retained_surface_execution_problem(error);
+        let diagnostic = problem
+            .diagnostic()
+            .expect("an unavailable problem carries a diagnostic")
+            .clone();
         assert_eq!(
-            map_execution_error(error),
-            RetainedSurfaceExecutionErrorV1::Unavailable
+            diagnostic.code,
+            "application.retained.authority-unavailable"
+        );
+        assert!(
+            diagnostic.message.contains("lcm store open failed"),
+            "the problem must name the underlying cause, got: {}",
+            diagnostic.message
         );
     }
 }

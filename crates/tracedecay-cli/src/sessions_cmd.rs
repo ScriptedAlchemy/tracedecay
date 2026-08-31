@@ -62,7 +62,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
 
 pub(crate) async fn handle_sessions_action(
     action: SessionsAction,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     match action {
         SessionsAction::Import {
             project_id,
@@ -105,7 +105,7 @@ pub(crate) async fn handle_sessions_action(
 async fn handle_sessions_import(
     project_id: Option<String>,
     project_path: Option<String>,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
     let outcome = call_daemon_tool(
         &project_path,
@@ -119,7 +119,7 @@ async fn handle_sessions_import(
 #[hotpath::measure(label = "cli.sessions.search", future = true)]
 async fn handle_sessions_search(
     args: SessionsSearchArgs,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let project_id = args.project_id.clone();
     let project_path = args.project_path.clone();
     let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
@@ -160,7 +160,7 @@ async fn handle_sessions_unfinished(
     json: bool,
     project_id: Option<String>,
     project_path: Option<String>,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
     let payload = call_daemon_tool(
         &project_path,
@@ -173,7 +173,7 @@ async fn handle_sessions_unfinished(
         println!(
             "{}",
             serde_json::to_string_pretty(&items).map_err(|e| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                tracedecay_domain::errors::TraceDecayError::Config {
                     message: e.to_string(),
                 }
             })?
@@ -242,7 +242,7 @@ enum SessionRefreshOutcome {
 }
 
 impl SessionRefreshOutcome {
-    fn parse(payload: &Value) -> tracedecay_runtime_core::errors::Result<Self> {
+    fn parse(payload: &Value) -> tracedecay_domain::errors::Result<Self> {
         let outcome = payload
             .get("outcome")
             .and_then(Value::as_str)
@@ -310,7 +310,7 @@ impl SessionRefreshOutcome {
 
 async fn handle_session_refresh_action(
     action: SessionsRefreshAction,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let transport = LiveSessionRefreshDaemonTransport;
     handle_session_refresh_action_with_transport(&transport, action).await
 }
@@ -318,7 +318,7 @@ async fn handle_session_refresh_action(
 async fn handle_session_refresh_action_with_transport<T>(
     transport: &T,
     action: SessionsRefreshAction,
-) -> tracedecay_runtime_core::errors::Result<()>
+) -> tracedecay_domain::errors::Result<()>
 where
     T: SessionRefreshDaemonTransport + ?Sized,
 {
@@ -418,7 +418,7 @@ async fn dispatch_session_refresh<T>(
     selectors: &SessionRefreshSelectors,
     handle: Option<&str>,
     json_output: bool,
-) -> tracedecay_runtime_core::errors::Result<()>
+) -> tracedecay_domain::errors::Result<()>
 where
     T: SessionRefreshDaemonTransport + ?Sized,
 {
@@ -431,17 +431,17 @@ async fn execute_session_refresh<T>(
     mode: SessionRefreshMode,
     selectors: &SessionRefreshSelectors,
     handle: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<Value>
+) -> tracedecay_domain::errors::Result<Value>
 where
     T: SessionRefreshDaemonTransport + ?Sized,
 {
     if selectors.source > selectors.target {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "--source must not exceed --target for a session refresh".to_string(),
         });
     }
     tracedecay_sessions::runtime::ProviderScope::parse_optional(Some(&selectors.provider))
-        .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Config { message })?;
+        .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })?;
     validate_refresh_handle(mode, handle)?;
 
     let scope = resolve_session_refresh_scope(transport, selectors).await?;
@@ -457,7 +457,7 @@ where
 fn validate_refresh_handle(
     mode: SessionRefreshMode,
     handle: Option<&str>,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let handle = handle.map(str::trim);
     if mode.begins_or_joins() {
         return match handle {
@@ -492,7 +492,7 @@ struct ResolvedSessionRefreshScope {
 async fn resolve_session_refresh_scope<T>(
     transport: &T,
     selectors: &SessionRefreshSelectors,
-) -> tracedecay_runtime_core::errors::Result<ResolvedSessionRefreshScope>
+) -> tracedecay_domain::errors::Result<ResolvedSessionRefreshScope>
 where
     T: SessionRefreshDaemonTransport + ?Sized,
 {
@@ -568,7 +568,7 @@ where
 fn resolve_project_refresh_scope(
     context: &Value,
     active: &Value,
-) -> tracedecay_runtime_core::errors::Result<ResolvedSessionRefreshScope> {
+) -> tracedecay_domain::errors::Result<ResolvedSessionRefreshScope> {
     if context.get("status").and_then(Value::as_str) != Some("ok") {
         return Err(refresh_config_error(
             "registered project context was not found for the refresh selector",
@@ -639,7 +639,7 @@ fn resolve_project_refresh_scope(
 fn required_context_string(
     object: &serde_json::Map<String, Value>,
     field: &str,
-) -> tracedecay_runtime_core::errors::Result<String> {
+) -> tracedecay_domain::errors::Result<String> {
     object
         .get(field)
         .and_then(Value::as_str)
@@ -701,7 +701,7 @@ fn session_refresh_payload(
 fn emit_session_refresh_outcome(
     payload: Value,
     json_output: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let outcome = SessionRefreshOutcome::parse(&payload)?;
     if json_output {
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -709,7 +709,7 @@ fn emit_session_refresh_outcome(
         println!("{}", session_refresh_human_outcome(outcome, &payload));
     }
     if outcome.is_failure() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("session refresh {}", outcome.label()),
         });
     }
@@ -777,14 +777,14 @@ fn append_session_refresh_record(output: &mut String, record: &serde_json::Map<S
     }
 }
 
-fn refresh_config_error(message: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+fn refresh_config_error(message: &str) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: message.to_string(),
     }
 }
 
-fn refresh_response_error(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
+fn refresh_response_error(detail: &str) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("daemon sessions refresh response {detail}"),
     }
 }
@@ -793,7 +793,7 @@ async fn call_daemon_tool(
     project_root: &Path,
     tool_name: &str,
     arguments: Value,
-) -> tracedecay_runtime_core::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
     call_daemon_tool_for_scope(Some(project_root), tool_name, arguments).await
 }
 
@@ -801,12 +801,12 @@ async fn call_daemon_tool_for_scope(
     project_root: Option<&Path>,
     tool_name: &str,
     arguments: Value,
-) -> tracedecay_runtime_core::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
     crate::commands::daemon_tool_json(project_root, tool_name, arguments).await
 }
 
 type SessionRefreshDaemonFuture<'a> =
-    Pin<Box<dyn Future<Output = tracedecay_runtime_core::errors::Result<Value>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<Value>> + Send + 'a>>;
 
 trait SessionRefreshDaemonTransport {
     fn call<'a>(

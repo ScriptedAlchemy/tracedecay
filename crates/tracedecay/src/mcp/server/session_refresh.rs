@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
 use tracedecay_domain::ProjectId;
 
-use crate::mcp::tools::{
+use tracedecay_mcp::{
     SessionRefreshCommand, SessionRefreshCoverageView, SessionRefreshFrontierView,
     SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
     SessionRefreshServicePort, utc_micros_value,
@@ -159,12 +159,12 @@ impl DaemonSessionRefreshService {
             return SessionRefreshServiceOutcome::Unavailable;
         };
         let outcome = match command.action {
-            crate::mcp::tools::SessionRefreshAction::Begin => {
+            tracedecay_mcp::SessionRefreshAction::Begin => {
                 service
                     .begin_or_join(&command.context, &command.binding, command.target)
                     .await
             }
-            crate::mcp::tools::SessionRefreshAction::Status => {
+            tracedecay_mcp::SessionRefreshAction::Status => {
                 let handle = match command.handle.as_deref().map(|token| self.handle(token)) {
                     Some(SessionRefreshHandleLookup::Found(handle)) => handle,
                     Some(SessionRefreshHandleLookup::Stale) => {
@@ -178,7 +178,7 @@ impl DaemonSessionRefreshService {
                     .status(&command.context, &command.binding, &handle)
                     .await
             }
-            crate::mcp::tools::SessionRefreshAction::Cancel => {
+            tracedecay_mcp::SessionRefreshAction::Cancel => {
                 let handle = match command.handle.as_deref().map(|token| self.handle(token)) {
                     Some(SessionRefreshHandleLookup::Found(handle)) => handle,
                     Some(SessionRefreshHandleLookup::Stale) => {

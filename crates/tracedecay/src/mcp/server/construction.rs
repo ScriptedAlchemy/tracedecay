@@ -14,7 +14,7 @@ use tracedecay_application::{
     remote::status::RemoteOperationalStatusReadPort,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_usecases::session::SessionProjectionServingStatusPort;
+use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
 
@@ -54,7 +54,7 @@ pub(crate) type CodeIndexIgnoredDependencyAdmissionPort =
 pub(crate) use tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest;
 pub(crate) type RetainedProjectServerFuture = Pin<
     Box<
-        dyn Future<Output = tracedecay_runtime_core::errors::Result<Option<Arc<super::McpServer>>>>
+        dyn Future<Output = tracedecay_domain::errors::Result<Option<Arc<super::McpServer>>>>
             + Send
             + 'static,
     >,
@@ -103,7 +103,7 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
                         .is_some_and(|identity| identity.profile_id() == &expected_profile_id);
                     if !profile_matches {
                         return Err(
-                            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                            tracedecay_domain::errors::TraceDecayError::project_route(
                                 "project_route_not_authorized",
                                 false,
                                 "retained dashboard project belongs to another profile",

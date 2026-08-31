@@ -9,12 +9,12 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn ensure_session_cursor_key_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_domain::SignedCursorKeyRefV1> {
+    ) -> tracedecay_domain::errors::Result<tracedecay_domain::SignedCursorKeyRefV1> {
         self.session_database_for_test(scope)?
             .ensure_active_session_cursor_key_result()
             .await
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "provision test session cursor authentication key".to_owned(),
                     message: error.to_string(),
                 },
@@ -25,7 +25,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn session_activity_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         tracedecay_automation_runtime::automation::scheduler::SessionActivity,
     > {
         Ok(
@@ -40,7 +40,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn transcript_store_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         tracedecay_usecases::store::transcript::GlobalDbTranscriptStore<
             &'_ tracedecay_global_db::RegisteredGlobalDb,
         >,
@@ -57,7 +57,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         path: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
+    ) -> tracedecay_domain::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
         Ok(self
             .session_database_for_test(scope)?
             .get_parse_offset(path)
@@ -70,12 +70,12 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         path: &str,
         offset: tracedecay_global_db::ParseOffset,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         self.session_database_for_test(scope)?
             .set_parse_offset(path, offset)
             .await
             .map_err(
-                |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |message| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "set retained test parse offset".to_owned(),
                     message,
                 },
@@ -87,7 +87,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         project_key: Option<&str>,
-    ) -> tracedecay_runtime_core::errors::Result<i64> {
+    ) -> tracedecay_domain::errors::Result<i64> {
         let database = self.session_database_for_test(scope)?;
         let result = match project_key {
             Some(project_key) => {
@@ -98,7 +98,7 @@ impl HostAdmissionTestRuntimeV1 {
             None => database.session_message_count().await,
         };
         result.map_err(
-            |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            |message| tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "count registered session messages".to_owned(),
                 message,
             },
@@ -110,12 +110,12 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         provider: Option<&str>,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_global_db::SessionIngestHealth> {
+    ) -> tracedecay_domain::errors::Result<tracedecay_global_db::SessionIngestHealth> {
         self.session_database_for_test(scope)?
             .session_ingest_health_for_provider(provider)
             .await
             .map_err(
-                |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |message| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "read registered session ingest health".to_owned(),
                     message,
                 },
@@ -127,7 +127,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         enabled: bool,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let statement = if enabled {
             "CREATE TRIGGER fail_parse_offset_insert
              BEFORE INSERT ON parse_offsets
@@ -142,7 +142,7 @@ impl HostAdmissionTestRuntimeV1 {
             .execute_batch(statement)
             .await
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "configure registered parse-offset failure".to_owned(),
                     message: error.to_string(),
                 },
@@ -154,12 +154,12 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         path: &str,
         offset: tracedecay_global_db::ParseOffset,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         self.project_database_for_test()?
             .advance_parse_offset_result(path, offset)
             .await
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "write registered project parse offset test seed".to_owned(),
                     message: error.to_string(),
                 },
@@ -202,7 +202,7 @@ impl HostAdmissionTestRuntimeV1 {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
     > {
         self.session_database_for_test(scope)?
@@ -219,7 +219,7 @@ impl HostAdmissionTestRuntimeV1 {
         query: &str,
         limit: usize,
         filters: tracedecay_sessions::runtime::SessionSearchFilters<'_>,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
     > {
         let fetch_limit = limit.saturating_mul(16).max(limit);
@@ -288,12 +288,12 @@ impl HostAdmissionTestRuntimeV1 {
         limit: usize,
         filters: tracedecay_sessions::runtime::SessionSearchFilters<'_>,
         git_filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
     > {
         let provider =
             provider.ok_or_else(
-                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                || tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "search registered git-scoped session messages".to_owned(),
                     message: "test facade requires an exact provider".to_owned(),
                 },
@@ -302,7 +302,7 @@ impl HostAdmissionTestRuntimeV1 {
         let scoped_ids = tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
             .session_ids_for_scope(git_filter)
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "resolve registered git-scoped sessions".to_owned(),
                     message: error.to_string(),
                 },
@@ -332,7 +332,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         enabled: bool,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let writer = self.session_database_for_test(scope)?.writer_connection()?;
         let statement = if enabled {
             "CREATE TRIGGER fail_session_message_projection
@@ -344,7 +344,7 @@ impl HostAdmissionTestRuntimeV1 {
             "DROP TRIGGER IF EXISTS fail_session_message_projection;"
         };
         writer.execute_batch(statement).await.map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "set registered session projection failure fixture".to_owned(),
                 message: error.to_string(),
             }
@@ -384,11 +384,11 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         provider: Option<tracedecay_sessions::runtime::SessionProvider>,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         tracedecay_sessions::runtime::shared::TranscriptIngestStats,
     > {
         let project_id = self.project_id.as_ref().ok_or_else(|| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "ingest registered project provider test fixture".to_owned(),
                 message: "registered project identity is unavailable".to_owned(),
             }
@@ -414,7 +414,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_parse_offset_for_test(
         &self,
         path: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
+    ) -> tracedecay_domain::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
         Ok(self
             .project_database_for_test()?
             .get_parse_offset(path)
@@ -426,7 +426,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
+    ) -> tracedecay_domain::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
     {
         Ok(self
             .project_database_for_test()?
@@ -439,7 +439,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         Option<tracedecay_sessions::runtime::SessionMessageRecord>,
     > {
         self.project_database_for_test()?
@@ -454,7 +454,7 @@ impl HostAdmissionTestRuntimeV1 {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
     > {
         self.project_database_for_test()?
@@ -467,7 +467,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_key: &str,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
     > {
         self.project_database_for_test()?
@@ -480,7 +480,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<
+    ) -> tracedecay_domain::errors::Result<
         Option<tracedecay_sessions::runtime::lcm::LcmRawMessage>,
     > {
         let database = self.project_database_for_test()?;
@@ -488,7 +488,7 @@ impl HostAdmissionTestRuntimeV1 {
         tracedecay_sessions::runtime::lcm::schema::load_raw_message(&snapshot, provider, message_id)
             .await
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "read project LCM raw message fixture".to_owned(),
                     message: error.to_string(),
                 },
@@ -502,7 +502,7 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         provider: &str,
         session_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<i64>> {
+    ) -> tracedecay_domain::errors::Result<Vec<i64>> {
         let snapshot = self
             .session_database_for_test(scope)?
             .read_snapshot()
@@ -516,20 +516,20 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "query registered LCM raw message store ids".to_owned(),
                     message: error.to_string(),
                 },
             )?;
         let mut store_ids = Vec::new();
         while let Some(row) = rows.next().await.map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "read registered LCM raw message store ids".to_owned(),
                 message: error.to_string(),
             }
         })? {
             store_ids.push(row.get::<i64>(0).map_err(|error| {
-                tracedecay_runtime_core::errors::TraceDecayError::Database {
+                tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "decode registered LCM raw message store id".to_owned(),
                     message: error.to_string(),
                 }
@@ -542,7 +542,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_parse_offset_by_suffix_for_test(
         &self,
         suffix: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
+    ) -> tracedecay_domain::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
         let snapshot = self.project_database_for_test()?.read_snapshot().await?;
         let mut rows = snapshot
             .query(
@@ -555,13 +555,13 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "query registered project parse offset by suffix".to_owned(),
                     message: error.to_string(),
                 },
             )?;
         let Some(row) = rows.next().await.map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
+            tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "read registered project parse offset by suffix".to_owned(),
                 message: error.to_string(),
             }
@@ -573,7 +573,7 @@ impl HostAdmissionTestRuntimeV1 {
             row.get::<i64>(index)
                 .map(|value| u64::try_from(value).unwrap_or_default())
                 .map_err(
-                    |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    |error| tracedecay_domain::errors::TraceDecayError::Database {
                         operation: "decode registered project parse offset by suffix".to_owned(),
                         message: error.to_string(),
                     },
@@ -591,7 +591,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn set_project_projection_failure_for_test(
         &self,
         enabled: bool,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<()> {
         let statement = if enabled {
             "CREATE TRIGGER fail_session_message_projection
              BEFORE INSERT ON session_messages
@@ -607,7 +607,7 @@ impl HostAdmissionTestRuntimeV1 {
             .execute_batch(statement)
             .await
             .map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "configure registered project projection failure".to_owned(),
                     message: error.to_string(),
                 },

@@ -32,7 +32,7 @@ use tracedecay_domain::{
 use tracedecay_lsp::DiagnosticSource;
 
 use crate::diagnostics_store::DiagnosticsStore;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Cataloged production diagnostic producers.
 ///

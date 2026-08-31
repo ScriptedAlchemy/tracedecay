@@ -7,7 +7,7 @@
 //! the reader-pool and store-runtime registry projections, and the
 //! generation-census reader attached by the exact daemon route.
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::runtime_telemetry::{
     DatabaseSnapshot, GenerationCensusReader, GenerationCensusSnapshot,
     GenerationCensusUnavailableReason, ReaderPoolOccupancy, RuntimeRegistrySnapshot,

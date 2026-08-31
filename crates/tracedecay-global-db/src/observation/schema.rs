@@ -8,7 +8,7 @@ use super::super::global_db_operation_error;
 /// ever shipped in a published release (`observations` is absent from both the
 /// v0.0.66 package and `origin/master`), so any schema drift here is a
 /// branch-local development artifact and refuses admission with
-/// [`ResetRequired`](tracedecay_runtime_core::errors::TraceDecayError::ResetRequired)
+/// [`ResetRequired`](tracedecay_domain::errors::TraceDecayError::ResetRequired)
 /// instead of migrating.
 pub const OBSERVATION_AUTHORITY: &str = "observations";
 
@@ -43,7 +43,7 @@ pub(super) const OBSERVATION_SCHEMA_OPERATION: &str = "ensure observation author
 
 async fn observation_table_exists(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'observations'",
@@ -60,7 +60,7 @@ async fn observation_table_exists(
 pub(super) async fn migration_recorded(
     conn: &impl QueryExecutor,
     migration: &str,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM global_schema_migrations WHERE migration = ?1",
@@ -77,7 +77,7 @@ pub(super) async fn migration_recorded(
 async fn table_columns(
     conn: &impl QueryExecutor,
     table: &str,
-) -> tracedecay_runtime_core::errors::Result<BTreeSet<String>> {
+) -> tracedecay_domain::errors::Result<BTreeSet<String>> {
     let mut rows = conn
         .query("SELECT name FROM pragma_table_xinfo(?1)", params![table])
         .await
@@ -111,13 +111,13 @@ fn canonical_column_set(columns: &[&str]) -> BTreeSet<String> {
 /// at the attach boundary for existing ones.
 async fn require_admitted_observation_shape(
     conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     if observation_table_exists(conn).await? {
         let columns = table_columns(conn, "observations").await?;
         let recorded = migration_recorded(conn, OBSERVATION_SCHEMA_MIGRATION).await?;
         if columns != canonical_column_set(OBSERVATION_CANONICAL_COLUMNS) || !recorded {
             return Err(
-                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                tracedecay_domain::errors::TraceDecayError::reset_required(
                     OBSERVATION_AUTHORITY,
                     "observations carries a pre-release branch-local shape that no \
                      published binary ever wrote; there is no sanctioned migration, \
@@ -132,7 +132,7 @@ async fn require_admitted_observation_shape(
         && advances != canonical_column_set(SOURCE_CURSOR_ADVANCES_CANONICAL_COLUMNS)
     {
         return Err(
-            tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+            tracedecay_domain::errors::TraceDecayError::reset_required(
                 OBSERVATION_AUTHORITY,
                 "source_cursor_advances carries a pre-release branch-local shape \
                  that no published binary ever wrote; there is no sanctioned \
@@ -265,7 +265,7 @@ pub(super) const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
 
 pub async fn ensure_observation_schema(
     conn: &(impl Executor + Sync),
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let table_preexisted = observation_table_exists(conn).await?;
     tracedecay_runtime_core::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
         conn,

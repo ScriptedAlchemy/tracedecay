@@ -128,6 +128,7 @@ grafeo-common.workspace = true
 grafeo-core.workspace = true
 grafeo-engine.workspace = true
 grafeo-storage.workspace = true
+fs2 = "0.4"
 hex = "0.4"
 hotpath.workspace = true
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
@@ -223,6 +224,13 @@ required-features = ["test-helpers"]
 # it is `#[ignore]`d, so it costs a compile and nothing else in a normal run.
 [[test]]
 name = "tiered_storage_rss"
+required-features = ["test-helpers"]
+
+# Residency probe for consecutive generation cycles (stage, retire, repeat)
+# on one incarnation — the issue #762 cross-cycle retention journey. Also
+# `#[ignore]`d.
+[[test]]
+name = "generation_cycle_rss"
 required-features = ["test-helpers"]
 
 # At-rest snapshot probe: reopen cost of a sealed generation, full LPG replay

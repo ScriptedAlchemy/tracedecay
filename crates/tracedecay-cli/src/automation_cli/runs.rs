@@ -4,7 +4,7 @@ use crate::resolve_cli_project_root;
 
 pub(super) async fn handle_automation_runs_command(
     action: AutomationRunsAction,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     use tracedecay_automation_runtime::automation::run_ledger::{
         find_run_record, load_run_records, read_run_artifact_payload,
     };
@@ -39,7 +39,7 @@ pub(super) async fn handle_automation_runs_command(
             let record = find_run_record(&dashboard_root, &run_id)
                 .await?
                 .ok_or_else(
-                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    || tracedecay_domain::errors::TraceDecayError::Config {
                         message: format!("automation run not found: {run_id}"),
                     },
                 )?;
@@ -61,7 +61,7 @@ pub(super) async fn handle_automation_runs_command(
             let record = find_run_record(&dashboard_root, &run_id)
                 .await?
                 .ok_or_else(
-                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    || tracedecay_domain::errors::TraceDecayError::Config {
                         message: format!("automation run not found: {run_id}"),
                     },
                 )?;
@@ -70,7 +70,7 @@ pub(super) async fn handle_automation_runs_command(
                 .iter()
                 .find(|artifact| artifact.kind == kind)
                 .ok_or_else(
-                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    || tracedecay_domain::errors::TraceDecayError::Config {
                         message: format!("automation run artifact not found: {run_id}/{kind}"),
                     },
                 )?;
@@ -158,7 +158,7 @@ fn print_automation_run_artifact(
     run_id: &str,
     artifact: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunArtifact,
     payload: &serde_json::Value,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     println!("run_id: {run_id}");
     println!("artifact: {}", artifact.kind);
     println!("path: {}", artifact.path);

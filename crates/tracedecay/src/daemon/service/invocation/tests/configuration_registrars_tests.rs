@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
-    let _pin = crate::config::PinnedUserDataDir::new();
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let (graph, runtime) =
         crate::tracedecay::TraceDecay::init_test_fixture_with_registered_runtime(

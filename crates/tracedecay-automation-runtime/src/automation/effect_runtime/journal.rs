@@ -23,7 +23,7 @@ use tracedecay_private_fs::framed_log::{
 use super::contract::contract_error;
 use super::retirement::RetirementBinding;
 use super::terminal::{AutomationSettledProblem, AutomationSettledTerminal};
-use tracedecay_runtime_core::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Production builds keep the item crate-private. Test / `test-helpers` builds
 /// expose it so composition-root journal tests can drive internals without

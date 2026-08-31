@@ -14,7 +14,7 @@ use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::service::invocation::{DaemonAdvisoryRuntimeRegistrar, DaemonRetainedRuntimeRegistrar};
 use super::*;
@@ -83,6 +83,12 @@ impl DaemonInvocationState {
 
     pub(super) fn invocation_service(&self) -> DaemonInvocationService {
         self.service.clone()
+    }
+
+    pub(in crate::daemon) fn github_stack_coordinator(
+        &self,
+    ) -> Arc<tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
+        self.service.github_stack_coordinator()
     }
 
     /// Mount the profile-owned background-worker plan before any projectless

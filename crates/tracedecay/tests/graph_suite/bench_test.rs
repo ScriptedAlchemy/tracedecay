@@ -39,7 +39,7 @@ task = "what does world do"
     .expect_err("bench must not bypass admitted graph authority");
 
     match error {
-        tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
+        tracedecay_domain::errors::TraceDecayError::ProjectRoute {
             reason_code,
             retryable,
             detail,

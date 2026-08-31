@@ -8,7 +8,7 @@ use tracedecay_application::retained_surfaces::{
     TemporalCoverageV1,
 };
 
-use crate::mcp::tools::{
+use tracedecay_mcp::{
     SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshProgressView,
     SessionRefreshReceiptView, SessionRefreshServiceOutcome,
 };
@@ -242,8 +242,10 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
             )
         }
         SessionRefreshServiceOutcome::Running(_) => RetainedSurfaceExecutionErrorV1::Conflict,
-        SessionRefreshServiceOutcome::Unavailable
-        | SessionRefreshServiceOutcome::Complete(_)
+        SessionRefreshServiceOutcome::Unavailable => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session refresh service is unavailable",
+        ),
+        SessionRefreshServiceOutcome::Complete(_)
         | SessionRefreshServiceOutcome::Failed(_)
         | SessionRefreshServiceOutcome::Cancelled(_)
         | SessionRefreshServiceOutcome::CancelledReconciliationRequired(_)
@@ -251,7 +253,9 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
         | SessionRefreshServiceOutcome::StartedReconciliationRequired { .. }
         | SessionRefreshServiceOutcome::Joined { .. }
         | SessionRefreshServiceOutcome::JoinedReconciliationRequired { .. } => {
-            RetainedSurfaceExecutionErrorV1::Unavailable
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the session refresh service returned an unexpected outcome shape",
+            )
         }
     }
 }
@@ -284,80 +288,79 @@ fn refresh_error(code: &str, message: &str) -> RetainedErrorV1 {
 fn refresh_progress(
     value: SessionRefreshProgressView,
 ) -> Result<SessionRefreshProgressV1, RetainedSurfaceExecutionErrorV1> {
-    Ok(SessionRefreshProgressV1::from(value))
+    Ok(session_refresh_progress_from_view(value))
 }
 
 fn refresh_receipt(
     value: SessionRefreshReceiptView,
 ) -> Result<SessionRefreshReceiptV1, RetainedSurfaceExecutionErrorV1> {
-    SessionRefreshReceiptV1::try_from(value)
-        .map_err(|()| RetainedSurfaceExecutionErrorV1::Unavailable)
+    session_refresh_receipt_from_view(value).ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the session refresh receipt could not be projected",
+        )
+    })
 }
 
-impl From<SessionRefreshFrontierView> for SessionRefreshFrontierResultV1 {
-    fn from(value: SessionRefreshFrontierView) -> Self {
-        Self {
-            observed_through: value.observed_through,
-            committed_through: value.committed_through,
-        }
+fn session_refresh_frontier_from_view(
+    value: SessionRefreshFrontierView,
+) -> SessionRefreshFrontierResultV1 {
+    SessionRefreshFrontierResultV1 {
+        observed_through: value.observed_through,
+        committed_through: value.committed_through,
     }
 }
 
-impl From<SessionRefreshCoverageView> for TemporalCoverageV1 {
-    fn from(value: SessionRefreshCoverageView) -> Self {
-        Self {
-            visible: value.visible,
-            hidden: value.hidden,
-            unknown: value.unknown,
-            redacted: value.redacted,
-        }
+fn temporal_coverage_from_view(value: SessionRefreshCoverageView) -> TemporalCoverageV1 {
+    TemporalCoverageV1 {
+        visible: value.visible,
+        hidden: value.hidden,
+        unknown: value.unknown,
+        redacted: value.redacted,
     }
 }
 
-impl From<SessionRefreshProgressView> for SessionRefreshProgressV1 {
-    fn from(value: SessionRefreshProgressView) -> Self {
-        Self {
-            operation_id: value.operation_id,
-            session_id: value.session_id,
-            frontier: value.frontier.into(),
-            coverage: value.coverage.into(),
-            source_coverage: value
-                .source_coverage
-                .into_iter()
-                .map(super::source_coverage)
-                .collect(),
-            committed_batches: value.committed_batches,
-            committed_records: value.committed_records,
-            updated_at: value.updated_at,
-        }
+fn session_refresh_progress_from_view(
+    value: SessionRefreshProgressView,
+) -> SessionRefreshProgressV1 {
+    SessionRefreshProgressV1 {
+        operation_id: value.operation_id,
+        session_id: value.session_id,
+        frontier: session_refresh_frontier_from_view(value.frontier),
+        coverage: temporal_coverage_from_view(value.coverage),
+        source_coverage: value
+            .source_coverage
+            .into_iter()
+            .map(super::source_coverage)
+            .collect(),
+        committed_batches: value.committed_batches,
+        committed_records: value.committed_records,
+        updated_at: value.updated_at,
     }
 }
 
-impl TryFrom<SessionRefreshReceiptView> for SessionRefreshReceiptV1 {
-    type Error = ();
-
-    fn try_from(value: SessionRefreshReceiptView) -> Result<Self, Self::Error> {
-        let state = match value.state.as_str() {
-            "complete" => SessionRefreshTerminalStateResultV1::Complete,
-            "failed" => SessionRefreshTerminalStateResultV1::Failed,
-            "cancelled" => SessionRefreshTerminalStateResultV1::Cancelled,
-            _ => return Err(()),
-        };
-        Ok(Self {
-            operation_id: value.operation_id,
-            session_id: value.session_id,
-            frontier: value.frontier.into(),
-            coverage: value.coverage.into(),
-            source_coverage: value
-                .source_coverage
-                .into_iter()
-                .map(super::source_coverage)
-                .collect(),
-            state,
-            failure_code: value.failure_code,
-            terminal_at: value.terminal_at,
-        })
-    }
+fn session_refresh_receipt_from_view(
+    value: SessionRefreshReceiptView,
+) -> Option<SessionRefreshReceiptV1> {
+    let state = match value.state.as_str() {
+        "complete" => SessionRefreshTerminalStateResultV1::Complete,
+        "failed" => SessionRefreshTerminalStateResultV1::Failed,
+        "cancelled" => SessionRefreshTerminalStateResultV1::Cancelled,
+        _ => return None,
+    };
+    Some(SessionRefreshReceiptV1 {
+        operation_id: value.operation_id,
+        session_id: value.session_id,
+        frontier: session_refresh_frontier_from_view(value.frontier),
+        coverage: temporal_coverage_from_view(value.coverage),
+        source_coverage: value
+            .source_coverage
+            .into_iter()
+            .map(super::source_coverage)
+            .collect(),
+        state,
+        failure_code: value.failure_code,
+        terminal_at: value.terminal_at,
+    })
 }
 
 #[cfg(test)]

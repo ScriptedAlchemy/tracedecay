@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 #[cfg(any(windows, test))]
 use serde::{Deserialize, Serialize};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{DaemonServiceSpec, DaemonServiceState};
 

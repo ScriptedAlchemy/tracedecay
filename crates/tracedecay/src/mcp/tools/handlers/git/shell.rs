@@ -5,6 +5,26 @@ use super::*;
 const PR_CONTEXT_MAX_ANCESTRY_COMMITS: usize = 100_000;
 const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
 
+/// Opens the project repository for one git-backed tool call.
+///
+/// `gix::open` leniently admits a plain directory as a bare git dir; every
+/// later read then fails with a confusing ref-resolution error instead of
+/// naming the real problem. Require a HEAD reference (present even in a
+/// freshly initialized repository with no commits) so a non-repository
+/// project reports the typed open failure.
+fn open_project_repository(
+    project_root: &std::path::Path,
+) -> std::result::Result<gix::Repository, String> {
+    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    if repo.head().is_err() {
+        return Err(format!(
+            "failed to open git repo: '{}' has no HEAD reference and is not a git repository",
+            project_root.display()
+        ));
+    }
+    Ok(repo)
+}
+
 #[hotpath::measure(label = "mcp.git.shell.resolve")]
 fn resolve_pr_comparison_commit(
     repo: &gix::Repository,
@@ -102,7 +122,7 @@ pub(super) fn git_pr_comparison_controlled(
     cancelled: &(impl Fn() -> bool + ?Sized),
 ) -> std::result::Result<GitPrComparison, String> {
     check_git_pr_cancelled(cancelled)?;
-    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    let repo = open_project_repository(project_root)?;
     check_git_pr_cancelled(cancelled)?;
     let base_commit = repo
         .find_commit(resolve_pr_comparison_commit(&repo, base_ref)?)
@@ -177,7 +197,7 @@ fn git_diff_file_changes_controlled(
     cancelled: &(impl Fn() -> bool + ?Sized),
 ) -> std::result::Result<Vec<GitFileChange>, String> {
     check_git_pr_cancelled(cancelled)?;
-    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    let repo = open_project_repository(project_root)?;
     let from_tree = repo
         .rev_parse_single(from_ref)
         .map_err(|e| format!("cannot resolve '{from_ref}': {e}"))?
@@ -289,7 +309,7 @@ pub(super) fn git_changed_files(
     project_root: &std::path::Path,
     staged_only: bool,
 ) -> std::result::Result<Vec<String>, String> {
-    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    let repo = open_project_repository(project_root)?;
 
     let head_tree = repo
         .head()
@@ -369,7 +389,7 @@ pub(super) fn git_recent_commits(
     project_root: &std::path::Path,
     count: usize,
 ) -> std::result::Result<Vec<String>, String> {
-    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    let repo = open_project_repository(project_root)?;
 
     let mut commits = Vec::new();
     let head = repo
@@ -416,7 +436,7 @@ fn git_commit_log_controlled(
     cancelled: &(impl Fn() -> bool + ?Sized),
 ) -> std::result::Result<Vec<Value>, String> {
     check_git_pr_cancelled(cancelled)?;
-    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    let repo = open_project_repository(project_root)?;
 
     let base_id = repo
         .rev_parse_single(base_ref)
@@ -756,5 +776,19 @@ mod tests {
         let empty: HashSet<String> = HashSet::new();
         assert_eq!(classify_file_role("tests/integration.rs", &empty), "test");
         assert_eq!(classify_file_role("src/foo_test.rs", &empty), "test");
+    }
+
+    /// A project directory that is not a git repository must report the typed
+    /// open failure, not a later ref-resolution error from a leniently opened
+    /// non-repository.
+    #[test]
+    fn plain_directory_is_refused_as_git_repository() {
+        let directory = tempfile::tempdir().expect("plain fixture directory");
+        let error = open_project_repository(directory.path())
+            .expect_err("a plain directory is not a git repository");
+        assert!(
+            error.contains("failed to open git repo"),
+            "the refusal must name the open failure: {error}"
+        );
     }
 }

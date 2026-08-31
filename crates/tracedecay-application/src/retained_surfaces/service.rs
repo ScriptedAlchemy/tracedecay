@@ -51,7 +51,13 @@ pub enum RetainedSurfaceExecutionErrorV1 {
     Stale,
     Unsupported,
     Saturated,
-    Unavailable,
+    /// The authority cannot serve the request right now. `detail` names the
+    /// exact cause (the underlying error or the absent authority) so every
+    /// dispatch surface can hand the caller a corrective message instead of a
+    /// blank terminal — mirroring the decode-request diagnostic contract.
+    Unavailable {
+        detail: String,
+    },
     ProfileResetRequired,
     ProjectResetRequired,
     Cancelled(CancellationStage),
@@ -238,21 +244,29 @@ impl<'a> RetainedSurfaceServiceV1<'a> {
                             port.execute_fact_store_curate(execution_context, request)
                                 .await
                         }
-                        None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+                        None => Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                            "the retained automation authority is not mounted for this scope",
+                        )),
                     }
                 }
             }
             RetainedSurfaceDispatch::Memory(request) => match self.ports.memory.as_ref() {
                 Some(port) => port.execute_memory(execution_context, request).await,
-                None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+                None => Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the retained memory authority is not mounted for this scope",
+                )),
             },
             RetainedSurfaceDispatch::Session(request) => match self.ports.session.as_ref() {
                 Some(port) => port.execute_session(execution_context, request).await,
-                None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+                None => Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the retained session authority is not mounted for this scope",
+                )),
             },
             RetainedSurfaceDispatch::Lcm(request) => match self.ports.lcm.as_ref() {
                 Some(port) => port.execute_lcm(execution_context, request).await,
-                None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+                None => Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the retained LCM authority is not mounted for this scope",
+                )),
             },
         }
         .map_err(retained_surface_execution_problem)?;
@@ -553,10 +567,17 @@ pub fn retained_surface_execution_problem(
         },
         // Structural budget refusal uses InvalidRequest so the wire kind stays
         // unchanged and non-retryable. Callers must narrow scope or limit.
-        RetainedSurfaceExecutionErrorV1::Unavailable => unavailable_problem(
-            "application.retained.authority-unavailable",
-            "The retained operation authority is unavailable.",
-        ),
+        RetainedSurfaceExecutionErrorV1::Unavailable { detail } => {
+            ApplicationProblem::Unavailable {
+                classification: crate::ApplicationUnavailableClassV1::Authority,
+                diagnostic: SafeDiagnostic {
+                    code: "application.retained.authority-unavailable".to_owned(),
+                    message: unavailable_authority_message(&detail),
+                },
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![LegalAction::Retry],
+            }
+        }
         RetainedSurfaceExecutionErrorV1::ProfileResetRequired => {
             ApplicationProblem::reset_required(diagnostic(
                 "application.retained.profile-reset-required",
@@ -591,7 +612,48 @@ fn unavailable_problem(code: &'static str, message: &'static str) -> Application
     }
 }
 
+const UNAVAILABLE_AUTHORITY_MESSAGE: &str = "The retained operation authority is unavailable";
+
+/// SafeDiagnostic validation refuses empty/untrimmed text, control characters,
+/// and messages over 512 bytes, so the threaded cause is normalized at this
+/// single projection choke point instead of at every producer.
+fn unavailable_authority_message(detail: &str) -> String {
+    let sanitized = detail
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        return format!("{UNAVAILABLE_AUTHORITY_MESSAGE}.");
+    }
+    // ": " joiner; 512 is the SafeDiagnostic message byte limit.
+    let budget = 512 - (UNAVAILABLE_AUTHORITY_MESSAGE.len() + 2);
+    let mut end = sanitized.len().min(budget);
+    while !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{UNAVAILABLE_AUTHORITY_MESSAGE}: {}",
+        sanitized[..end].trim_end()
+    )
+}
+
 impl RetainedSurfaceExecutionErrorV1 {
+    /// Typed unavailability that names its cause. Producers must pass the
+    /// underlying error text or an honest description of the absent
+    /// authority; the projection above sanitizes it for the diagnostic.
+    pub fn unavailable(detail: impl Into<String>) -> Self {
+        Self::Unavailable {
+            detail: detail.into(),
+        }
+    }
+
     pub fn cursor_stale_refusal() -> Self {
         Self::ApplicationProblem(ApplicationProblem::Stale {
             diagnostic: diagnostic(
@@ -970,6 +1032,63 @@ mod tests {
                 spec.operation.as_str(),
             );
         }
+    }
+
+    #[test]
+    fn unavailable_problem_carries_the_producer_detail() {
+        let problem =
+            retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::unavailable(
+                "database error: lcm store open failed (operation: lcm_store_open)",
+            ));
+        assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+        assert_eq!(problem.retry(), RetryDirective::AfterDelay);
+        let diagnostic = problem.diagnostic().expect("unavailable diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            "application.retained.authority-unavailable"
+        );
+        assert_eq!(
+            diagnostic.message,
+            "The retained operation authority is unavailable: database error: \
+             lcm store open failed (operation: lcm_store_open)"
+        );
+        problem
+            .validate()
+            .expect("threaded detail must satisfy the SafeDiagnostic contract");
+    }
+
+    #[test]
+    fn unavailable_detail_is_sanitized_for_the_safe_diagnostic() {
+        // Control characters, surrounding whitespace, and oversized text must
+        // never invalidate the diagnostic — the caller would then lose the
+        // problem entirely instead of just the tail of the detail.
+        for detail in [
+            "  multi\nline\tcause  ".to_owned(),
+            "x".repeat(4_096),
+            "é".repeat(1_024),
+            String::new(),
+            "\n\t".to_owned(),
+        ] {
+            let problem = retained_surface_execution_problem(
+                RetainedSurfaceExecutionErrorV1::unavailable(detail),
+            );
+            problem
+                .validate()
+                .expect("every sanitized detail must satisfy the SafeDiagnostic contract");
+            let diagnostic = problem.diagnostic().expect("unavailable diagnostic");
+            assert!(
+                diagnostic
+                    .message
+                    .starts_with("The retained operation authority is unavailable"),
+            );
+        }
+        let multiline = retained_surface_execution_problem(
+            RetainedSurfaceExecutionErrorV1::unavailable("multi\nline\tcause"),
+        );
+        assert_eq!(
+            multiline.diagnostic().expect("diagnostic").message,
+            "The retained operation authority is unavailable: multi line cause"
+        );
     }
 
     #[test]

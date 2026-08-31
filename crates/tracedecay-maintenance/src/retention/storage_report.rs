@@ -266,7 +266,7 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 #[hotpath::measure(label = "maintenance.storage_report.build", future = true)]
 pub async fn build_storage_report(
     profile_root: &Path,
-) -> tracedecay_runtime_core::errors::Result<StorageReport> {
+) -> tracedecay_domain::errors::Result<StorageReport> {
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // Capture the profile's physical footprint before opening any SQLite
     // readers. A report must describe the profile supplied by its caller, not
@@ -316,7 +316,7 @@ struct SampledRegisteredStorage {
 async fn load_registered_project_rows(
     profile_root: &Path,
     global_db_path: &Path,
-) -> tracedecay_runtime_core::errors::Result<Vec<(String, String)>> {
+) -> tracedecay_domain::errors::Result<Vec<(String, String)>> {
     let profile_root = profile_root.to_path_buf();
     let global_db_path = global_db_path.to_path_buf();
     let (scratch, snapshot_source) = tokio::task::spawn_blocking(move || {
@@ -334,7 +334,7 @@ async fn load_registered_project_rows(
         let snapshot_source = scratch.path().join(GLOBAL_DB_FILENAME);
         copy_sqlite_family(&global_db_path, &snapshot_source)
             .map_err(|error| report_error("copy global.db family for read-only report", error))?;
-        Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>((scratch, snapshot_source))
+        Ok::<_, tracedecay_domain::errors::TraceDecayError>((scratch, snapshot_source))
     })
     .await
     .map_err(|error| report_error("join global.db family copy", error))??;
@@ -374,7 +374,7 @@ fn sample_registered_storage(
     profile_root: &Path,
     global_db_path: &Path,
     registered_projects: Vec<(String, String)>,
-) -> tracedecay_runtime_core::errors::Result<SampledRegisteredStorage> {
+) -> tracedecay_domain::errors::Result<SampledRegisteredStorage> {
     let mut registered_ids = HashSet::new();
     let mut stores = Vec::new();
     let mut code_generation_retention = Vec::new();
@@ -415,7 +415,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
     global_db: &tracedecay_global_db::RegisteredGlobalDb,
     cursor: Option<&str>,
     limit: usize,
-) -> tracedecay_runtime_core::errors::Result<StorageReport> {
+) -> tracedecay_domain::errors::Result<StorageReport> {
     let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
     let global_db_bytes = database_family_bytes(&profile_root.join(GLOBAL_DB_FILENAME));
     let cursor = cursor.unwrap_or(PROJECT_CURSOR_PREFIX);
@@ -430,7 +430,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
         projects.truncate(limit);
         let next_cursor = if has_more {
             let Some(last_project) = projects.last() else {
-                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: "project storage report page lost its continuation".to_owned(),
                 });
             };
@@ -467,7 +467,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
         .map_err(|error| report_error("join daemon-backed storage report page", error))?;
     }
     let Some(after_directory) = cursor.strip_prefix(DIRECTORY_CURSOR_PREFIX) else {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "invalid daemon storage report cursor".to_owned(),
         });
     };
@@ -577,7 +577,7 @@ pub async fn build_project_storage_report_from_daemon(
     profile_root: &Path,
     project_id: &str,
     canonical_root: &Path,
-) -> tracedecay_runtime_core::errors::Result<StorageReport> {
+) -> tracedecay_domain::errors::Result<StorageReport> {
     let profile_root = profile_root.to_path_buf();
     let project_id = project_id.to_owned();
     let canonical_root = canonical_root.to_path_buf();
@@ -603,9 +603,9 @@ pub fn build_project_storage_report(
     project_id: &str,
     canonical_root: &Path,
     vector_readable_sources: Option<BTreeSet<CodeGenerationId>>,
-) -> tracedecay_runtime_core::errors::Result<StorageReport> {
+) -> tracedecay_domain::errors::Result<StorageReport> {
     tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: message.to_owned(),
         }
     })?;
@@ -643,7 +643,7 @@ fn append_project_report(
     stores: &mut Vec<StoreSizeReportEntry>,
     code_generation_retention: &mut Vec<CodeGenerationRetentionDryRunEntry>,
     code_generation_retention_availability: &mut Vec<CodeGenerationRetentionAvailabilityEntry>,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<()> {
     let data_root = profile_root.join("projects").join(project_id);
     let graph_db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     if let Some(entry) = sample_store_size(&graph_db_path) {
@@ -758,7 +758,7 @@ fn append_project_report(
 fn generation_digest_scan_exceeds_budget(
     store_root: &Path,
     maximum_bytes: u64,
-) -> tracedecay_runtime_core::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<bool> {
     let entries = std::fs::read_dir(store_root.join(CODE_GENERATIONS_DIRECTORY))
         .map_err(|error| report_error("list code-generation retention files", error))?;
     let mut bytes = 0u64;
@@ -968,8 +968,8 @@ pub(crate) fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
 fn report_error(
     operation: &'static str,
     error: impl std::fmt::Display,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Database {
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Database {
         operation: operation.to_string(),
         message: error.to_string(),
     }

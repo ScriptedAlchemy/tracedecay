@@ -14,7 +14,7 @@ use tracedecay_usecases::memory::{
 
 use super::{ContractFixture, await_mounted_graph_operation, project_id};
 use crate::daemon::profile_identity;
-use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 async fn publish_foreign_memory_owner(

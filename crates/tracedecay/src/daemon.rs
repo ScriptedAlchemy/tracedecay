@@ -45,11 +45,11 @@ pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 pub(crate) use tracedecay_daemon_protocol::{
     ensure_private_socket_parent, unix_socket_path_within_limit,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::transport::ReplayTransport;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub use tracedecay_daemon_protocol::SOCKET_ENV;
@@ -221,6 +221,7 @@ pub(crate) mod query_authority_provider;
 pub(crate) mod retained_test_support;
 mod shutdown_coordination;
 mod shutdown_orchestration;
+mod shutdown_watchdog;
 mod store_shutdown;
 pub(crate) use core_admission::*;
 pub use core_client::*;
@@ -266,12 +267,12 @@ mod invocation_state;
 pub(crate) use invocation_state::DaemonInvocationState;
 pub(crate) mod lcm_authority;
 mod lsp_sessions;
-mod request_cancellation;
 use lsp_sessions::{
     admitted_lsp_root_for_project_path, admitted_lsp_workspace_for_request,
     cleanup_connection_lsp_sessions, invocation_lsp_session_transition,
     settle_pending_lsp_workspace_mutation, update_connection_lsp_sessions,
 };
+pub(crate) use service::request_cancellation;
 mod maintenance;
 mod maintenance_tasks;
 pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
@@ -362,21 +363,6 @@ pub(crate) mod session_retrieval;
 pub(crate) mod session_sync;
 pub(crate) mod session_temporal_refresh_scheduler;
 
-/// Truthy `TRACEDECAY_SESSION_INGEST_DISABLED` turns off every session
-/// transcript ingest lane for the daemon's lifetime - the session-temporal
-/// refresh workers and the session-sync import service alike. A dev/profiling
-/// switch: session history simply stays un-ingested, reported as a typed
-/// unavailable outcome rather than an empty success.
-pub(crate) fn session_ingest_disabled() -> bool {
-    std::env::var("TRACEDECAY_SESSION_INGEST_DISABLED").is_ok_and(|v| !v.is_empty() && v != "0")
-}
-
-/// The typed unavailable reason a configured-off ingest lane reports.
-///
-/// Named because callers must distinguish a deliberate no-op from a genuine
-/// admission failure: treating it as a failure retires the project's session
-/// context and fails the whole project mount.
-pub(crate) const SESSION_INGEST_DISABLED_REASON_V1: &str = "session_ingest_disabled_by_env";
 pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;

@@ -1,6 +1,6 @@
 //! Automatic fact-receipt integrity triggers and current-projection indexes.
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::super::{MemoryV2Executor, db_error};
 
