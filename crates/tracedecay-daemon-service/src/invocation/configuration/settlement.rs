@@ -1,7 +1,7 @@
 //! Durable configuration effect rendering and runtime reconciliation.
 
 use super::*;
-use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[hotpath::measure(label = "daemon.service.configuration.reconcile", future = true)]
 pub(super) async fn reconcile_configuration_runtime(

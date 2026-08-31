@@ -1,8 +1,8 @@
 //! The daemon invocation dispatcher: `DaemonInvocationService::invoke`.
 
 use super::*;
-use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Upper bound for the size of the `DaemonInvocationService::invoke` future.
 ///
@@ -174,15 +174,12 @@ impl DaemonInvocationService {
         native_integration_service: Option<DaemonNativeIntegrationOwner>,
         request: DaemonInvocationRequest,
         admitted_cancellation: Option<CancellationToken>,
-        project_admission: Option<
-            &crate::project_runtime::ProjectRuntimeRequestLeaseV1,
-        >,
+        project_admission: Option<&crate::project_runtime::ProjectRuntimeRequestLeaseV1>,
     ) -> DaemonInvocationResponse {
         let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
-            let Some(lease) = crate::request_cancellation::register(&request_id)
-            else {
+            let Some(lease) = crate::request_cancellation::register(&request_id) else {
                 observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
                 return DaemonInvocationResponse::problem(
                     request_id,

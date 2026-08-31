@@ -4,10 +4,12 @@ use tracedecay_application::{
     Deadline, InvocationTarget, RequestId, RetainedSurfaceOperation,
 };
 use tracedecay_domain::UtcMicros;
-use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, BindingId, BindingSurface, ProfileId, SurfaceOperationName,
+};
 
 use crate::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, NormalizedApplicationToolArgs,
+    ApplicationSurfaceInvocationResult, NormalizedApplicationToolArgs,
     parse_application_surface_request,
 };
 use crate::mcp::tools::dispatch::{
@@ -354,7 +356,7 @@ mod tests {
     use tracedecay_tool_catalog::{BindingId, SchemaId};
 
     use super::{complete_protocol_controls, render_canonical_markdown};
-    use crate::application_surface::ApplicationSurfaceOperation;
+    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
     #[test]
     fn preserves_a_supplied_deadline_when_cancellation_is_missing() {

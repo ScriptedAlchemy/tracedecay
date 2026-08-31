@@ -12,14 +12,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_application::{ApplicationProblemEnvelope, ApplicationProblemKind};
 use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
-
-use crate::http::HttpApplicationOperation;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Application operation behind the project settings write.
 pub const PROJECT_SETTINGS_APPLY_OPERATION: &str =
-    HttpApplicationOperation::ConfigurationBatch.as_str();
+    ApplicationSurfaceOperation::ConfigurationBatch.as_str();
 /// Application operation used to refresh configuration state.
-pub const SETTINGS_REFRESH_OPERATION: &str = HttpApplicationOperation::ConfigurationList.as_str();
+pub const SETTINGS_REFRESH_OPERATION: &str =
+    ApplicationSurfaceOperation::ConfigurationList.as_str();
 
 /// Project-scoped settings patch accepted by `PATCH /api/settings/project`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]

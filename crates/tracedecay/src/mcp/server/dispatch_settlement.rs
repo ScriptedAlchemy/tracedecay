@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 const SETTLEMENT_NOT_STARTED: u8 = 0;
 const SETTLEMENT_SETTLING: u8 = 1;
@@ -417,8 +418,7 @@ impl super::McpServer {
             self.dispatch_authority.cancellations(),
             registered_request_id,
         );
-        let application_surface =
-            crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
+        let application_surface = ApplicationSurfaceOperation::from_tool_name(tool_name);
         let source_edit = super::requests::is_source_edit_tool(tool_name);
         let controlled_read = super::requests::is_controlled_read_tool(tool_name);
         let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name)

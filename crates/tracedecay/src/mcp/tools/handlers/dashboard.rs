@@ -21,6 +21,7 @@ use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::tracedecay::TraceDecay;
@@ -263,7 +264,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         Box::pin(async move {
             let error_request_id = request_id.clone();
             match crate::application_surface::resolve_dashboard_application_surface(
-                crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
+                ApplicationSurfaceOperation::ConfigurationBatch,
                 request_id,
                 crate::application_surface::ApplicationSurfaceRequest::Configuration(
                     tracedecay_application::ConfigurationWireRequestV1::Batch(
@@ -386,7 +387,7 @@ pub(crate) async fn dashboard_native_integration_status(
 
     let request = tracedecay_daemon_protocol::DaemonInvocationRequest::native_integration(
         control.request_id().as_str(),
-        crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStatus,
+        ApplicationSurfaceOperation::NativeIntegrationStatus,
         crate::application_surface::NativeIntegrationSurfaceRequest::Status(
             tracedecay_application::NativeIntegrationStatusSurfaceRequest { transaction_id },
         ),

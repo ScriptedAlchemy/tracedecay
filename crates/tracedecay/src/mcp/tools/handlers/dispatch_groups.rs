@@ -1,9 +1,9 @@
 use serde_json::Value;
 use tracedecay_application::{ApplicationProblem, ResultContractRef};
-use tracedecay_tool_catalog::BindingSurface;
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
-use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
+use crate::application_surface::resolve_catalog_tool_binding;
 use crate::tracedecay::TraceDecay;
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_domain::errors::{Result, TraceDecayError};

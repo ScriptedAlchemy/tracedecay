@@ -13,9 +13,9 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_lsp::LspSessionRegistry;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
-use crate::application_surface::ApplicationSurfaceOperation;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationWireRequestV1,
@@ -287,10 +287,11 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
         .configuration_target()
         .project_id
         .clone();
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("dashboard test configuration scope is invalid: {error}"),
-        })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("dashboard test configuration scope is invalid: {error}"),
+            })?;
     let resident_memory = Arc::new(
         tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
@@ -383,10 +384,11 @@ pub(crate) async fn register_dashboard_test_retained_runtime(
     project_root: PathBuf,
     project_id: ProjectId,
 ) -> Result<()> {
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("dashboard test retained scope is invalid: {error}"),
-        })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("dashboard test retained scope is invalid: {error}"),
+            })?;
     let observed_at = invocation_now_micros();
     let configuration = cg
         .configuration_runtime()

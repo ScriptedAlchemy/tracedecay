@@ -1,8 +1,8 @@
 //! Git index transaction daemon invocation handlers (`execute_git_read`/`execute_git_preview`/`execute_git_apply`).
 
 use super::*;
-use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 use tracedecay_domain::GitIndexPreviewV1;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn git_read_evidence_packet(
