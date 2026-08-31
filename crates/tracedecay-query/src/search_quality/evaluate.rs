@@ -15,6 +15,7 @@ use super::candidate_output::{
 };
 use super::candidate_output as candidate_output;
 use super::packaged;
+use super::report;
 use super::report::{
     DirectEvaluationReportV1, DirectProfileEvaluationV1, DirectQualityMetricsV1,
     DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1, DirectStratumQualityV1,
