@@ -68,8 +68,8 @@ mod temporal_kernel_behavior {
 mod lcm_payload_behavior {
     use tempfile::TempDir;
     use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-    use tracedecay_sessions::admission::HostAdmissionScope;
     use tracedecay_lcm::{LcmExpandRequest, LcmExpandTarget};
+    use tracedecay_sessions::admission::HostAdmissionScope;
 
     use super::common::{lcm_payload_message, lcm_payload_session};
 

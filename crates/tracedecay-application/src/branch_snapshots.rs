@@ -23,9 +23,7 @@ impl LocalBranchReadControlV1 {
         }
         self.deadline
             .as_ref()
-            .is_some_and(|deadline| {
-                deadline.is_elapsed_at(crate::clock::now_micros())
-            })
+            .is_some_and(|deadline| deadline.is_elapsed_at(crate::clock::now_micros()))
             .then_some(LocalBranchSnapshotErrorV1::TimedOut)
     }
 }
@@ -328,8 +326,8 @@ mod tests {
         assert!(page.truncated);
         assert!(page.next_after.is_some());
 
-        let cancellation = crate::CancellationSignal::active("cancel.branch-refs")
-            .expect("cancellation");
+        let cancellation =
+            crate::CancellationSignal::active("cancel.branch-refs").expect("cancellation");
         cancellation.cancel(crate::clock::now_micros());
         assert_eq!(
             local_branch_snapshots_controlled(
@@ -343,9 +341,7 @@ mod tests {
             ),
             Err(LocalBranchSnapshotErrorV1::Cancelled)
         );
-        let expired =
-            crate::Deadline::new(crate::clock::now_micros())
-                .expect("deadline");
+        let expired = crate::Deadline::new(crate::clock::now_micros()).expect("deadline");
         assert_eq!(
             local_branch_snapshots_controlled(
                 root.path(),

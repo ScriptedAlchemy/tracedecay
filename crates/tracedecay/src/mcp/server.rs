@@ -17,14 +17,13 @@ use crate::mcp::tool_analytics::{
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
-use tracedecay_daemon_protocol::wire::is_wire_oversized_io_error;
+use tracedecay_framing::is_wire_oversized_io_error;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
 use tracedecay_mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json,
 };
-use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_session_runtime::lcm_authority::{
     MountedLcmAuthorityPort, mount_registered_lcm_authority,
 };
@@ -32,6 +31,7 @@ use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
     SessionRetrievalServingIdentityV1, UnavailableSessionApplicationRetrievalV1,
 };
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
@@ -669,8 +669,7 @@ impl McpServer {
             let transport = crate::daemon::retained_test_support::project_retained_owner_transport(
                 context.cg.project_root(),
             )?;
-            context =
-                context.with_application_invocation_executor(Arc::clone(&transport.executor));
+            context = context.with_application_invocation_executor(Arc::clone(&transport.executor));
             Some(transport)
         } else {
             None
@@ -977,10 +976,10 @@ impl McpServer {
                 let service = match registered_session_db.as_ref() {
                     Some(registered) => {
                         DaemonSessionRetrievalService::new_registered_with_serving_port(
-                        database.clone(),
-                        registered.clone(),
-                        root,
-                        project_session_refresh_serving.clone(),
+                            database.clone(),
+                            registered.clone(),
+                            root,
+                            project_session_refresh_serving.clone(),
                         )
                     }
                     None => DaemonSessionRetrievalService::new_with_serving_port(
@@ -1107,6 +1106,7 @@ impl McpServer {
             version_cache: std::sync::Mutex::new(VersionCheckState {
                 latest: None,
                 checked_at: None,
+                refreshing: false,
             }),
             pending_notifications: std::sync::Mutex::new(Vec::new()),
             scope_prefix,
@@ -1303,11 +1303,9 @@ impl McpServer {
     ) -> Result<Arc<dyn SessionApplicationRetrievalPortV1>> {
         match self.project_application_retrieval.as_ref() {
             Some(mounted) => mounted.retrieval_for_scope(expected_scope),
-            None => Ok(Arc::new(
-                UnavailableSessionApplicationRetrievalV1::new(
-                    expected_scope.clone(),
-                ),
-            )),
+            None => Ok(Arc::new(UnavailableSessionApplicationRetrievalV1::new(
+                expected_scope.clone(),
+            ))),
         }
     }
 

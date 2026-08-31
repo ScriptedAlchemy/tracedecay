@@ -20,13 +20,13 @@ use tracedecay_graph_db::{
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
 };
 use tracedecay_runtime_core::db::engine::TestConnection;
-use tracedecay_store::{
-    FactReadControl, FactWriteControl, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
-};
 use tracedecay_session_memory::memory::{
     MemoryOperationContext, ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
     ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome, memory_application_for_db,
+};
+use tracedecay_store::{
+    FactReadControl, FactWriteControl, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
 };
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
@@ -1185,7 +1185,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
                 GraphIdempotencyKey::new("idempotency.generic-test.1").expect("stale idempotency"),
                 Arc::new(AtomicBool::new(false)),
             ),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
 
     let cancelled = FactReadControl::new(Arc::new(|| true));

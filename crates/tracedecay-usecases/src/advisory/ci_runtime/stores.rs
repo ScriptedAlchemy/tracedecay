@@ -26,7 +26,9 @@ use super::production::{
     CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
 };
 use crate::advisory::context_allows_feedback_operation;
-use tracedecay_graph_query::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
+use tracedecay_graph_query::{
+    CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation,
+};
 use tracedecay_runtime_core::db::{BoundedMetadataValue, Database};
 
 const RETAINED_KEY_DOMAIN_V1: &str = "tracedecay.advisory.ci.retained-key.v1";

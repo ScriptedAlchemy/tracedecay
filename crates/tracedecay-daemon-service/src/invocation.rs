@@ -27,7 +27,6 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     ApplicationResult, AuthorityReceipt, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
     CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryService,
-    WorkEvidenceRetrievalPortV1,
     CancellationContext, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot,
     CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticProviderIdentity,
     DisclosureClass, EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority,
@@ -41,7 +40,7 @@ use tracedecay_application::{
     PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
     PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestAdmission,
     RequestContext, RequestId, ResolvedScope, RetryDirective, SafeDiagnostic, TemporalState,
-    callable_code_operations,
+    WorkEvidenceRetrievalPortV1, callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
@@ -84,14 +83,14 @@ use tracedecay_agent_hosts::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
 };
-use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 use tracedecay_application::ConfigurationWireRequestV1;
+use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_code_index_runtime::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
     capture_exact_snapshot,
 };
+use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
 use tracedecay_usecases::CallableCodeAuthorizationSourcePort;
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::configuration::{
@@ -108,7 +107,30 @@ use tracedecay_application::feedback::observations::{
     FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
     FeedbackOperationV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1,
 };
+use tracedecay_application::request_identity::{
+    GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
+    mint_global_opaque_id,
+};
 use tracedecay_application::retrieval::{PrimitiveInvocation, PrimitiveRequest};
+#[cfg(test)]
+use tracedecay_application::{
+    CancellationStage, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
+    ProblemTerminality,
+};
+#[cfg(test)]
+pub(crate) use tracedecay_daemon_protocol::{
+    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, parse_daemon_invocation_request,
+};
+pub(crate) use tracedecay_daemon_protocol::{
+    DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
+    DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
+    DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
+    HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, LspSessionAccess,
+    LspSessionCredential, LspSessionId, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
+};
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
+use tracedecay_runtime_core::db::Database;
 use tracedecay_usecases::advisory::{
     AdvisoryDaemonStartupErrorV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
     AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
@@ -139,29 +161,6 @@ use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
     SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
 };
-use tracedecay_application::request_identity::{
-    GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
-    mint_global_opaque_id,
-};
-#[cfg(test)]
-use tracedecay_application::{
-    CancellationStage, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
-    ProblemTerminality,
-};
-#[cfg(test)]
-pub(crate) use tracedecay_daemon_protocol::{
-    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, parse_daemon_invocation_request,
-};
-pub(crate) use tracedecay_daemon_protocol::{
-    DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
-    DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
-    HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, LspSessionAccess,
-    LspSessionCredential, LspSessionId, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
-};
-use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
-use tracedecay_runtime_core::db::Database;
-use tracedecay_domain::errors::TraceDecayError;
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).
@@ -193,8 +192,8 @@ mod work_attempt_exec;
 mod work_blocked_interval_recovery;
 mod work_routing;
 
-pub use clock::{current_micros, now_millis};
 use clock::now_micros;
+pub use clock::{current_micros, now_millis};
 use configuration::*;
 use feedback::*;
 use git::*;
@@ -216,9 +215,7 @@ use types::*;
 use work::*;
 pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;
 
-pub use configuration::{
-    DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
-};
+pub use configuration::{DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError};
 pub use feedback::{
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
@@ -232,9 +229,8 @@ pub use primitive::{
 pub use types::{
     BoundedHookOrchestratorV1, DaemonLspInvocationOwner, HookOrchestrationAdmissionV1,
     HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
-    MAX_COALESCED_HOOK_COMPLETIONS,
-    admit_registered_hook_orchestration, register_hook_orchestration_runtime,
-    unregister_hook_orchestration_runtime,
+    MAX_COALESCED_HOOK_COMPLETIONS, admit_registered_hook_orchestration,
+    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
 };
 // `pub(super)` on these shapes, in their original flat-file home, meant
 // "visible to `daemon::service`" (their home's actual parent); nesting them
@@ -242,29 +238,29 @@ pub use types::{
 // "visible to `invocation`" only, which breaks the existing sibling reads
 // from `service::project_runtime`. Re-export at the same absolute reach the
 // definitions themselves now declare via `pub`.
+#[cfg(any(test, feature = "test-helpers"))]
+pub use lsp::canonicalize_lsp_roots;
+pub use lsp::{LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use registrars::DaemonFeedbackPublicationTestGate;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use registrars::mounted_configuration_layers;
 pub use registrars::{
-    DaemonAdvisoryRuntimeRegistrationError, DaemonAdvisoryRuntimeRegistrar,
+    DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
     DaemonConfigurationGrantAuthority, DaemonConfigurationRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
     DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
     DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
 };
 #[cfg(any(test, feature = "test-helpers"))]
-pub use registrars::DaemonFeedbackPublicationTestGate;
-pub use lsp::{LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1};
+pub use types::{
+    AuthorizedDaemonLspWorkspace, InvocationProjectRuntimeIdentityV1, LspLeaseTaskRegistry,
+    RuntimeLspSession,
+};
 pub use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
     RegisteredRetainedRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
     UnavailableFeedbackCycleRuntimeV1,
-};
-#[cfg(any(test, feature = "test-helpers"))]
-pub use lsp::canonicalize_lsp_roots;
-#[cfg(any(test, feature = "test-helpers"))]
-pub use registrars::mounted_configuration_layers;
-#[cfg(any(test, feature = "test-helpers"))]
-pub use types::{
-    AuthorizedDaemonLspWorkspace, InvocationProjectRuntimeIdentityV1, LspLeaseTaskRegistry,
-    RuntimeLspSession,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use work::execute_work_application;

@@ -81,7 +81,7 @@ fn rooted_relation_with_an_endpoint_outside_the_reachable_set_fails_closed() {
             vec![relation("a", "outside", "memory-supports")],
             1,
         ),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
 }
 

@@ -27,13 +27,13 @@ use tracedecay_store::{
     parse_diagnostic_evidence_class, parse_diagnostic_producer_kind, parse_diagnostic_severity,
 };
 
+use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_runtime_core::db::MemoryConnection;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::TransactionBehavior;
 use tracedecay_runtime_core::db::engine::{IntoParams, Row, Rows, Value, params};
 use tracedecay_runtime_core::db::{Database, DatabaseMemoryTransaction};
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Durable tables for generation-bound diagnostic records.

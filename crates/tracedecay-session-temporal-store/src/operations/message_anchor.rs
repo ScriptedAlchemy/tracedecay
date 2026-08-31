@@ -16,8 +16,8 @@ use tracedecay_domain::{
     AnchorDurabilityClass, DurableObservationV1, ObservationScopeV1, PayloadAccessState, ProjectId,
     RetrievalAnchorRecord, derive_exact_observation_anchor_id,
 };
-use tracedecay_runtime_core::db::engine::params;
 use tracedecay_lcm::types::LcmError;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::derive_canonical_projection;
 
 use super::sources::unavailable;
@@ -320,10 +320,10 @@ mod tests {
         SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
         SessionId, UserProfileId, UtcMicros,
     };
-    use tracedecay_runtime_core::db::engine::params;
     use tracedecay_lcm::types::{
         LcmError, LcmImmutableSummaryPublication, LcmSourceRef, LcmSummaryNodeDraft,
     };
+    use tracedecay_runtime_core::db::engine::params;
 
     use crate::relations::{SessionRelationProjection, SessionRelationScope};
     use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
@@ -571,8 +571,7 @@ mod tests {
 
     async fn publish(
         conn: &impl crate::handle::SessionTemporalExec,
-    ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError>
-    {
+    ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError> {
         super::super::publication::publish_immutable_summary(
             conn,
             publication(),

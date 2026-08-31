@@ -51,9 +51,7 @@ fn handle_gain_inner(
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let since = tracedecay_session_memory::provider_usage::provider_usage_range_start(range)
-            .map_err(
-                |message| tracedecay_domain::errors::TraceDecayError::Config { message },
-            )?;
+            .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })?;
         let since = i64::try_from(since).map_err(|_| {
             tracedecay_domain::errors::TraceDecayError::Config {
                 message: "savings range exceeds the supported timestamp domain".to_owned(),
@@ -82,11 +80,9 @@ fn handle_gain_inner(
             let rows = result
                 .get("history")
                 .and_then(serde_json::Value::as_array)
-                .ok_or_else(
-                    || tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "daemon gain history response is missing history rows".to_owned(),
-                    },
-                )?;
+                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "daemon gain history response is missing history rows".to_owned(),
+                })?;
             let rows = rows
                 .iter()
                 .cloned()
