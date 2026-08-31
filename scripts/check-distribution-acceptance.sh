@@ -29,6 +29,58 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+resolve_clean_source_head() {
+  local source_repo=$1
+  local expected_sha=${2:-}
+  local source_git_root
+  local source_git_sha
+  local source_drift
+  local first_drift
+
+  if ! source_git_root=$(git -C "$source_repo" rev-parse --show-toplevel 2>/dev/null); then
+    die "source repository is not a git worktree: $source_repo"
+  fi
+  source_git_root=$(cd -- "$source_git_root" && pwd -P)
+  [[ $source_git_root == "$source_repo" ]] ||
+    die "source repository must be its own git worktree: $source_repo (git reported $source_git_root)"
+  if ! source_git_sha=$(git -C "$source_repo" rev-parse --verify 'HEAD^{commit}' 2>/dev/null); then
+    die "source repository HEAD does not resolve to a commit: $source_repo"
+  fi
+  [[ ${#source_git_sha} -eq 40 && $source_git_sha != *[!0-9a-f]* ]] ||
+    die "source repository HEAD is not a full lowercase git sha: $source_git_sha"
+  if [[ -n $expected_sha && $source_git_sha != "$expected_sha" ]]; then
+    die "source repository HEAD moved during distribution acceptance: captured $expected_sha, now $source_git_sha"
+  fi
+  # Ignored build outputs are intentionally allowed. Tracked, staged, and
+  # untracked source drift cannot be stamped as the clean release-env commit.
+  if ! source_drift=$(git --no-optional-locks -C "$source_repo" status \
+    --porcelain=v1 \
+    --untracked-files=all 2>/dev/null); then
+    die "failed to verify source repository cleanliness: $source_repo"
+  fi
+  if [[ -n $source_drift ]]; then
+    first_drift=${source_drift%%$'\n'*}
+    die "source repository has tracked or untracked drift ($first_drift); commit or remove it before distribution acceptance"
+  fi
+
+  printf '%s\n' "$source_git_sha"
+}
+
+assert_binary_source_sha() {
+  local binary=$1
+  local product_version=$2
+  local source_git_sha=$3
+  local build_kind=$4
+  local reported_version
+  local expected_version="tracedecay ${product_version}+${source_git_sha}"
+
+  if ! reported_version=$("$binary" --version); then
+    die "$build_kind tracedecay binary failed to report its version: $binary"
+  fi
+  [[ $reported_version == "$expected_version" ]] ||
+    die "$build_kind tracedecay binary reported $reported_version; expected $expected_version"
+}
+
 assert_fastembed_fixture() {
   local fixture_root=$1
   local validator=$2
@@ -238,12 +290,14 @@ done
 require_command cargo
 require_command cmp
 require_command curl
+require_command git
 require_command python3
 require_command rustc
 require_command tar
 
 repo=$(cd -- "$repo" && pwd -P)
 [[ -f "$repo/Cargo.toml" ]] || die "Cargo.toml not found under $repo"
+source_git_sha=$(resolve_clean_source_head "$repo")
 for fixture in \
   claude.json \
   claude/post_tool_use_write.json \
@@ -342,6 +396,7 @@ echo "distribution acceptance: staging the product package tree"
 # CLI manifest below rather than beside the library manifest.
 staged="$work/staged"
 mkdir -p -- "$staged"
+resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 tar -C "$repo" \
   --exclude=./target \
   --exclude=./.git \
@@ -350,6 +405,7 @@ tar -C "$repo" \
   --exclude='./dashboard/node_modules' \
   --exclude='./node_modules' \
   -cf - . | tar -xf - -C "$staged"
+resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 
 staged_product="$staged/crates/tracedecay"
 [[ -f "$staged_product/Cargo.toml" ]] ||
@@ -596,6 +652,8 @@ semantic_package=${package_dirs[tracedecay-semantic]}
 catalog_package=${package_dirs[tracedecay-tool-catalog]}
 
 assert_required_assets "$root_package" "$cli_package"
+[[ ! -e "$package_root/.git" && ! -L "$package_root/.git" ]] ||
+  die "extracted package workspace unexpectedly contains .git metadata: $package_root/.git"
 
 patch_config="$work/packaged-crates.toml"
 python3 - "$metadata" "$packages" "$staged/Cargo.toml" >"$patch_config" <<'PY'
@@ -644,7 +702,7 @@ verify_feature_wiring \
   "$patch_config"
 
 echo "distribution acceptance: compiling packaged CLI with release facilities"
-cargo build \
+TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" cargo build \
   --manifest-path "$cli_package/Cargo.toml" \
   --release \
   "${release_cli_cargo_args[@]}" \
@@ -657,6 +715,11 @@ fi
 packaged_cli_bin="$target_directory/release/tracedecay${executable_suffix}"
 [[ -x $packaged_cli_bin ]] ||
   die "packaged tracedecay CLI build did not produce $packaged_cli_bin"
+assert_binary_source_sha \
+  "$packaged_cli_bin" \
+  "$product_version" \
+  "$source_git_sha" \
+  "extracted-package"
 
 echo "distribution acceptance: testing packaged patched Rust grammar"
 cargo nextest run \
@@ -767,7 +830,7 @@ TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
 
 install_root="$work/install"
 echo "distribution acceptance: installing packaged CLI with release facilities"
-cargo install \
+TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" cargo install \
   --path "$cli_package" \
   --root "$install_root" \
   "${release_cli_cargo_args[@]}" \
@@ -962,7 +1025,11 @@ CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 "$fastembed_binary" \
 binary=$(python3 "$repo/scripts/resolve-installed-binary.py" \
   "$install_root" \
   "${RUNNER_OS:-}")
-"$binary" --version
+assert_binary_source_sha \
+  "$binary" \
+  "$product_version" \
+  "$source_git_sha" \
+  "installed extracted-package"
 
 echo "distribution acceptance: exercising installed MCP behavior"
 if [[ ${RUNNER_OS:-} == Windows ]]; then

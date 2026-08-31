@@ -1,8 +1,25 @@
 use std::sync::Arc;
 
 use super::Database;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use crate::store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_graph_db::GraphWatermark;
+
+/// Watermark of the projected memory-graph source at an exact lineage stamp.
+///
+/// `memory_v2_lineage_events.event_sequence` is append-only (schema triggers
+/// reject updates and deletes) and its `AUTOINCREMENT` key is never reused,
+/// and every committed mutation that can change the projected source records
+/// at least one lineage event in the same transaction (the invariant
+/// `store::memory::graph::source_unchanged_since` already relies on). Two
+/// snapshots observing the same maximum sequence therefore saw an identical
+/// projected source, so a watermark computed under one snapshot remains valid
+/// for any later snapshot that still observes the same stamp.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct MemoryGraphSourceStampedWatermarkV1 {
+    lineage_stamp: i64,
+    watermark: GraphWatermark,
+}
 
 /// One short-lived use of the graph authority bound to a database owner.
 ///
@@ -110,6 +127,40 @@ impl Database {
         )
     }
 
+    /// Returns the memoized projected-source watermark when it was computed
+    /// under the exact `lineage_stamp` the caller currently observes.
+    #[must_use]
+    pub(crate) fn memory_graph_source_watermark_at(
+        &self,
+        lineage_stamp: i64,
+    ) -> Option<GraphWatermark> {
+        self.inner
+            .memory_graph_source_watermark
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|memo| memo.lineage_stamp == lineage_stamp)
+            .map(|memo| memo.watermark.clone())
+    }
+
+    /// Records the projected-source watermark computed under `lineage_stamp`.
+    /// The stamp and the hashed source must come from the same read snapshot.
+    pub(crate) fn record_memory_graph_source_watermark(
+        &self,
+        lineage_stamp: i64,
+        watermark: GraphWatermark,
+    ) {
+        *self
+            .inner
+            .memory_graph_source_watermark
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(MemoryGraphSourceStampedWatermarkV1 {
+                lineage_stamp,
+                watermark,
+            });
+    }
+
     /// Issues graph work through the exact weak map binding.
     ///
     /// The returned value is non-cloneable and keeps the database client
@@ -153,7 +204,7 @@ mod tests {
     use tracedecay_domain::LocatorDigest;
     use tracedecay_graph_db::{
         GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
-        VerifiedGraphSnapshot,
+        GraphWatermark, VerifiedGraphSnapshot,
     };
     use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
@@ -257,6 +308,41 @@ mod tests {
             .issue_memory_graph_runtime_operation()
             .expect("bound graph operation");
         assert!(Arc::ptr_eq(&operation.runtime, &runtime));
+    }
+
+    #[tokio::test]
+    async fn stamped_source_watermark_memo_serves_only_the_exact_lineage_stamp() {
+        let directory = tempfile::tempdir().expect("watermark memo directory");
+        let database_path = directory.path().join("memory.db");
+        let authority = DatabaseAuthority::acquire_test(&database_path, "watermark memo test")
+            .expect("database authority");
+        let (database, _) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("database runtime");
+
+        // Before any record, every stamp is a miss — never a fabricated hit.
+        assert!(database.memory_graph_source_watermark_at(7).is_none());
+
+        let first = GraphWatermark::new("sha256:memo-stamp-seven").expect("first watermark");
+        database.record_memory_graph_source_watermark(7, first.clone());
+        assert_eq!(
+            database.memory_graph_source_watermark_at(7),
+            Some(first.clone())
+        );
+        // A snapshot observing a different stamp must not see the memo.
+        assert!(database.memory_graph_source_watermark_at(8).is_none());
+        // A stale-stamp probe does not evict the memo for its exact stamp.
+        assert_eq!(database.memory_graph_source_watermark_at(7), Some(first));
+
+        // A newer record supersedes the memo; the old stamp becomes a miss.
+        let second = GraphWatermark::new("sha256:memo-stamp-eight").expect("second watermark");
+        database.record_memory_graph_source_watermark(8, second.clone());
+        assert_eq!(database.memory_graph_source_watermark_at(8), Some(second));
+        assert!(database.memory_graph_source_watermark_at(7).is_none());
     }
 
     #[tokio::test]

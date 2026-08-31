@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -13,13 +14,18 @@ use crate::daemon::maintenance::{
     SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
     StoreTelemetrySamplingRegistry,
 };
+use crate::daemon::store_writer_gate::{StoreWriterGates, WriterScope};
 use crate::tracedecay::TraceDecay;
 use tracedecay_code_index_retention::code_index_generations::{
-    DurableGenerationIndexEntryV1, DurablePublicationPointerV1, durable_generation_index_digest,
+    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
+    DEFAULT_SUPERSEDED_GENERATION_FLOOR, DurableGenerationIndexEntryV1,
+    DurablePublicationPointerV1, GRAPH_REPLAY_POOL_ACQUIRE_BUDGET, durable_generation_index_digest,
+    execute_code_generation_retention, plan_code_generation_retention,
     try_acquire_code_generation_store_lock,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
+use tracedecay_domain::UtcMicros;
 use tracedecay_semantic_contracts::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
 };
@@ -672,4 +678,78 @@ async fn held_replay_pool_defers_then_backs_off_then_recovers() {
             .graph_replay_release_attempt_admitted(&project_root),
         "a served reconcile closes the backoff window"
     );
+}
+
+/// The probe-to-execute TOCTOU at the executor boundary: the outer probe
+/// would have succeeded, the publisher then holds the pool, and collection
+/// must return the typed busy result and drop the daemon writer gate inside
+/// the acquire budget instead of parking on a blocking flock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publisher_between_probe_and_execute_releases_writer_gate_promptly() {
+    let fixture = open_unseated_graph_fixture().await;
+    let replay_root = fixture
+        .graph
+        .db()
+        .database_path()
+        .with_extension("graph-replay");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
+        .expect("create owner-private replay pool");
+
+    let probe = try_acquire_code_generation_store_lock(&replay_root)
+        .expect("outer probe")
+        .expect("probe finds a free pool");
+    drop(probe);
+
+    let publisher = try_acquire_code_generation_store_lock(&replay_root)
+        .expect("publisher probe")
+        .expect("publisher wins the probe-to-execute window");
+    let plan = plan_code_generation_retention(
+        &fixture.store_root,
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("plan collectable retention");
+    assert!(
+        !plan.collectable_generations.is_empty(),
+        "execute only acquires the pool when a generation is collectable"
+    );
+
+    let gates = StoreWriterGates::default();
+    let started = Instant::now();
+    let error = {
+        let writer = gates
+            .try_acquire(&WriterScope::Daemon)
+            .expect("maintenance holds the daemon writer gate");
+        let error = execute_code_generation_retention(
+            &fixture.store_root,
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(130),
+            Some(&replay_root),
+        )
+        .expect_err("held pool after a successful probe must defer");
+        drop(writer);
+        error
+    };
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(error, CodeGenerationRetentionErrorV1::GraphReplayPoolBusy),
+        "executor must return the typed busy result, got {error:?}"
+    );
+    assert!(
+        elapsed < GRAPH_REPLAY_POOL_ACQUIRE_BUDGET + Duration::from_millis(50),
+        "writer-held acquire must stay inside the budget, took {elapsed:?}"
+    );
+    assert!(
+        gates.try_acquire(&WriterScope::Daemon).is_some(),
+        "the daemon writer gate must be free as soon as execute defers"
+    );
+    assert_eq!(
+        sealed_generation_files(&fixture.store_root).len(),
+        FIXTURE_GENERATION_COUNT,
+        "a deferred execute must not collect"
+    );
+
+    drop(publisher);
 }

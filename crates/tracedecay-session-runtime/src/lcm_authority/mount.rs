@@ -11,8 +11,6 @@ use tracedecay_application::{
     DisclosureClass, RequestContext, RequestId,
 };
 use tracedecay_domain::{ActorId, UtcMicros};
-use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
-use tracedecay_tool_catalog::CapabilityId;
 use tracedecay_session_memory::context::{
     CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
     ResolvedSessionIdentity, application_observed_at, session_application_grant_digest,
@@ -22,6 +20,8 @@ use tracedecay_session_memory::session::lcm::{
     LcmAuthorityInvocation, LcmAuthorityPort, LcmAuthorityRequest, LcmAuthorityResponse,
     LcmAuthorityTarget, lcm_authority_operation_identity,
 };
+use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
+use tracedecay_tool_catalog::CapabilityId;
 
 use super::DaemonLcmAuthority;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;

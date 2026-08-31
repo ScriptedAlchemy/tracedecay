@@ -17,6 +17,13 @@ use super::failure::{
 pub const USER_INGEST_PROVIDER_FRONTIER_KEY: &str =
     "tracedecay-internal:user-ingest-provider-frontier:v1";
 
+/// Durable fair-rotation cursor for project-scoped provider catch-up passes.
+/// Lives in the project's transcript store, so a daemon restart resumes the
+/// sweep at the provider after the last persisted pass instead of restarting
+/// the rotation at the first provider.
+pub const PROJECT_INGEST_PROVIDER_FRONTIER_KEY: &str =
+    "tracedecay-internal:project-ingest-provider-frontier:v1";
+
 /// Durable versioned Codex discovery frontier for the profile corpus.
 pub const USER_INGEST_CODEX_HISTORY_FRONTIER_KEY: &str =
     "tracedecay-internal:user-ingest-codex-history-frontier:v2";
@@ -87,7 +94,7 @@ pub(super) const USER_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Vibe,
 ];
 
-pub(super) fn plan_user_provider_admission(
+pub(super) fn plan_provider_rotation_admission(
     selected_count: usize,
     frontier: u64,
     bounds: IngestPassBounds,

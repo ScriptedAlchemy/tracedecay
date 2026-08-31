@@ -292,12 +292,10 @@ impl HostAdmissionTestRuntimeV1 {
         Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
     > {
         let provider =
-            provider.ok_or_else(
-                || tracedecay_domain::errors::TraceDecayError::Database {
-                    operation: "search registered git-scoped session messages".to_owned(),
-                    message: "test facade requires an exact provider".to_owned(),
-                },
-            )?;
+            provider.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Database {
+                operation: "search registered git-scoped session messages".to_owned(),
+                message: "test facade requires an exact provider".to_owned(),
+            })?;
         let database = self.session_database_for_test(scope)?;
         let scoped_ids = tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
             .session_ids_for_scope(git_filter)
@@ -439,9 +437,8 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_domain::errors::Result<
-        Option<tracedecay_sessions::runtime::SessionMessageRecord>,
-    > {
+    ) -> tracedecay_domain::errors::Result<Option<tracedecay_sessions::runtime::SessionMessageRecord>>
+    {
         self.project_database_for_test()?
             .get_session_message(provider, message_id)
             .await
@@ -480,9 +477,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_domain::errors::Result<
-        Option<tracedecay_lcm::LcmRawMessage>,
-    > {
+    ) -> tracedecay_domain::errors::Result<Option<tracedecay_lcm::LcmRawMessage>> {
         let database = self.project_database_for_test()?;
         let snapshot = database.read_snapshot().await?;
         tracedecay_lcm::schema::load_raw_message(&snapshot, provider, message_id)

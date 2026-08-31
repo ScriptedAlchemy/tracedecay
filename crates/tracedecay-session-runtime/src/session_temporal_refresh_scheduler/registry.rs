@@ -4,7 +4,6 @@ use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::StoreOwnerKey;
 use super::history::SharedSessionHistoricalIngestor;
 use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshPolicy,
@@ -17,6 +16,7 @@ use super::wake::{
     SessionTemporalRefreshWakeState,
 };
 use super::worker::run_session_temporal_refresh_scheduler;
+use crate::StoreOwnerKey;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_sessions::admission::session_ingest_disabled;
 
@@ -61,6 +61,29 @@ impl SessionTemporalRefreshPassReport {
             self.retry_class = Some(class);
         }
     }
+}
+
+/// Bounded daemon-wide concurrency for historical session-ingest passes.
+///
+/// Every mounted project scheduler plus the profile scheduler owns one worker
+/// task, so a daemon serving N registered projects would otherwise run N + 1
+/// historical catch-up passes concurrently at startup — each pass is bounded,
+/// but the aggregate grew with the number of projects (the 11.6 GB catch-up
+/// incident). Daemon readiness never waits on this admission: catch-up is
+/// background work, and a worker that cannot acquire a permit defers its
+/// history pass as typed retryable state while projection serving continues.
+///
+/// Two rather than one for the same reason as the code-index reconcile bound:
+/// a pass is not pure CPU — discovery, store writes, and projection drains are
+/// I/O and lock phases that overlap a second pass's parsing at negligible
+/// cost, while race-to-idle finishes each backlog sooner than interleaving
+/// all of them.
+const MAX_CONCURRENT_HISTORICAL_INGEST_PASSES: usize = 2;
+
+fn bounded_historical_ingest_permits() -> usize {
+    std::thread::available_parallelism().map_or(1, |cores| {
+        cores.get().min(MAX_CONCURRENT_HISTORICAL_INGEST_PASSES)
+    })
 }
 
 struct SessionTemporalRefreshSchedulerEntry {
@@ -118,6 +141,7 @@ pub struct SessionTemporalRefreshSchedulerRegistry {
     project_lifecycle: tokio::sync::Mutex<()>,
     retired_project_owners: std::sync::Mutex<HashSet<StoreOwnerKey>>,
     codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+    historical_ingest_admission: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for SessionTemporalRefreshSchedulerRegistry {
@@ -134,6 +158,9 @@ impl Default for SessionTemporalRefreshSchedulerRegistry {
             codex_discovery: Arc::new(
                 tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default(),
             ),
+            historical_ingest_admission: Arc::new(tokio::sync::Semaphore::new(
+                bounded_historical_ingest_permits(),
+            )),
         }
     }
 }
@@ -181,6 +208,14 @@ impl SessionTemporalRefreshSchedulerRegistry {
         self.policy = policy;
     }
 
+    /// The bounded historical-ingest admission, so a test can occupy its
+    /// permits and assert that saturated workers defer their history pass
+    /// instead of running an unbounded aggregate.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn historical_ingest_admission(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.historical_ingest_admission)
+    }
+
     pub fn configure_codex_preparation_resources(
         &self,
         memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
@@ -188,9 +223,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         self.codex_discovery.configure_preparation_resources(memory)
     }
 
-    pub fn codex_discovery(
-        &self,
-    ) -> Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub> {
+    pub fn codex_discovery(&self) -> Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub> {
         Arc::clone(&self.codex_discovery)
     }
 
@@ -208,6 +241,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let worker_state = Arc::clone(&state);
         let projector = Arc::clone(&self.projector);
         let worker_history = Arc::clone(&history);
+        let history_admission = Arc::clone(&self.historical_ingest_admission);
         let policy = self.policy;
         state.wake();
         let supervisor = hotpath::future!(
@@ -229,6 +263,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             Arc::clone(&worker_state),
                             Arc::clone(&projector),
                             Arc::clone(&worker_history),
+                            Arc::clone(&history_admission),
                             policy,
                         ),
                         label = "daemon.scheduler.session_temporal.worker"

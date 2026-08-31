@@ -167,7 +167,7 @@ pub fn encode_generation_receipt(
 
 pub fn decode_generation_receipt(bytes: &[u8]) -> Result<ProjectionBatchReceiptV1, GraphDbError> {
     match serde_json::from_slice::<StoredBatchReceiptV1>(bytes)
-        .map_err(|_| GraphDbError::Conflict)?
+        .map_err(|_| GraphDbError::conflict("semantic_vector_native.decode_generation_receipt"))?
     {
         StoredBatchReceiptV1::Fat(receipt) => Ok(receipt),
         StoredBatchReceiptV1::Slim(receipt) => Ok(ProjectionBatchReceiptV1 {
