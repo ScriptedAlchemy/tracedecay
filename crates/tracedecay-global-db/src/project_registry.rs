@@ -428,14 +428,12 @@ pub(super) async fn validate_project_rows_have_canonical_keys(
             .to_string_lossy()
             .into_owned();
         if stored_path != canonical_path {
-            return Err(
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    PROJECT_REGISTRY_AUTHORITY,
-                    format!(
-                        "projects.path contains non-canonical key '{stored_path}'; expected exact final key '{canonical_path}'"
-                    ),
+            return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+                PROJECT_REGISTRY_AUTHORITY,
+                format!(
+                    "projects.path contains non-canonical key '{stored_path}'; expected exact final key '{canonical_path}'"
                 ),
-            );
+            ));
         }
     }
     Ok(())
@@ -732,13 +730,11 @@ impl RegisteredGlobalDb {
         // cannot become a durable authority even from a call site that has
         // never heard of the policy.
         if let Some(reason) = self.ephemeral_root_rejection(project_root) {
-            return Err(
-                tracedecay_domain::errors::TraceDecayError::project_route(
-                    EPHEMERAL_PROJECT_ROOT_REASON_CODE,
-                    false,
-                    reason,
-                ),
-            );
+            return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                EPHEMERAL_PROJECT_ROOT_REASON_CODE,
+                false,
+                reason,
+            ));
         }
         crate::hotpath_observe::record_transaction_rows(1);
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
@@ -807,20 +803,18 @@ impl RegisteredGlobalDb {
             // Two ids already claim this root or its repository. Picking one
             // would fabricate a consolidation the caller never asked for, so
             // the conflict is surfaced with the ids that produced it.
-            return Err(
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    PROJECT_REGISTRY_AUTHORITY,
-                    format!(
-                        "conflicting project authorities [{}] already claim '{}'",
-                        existing_authorities
-                            .iter()
-                            .map(String::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        canonical_project_root.display()
-                    ),
+            return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+                PROJECT_REGISTRY_AUTHORITY,
+                format!(
+                    "conflicting project authorities [{}] already claim '{}'",
+                    existing_authorities
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    canonical_project_root.display()
                 ),
-            );
+            ));
         }
         let authority_project_id = existing_authorities
             .into_iter()
@@ -1615,17 +1609,15 @@ impl RegisteredGlobalDb {
         match project_ids.as_slice() {
             [] => Ok(None),
             [project_id] => Ok(Some(project_id.clone())),
-            _ => Err(
-                tracedecay_domain::errors::TraceDecayError::project_route(
-                    "project_identity_conflict",
-                    false,
-                    format!(
-                        "project '{}' resolves to conflicting project identities: {}",
-                        project_root.display(),
-                        project_ids.join(", ")
-                    ),
+            _ => Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                "project_identity_conflict",
+                false,
+                format!(
+                    "project '{}' resolves to conflicting project identities: {}",
+                    project_root.display(),
+                    project_ids.join(", ")
                 ),
-            ),
+            )),
         }
     }
 
@@ -1802,9 +1794,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns project ledger paths with native path bytes preserved.
-    pub async fn try_list_project_paths(
-        &self,
-    ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
+    pub async fn try_list_project_paths(&self) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
         list_registered_lossless_paths(
             self,
             "SELECT path FROM projects ORDER BY path",
@@ -1841,9 +1831,7 @@ impl RegisteredGlobalDb {
     ///
     /// [`apply_registry_reap`]: Self::apply_registry_reap
     #[hotpath::measure(future = true, label = "global_db.registry.query.reap_plan")]
-    pub async fn plan_registry_reap(
-        &self,
-    ) -> tracedecay_domain::errors::Result<RegistryReapPlan> {
+    pub async fn plan_registry_reap(&self) -> tracedecay_domain::errors::Result<RegistryReapPlan> {
         const OPERATION: &str = "plan registry reap";
         let profile_root = self
             .db_path()

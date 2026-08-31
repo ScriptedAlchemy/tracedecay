@@ -155,7 +155,7 @@ pub(crate) fn validate_metadata_binding(
         GraphGenerationReplaySource::SemanticVectorGeneration(vector) => vector.metadata,
         GraphGenerationReplaySource::InlineManifest(_)
         | GraphGenerationReplaySource::SealedCodeGeneration(_) => {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("replay.validate_metadata_binding"));
         }
     };
     validate_decoded_metadata_binding(
@@ -194,7 +194,9 @@ fn validate_decoded_metadata_binding(
         || metadata.watermark != manifest.watermark
         || metadata.dependencies != manifest.dependencies
     {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "replay.validate_decoded_metadata_binding",
+        ));
     }
     validate_publication_manifest_identity(publication, manifest, validate_expected_digest, check)
 }
@@ -257,7 +259,9 @@ pub(crate) fn validate_supplied_manifest_binding(
                 check,
             )
         }
-        GraphGenerationReplaySource::InlineManifest(_) => Err(GraphDbError::Conflict),
+        GraphGenerationReplaySource::InlineManifest(_) => Err(GraphDbError::conflict(
+            "replay.validate_supplied_manifest_binding",
+        )),
     }
 }
 
@@ -282,7 +286,9 @@ fn validate_publication_manifest_identity(
                 && publication.expected_recovered_digest
                     != manifest.expected_recovered_digest(check)?)
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "replay.validate_publication_manifest_identity",
+            ));
         }
         Ok(())
     })

@@ -17,6 +17,7 @@ hotpath = [
     "hotpath/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-domain/hotpath",
+    "tracedecay-framing/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-tool-catalog/hotpath",
 ]
@@ -25,6 +26,7 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
 ]
@@ -33,12 +35,13 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
 ]
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper
 # surfaces to dependent crates' test builds only. Never gates production code.
-test-helpers = []
+test-helpers = ["tracedecay-framing/test-helpers"]
 
 [dependencies]
 base64 = "0.22"
@@ -51,6 +54,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 [dev-dependencies]

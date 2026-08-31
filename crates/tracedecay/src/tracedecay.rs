@@ -11,8 +11,8 @@ use std::sync::{Arc, OnceLock};
 
 use crate::config::TraceDecayConfig;
 use tracedecay_application::context_scout::ContextScoutAddressV1;
-use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 #[cfg(test)]

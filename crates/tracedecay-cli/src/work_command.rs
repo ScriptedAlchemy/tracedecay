@@ -8,9 +8,7 @@ use tracedecay_application::ApplicationResult;
 use crate::cli::WorkInvocationArgs;
 
 #[hotpath::measure(label = "cli.work.invoke", future = true)]
-pub(crate) async fn run(
-    invocation: WorkInvocationArgs,
-) -> tracedecay_domain::errors::Result<()> {
+pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::errors::Result<()> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
     let body = read_request(&invocation.request_file)?;

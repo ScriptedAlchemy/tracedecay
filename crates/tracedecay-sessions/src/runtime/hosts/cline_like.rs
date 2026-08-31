@@ -108,6 +108,7 @@ pub struct ClineLikeSource {
     task_metadata: TaskMetadataCache,
 }
 
+#[hotpath::measure_all]
 impl ClineLikeSource {
     /// Cline VS Code extension storage:
     /// `Code/User/globalStorage/saoudrizwan.claude-dev/tasks`.
@@ -223,6 +224,7 @@ impl TranscriptSource for ClineLikeSource {
     }
 }
 
+#[hotpath::measure_all]
 impl ClineLikeSource {
     fn snapshot_location(&self, path: &Path, project_root: &Path) -> Option<PathBuf> {
         let metadata = self.task_metadata.get(self.provider, path.parent()?)?;

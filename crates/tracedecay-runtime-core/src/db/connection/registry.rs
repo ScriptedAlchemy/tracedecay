@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::db::{DatabaseAuthority, engine::Connection};
-use tracedecay_domain::errors::TraceDecayError;
 use crate::profiled_lock::ProfiledMutex;
+use tracedecay_domain::errors::TraceDecayError;
 // The store-runtime registry moved into this kernel, so the facade retains the
 // concrete handle rather than an erased port.
 use super::memory_graph_reconciliation::{

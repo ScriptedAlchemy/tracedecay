@@ -321,9 +321,7 @@ impl RegisteredGlobalDbTestRuntime {
         .await
     }
 
-    pub async fn reopen_profile_database_for_test(
-        self,
-    ) -> tracedecay_domain::errors::Result<Self> {
+    pub async fn reopen_profile_database_for_test(self) -> tracedecay_domain::errors::Result<Self> {
         let Self {
             profile_registered,
             _profile_owner,
@@ -415,12 +413,12 @@ impl RegisteredGlobalDbTestRuntime {
                 message: "registered project database owner is unavailable".to_owned(),
             }
         })?;
-        owner.issue_lease().map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Database {
+        owner.issue_lease().map_err(
+            |error| tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "issue registered project test database client".to_owned(),
                 message: format!("{error:?}"),
-            }
-        })
+            },
+        )
     }
 }
 
@@ -780,15 +778,13 @@ impl HostAdmissionTestRuntimeV1 {
         let session = database
             .get_session(&message.provider, &message.session_id)
             .await
-            .ok_or_else(
-                || tracedecay_domain::errors::TraceDecayError::Database {
-                    operation: "seed registered session message fixture".to_owned(),
-                    message: format!(
-                        "session {}/{} is unavailable",
-                        message.provider, message.session_id
-                    ),
-                },
-            )?;
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Database {
+                operation: "seed registered session message fixture".to_owned(),
+                message: format!(
+                    "session {}/{} is unavailable",
+                    message.provider, message.session_id
+                ),
+            })?;
         Ok(database
             .upsert_transcript_batch(
                 &session,
@@ -973,10 +969,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_describe_for_test(
         &self,
         request: tracedecay_lcm::LcmDescribeRequest,
-    ) -> Result<
-        tracedecay_lcm::LcmDescribeResponse,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> Result<tracedecay_lcm::LcmDescribeResponse, tracedecay_lcm::LcmError> {
         self.profile_registered.lcm_describe(request).await
     }
 
@@ -984,10 +977,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_expand_for_test(
         &self,
         request: tracedecay_lcm::LcmExpandRequest,
-    ) -> Result<
-        tracedecay_lcm::LcmExpandResponse,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> Result<tracedecay_lcm::LcmExpandResponse, tracedecay_lcm::LcmError> {
         self.profile_registered.lcm_expand(request).await
     }
 
@@ -1020,23 +1010,17 @@ impl HostAdmissionTestRuntimeV1 {
         }
 
         let external_content = "canonical external payload";
-        let external_hash =
-            tracedecay_lcm::util::sha256_hex(external_content.as_bytes());
-        let raw_hash =
-            tracedecay_lcm::util::sha256_hex(b"canonical raw message");
-        let child_summary_hash =
-            tracedecay_lcm::util::sha256_hex(b"canonical child summary");
-        let parent_summary_hash =
-            tracedecay_lcm::util::sha256_hex(b"canonical parent summary");
+        let external_hash = tracedecay_lcm::util::sha256_hex(external_content.as_bytes());
+        let raw_hash = tracedecay_lcm::util::sha256_hex(b"canonical raw message");
+        let child_summary_hash = tracedecay_lcm::util::sha256_hex(b"canonical child summary");
+        let parent_summary_hash = tracedecay_lcm::util::sha256_hex(b"canonical parent summary");
         let payload_dir = database
             .db_path()
             .parent()
-            .ok_or_else(
-                || tracedecay_domain::errors::TraceDecayError::Database {
-                    operation: "seed canonical lcm render payload".to_owned(),
-                    message: "registered session database has no storage root".to_owned(),
-                },
-            )?
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Database {
+                operation: "seed canonical lcm render payload".to_owned(),
+                message: "registered session database has no storage root".to_owned(),
+            })?
             .join("lcm-payloads");
         std::fs::create_dir_all(&payload_dir)?;
         std::fs::write(payload_dir.join("payload-a"), external_content)?;
@@ -1371,8 +1355,7 @@ async fn open_registered_test_database_with(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
     write_authority: RegisteredTestWriteAuthority,
-) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
-{
+) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)> {
     open_registered_test_database_with_identity(path, scope, write_authority, None).await
 }
 
@@ -1382,8 +1365,7 @@ async fn open_registered_test_database_with_identity(
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
     write_authority: RegisteredTestWriteAuthority,
     profile_identity: Option<tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1>,
-) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
-{
+) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)> {
     crate::register_test_schema_installer();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1469,8 +1451,7 @@ async fn open_registered_test_database_with_identity(
 pub async fn open_registered_test_database_fixture(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
-) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
-{
+) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)> {
     open_registered_test_database_with(path, scope, RegisteredTestWriteAuthority::Fixture).await
 }
 

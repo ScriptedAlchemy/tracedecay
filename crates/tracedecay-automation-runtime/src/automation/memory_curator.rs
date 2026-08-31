@@ -29,10 +29,10 @@ use tracedecay_policy::{
     CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
     CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
-use tracedecay_store::ProjectMemoryFactCurationReceiptV1;
 use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryApplicationError, MemoryMutationError, MemoryOperationContext,
 };
+use tracedecay_store::ProjectMemoryFactCurationReceiptV1;
 
 pub const CURATION_DEFAULT_FACT_REVIEW_LIMIT: usize = 24;
 pub const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.72;

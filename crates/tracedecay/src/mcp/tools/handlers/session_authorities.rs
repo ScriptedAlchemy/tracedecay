@@ -17,8 +17,10 @@ pub struct SessionAuthorities<'a> {
         Option<&'a crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
     pub(crate) project_registered: Option<&'a RegisteredGlobalDbLeaseV1>,
     pub(crate) profile_registered: Option<&'a RegisteredGlobalDbLeaseV1>,
-    pub(crate) project_lcm: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
-    pub(crate) profile_lcm: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
+    pub(crate) project_lcm:
+        Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
+    pub(crate) profile_lcm:
+        Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
 }
 
 impl<'a> SessionAuthorities<'a> {

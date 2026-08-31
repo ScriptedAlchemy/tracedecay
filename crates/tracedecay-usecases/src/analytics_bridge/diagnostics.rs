@@ -79,12 +79,8 @@ pub async fn analytics_diagnostics_with_db(
         .map_err(cli_error)?
     );
     let observatory = hotpath::measure_block!("analytics.observatory", {
-        let observatory = crate::observability::observatory_read_model(
-            gdb,
-            project_filter.as_deref(),
-            0,
-        )
-        .await;
+        let observatory =
+            crate::observability::observatory_read_model(gdb, project_filter.as_deref(), 0).await;
         crate::observability::observatory_cli_value(&observatory).map_err(cli_error)?
     });
     let provider_scope = if all_projects {

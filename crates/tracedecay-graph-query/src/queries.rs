@@ -5,9 +5,9 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::map_projection_error;
 
@@ -506,9 +506,7 @@ impl<'a> GraphQueryManager<'a> {
     }
 }
 
-pub fn is_test_marker(
-    record: &tracedecay_code_index::lineage::LineageSymbolRecordV1,
-) -> bool {
+pub fn is_test_marker(record: &tracedecay_code_index::lineage::LineageSymbolRecordV1) -> bool {
     record.kind == "annotation_usage"
         && matches!(
             record.simple_name.as_str(),

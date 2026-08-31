@@ -1097,8 +1097,9 @@ impl McpServer {
         connection_notifications: &std::sync::Mutex<Vec<Value>>,
     ) {
         // Prepend the version-update warning and queue the corresponding
-        // protocol notification.
-        if let Some(warning) = self.check_version_update().await {
+        // protocol notification. The check serves the cached answer and
+        // refreshes in the background, so completion never awaits the fetch.
+        if let Some(warning) = self.check_version_update() {
             if let Some(content) = result
                 .value
                 .get_mut("content")

@@ -1,6 +1,4 @@
-use tracedecay_lcm::contracts::{
-    LcmError, LcmExpandSourcePagination, validate_payload_ref,
-};
+use tracedecay_lcm::contracts::{LcmError, LcmExpandSourcePagination, validate_payload_ref};
 
 #[test]
 fn payload_ref_validation_rejects_traversal_and_separators() {

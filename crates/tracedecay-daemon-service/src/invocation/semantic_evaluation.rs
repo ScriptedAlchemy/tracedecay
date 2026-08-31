@@ -70,10 +70,7 @@ impl SemanticInvocationControlV1 {
             .then(ApplicationProblem::timed_out_before_admission)
     }
 
-    pub fn remaining(
-        &self,
-        now: UtcMicros,
-    ) -> Result<Duration, ApplicationProblem> {
+    pub fn remaining(&self, now: UtcMicros) -> Result<Duration, ApplicationProblem> {
         self.deadline
             .expires_at
             .0
@@ -377,7 +374,8 @@ fn semantic_qualification_key(
     candidate: &tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
     snapshot: &tracedecay_usecases::semantic_runtime::SemanticEvaluationPublicationSnapshotV1,
     report: &tracedecay_search_eval::DirectEvaluationReportV1,
-) -> Result<tracedecay_search_eval::NativeQualificationKeyV1, SemanticActivationCoordinationErrorV1> {
+) -> Result<tracedecay_search_eval::NativeQualificationKeyV1, SemanticActivationCoordinationErrorV1>
+{
     let candidate_semantic = candidate
         .compatibility
         .semantic
@@ -392,9 +390,10 @@ fn semantic_qualification_key(
         tracedecay_search_eval::NativeQualificationModelKeyV1::from_admitted_projection(
             &candidate_semantic.projection,
         );
-    let current_model = tracedecay_search_eval::NativeQualificationModelKeyV1::from_admitted_projection(
-        &current_semantic.projection,
-    );
+    let current_model =
+        tracedecay_search_eval::NativeQualificationModelKeyV1::from_admitted_projection(
+            &current_semantic.projection,
+        );
     if candidate_semantic.implementation_revision != current_semantic.implementation_revision
         || candidate_semantic.fusion_revision != current_semantic.fusion_revision
         || candidate_semantic.artifact_manifest_digest != current_semantic.artifact_manifest_digest
@@ -414,15 +413,16 @@ fn semantic_qualification_key(
             runtime_compatibility_digest: current_semantic.runtime_compatibility_digest.clone(),
             model: current_model,
             search_index_key: current_semantic.search_index_key.clone(),
-            execution_resources: tracedecay_search_eval::NativeQualificationExecutionResourceKeyV1 {
-                model_bytes: current_semantic.resources.model_bytes,
-                tokenizer_bytes: current_semantic.resources.tokenizer_bytes,
-                threads: current_semantic.resources.threads,
-                max_concurrent_sessions: current_semantic.resources.max_concurrent_sessions,
-                batch_size: current_semantic.resources.batch_size,
-                sequence_length: current_semantic.resources.sequence_length,
-                load_deadline_ms: current_semantic.resources.load_deadline_ms,
-            },
+            execution_resources:
+                tracedecay_search_eval::NativeQualificationExecutionResourceKeyV1 {
+                    model_bytes: current_semantic.resources.model_bytes,
+                    tokenizer_bytes: current_semantic.resources.tokenizer_bytes,
+                    threads: current_semantic.resources.threads,
+                    max_concurrent_sessions: current_semantic.resources.max_concurrent_sessions,
+                    batch_size: current_semantic.resources.batch_size,
+                    sequence_length: current_semantic.resources.sequence_length,
+                    load_deadline_ms: current_semantic.resources.load_deadline_ms,
+                },
         },
         tracedecay_search_eval::NativeQualificationPlatformV1::current(),
     ))

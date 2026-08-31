@@ -24,6 +24,8 @@ use tracedecay_application::now_micros;
 use tracedecay_domain::canonical_text::{
     encode_lowercase_hex, encode_tagged_lowercase_hex, sha256_hex,
 };
+use tracedecay_graph_db::GraphConflictContextV1;
+
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
@@ -49,6 +51,7 @@ use tracedecay_usecases::code_index::{
 use self::freshness_witness::RestoreFreshnessWitnessV1;
 use tracedecay_dashboard_api::code_index_freshness_api::{
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
+    CodeIndexGenerationRecoveryServingV1, CodeIndexGenerationRecoveryV1,
 };
 
 use crate::{
@@ -60,14 +63,14 @@ use crate::{
         languages::{LanguageRegistry, StaticLanguageRegistry},
         production::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-            CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1,
-            CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1, CodeIndexProductionConfigV1,
-            CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-            CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-            SharedPhysicalCodeArtifactPoolV1, UninterruptibleCodeIndexControlV1,
-            VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
-            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
-            VerifiedSealedTextGenerationMetadataV1,
+            CodeIndexExecutionControlV1, CodeIndexGenerationCompatibilityV1,
+            CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
+            CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
+            CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+            CodeIndexRepositoryParseIdentityV1, SharedPhysicalCodeArtifactPoolV1,
+            UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageBatchBoundsV1,
+            VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
+            VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -4259,7 +4262,7 @@ impl CodeIndexSchedulerErrorV1 {
                 CodeGraphProjectionError::Cancelled
                     | CodeGraphProjectionError::BudgetExhausted { .. }
                     | CodeGraphProjectionError::DeadlineExceeded
-                    | CodeGraphProjectionError::Conflict
+                    | CodeGraphProjectionError::Conflict { .. }
                     | CodeGraphProjectionError::Unavailable(_)
                     | CodeGraphProjectionError::Closed
             ),
@@ -4280,6 +4283,19 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::WorkerPlan(_) => false,
             #[cfg(not(any(test, feature = "test-helpers")))]
             Self::WorkerPlanNotInstalled => false,
+        }
+    }
+
+    /// The structured conflict verdict carried by a graph-projection
+    /// activation failure, when this error is one. The seat retry loop uses
+    /// it to recognize a deterministic conflict — the same guard site
+    /// refusing with identical compared evidence on consecutive attempts
+    /// over the same sealed generation — which no amount of backoff can
+    /// outwait (issue #765).
+    pub fn activation_conflict_context(&self) -> Option<&GraphConflictContextV1> {
+        match self {
+            Self::GraphProjection(CodeGraphProjectionError::Conflict { context }) => Some(context),
+            _ => None,
         }
     }
 
@@ -4446,6 +4462,9 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// Number of in-flight owner passes; nonzero means activation or
     /// reconcile work is running for this worktree.
     reconcile_in_progress: Arc<AtomicUsize>,
+    /// Typed owner-configuration recovery independently readable while a
+    /// replacement generation is building.
+    generation_recovery: Arc<RwLock<Option<CodeIndexGenerationRecoveryV1>>>,
     latest_content_identity: Option<ContentDigest>,
     ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     query_owners: ProfiledStdMutex<Option<GenerationServingCachesV1>>,
@@ -4658,6 +4677,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
             reconcile_in_progress: Arc::new(AtomicUsize::new(0)),
+            generation_recovery: Arc::new(RwLock::new(None)),
             latest_content_identity,
             ignored_source_admissions: Vec::new(),
             query_owners: hotpath::mutex!(
@@ -4937,6 +4957,54 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.wake.notify_one();
     }
 
+    #[hotpath::measure(label = "code_index.generation.compatibility_observe")]
+    fn observe_generation_compatibility(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> CodeIndexGenerationCompatibilityV1 {
+        let compatibility = generation.compatibility_with(&self.production_config);
+        let next = if compatibility.is_reusable() {
+            None
+        } else {
+            Some(CodeIndexGenerationRecoveryV1 {
+                incompatible_generation_id: generation.manifest().generation_id.as_str().to_owned(),
+                incompatibilities: compatibility
+                    .incompatibilities()
+                    .iter()
+                    .map(|reason| reason.as_str().to_owned())
+                    .collect(),
+                serving: if compatibility.may_serve_while_rebuilding() {
+                    CodeIndexGenerationRecoveryServingV1::Preserved
+                } else {
+                    CodeIndexGenerationRecoveryServingV1::Refused
+                },
+            })
+        };
+        let mut observed = self
+            .generation_recovery
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *observed != next {
+            match next.as_ref() {
+                Some(recovery) => tracing::warn!(
+                    event = "code_index_generation_configuration_incompatible",
+                    generation_id = recovery.incompatible_generation_id,
+                    incompatibilities = recovery.incompatibilities.join(","),
+                    serving = ?recovery.serving,
+                    "the active generation is retired from reuse; one compatible replacement is scheduled"
+                ),
+                None if observed.is_some() => tracing::info!(
+                    event = "code_index_generation_configuration_recovered",
+                    generation_id = %generation.manifest().generation_id,
+                    "the compatible replacement generation is now active"
+                ),
+                None => {}
+            }
+            *observed = next;
+        }
+        compatibility
+    }
+
     fn validate_generation_identity(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
@@ -4999,6 +5067,12 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         };
         self.validate_generation_identity(&generation)?;
+        if !self
+            .observe_generation_compatibility(&generation)
+            .is_reusable()
+        {
+            return Ok(None);
+        }
         self.adopt_ignored_source_roster(&generation);
         let Some(witness) = RestoreFreshnessWitnessV1::load(&self.store_root) else {
             return Ok(None);
@@ -5081,13 +5155,29 @@ impl CodeIndexWorktreeSchedulerV1 {
         else {
             return Ok(None);
         };
+        let decoded = self
+            .publication
+            .active_already_decoded()
+            .map_err(CodeIndexProductionErrorV1::Publication)?;
+        let configuration_changed = if let Some(generation) = decoded.as_ref() {
+            self.validate_generation_identity(generation)?;
+            let compatibility = self.observe_generation_compatibility(generation);
+            if !compatibility.may_serve_while_rebuilding() {
+                self.request_background_reconcile();
+                return Ok(None);
+            }
+            !compatibility.is_reusable()
+        } else {
+            false
+        };
         let dirty = {
             let hints = self
                 .hints
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             hints.overflow || !hints.paths.is_empty()
-        } || !self.retained_frontier_is_quietly_current(&pointer);
+        } || configuration_changed
+            || !self.retained_frontier_is_quietly_current(&pointer);
         if dirty {
             self.request_background_reconcile();
         }
@@ -5095,12 +5185,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // `load_active_shared` here parked remount on the publication
         // barrier while activation owned it, so the seated event never
         // published and the dirty successor extract never started.
-        let snapshot_content_identity = if let Some(generation) = self
-            .publication
-            .active_already_decoded()
-            .map_err(CodeIndexProductionErrorV1::Publication)?
-        {
-            self.validate_generation_identity(&generation)?;
+        let snapshot_content_identity = if let Some(generation) = decoded {
             self.adopt_ignored_source_roster(&generation);
             generation.snapshot().content_identity.clone()
         } else {
@@ -5783,6 +5868,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             if let Some(generation) = active_generation.as_ref() {
                 self.validate_generation_identity(generation)?;
             }
+            let active_is_reusable = active_generation.as_ref().is_none_or(|generation| {
+                self.observe_generation_compatibility(generation)
+                    .is_reusable()
+            });
             let latest_snapshot = active_generation
                 .as_ref()
                 .map(|generation| generation.snapshot());
@@ -5792,11 +5881,12 @@ impl CodeIndexWorktreeSchedulerV1 {
             });
             let active_content_identity =
                 latest_snapshot.map(|snapshot| &snapshot.content_identity);
-            if self
-                .latest_content_identity
-                .as_ref()
-                .or(active_content_identity)
-                == Some(&captured.snapshot.content_identity)
+            if active_is_reusable
+                && self
+                    .latest_content_identity
+                    .as_ref()
+                    .or(active_content_identity)
+                    == Some(&captured.snapshot.content_identity)
                 && unchanged_source
             {
                 drop(std::mem::take(&mut captured.captured_files));
@@ -5860,6 +5950,13 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 Err(error) => return Err(error.into()),
             };
+            let replacement_compatibility = self.observe_generation_compatibility(&generation);
+            if !replacement_compatibility.is_reusable() {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "newly published generation is incompatible with its production owner"
+                        .to_owned(),
+                ));
+            }
             Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
             self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
             self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
@@ -6302,6 +6399,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         .ok()
         .flatten()?;
         self.validate_generation_identity(&generation).ok()?;
+        if !self
+            .observe_generation_compatibility(&generation)
+            .may_serve_while_rebuilding()
+        {
+            return None;
+        }
         Some(self.bind_latest_complete(generation, None))
     }
 
@@ -6517,6 +6620,10 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub fn reconcile_in_progress(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.reconcile_in_progress)
+    }
+
+    pub fn generation_recovery(&self) -> Arc<RwLock<Option<CodeIndexGenerationRecoveryV1>>> {
+        Arc::clone(&self.generation_recovery)
     }
 
     pub fn active_generation_encoded_bytes(&self) -> Arc<AtomicU64> {

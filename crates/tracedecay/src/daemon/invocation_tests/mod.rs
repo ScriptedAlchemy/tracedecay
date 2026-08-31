@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1;
 use tracedecay_application::ResolvedScope;
 use tracedecay_application::feedback::observations::FeedbackSourceEventV1;
 use tracedecay_daemon_service::{
@@ -22,7 +23,6 @@ use tracedecay_lsp::{
 };
 use tracedecay_usecases::feedback::observations::FeedbackObservationEmitterV1;
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
-use tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1;
 
 struct DeniedWorkEvidenceRetrieval;
 
@@ -33,8 +33,11 @@ impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalP
         &'a self,
         _context: &'a tracedecay_application::RequestContext,
         _query: tracedecay_session_memory::session::SessionTemporalQuery,
-    ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
-        Box::pin(async { tracedecay_session_runtime::session_retrieval::SessionRetrievalServiceOutcome::Denied })
+    ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
+    {
+        Box::pin(async {
+            tracedecay_session_runtime::session_retrieval::SessionRetrievalServiceOutcome::Denied
+        })
     }
 }
 

@@ -294,7 +294,9 @@ fn daemon_handshake_advertises_binary_version() {
 
     assert_eq!(
         value["client_version"],
-        serde_json::json!(crate::version::build_version().expect("fixture product runtime registered"))
+        serde_json::json!(
+            crate::version::build_version().expect("fixture product runtime registered")
+        )
     );
     assert_eq!(
         value["client_instance_id"],
@@ -475,9 +477,7 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
         .write_all(format!("{preface}\n").as_bytes())
         .await
         .expect("write bad auth preface");
-    let handshake = test_handshake_defaults()
-        .to_line()
-        .expect("handshake json");
+    let handshake = test_handshake_defaults().to_line().expect("handshake json");
     writer
         .write_all(format!("{handshake}\n").as_bytes())
         .await

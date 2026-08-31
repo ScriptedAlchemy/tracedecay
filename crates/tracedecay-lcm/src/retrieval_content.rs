@@ -254,10 +254,7 @@ mod tests {
             MAX_DERIVED_TEXT_CHARS,
             "LCM must re-export the application derived-text cap, not redefine it"
         );
-        assert_eq!(
-            crate::DERIVED_TRUNCATION_MARKER,
-            DERIVED_TRUNCATION_MARKER
-        );
+        assert_eq!(crate::DERIVED_TRUNCATION_MARKER, DERIVED_TRUNCATION_MARKER);
         assert_eq!(
             crate::derived_text_for_index(&content),
             derived,

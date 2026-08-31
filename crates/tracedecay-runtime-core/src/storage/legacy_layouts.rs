@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use crate::git_discovery::{
     GitDiscoveryUnknown, GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
 };
 use crate::worktree;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,

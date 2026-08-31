@@ -641,11 +641,9 @@ async fn bounded_project_catch_up_pass_persists_the_rotation_frontier() {
     .await;
 
     assert_eq!(
-        outcome.stats.messages_upserted,
-        2,
+        outcome.stats.messages_upserted, 2,
         "the first bounded pass covers only the codex slot; coverage {:?} failures {:?}",
-        outcome.coverage,
-        outcome.failures,
+        outcome.coverage, outcome.failures,
     );
     assert!(
         outcome.has_deferred_work(),
@@ -703,11 +701,9 @@ async fn project_catch_up_resumes_from_the_persisted_frontier_after_restart() {
         )
         .await;
         assert_eq!(
-            first.stats.messages_upserted,
-            2,
+            first.stats.messages_upserted, 2,
             "codex slot ingested; coverage {:?} failures {:?}",
-            first.coverage,
-            first.failures,
+            first.coverage, first.failures,
         );
         assert_eq!(project_rotation_frontier(&runtime).await, Some(1));
     }

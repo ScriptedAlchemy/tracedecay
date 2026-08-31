@@ -459,7 +459,7 @@ fn profile_relation_projection_reopens_after_final_clone_allows_retirement() {
             Ok(_) => panic!("retained graph client must refuse retirement"),
             Err(refusal) => refusal,
         };
-        assert_eq!(refusal.error(), &GraphDbError::Conflict);
+        assert!(matches!(refusal.error(), &GraphDbError::Conflict { .. }));
         let (_, retry_targets) = refusal.into_parts();
         assert_eq!(retry_targets, vec![retirement_target.clone()]);
         drop(retained_clone);

@@ -498,8 +498,7 @@ mod tests {
         let roots = [std::path::PathBuf::from("/repository")]
             .into_iter()
             .collect();
-        let invocation_registry =
-            tracedecay_daemon_service::ProjectRuntimeRegistryV1::default();
+        let invocation_registry = tracedecay_daemon_service::ProjectRuntimeRegistryV1::default();
         let invocation = invocation_registry
             .quiesce_roots(&roots)
             .await

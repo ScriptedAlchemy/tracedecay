@@ -18,6 +18,7 @@ members = [
     "crates/tracedecay-daemon-service",
     "crates/tracedecay-dashboard-api",
     "crates/tracedecay-domain",
+    "crates/tracedecay-framing",
     "crates/tracedecay-global-db",
     "crates/tracedecay-graph-db",
     "crates/tracedecay-graph-query",

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use tracedecay_runtime_core::db::engine::Value as EngineValue;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::db::engine::Value as EngineValue;
 
 use crate::{AnalyticsEventRecord, project_path_alias_key};
 

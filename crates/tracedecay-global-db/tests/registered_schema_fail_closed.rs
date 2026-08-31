@@ -20,10 +20,10 @@
 //! Deleting or weakening this test removes the only executable proof that a
 //! production process still refuses an unregistered shard.
 
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::{
     Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
 };
-use tracedecay_domain::errors::TraceDecayError;
 
 #[tokio::test]
 async fn unregistered_installer_refuses_to_initialize_a_registered_shard() {

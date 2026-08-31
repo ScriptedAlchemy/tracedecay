@@ -278,7 +278,7 @@ macro_rules! read_hook_event {
             Ok($crate::hooks::HookStdinRead::Oversized) => {
                 eprintln!(
                     "tracedecay hook: stdin exceeds wire message bound ({})",
-                    ::tracedecay_daemon_protocol::wire::WIRE_RECORD_TOO_LARGE
+                    ::tracedecay_framing::WIRE_RECORD_TOO_LARGE
                 );
                 return 0;
             }
@@ -1103,7 +1103,7 @@ fn append_tool_hint(context: &mut String, hint: &ToolHint) {
 
 pub(crate) enum HookStdinRead {
     Event(String),
-    /// Stdin exceeded [`tracedecay_daemon_protocol::wire::MAX_WIRE_MESSAGE_BYTES`].
+    /// Stdin exceeded [`tracedecay_framing::MAX_WIRE_MESSAGE_BYTES`].
     /// No payload bytes are retained.
     Oversized,
 }
@@ -1115,11 +1115,11 @@ pub(crate) fn read_stdin_bounded() -> std::io::Result<HookStdinRead> {
 }
 
 /// Testable stdin reader: streams until EOF while retaining at most
-/// [`tracedecay_daemon_protocol::wire::MAX_WIRE_MESSAGE_BYTES`].
+/// [`tracedecay_framing::MAX_WIRE_MESSAGE_BYTES`].
 pub(crate) fn read_stdin_bounded_from(
     reader: &mut impl std::io::Read,
 ) -> std::io::Result<HookStdinRead> {
-    use tracedecay_daemon_protocol::wire::{
+    use tracedecay_framing::{
         MAX_WIRE_MESSAGE_BYTES, WireReadOutcome, read_bounded_to_string,
     };
     match read_bounded_to_string(reader, MAX_WIRE_MESSAGE_BYTES)? {

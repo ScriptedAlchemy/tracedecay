@@ -18,13 +18,13 @@ use tracedecay_application::{
     RetainedSurfaceExecutionFutureV1, now_micros,
 };
 use tracedecay_domain::{FactOwnerV1, ManifestDigest};
+use tracedecay_session_memory::memory::{
+    MemoryApplication, MemoryOperationContext, ProjectMemoryFactAddRequestOutcome,
+};
 use tracedecay_store::{
     FactReadControl, FactWriteControl, ProjectMemoryFactContradictionQueryV1,
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactListQueryV1,
     ProjectMemoryFactSearchKindV1,
-};
-use tracedecay_session_memory::memory::{
-    MemoryApplication, MemoryOperationContext, ProjectMemoryFactAddRequestOutcome,
 };
 
 use super::map_execution_error;

@@ -1730,6 +1730,26 @@ fn parses_sessions_import_and_search_commands() {
     ));
 }
 
+/// `--json` is not a sessions-search flag. Clap must reject it at parse
+/// time; a hang after the usage error is a process-lifetime defect, not
+/// this check.
+#[test]
+fn sessions_search_rejects_json_at_parse() {
+    let error = match Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "search",
+        "tracedecay",
+        "--limit",
+        "3",
+        "--json",
+    ]) {
+        Ok(_) => panic!("sessions search does not accept --json"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+}
+
 #[test]
 fn sessions_refresh_parses_exact_lifecycle_selectors() {
     let begin = Cli::try_parse_from([

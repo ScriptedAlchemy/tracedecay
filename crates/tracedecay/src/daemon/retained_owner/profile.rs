@@ -35,7 +35,8 @@ pub(crate) struct ProfileRetainedAuthoritiesV1<'a> {
         Option<&'a crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
     pub(crate) session_identity: ResolvedSessionIdentity,
     pub(crate) configuration_digest: ManifestDigest,
-    pub(crate) lcm_authority: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
+    pub(crate) lcm_authority:
+        Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
 }
 
 const PROFILE_RETAINED_REQUEST_GRANT_REVISION_V1: u64 = 1;
@@ -381,16 +382,16 @@ mod tests {
         SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UserProfileId,
         UtcMicros,
     };
+    use tracedecay_session_memory::context::{
+        ProfileId, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    };
+    use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
         SessionTemporalSnapshotRequestV1, build_observation_resolution_authorization_v1,
         build_observation_retrieval_anchor_v2,
     };
-    use tracedecay_session_memory::context::{
-        ProfileId, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
-    };
-    use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
 
     use super::*;
 
@@ -411,12 +412,9 @@ mod tests {
         );
         let serving_db =
             tracedecay_sessions::runtime::user_sessions_db_path(profile_identity.profile_root());
-        let serving = profile_session_retrieval_serving_identity(
-            profile_identity,
-            &shard,
-            &serving_db,
-        )
-        .expect("profile serving identity");
+        let serving =
+            profile_session_retrieval_serving_identity(profile_identity, &shard, &serving_db)
+                .expect("profile serving identity");
         DaemonSessionRetrievalRoot::profile(serving).expect("profile retrieval root")
     }
 
@@ -677,8 +675,8 @@ mod tests {
     async fn profile_retained_message_search_reads_the_profile_session_store() {
         let temporary = tempfile::tempdir().expect("temporary profile parent");
         let profile_root = temporary.path().join("profile");
-        let profile_identity = profile_identity::load_or_create(&profile_root)
-            .expect("durable profile identity");
+        let profile_identity =
+            profile_identity::load_or_create(&profile_root).expect("durable profile identity");
         let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             1,
@@ -782,8 +780,8 @@ mod tests {
     async fn profile_retained_message_search_rejects_project_selection() {
         let temporary = tempfile::tempdir().expect("temporary profile parent");
         let profile_root = temporary.path().join("profile");
-        let profile_identity = profile_identity::load_or_create(&profile_root)
-            .expect("durable profile identity");
+        let profile_identity =
+            profile_identity::load_or_create(&profile_root).expect("durable profile identity");
         let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             1,
@@ -840,8 +838,8 @@ mod tests {
     async fn profile_retained_sessions_for_remains_unsupported() {
         let temporary = tempfile::tempdir().expect("temporary profile parent");
         let profile_root = temporary.path().join("profile");
-        let profile_identity = profile_identity::load_or_create(&profile_root)
-            .expect("durable profile identity");
+        let profile_identity =
+            profile_identity::load_or_create(&profile_root).expect("durable profile identity");
         let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             1,

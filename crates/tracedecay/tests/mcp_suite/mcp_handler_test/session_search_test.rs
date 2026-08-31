@@ -375,10 +375,7 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
         .expect("production Codex hook ingest invocation");
     let result = match response.result {
         Some(result) => result,
-        None => panic!(
-            "production Codex hook ingest failed: {:?}",
-            response.error
-        ),
+        None => panic!("production Codex hook ingest failed: {:?}", response.error),
     };
     let ingest: Value = serde_json::from_str(
         result["content"][0]["text"]

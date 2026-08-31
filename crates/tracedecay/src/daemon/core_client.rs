@@ -13,7 +13,7 @@ use tracedecay_daemon_control::default_socket_path;
 #[cfg(not(unix))]
 use tracedecay_daemon_identity::current_daemon_connection;
 use tracedecay_daemon_identity::{DaemonConnection, client_connection};
-use tracedecay_daemon_protocol::wire::{
+use tracedecay_framing::{
     WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
 };
 
@@ -355,8 +355,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
         // refusal frame (no JSON-RPC id) before EOF; skipping it as a
         // non-matching response line reported the definitive refusal as a
         // closed-connection mystery.
-        if let Some(refusal) =
-            tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&line)
+        if let Some(refusal) = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&line)
         {
             return Err(tracedecay_daemon_protocol::handshake_refusal_error(
                 &refusal, handshake,
@@ -573,20 +572,19 @@ pub fn tool_json_payload(
     let blocks = result
         .get("content")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("daemon tool {tool_name} returned no content blocks"),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned no content blocks"),
+        })?;
     let mut payloads = blocks
         .iter()
         .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
         .filter_map(|text| serde_json::from_str(text).ok());
-    let payload = payloads.next().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned no JSON payload"),
-        }
-    })?;
+    let payload =
+        payloads
+            .next()
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("daemon tool {tool_name} returned no JSON payload"),
+            })?;
     if payloads.next().is_some() {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("daemon tool {tool_name} returned multiple JSON payloads"),

@@ -10,6 +10,7 @@ use crate::host_ports::hermes_profile_pin::resolve as read_config_pinned_project
 use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::{TranscriptIngestStats, path_belongs_to_project};
+use crate::runtime::source::run_blocking_transcript_section;
 
 use super::DEFAULT_HERMES_SWEEP_BYTES;
 use super::coverage::{
@@ -141,7 +142,11 @@ pub async fn ingest_homes_for_projects(
 ) -> TranscriptIngestStats {
     let mut stats = TranscriptIngestStats::default();
     let mut budget = new_sweep_budget(None);
-    for source in all_profile_sources(hermes_homes) {
+    let sources = hotpath::measure_block!(
+        "sessions.hosts.hermes.discover_blocking",
+        run_blocking_transcript_section(|| all_profile_sources(hermes_homes))
+    );
+    for source in sources {
         if budget.exhausted() {
             budget.defer();
             break;
@@ -240,7 +245,11 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
         return outcome;
     }
     let mut budget = new_sweep_budget(max_new_bytes);
-    for source in candidate_state_dbs(hermes_homes, project_root) {
+    let sources = hotpath::measure_block!(
+        "sessions.hosts.hermes.discover_blocking",
+        run_blocking_transcript_section(|| candidate_state_dbs(hermes_homes, project_root))
+    );
+    for source in sources {
         if cancellation.is_cancelled() {
             break;
         }
@@ -352,7 +361,11 @@ async fn ingest_user_homes_capped_with_admission(
         return outcome;
     }
     let mut budget = new_sweep_budget(max_new_bytes);
-    for source in all_profile_sources(hermes_homes) {
+    let sources = hotpath::measure_block!(
+        "sessions.hosts.hermes.discover_blocking",
+        run_blocking_transcript_section(|| all_profile_sources(hermes_homes))
+    );
+    for source in sources {
         if cancellation.is_cancelled() {
             break;
         }

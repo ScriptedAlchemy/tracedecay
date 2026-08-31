@@ -134,6 +134,27 @@ pub struct CodeIndexConvergenceParkedV1 {
     pub retries_on_wake: bool,
 }
 
+/// Recovery state for a durable generation sealed under a different production
+/// owner configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexGenerationRecoveryV1 {
+    /// Generation retired from incremental reuse.
+    pub incompatible_generation_id: String,
+    /// Stable owner-input reason codes reported by the code-index authority.
+    pub incompatibilities: Vec<String>,
+    /// Whether the prior generation may continue serving while its replacement
+    /// builds under the current configuration.
+    pub serving: CodeIndexGenerationRecoveryServingV1,
+}
+
+/// Serving disposition of an incompatible generation during recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexGenerationRecoveryServingV1 {
+    Preserved,
+    Refused,
+}
+
 /// Interactive graph-serving state for the latest sealed generation.
 ///
 /// A sealed generation can expose truthful census statistics before its graph
@@ -184,6 +205,11 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     /// the scheduler most recently observed a fresh source; the status read
     /// does not probe the worktree to revalidate that observation.
     pub staleness_state: Option<String>,
+    /// Whether the exact scheduler route owns a reconcile pass or has a
+    /// pending wake. A stale seated generation with this false is stalled,
+    /// not in a routine rebuild window.
+    #[serde(default)]
+    pub rebuild_in_flight: bool,
     /// Pending hook-hint count, when cheaply available.
     pub hook_hint_count: Option<u64>,
     /// Whether this read covers the complete mounted scheduler state.
@@ -194,6 +220,11 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     /// convergence, when one is observed. `staleness_state` reads `parked`
     /// while this is set and no generation serves.
     pub parked: Option<CodeIndexConvergenceParkedV1>,
+    /// One-shot owner-configuration recovery currently replacing an
+    /// incompatible durable generation.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_recovery: Option<CodeIndexGenerationRecoveryV1>,
 }
 
 pub type CodeIndexFreshnessReadFuture =
@@ -338,14 +369,37 @@ mod tests {
             .as_object_mut()
             .expect("freshness object")
             .remove("code_graph_serving");
+        value
+            .as_object_mut()
+            .expect("freshness object")
+            .remove("rebuild_in_flight");
 
         let decoded: CodeIndexWorktreeFreshnessV1 =
             serde_json::from_value(value).expect("older response remains readable");
         assert_eq!(decoded.code_graph_serving, None);
+        assert!(!decoded.rebuild_in_flight);
 
         let ready = serde_json::to_value(CodeGraphServingReadinessV1::Ready)
             .expect("ready state serializes");
         assert_eq!(ready, serde_json::json!({ "state": "ready" }));
+    }
+
+    #[test]
+    fn generation_recovery_serializes_typed_serving_disposition() {
+        let recovery = CodeIndexGenerationRecoveryV1 {
+            incompatible_generation_id: "generation.config-a".to_owned(),
+            incompatibilities: vec!["policy_revision".to_owned()],
+            serving: CodeIndexGenerationRecoveryServingV1::Refused,
+        };
+
+        assert_eq!(
+            serde_json::to_value(recovery).expect("generation recovery serializes"),
+            serde_json::json!({
+                "incompatible_generation_id": "generation.config-a",
+                "incompatibilities": ["policy_revision"],
+                "serving": "refused"
+            })
+        );
     }
 
     #[tokio::test]
@@ -382,6 +436,7 @@ mod tests {
                     coverage: "complete".to_owned(),
                     progress: None,
                     parked: None,
+                    generation_recovery: None,
                 })
             })
         }));
@@ -424,6 +479,7 @@ mod tests {
                     coverage: "complete".to_owned(),
                     progress: None,
                     parked: None,
+                    generation_recovery: None,
                 })
             })
         }));
@@ -482,6 +538,7 @@ mod tests {
                         blocked_reason: None,
                     }),
                     parked: None,
+                    generation_recovery: None,
                 })
             })
         }));

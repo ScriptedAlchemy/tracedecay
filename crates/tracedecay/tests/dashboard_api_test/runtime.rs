@@ -13,18 +13,18 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
 use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
+use tracedecay_session_memory::context::RegisteredScopeResolver;
+use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 #[derive(Clone)]
 struct DashboardTestCodeGraphProjectionV1 {
@@ -48,13 +48,11 @@ impl CodeGraphProjectionReadPort for DashboardTestCodeGraphProjectionV1 {
                 return Err(CodeGraphReadError::Cancelled);
             }
             match request.context.admission_at(request.observed_at) {
-                RequestAdmission::Admitted => {
-                    VerifiedCodeGraphRead::new(
-                        self.scope.clone(),
-                        Arc::clone(&self.store),
-                        tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
-                    )
-                }
+                RequestAdmission::Admitted => VerifiedCodeGraphRead::new(
+                    self.scope.clone(),
+                    Arc::clone(&self.store),
+                    tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+                ),
                 RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
             }
@@ -564,10 +562,7 @@ impl DashboardTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         draft: tracedecay_lcm::LcmSummaryNodeDraft,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmSummaryNode,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmSummaryNode, tracedecay_lcm::LcmError> {
         let database = self
             .database(scope)
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;

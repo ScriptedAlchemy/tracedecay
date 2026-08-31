@@ -11,13 +11,13 @@ use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
-use tracedecay_temporal_query::TemporalKernelResult;
-use tracedecay_temporal_query::context::ContextBudget;
-use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_session_memory::session::{
     SessionDataFreshness, SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionTemporalExecutionError, SessionTemporalQuery,
 };
+use tracedecay_temporal_query::TemporalKernelResult;
+use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::ranking::DiversityLimits;
 
 use super::contract::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, LcmExpandServiceCommand,

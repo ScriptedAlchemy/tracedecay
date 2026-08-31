@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use tracedecay_runtime_core::db::DatabaseAuthorityRole;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::db::DatabaseAuthorityRole;
 
 use crate::RegisteredGlobalDb;
 

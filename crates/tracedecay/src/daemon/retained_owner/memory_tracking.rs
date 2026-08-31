@@ -2,11 +2,11 @@
 
 use tracedecay_application::{RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1};
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProvenanceId};
+use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_store::{
     ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRetrievalCommandV1,
     ProjectMemoryFactRetrievalReceiptV1, ProjectMemoryFactSearchPageV1,
 };
-use tracedecay_session_memory::memory::MemoryApplication;
 
 use super::memory::{bounded_memory_operation, fact_write_control};
 use super::memory_mapping;

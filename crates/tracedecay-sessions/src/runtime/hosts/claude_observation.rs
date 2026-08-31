@@ -35,6 +35,7 @@ use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     HostProviderCoverage, JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds,
     TranscriptIngestError, TranscriptSource, persist_host_provider_coverage,
+    run_blocking_transcript_section,
 };
 use tracedecay_runtime_core::privacy::PrivacySanitizerError;
 
@@ -523,11 +524,13 @@ where
     if context.cancellation.is_cancelled() {
         return Err(ObservationApplicationError::Cancelled.into());
     }
-    let identity = identify_claude_source(path).ok_or_else(|| {
-        TranscriptIngestError::InvalidSourceIdentity {
-            provider: "claude",
-            path: path.to_path_buf(),
-        }
+    let identity = hotpath::measure_block!(
+        "sessions.hosts.claude.identify_blocking",
+        run_blocking_transcript_section(|| identify_claude_source(path))
+    )
+    .ok_or_else(|| TranscriptIngestError::InvalidSourceIdentity {
+        provider: "claude",
+        path: path.to_path_buf(),
     })?;
     let source = ClaudeSourceIdentityV1::for_source(
         SessionId::new(identity.session_id.clone())?,
@@ -546,8 +549,17 @@ where
             fingerprint: cursor.resume_fingerprint()?,
         })
     });
-    let Some(mut scan) =
-        try_scan_claude_source_frames_with_resume(identity, previous, max_new_bytes, resume_state)?
+    let Some(mut scan) = hotpath::measure_block!(
+        "sessions.hosts.claude.scan_blocking",
+        run_blocking_transcript_section(|| {
+            try_scan_claude_source_frames_with_resume(
+                identity,
+                previous,
+                max_new_bytes,
+                resume_state,
+            )
+        })
+    )?
     else {
         return Ok(SourcePreparation::Finished(
             ClaudeObservationIngestStats::default(),
@@ -815,8 +827,13 @@ async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     source: &ClaudeSource,
     project_root: &Path,
 ) -> Result<(Vec<PathBuf>, usize), ClaudeObservationIngestError> {
-    let discovery =
-        source.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk());
+    let discovery = hotpath::measure_block!(
+        "sessions.hosts.claude.discover_blocking",
+        run_blocking_transcript_section(|| {
+            source
+                .discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
+        })
+    );
     let discovery_truncated = discovery.is_truncated();
     let mut paths = discovery.paths;
     paths.sort();

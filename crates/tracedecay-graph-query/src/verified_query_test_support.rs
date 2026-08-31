@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tracedecay_application::{
-    ApplicationOperation, CapabilityGrantId, CapabilityGrantSnapshot, CancellationSignal,
+    ApplicationOperation, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot,
     DisclosureClass, RequestContext, ResolvedScope,
 };
 use tracedecay_code_index::graph_projection::{
@@ -103,7 +103,8 @@ pub(super) fn fixture_store(tag: &str) -> Arc<CodeGraphProjectionStore> {
     let cancellation =
         CancellationSignal::active(format!("cancel.{tag}.store")).expect("cancellation");
     let projection = HermeticCodeGraphProjectionStore::memory(&cancellation).expect("projection");
-    let generation = CodeGenerationId::new(format!("generation.{tag}.1").as_str()).expect("generation");
+    let generation =
+        CodeGenerationId::new(format!("generation.{tag}.1").as_str()).expect("generation");
     projection
         .publish_with_cancellation(&generation, &[], &[], Arc::new(NeverCancelled))
         .expect("publish");

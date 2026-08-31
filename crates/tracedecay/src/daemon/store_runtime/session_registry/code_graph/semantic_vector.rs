@@ -394,7 +394,9 @@ impl RetainedCodeGraphRuntimeV1 {
                     | tracedecay_store::SemanticVectorStageAppendOutcome::StaleFence { .. }
                     | tracedecay_store::SemanticVectorStageAppendOutcome::ReadyToPublish(_)
                     | tracedecay_store::SemanticVectorStageAppendOutcome::Cancelled(_) => {
-                        return Err(GraphDbError::Conflict);
+                        return Err(GraphDbError::conflict(
+                            "semantic_vector.append_semantic_vector_stage_batch",
+                        ));
                     }
                     tracedecay_store::SemanticVectorStageAppendOutcome::MissingStage => {
                         return Err(GraphDbError::ResetRequired {
@@ -578,9 +580,9 @@ fn require_retriable_stage_effect(
         tracedecay_store::SemanticVectorStageEffectState::Pending
         | tracedecay_store::SemanticVectorStageEffectState::Applied => Ok(()),
         tracedecay_store::SemanticVectorStageEffectState::Failed
-        | tracedecay_store::SemanticVectorStageEffectState::Cancelled => {
-            Err(GraphDbError::Conflict)
-        }
+        | tracedecay_store::SemanticVectorStageEffectState::Cancelled => Err(
+            GraphDbError::conflict("semantic_vector.require_retriable_stage_effect"),
+        ),
     }
 }
 
@@ -613,7 +615,7 @@ fn map_semantic_vector_staging_error(
         },
         tracedecay_store::SemanticVectorStagingStoreError::AuthorityLost
         | tracedecay_store::SemanticVectorStagingStoreError::ReusedOperationContext => {
-            GraphDbError::Conflict
+            GraphDbError::conflict("semantic_vector.map_semantic_vector_staging_error")
         }
         tracedecay_store::SemanticVectorStagingStoreError::Corrupt(message) => {
             GraphDbError::Corrupt { message }
@@ -630,13 +632,13 @@ mod tests {
     fn terminal_stage_effects_cannot_be_reapplied() {
         assert!(require_retriable_stage_effect(SemanticVectorStageEffectState::Pending).is_ok());
         assert!(require_retriable_stage_effect(SemanticVectorStageEffectState::Applied).is_ok());
-        assert_eq!(
+        assert!(matches!(
             require_retriable_stage_effect(SemanticVectorStageEffectState::Failed),
-            Err(GraphDbError::Conflict)
-        );
-        assert_eq!(
+            Err(GraphDbError::Conflict { .. })
+        ));
+        assert!(matches!(
             require_retriable_stage_effect(SemanticVectorStageEffectState::Cancelled),
-            Err(GraphDbError::Conflict)
-        );
+            Err(GraphDbError::Conflict { .. })
+        ));
     }
 }

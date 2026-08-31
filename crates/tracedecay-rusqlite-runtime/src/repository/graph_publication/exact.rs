@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_store::{
-    GraphProjectionIdentityV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphPendingReplayDiscardOutcomeV1, GraphPendingReplayDiscardV1, GraphProjectionIdentityV1,
+    GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationProjectionPageRequestV1, GraphPublicationProjectionPageV1,
     GraphPublicationReplayCursorV1, GraphPublicationReplayLookupV1,
     GraphPublicationReplayPageRequestV1, GraphPublicationReplayPageV1,
@@ -22,9 +23,10 @@ use crate::exact_sql::{
 };
 
 use super::{
-    EncodedProjection, begin_replay_retirement_commit, begin_retired_cleanup_finalize_commit,
-    begin_verified_commit, encode_direct_dependency_generations, encode_optional_head,
-    ensure_not_interrupted, sequence_from_i64, sequence_to_i64,
+    EncodedProjection, begin_pending_discard_commit, begin_replay_retirement_commit,
+    begin_retired_cleanup_finalize_commit, begin_verified_commit,
+    encode_direct_dependency_generations, encode_optional_head, ensure_not_interrupted,
+    sequence_from_i64, sequence_to_i64,
 };
 
 #[path = "support.rs"]
@@ -294,6 +296,64 @@ pub(crate) fn retire_replay_in_transaction(
         vec![ExactSqlValue::Integer(sequence_to_i64(replay.sequence)?)],
     )?;
     Ok(GraphReplayRetirementOutcomeV1::Retired(tombstone))
+}
+
+pub(crate) fn discard_pending_replay_in_transaction(
+    transaction: &ExactSqlTransaction,
+    request: &GraphPendingReplayDiscardV1,
+) -> GraphPublicationStoreResultV1<GraphPendingReplayDiscardOutcomeV1> {
+    let encoded = EncodedProjection::new(&request.key.projection)?;
+    let conflicts = read_conflicts(transaction, &encoded, &request.key)?;
+    let Some(replay) = conflicts
+        .iter()
+        .find(|replay| replay.publication.key == request.key)
+        .cloned()
+    else {
+        return Ok(GraphPendingReplayDiscardOutcomeV1::Missing);
+    };
+    if replay.sequence != request.sequence {
+        return Ok(GraphPendingReplayDiscardOutcomeV1::SequenceMismatch { actual: replay });
+    }
+    let head = read_head(transaction, &encoded)?;
+    if let Some(head) = head.as_ref() {
+        if head.sequence == replay.sequence {
+            return Ok(GraphPendingReplayDiscardOutcomeV1::CurrentVerifiedHead {
+                head: head.clone(),
+            });
+        }
+        if replay.sequence < head.sequence {
+            return Ok(GraphPendingReplayDiscardOutcomeV1::Superseded { head: head.clone() });
+        }
+    }
+    // A pending row postdates every verified head, so nothing active can
+    // have journaled a dependency on its generation. Fail closed anyway:
+    // deleting a depended-upon replay would orphan its dependents' closures.
+    if has_active_inbound_dependencies(transaction, replay.sequence)? {
+        return Err(GraphPublicationStoreErrorV1::Corrupt(
+            "pending graph replay discard target has active inbound dependencies".to_owned(),
+        ));
+    }
+    execute(
+        transaction,
+        "DELETE FROM graph_publication_replay_dependencies_v1
+         WHERE owner_replay_sequence = ?1",
+        vec![ExactSqlValue::Integer(sequence_to_i64(replay.sequence)?)],
+    )?;
+    execute(
+        transaction,
+        "DELETE FROM graph_publication_replay_v1
+         WHERE sequence = ?1 AND shard_id = ?2 AND namespace = ?3
+           AND projection = ?4 AND generation = ?5 AND idempotency_key = ?6",
+        vec![
+            ExactSqlValue::Integer(sequence_to_i64(replay.sequence)?),
+            text(encoded.shard_id),
+            text(encoded.namespace),
+            text(encoded.projection),
+            text(request.key.generation.as_str()),
+            text(request.key.idempotency_key.as_str()),
+        ],
+    )?;
+    Ok(GraphPendingReplayDiscardOutcomeV1::Discarded(replay))
 }
 
 pub(crate) fn append_replay_in_transaction(
@@ -572,6 +632,33 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         }
         if matches!(outcome, GraphReplayRetirementOutcomeV1::Retired(_)) {
             if let Err(error) = begin_replay_retirement_commit(context) {
+                return rollback_error(transaction, error);
+            }
+            commit(transaction)?;
+            Ok(outcome)
+        } else {
+            rollback(transaction, outcome)
+        }
+    }
+
+    #[hotpath::measure(label = "rusqlite_runtime.graph_publication.discard_pending_replay")]
+    fn discard_pending_replay(
+        &mut self,
+        request: &GraphPendingReplayDiscardV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> GraphPublicationStoreResultV1<GraphPendingReplayDiscardOutcomeV1> {
+        ensure_not_interrupted(context)?;
+        ensure_owner(&self.handle, &request.key.projection)?;
+        let transaction = begin(&self.handle, context)?;
+        let outcome = match discard_pending_replay_in_transaction(&transaction, request) {
+            Ok(outcome) => outcome,
+            Err(error) => return rollback_error(transaction, error),
+        };
+        if let Err(error) = ensure_not_interrupted(context) {
+            return rollback_error(transaction, error);
+        }
+        if matches!(outcome, GraphPendingReplayDiscardOutcomeV1::Discarded(_)) {
+            if let Err(error) = begin_pending_discard_commit(context) {
                 return rollback_error(transaction, error);
             }
             commit(transaction)?;

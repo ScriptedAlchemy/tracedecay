@@ -155,14 +155,13 @@ fn project_store_graph_db_paths(
         })?;
         let mut branch_dbs = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|error| {
-                tracedecay_domain::errors::TraceDecayError::Config {
+            let entry =
+                entry.map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
                         "could not enumerate branch graph databases under {}: {error}",
                         branches_dir.display()
                     ),
-                }
-            })?;
+                })?;
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) == Some("db") && path.is_file() {
                 branch_dbs.push(path);
@@ -181,14 +180,12 @@ fn verified_graph_db_schema_version(
     graph_db_path: &Path,
 ) -> tracedecay_domain::errors::Result<i64> {
     let has_header = tracedecay_runtime_core::storage::has_sqlite_database_header(graph_db_path)
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "could not verify the store header at {}: {error}",
-                    graph_db_path.display()
-                ),
-            },
-        )?;
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "could not verify the store header at {}: {error}",
+                graph_db_path.display()
+            ),
+        })?;
     if !has_header {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
@@ -396,12 +393,9 @@ async fn brokered_storage_report(
         );
         let value = tokio::time::timeout(Duration::from_secs(10), request)
             .await
-            .map_err(
-                |_| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon storage report authority timed out after 10 seconds"
-                        .to_string(),
-                },
-            )??;
+            .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "daemon storage report authority timed out after 10 seconds".to_string(),
+            })??;
         let page: tracedecay_maintenance::retention::storage_report::StorageReport =
             serde_json::from_value(value)?;
         merge_storage_report_page(&mut report, page);
@@ -612,18 +606,14 @@ fn handle_backup_profile(
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("system clock is before Unix epoch: {error}"),
-            },
-        )?
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("system clock is before Unix epoch: {error}"),
+        })?
         .as_secs()
         .try_into()
-        .map_err(
-            |_| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "system clock exceeds supported backup timestamp range".to_owned(),
-            },
-        )?;
+        .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "system clock exceeds supported backup timestamp range".to_owned(),
+        })?;
     let backup = tracedecay_daemon_control::with_quiesced_installed_service(
         "complete profile backup",
         crate::product_runtime::PRODUCT_BUILD_VERSION,
@@ -635,10 +625,8 @@ fn handle_backup_profile(
                 created_at,
                 lifecycle,
             )
-            .map_err(|error| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: error.to_string(),
-                }
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: error.to_string(),
             })
         },
     )?;
@@ -657,11 +645,9 @@ fn handle_rehearse_profile_backup(
         Path::new(&backup),
         Path::new(&restore),
     )
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        },
-    )?;
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
     println!(
         "complete profile backup rehearsed: {} entries restored to {}",
         manifest.entries.len(),

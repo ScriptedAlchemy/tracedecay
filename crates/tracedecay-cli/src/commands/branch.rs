@@ -26,11 +26,7 @@ pub(crate) async fn handle_branch_action(
 fn handle_branch_action_inner(
     action: BranchAction,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>>
-            + Send
-            + 'static,
-    >,
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
 > {
     // Erase the deeply nested branch-dispatch future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.

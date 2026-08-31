@@ -255,6 +255,9 @@ impl StartupCatchUpMachineV1 {
 pub(crate) struct VersionCheckState {
     pub(crate) latest: Option<String>,
     pub(crate) checked_at: Option<Instant>,
+    /// Single-flights the background refresh so an expired cache cannot fan
+    /// concurrent completions into parallel GitHub fetches.
+    pub(crate) refreshing: bool,
 }
 
 /// Owns response admission, revocation, and forced cancellation for one
@@ -302,7 +305,9 @@ impl ProjectServerResponseLifecycle {
         &self.response_gate
     }
 
-    pub(crate) fn response_revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
+    pub(crate) fn response_revoked(
+        &self,
+    ) -> &tracedecay_session_memory::context::CancellationToken {
         &self.response_revoked
     }
 }
@@ -729,51 +734,75 @@ impl McpServer {
         });
     }
 
-    /// Returns a version-update warning if a newer release is available.
-    /// Results are cached for `VERSION_CHECK_INTERVAL` (15 minutes).
-    pub(crate) async fn check_version_update(&self) -> Option<String> {
-        let current = env!("CARGO_PKG_VERSION");
+    /// Returns a version-update warning if a newer release is known to be
+    /// available. Results are cached for `VERSION_CHECK_INTERVAL` (15
+    /// minutes); an expired cache answers with the previous result and
+    /// refreshes in the background, so a tool-call completion never awaits
+    /// the GitHub fetch (best-effort with a 1 s timeout, but a fixed
+    /// per-interval stall on the response path either way).
+    pub(crate) fn check_version_update(&self) -> Option<String> {
+        let (warning, claim_refresh) = {
+            let mut cache = self.version_cache.lock().ok()?;
+            cached_version_warning(&mut cache, env!("CARGO_PKG_VERSION"))
+        };
+        if claim_refresh {
+            self.spawn_version_refresh();
+        }
+        warning
+    }
 
-        // Fast path: serve from cache if still fresh.
-        {
-            let cache = self.version_cache.lock().ok()?;
-            if let Some(checked_at) = cache.checked_at
-                && checked_at.elapsed() < VERSION_CHECK_INTERVAL
-            {
-                let latest = cache.latest.as_deref()?;
-                return if crate::cloud::is_newer_minor_version(current, latest) {
-                    Some(format!(
-                        "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
-                             Run `tracedecay upgrade` to update."
-                    ))
-                } else {
-                    None
+    /// Refreshes the version cache off the request path. The claimed
+    /// `refreshing` flag is always released: on a completed fetch (success or
+    /// failure both stamp `checked_at`, preserving the no-immediate-retry
+    /// contract) and on a refused spawn during shutdown.
+    fn spawn_version_refresh(&self) {
+        let server = self.dispatch_authority.server();
+        let spawned = self.spawn_background_task(hotpath::future!(
+            async move {
+                let latest = tokio::task::spawn_blocking(crate::cloud::fetch_latest_version)
+                    .await
+                    .ok()
+                    .flatten();
+                let Some(server) = server.upgrade() else {
+                    return;
                 };
-            }
-        }
-
-        // Cache miss or expired – fetch from GitHub (best-effort, 1 s timeout).
-        let latest = tokio::task::spawn_blocking(crate::cloud::fetch_latest_version)
-            .await
-            .ok()
-            .flatten();
-
-        // Update cache regardless of fetch outcome so we don't retry immediately.
-        if let Ok(mut cache) = self.version_cache.lock() {
-            cache.latest.clone_from(&latest);
-            cache.checked_at = Some(Instant::now());
-        }
-
-        let latest = latest?;
-        if crate::cloud::is_newer_minor_version(current, &latest) {
-            Some(format!(
-                "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
-                 Run `tracedecay upgrade` to update."
-            ))
-        } else {
-            None
+                if let Ok(mut cache) = server.version_cache.lock() {
+                    cache.latest.clone_from(&latest);
+                    cache.checked_at = Some(Instant::now());
+                    cache.refreshing = false;
+                }
+            },
+            label = "mcp.server.version_refresh"
+        ));
+        if !spawned && let Ok(mut cache) = self.version_cache.lock() {
+            cache.refreshing = false;
         }
     }
+}
+
+/// Answers the version-update question from the cache alone and reports
+/// whether this caller claimed the (single-flighted) background refresh. The
+/// warning always reflects the last completed check; an expired cache serves
+/// that stale answer rather than making the caller wait for a fetch.
+fn cached_version_warning(cache: &mut VersionCheckState, current: &str) -> (Option<String>, bool) {
+    let fresh = cache
+        .checked_at
+        .is_some_and(|checked_at| checked_at.elapsed() < VERSION_CHECK_INTERVAL);
+    let claim_refresh = !fresh && !cache.refreshing;
+    if claim_refresh {
+        cache.refreshing = true;
+    }
+    let warning = cache
+        .latest
+        .as_deref()
+        .filter(|latest| crate::cloud::is_newer_minor_version(current, latest))
+        .map(|latest| {
+            format!(
+                "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
+                 Run `tracedecay upgrade` to update."
+            )
+        });
+    (warning, claim_refresh)
 }
 
 #[cfg(test)]
@@ -829,5 +858,72 @@ mod background_task_owner_tests {
         assert!(owner.shutdown().await.is_empty());
         assert!(dropped.load(Ordering::Acquire));
         assert!(!owner.spawn(async {}));
+    }
+}
+
+#[cfg(test)]
+mod version_check_tests {
+    use super::*;
+
+    fn state(
+        latest: Option<&str>,
+        checked_at: Option<Instant>,
+        refreshing: bool,
+    ) -> VersionCheckState {
+        VersionCheckState {
+            latest: latest.map(str::to_owned),
+            checked_at,
+            refreshing,
+        }
+    }
+
+    #[test]
+    fn fresh_cache_answers_without_claiming_a_refresh() {
+        let mut newer = state(Some("99.0.0"), Some(Instant::now()), false);
+        let (warning, claimed) = cached_version_warning(&mut newer, "0.1.0");
+        assert!(warning.expect("newer release warns").contains("99.0.0"));
+        assert!(!claimed, "a fresh cache must not refetch");
+        assert!(!newer.refreshing);
+
+        let mut same = state(Some("0.1.0"), Some(Instant::now()), false);
+        let (warning, claimed) = cached_version_warning(&mut same, "0.1.0");
+        assert_eq!(warning, None);
+        assert!(!claimed);
+    }
+
+    #[test]
+    fn expired_cache_serves_the_stale_answer_and_claims_one_refresh() {
+        let expired = Instant::now()
+            .checked_sub(VERSION_CHECK_INTERVAL * 2)
+            .expect("expired instant");
+        let mut cache = state(Some("99.0.0"), Some(expired), false);
+
+        let (warning, claimed) = cached_version_warning(&mut cache, "0.1.0");
+        assert!(
+            warning
+                .expect("stale answer still serves")
+                .contains("99.0.0"),
+            "an expired cache must answer from the last completed check instead of blocking"
+        );
+        assert!(claimed, "the first caller past expiry claims the refresh");
+        assert!(cache.refreshing);
+
+        let (warning, claimed) = cached_version_warning(&mut cache, "0.1.0");
+        assert!(
+            warning.is_some(),
+            "in-flight refresh still serves the cache"
+        );
+        assert!(
+            !claimed,
+            "a refresh already in flight must not be claimed again"
+        );
+    }
+
+    #[test]
+    fn cold_cache_answers_nothing_but_still_claims_the_refresh() {
+        let mut cache = state(None, None, false);
+        let (warning, claimed) = cached_version_warning(&mut cache, "0.1.0");
+        assert_eq!(warning, None, "no completed check yet, nothing to report");
+        assert!(claimed);
     }
 }

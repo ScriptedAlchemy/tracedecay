@@ -1,6 +1,6 @@
 use super::{HookStdinRead, read_stdin_bounded_from};
 use std::io::{self, Read};
-use tracedecay_daemon_protocol::wire::MAX_WIRE_MESSAGE_BYTES;
+use tracedecay_framing::MAX_WIRE_MESSAGE_BYTES;
 
 struct ChunkedHostileReader {
     remaining: usize,

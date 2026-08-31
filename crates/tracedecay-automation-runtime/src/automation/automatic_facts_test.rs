@@ -12,15 +12,15 @@ use crate::application::memory::MemoryApplication;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_domain::{Confidence, FactCategoryV1, FactOwnerV1, ProvenanceId, UtcMicros};
+use tracedecay_session_memory::memory::{
+    MemoryApplicationError, MemoryMutationError, ProjectMemoryFactAddRequest,
+    automatic_fact_add_command,
+};
 use tracedecay_store::{
     ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
     ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
     ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1,
-};
-use tracedecay_session_memory::memory::{
-    MemoryApplicationError, MemoryMutationError, ProjectMemoryFactAddRequest,
-    automatic_fact_add_command,
 };
 
 async fn database(path: &Path, mode: TestDatabaseRuntimeMode) -> Database {

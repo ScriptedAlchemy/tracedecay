@@ -60,8 +60,8 @@ pub use capabilities::{
     UpstreamCapabilities, negotiate_capabilities,
 };
 pub use compile_diagnostics::{
-    Diagnostic, DiagnosticsCache, Driver, Scope, is_rust_diagnostics_cold,
-    rust_diagnostics_target_dir, run_all, spawn_rust_diagnostics_prewarm,
+    Diagnostic, DiagnosticsCache, Driver, Scope, is_rust_diagnostics_cold, run_all,
+    rust_diagnostics_target_dir, spawn_rust_diagnostics_prewarm,
 };
 pub use context::{
     CanonicalContextProjectionAuthority, ContextCoverage, ContextExpansionEnvelope,

@@ -518,8 +518,7 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
     });
 
     let payload_ref = created_rx.await.expect("payload creation signal");
-    let payload_path =
-        tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+    let payload_path = tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     assert!(payload_path.is_file());
 
     let snapshot = db.read_snapshot().await.unwrap();
@@ -596,12 +595,10 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
         current_frontier_store_id: None,
         last_finalized_session_id: None,
         last_finalized_frontier_store_id: None,
-        maintenance_debt: vec![
-            tracedecay_lcm::LcmMaintenanceDebt::RawBacklog {
-                from_store_id: 1,
-                to_store_id: 2,
-            },
-        ],
+        maintenance_debt: vec![tracedecay_lcm::LcmMaintenanceDebt::RawBacklog {
+            from_store_id: 1,
+            to_store_id: 2,
+        }],
     };
     let (written_tx, written_rx) = tokio::sync::oneshot::channel();
     let task_db = db.clone();
@@ -618,13 +615,9 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     written_rx.await.expect("lifecycle write signal");
     let snapshot = db.read_snapshot().await.unwrap();
     assert!(
-        tracedecay_lcm::compression::lifecycle_state(
-            &snapshot,
-            "cursor",
-            "cancelled-lifecycle",
-        )
-        .await
-        .is_err(),
+        tracedecay_lcm::compression::lifecycle_state(&snapshot, "cursor", "cancelled-lifecycle",)
+            .await
+            .is_err(),
         "retained reader observed uncommitted lifecycle state"
     );
     drop(snapshot);
@@ -633,24 +626,17 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     assert!(task.await.unwrap_err().is_cancelled());
     let snapshot = db.read_snapshot().await.unwrap();
     assert!(
-        tracedecay_lcm::compression::lifecycle_state(
-            &snapshot,
-            "cursor",
-            "cancelled-lifecycle",
-        )
-        .await
-        .is_err(),
+        tracedecay_lcm::compression::lifecycle_state(&snapshot, "cursor", "cancelled-lifecycle",)
+            .await
+            .is_err(),
         "cancellation persisted lifecycle state or maintenance debt"
     );
     drop(snapshot);
 
     let transaction = db.begin_write_transaction().await.unwrap();
-    let state = tracedecay_lcm::compression::update_lifecycle(
-        &transaction,
-        update.clone(),
-    )
-    .await
-    .unwrap();
+    let state = tracedecay_lcm::compression::update_lifecycle(&transaction, update.clone())
+        .await
+        .unwrap();
     transaction.commit().await.unwrap();
     assert_eq!(state.provider, update.provider);
     assert_eq!(state.conversation_id, update.conversation_id);

@@ -28,7 +28,6 @@ pub use workflow::{workflow_index, workflow_ingest, workflow_state};
 pub use crate::{ProviderScope, SessionProvider};
 // Shared full-text/LCM retrieval filters are owned by the LCM engine crate;
 // the session search surface re-imports them so both sides filter identically.
-pub use tracedecay_lcm::{SessionMessageType, SessionSearchScope};
 pub use ingest::{
     IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestDisposition,
     TranscriptIngestOutcome, classify_claude_observation_failure,
@@ -52,6 +51,7 @@ pub use store_access::{
     SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     TranscriptBatch, TranscriptPersistenceError,
 };
+pub use tracedecay_lcm::{SessionMessageType, SessionSearchScope};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMessageSearchResult {
@@ -85,4 +85,3 @@ impl Default for SessionSearchFilters<'_> {
         }
     }
 }
-

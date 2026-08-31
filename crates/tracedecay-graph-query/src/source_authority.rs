@@ -43,14 +43,18 @@ pub type CodeGraphSourceBindFuture<'a> = Pin<
 /// it, and the opener validates the returned runtime against the admitted
 /// scope before freezing it.
 pub trait CodeGraphSourceAuthorityPort: Send + Sync {
-    fn bind<'a>(&'a self, request: CodeGraphSourceBindRequest<'a>) -> CodeGraphSourceBindFuture<'a>;
+    fn bind<'a>(&'a self, request: CodeGraphSourceBindRequest<'a>)
+    -> CodeGraphSourceBindFuture<'a>;
 }
 
 impl<T> CodeGraphSourceAuthorityPort for Arc<T>
 where
     T: CodeGraphSourceAuthorityPort + ?Sized,
 {
-    fn bind<'a>(&'a self, request: CodeGraphSourceBindRequest<'a>) -> CodeGraphSourceBindFuture<'a> {
+    fn bind<'a>(
+        &'a self,
+        request: CodeGraphSourceBindRequest<'a>,
+    ) -> CodeGraphSourceBindFuture<'a> {
         (**self).bind(request)
     }
 }

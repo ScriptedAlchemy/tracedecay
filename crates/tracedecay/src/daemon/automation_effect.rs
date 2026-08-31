@@ -53,9 +53,7 @@ use tracedecay_automation_runtime::automation::effect_runtime::{
     AutomationSettledProblem, AutomationSettledTerminal, contract_error, digest, journal,
     retirement,
 };
-use tracedecay_daemon_service::{
-    DaemonInvocationService, RegisteredRetainedRequestContextError,
-};
+use tracedecay_daemon_service::{DaemonInvocationService, RegisteredRetainedRequestContextError};
 use tracedecay_domain::errors::Result;
 
 mod authority;

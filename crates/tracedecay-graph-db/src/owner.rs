@@ -10,9 +10,9 @@ use tracedecay_store::{
     RetainedGraphStoreOwnerOperationLeaseErrorV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
-use crate::GraphDbRegistration;
 #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
 use crate::GraphDbOpenOptions;
+use crate::GraphDbRegistration;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use crate::{GraphCancellation, GraphDbLocation, GraphDurability, GraphFormatVersion};
 use crate::{GraphDb, GraphDbError, GraphDbRuntimeState, GraphSnapshot};
@@ -258,7 +258,7 @@ impl GraphDbOwnerAttachmentV1 {
         let authority_lease = match authority_attachment.issue_operation_lease() {
             Ok(lease) => lease,
             Err(RetainedGraphStoreOwnerOperationLeaseErrorV1::Retiring) => {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict("owner.issue_lease"));
             }
             Err(
                 RetainedGraphStoreOwnerOperationLeaseErrorV1::Unavailable
@@ -296,7 +296,9 @@ impl GraphDbOwnerAttachmentV1 {
     pub(crate) fn inject_stale_owner_attachment_id(&self) -> Result<(), GraphDbError> {
         let mut state = self.token.source.state.lock();
         if !matches!(state.lifecycle, GraphDbOwnerLifecycle::Ready) {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.inject_stale_owner_attachment_id.lifecycle",
+            ));
         }
         let attachment_id =
             next_local_id(&mut state.next_attachment_id).map(GraphDbOwnerAttachmentId)?;
@@ -468,7 +470,9 @@ impl GraphDbOwner {
         if !matches!(state.lifecycle, GraphDbOwnerLifecycle::Ready)
             || state.owner_attachment.is_some()
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.issue_owner_attachment.lifecycle",
+            ));
         }
         let attachment_id =
             next_local_id(&mut state.next_attachment_id).map(GraphDbOwnerAttachmentId)?;
@@ -493,7 +497,7 @@ impl GraphDbOwner {
         let state = self.source.state.lock();
         self.require_map_owned_attachment(&state, target)?;
         if !state.leases.is_empty() {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("owner.can_reserve_owner_attachment"));
         }
         Ok(())
     }
@@ -505,7 +509,7 @@ impl GraphDbOwner {
         let mut state = self.source.state.lock();
         self.require_map_owned_attachment(&state, target)?;
         if !state.leases.is_empty() {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("owner.reserve_owner_attachment"));
         }
         #[cfg(test)]
         if let Some(error) = state.attachment_reservation_failure.take() {
@@ -538,7 +542,9 @@ impl GraphDbOwner {
             }) if attachment_id == target.attachment_id && current == reservation_id
         ) || !target.matches_source(&self.source)
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.restore_owner_attachment.reservation",
+            ));
         }
         state.lifecycle = GraphDbOwnerLifecycle::Ready;
         state.owner_attachment = Some(OwnerAttachmentState::MapOwned(target.attachment_id));
@@ -564,7 +570,9 @@ impl GraphDbOwner {
             }) if attachment_id == target.attachment_id && current == reservation_id
         ) || !target.matches_source(&self.source)
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.restore_owner_attachment_before_native_close.reservation",
+            ));
         }
         state.lifecycle = GraphDbOwnerLifecycle::Ready;
         state.owner_attachment = Some(OwnerAttachmentState::MapOwned(target.attachment_id));
@@ -588,7 +596,9 @@ impl GraphDbOwner {
             }) if attachment_id == target.attachment_id && current == reservation_id
         ) || !target.matches_source(&self.source)
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.begin_owner_attachment_close.reservation",
+            ));
         }
         #[cfg(test)]
         if let Some(error) = state.retirement_begin_failure.take() {
@@ -608,7 +618,9 @@ impl GraphDbOwner {
             state.lifecycle,
             GraphDbOwnerLifecycle::Closing(current) if current == reservation_id
         ) {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.finish_owner_attachment_close.reservation",
+            ));
         }
         #[cfg(test)]
         if let Some(error) = state.retirement_finish_failure.take() {
@@ -626,7 +638,9 @@ impl GraphDbOwner {
             || state.owner_attachment.is_some()
             || !state.leases.is_empty()
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.reserve_unleased_close.lifecycle",
+            ));
         }
         let reservation_id =
             next_local_id(&mut state.next_reservation_id).map(GraphDbRetirementReservationId)?;
@@ -644,7 +658,9 @@ impl GraphDbOwner {
             GraphDbOwnerLifecycle::RetirementFenced(current) if current == reservation_id
         ) || state.owner_attachment.is_some()
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.restore_unleased_close.reservation",
+            ));
         }
         state.lifecycle = GraphDbOwnerLifecycle::Ready;
         Ok(())
@@ -660,7 +676,9 @@ impl GraphDbOwner {
             GraphDbOwnerLifecycle::RetirementFenced(current) if current == reservation_id
         ) || state.owner_attachment.is_some()
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.begin_unleased_close.reservation",
+            ));
         }
         state.lifecycle = GraphDbOwnerLifecycle::Closing(reservation_id);
         Ok(())
@@ -738,7 +756,9 @@ impl GraphDbOwner {
             || target.owner_id != self.source.owner_id
             || !target.matches_source(&self.source)
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "owner.require_map_owned_attachment.identity",
+            ));
         }
         Ok(())
     }
@@ -769,7 +789,9 @@ fn issue_client_lease_with_store(
 ) -> Result<GraphDbLeaseV1, GraphDbError> {
     let mut state = source.state.lock();
     if !matches!(state.lifecycle, GraphDbOwnerLifecycle::Ready) {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "owner.issue_client_lease_with_store.lifecycle",
+        ));
     }
     let lease_id = next_local_id(&mut state.next_lease_id).map(GraphDbLeaseId)?;
     state.leases.insert(lease_id, ());

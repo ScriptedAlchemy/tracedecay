@@ -26,10 +26,10 @@ use tracedecay_domain::{
 };
 
 use crate::diagnostics_store::{DiagnosticsStore, DirtyDiagnosticOverlay};
+use tracedecay_domain::errors::Result as CrateResult;
 use tracedecay_runtime_core::db::Database;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::Connection;
-use tracedecay_domain::errors::Result as CrateResult;
 
 /// Default page limit when a request carries `limit: 0`.
 pub const DEFAULT_DIAGNOSTIC_PAGE_LIMIT: usize = 200;

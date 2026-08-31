@@ -545,10 +545,7 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
             journal_key(&scope, primary_request.idempotency_key()),
             primary,
         ),
-        (
-            journal_key(&scope, alias_request.idempotency_key()),
-            alias,
-        ),
+        (journal_key(&scope, alias_request.idempotency_key()), alias),
     ] {
         profile_sessions
             .insert_session_sync_journal(&key, &serde_json::to_string(&journal).unwrap())
