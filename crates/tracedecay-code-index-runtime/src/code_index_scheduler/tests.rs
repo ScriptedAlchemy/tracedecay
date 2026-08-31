@@ -8232,8 +8232,25 @@ async fn background_reconciles_respect_a_single_admission_permit() {
             .await
             .expect("mount worktree");
     }
-    let first_generation = wait_for_initial_generation(&registry, first.path()).await;
-    let second_generation = wait_for_initial_generation(&registry, second.path()).await;
+    // Publication broadcasts at publish time, before the pass's deliberately
+    // admission-free tail (graph prepare, activation, serving seat) has run.
+    // Wait for both serving seats — the tail's last scheduler-lock step — so
+    // each worker is parked on its wake. Holding the first scheduler's lock
+    // any earlier wedges that worker inside its tail, where it holds no
+    // permit, and the second worktree would overtake through the free permit
+    // before the first worker's edit pass is ever admitted.
+    let first_generation = wait_for_live_complete_generation(&registry, first.path())
+        .await
+        .generation()
+        .manifest()
+        .generation_id
+        .clone();
+    let second_generation = wait_for_live_complete_generation(&registry, second.path())
+        .await
+        .generation()
+        .manifest()
+        .generation_id
+        .clone();
 
     let first_handle = registry
         .scheduler_handle(first.path())
