@@ -29,6 +29,7 @@ pub enum ProjectMemoryFactSearchKindV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactSearchKindV1 {
     pub(in crate::memory) fn validate(&self) -> FactStoreResult<()> {
         match self {
@@ -64,6 +65,7 @@ pub struct ProjectMemoryFactSearchFilterV1 {
     threshold_millionths: Option<u32>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactSearchFilterV1 {
     pub fn new(
         category: Option<FactCategoryV1>,
@@ -106,6 +108,7 @@ pub struct ProjectMemoryFactSearchCursorV1 {
     fact_id: FactId,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactSearchCursorV1 {
     pub fn new(
         score_millionths: u32,
@@ -149,6 +152,7 @@ pub struct ProjectMemoryFactSearchScoresV1 {
     trust_score_millionths: u32,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactSearchScoresV1 {
     pub fn new(
         score_millionths: u32,
@@ -229,6 +233,7 @@ pub struct ProjectMemoryFactSearchHitV1 {
     why: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactSearchHitV1 {
     pub fn new(
         fact: ProjectMemoryFactV1,
@@ -267,6 +272,7 @@ pub struct ProjectMemoryFactSearchPageV1 {
     graph_coverage: ProjectMemoryFactSearchGraphCoverageV1,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactSearchPageV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -351,6 +357,7 @@ pub struct ProjectMemoryFactContradictionQueryV1 {
     limit: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactContradictionQueryV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -395,6 +402,7 @@ pub struct ProjectMemoryFactContradictionV1 {
     why: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactContradictionV1 {
     pub fn new(
         existing: ProjectMemoryFactV1,
@@ -442,6 +450,7 @@ pub struct ProjectMemoryFactContradictionPageV1 {
     contradictions: Vec<ProjectMemoryFactContradictionV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactContradictionPageV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -481,6 +490,7 @@ pub struct ProjectMemoryFactRetrievalCommandV1 {
     recall: bool,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactRetrievalCommandV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -566,6 +576,7 @@ pub struct ProjectMemoryFactRetrievalReceiptV1 {
     committed_state_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactRetrievalReceiptV1 {
     pub fn recorded(
         owner: FactOwnerV1,
@@ -686,6 +697,7 @@ pub struct ProjectMemoryFactRetrievalOutcomeV1 {
     projections: Vec<ProjectMemoryFactProjectionV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactRetrievalOutcomeV1 {
     pub fn new(
         receipt: ProjectMemoryFactRetrievalReceiptV1,

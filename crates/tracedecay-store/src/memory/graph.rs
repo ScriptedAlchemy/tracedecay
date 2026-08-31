@@ -20,6 +20,7 @@ pub struct ProjectMemoryGraphQueryV1 {
     max_relations: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryGraphQueryV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -84,6 +85,7 @@ pub enum ProjectMemoryGraphTargetV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryGraphTargetV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         match self {
@@ -121,6 +123,7 @@ pub struct ProjectMemoryGraphRelationV1 {
     kind: ProjectMemoryGraphRelationKindV1,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryGraphRelationV1 {
     pub fn new(
         owner: &FactOwnerV1,
@@ -162,6 +165,7 @@ pub struct ProjectMemoryGraphPageV1 {
     relations: Vec<ProjectMemoryGraphRelationV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryGraphPageV1 {
     pub fn new(
         owner: FactOwnerV1,

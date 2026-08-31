@@ -7,6 +7,7 @@ pub enum SourceProjectionEffectV1 {
     Tombstone(SourceObjectObservationV1),
 }
 
+#[hotpath::measure_all]
 impl SourceProjectionEffectV1 {
     pub fn observation(&self) -> &SourceObjectObservationV1 {
         match self {
@@ -35,6 +36,7 @@ pub struct SourceProjectionCommitV1 {
     verified: ValidationMemoV1,
 }
 
+#[hotpath::measure_all]
 impl SourceProjectionCommitV1 {
     pub(super) fn new(
         projector: ComponentVersion,
@@ -169,6 +171,7 @@ impl SourceProjectionCommitV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_projection_payload(
     source_frontier: &SourceAggregateFrontierV1,
     mutations: &[SourceObjectMutationV1],

@@ -23,6 +23,7 @@ pub struct ProjectMemoryFactTelemetryV1 {
     last_feedback_at: Option<UtcMicros>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactTelemetryV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -95,6 +96,7 @@ pub struct ProjectMemoryFactStatusV1 {
     projected_as_of: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactStatusV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -144,6 +146,7 @@ pub struct ProjectMemoryMemoryFeedbackFunnelV1 {
     seen_to_feedback_ratio: Option<u64>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryMemoryFeedbackFunnelV1 {
     pub fn new(
         retrieval_count_total: u64,
@@ -206,6 +209,7 @@ pub struct ProjectMemoryMemoryAlgebraV1 {
     estimated_capacity: u64,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryMemoryAlgebraV1 {
     pub fn new(name: String, hrr_dim: u64, estimated_capacity: u64) -> FactStoreResult<Self> {
         if name.trim().is_empty() || name.len() > MAX_PROJECT_MEMORY_SEARCH_BYTES {
@@ -231,6 +235,7 @@ impl ProjectMemoryMemoryAlgebraV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryMemoryStatusV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -327,6 +332,7 @@ pub struct ProjectMemoryFactFeedbackHistoryEntryV1 {
     details_availability: ProjectMemoryFactFeedbackDetailsAvailabilityV1,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactFeedbackHistoryEntryV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -402,6 +408,7 @@ pub struct ProjectMemoryFactFeedbackHistoryV1 {
     next_after: Option<FactLineageCursor>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactFeedbackHistoryV1 {
     pub fn new(
         owner: FactOwnerV1,

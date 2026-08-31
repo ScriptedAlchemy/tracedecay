@@ -15,6 +15,7 @@ pub struct SessionSummaryPublicationRequestV1 {
     snapshot: SessionTemporalSnapshotV1,
 }
 
+#[hotpath::measure_all]
 impl SessionSummaryPublicationRequestV1 {
     pub fn new(
         summary: SessionSummaryRecordV1,

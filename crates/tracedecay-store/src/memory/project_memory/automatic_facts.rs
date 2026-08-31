@@ -64,6 +64,7 @@ pub struct ProjectMemoryAutomaticFactEvidenceV1 {
     validation: Option<Value>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactEvidenceV1 {
     pub fn new(
         evidence_hash: Option<String>,
@@ -117,6 +118,7 @@ pub enum ProjectMemoryAutomaticFactEffectV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactEffectV1 {
     fn validate(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
         match self {
@@ -139,6 +141,7 @@ impl ProjectMemoryAutomaticFactEffectV1 {
         Ok(())
     }
 
+    #[hotpath::skip]
     pub const fn state(&self) -> ProjectMemoryAutomaticFactStateV1 {
         match self {
             Self::Applied { .. } => ProjectMemoryAutomaticFactStateV1::Applied,
@@ -194,6 +197,7 @@ pub struct ProjectMemoryAutomaticFactReceiptV1 {
     recorded_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactReceiptV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -236,6 +240,7 @@ impl ProjectMemoryAutomaticFactReceiptV1 {
         &self.owner
     }
 
+    #[hotpath::skip]
     pub const fn state(&self) -> ProjectMemoryAutomaticFactStateV1 {
         self.state
     }
@@ -276,6 +281,7 @@ impl ProjectMemoryAutomaticFactReceiptV1 {
         self.effect.quarantine_reason()
     }
 
+    #[hotpath::skip]
     pub const fn recorded_at(&self) -> UtcMicros {
         self.recorded_at
     }
@@ -297,6 +303,7 @@ pub struct ProjectMemoryAutomaticFactApplyResultV1 {
     disposition: ProjectMemoryAutomaticFactApplyDispositionV1,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactApplyResultV1 {
     pub fn new(
         receipt: ProjectMemoryAutomaticFactReceiptV1,
@@ -328,6 +335,7 @@ impl ProjectMemoryAutomaticFactApplyResultV1 {
         &self.receipt
     }
 
+    #[hotpath::skip]
     pub const fn disposition(&self) -> ProjectMemoryAutomaticFactApplyDispositionV1 {
         self.disposition
     }
@@ -386,6 +394,7 @@ pub struct ProjectMemoryAutomaticFactReceiptPageV1 {
     next_after_apply_id: Option<ProvenanceId>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactReceiptPageV1 {
     pub fn new(
         owner: FactOwnerV1,

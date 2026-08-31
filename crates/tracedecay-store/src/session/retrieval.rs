@@ -29,6 +29,7 @@ pub struct SessionTemporalRetrievalRequestV1 {
     execution_control: ExecutionControl,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalRetrievalRequestV1 {
     pub fn new(
         session_id: SessionId,
@@ -65,10 +66,12 @@ impl SessionTemporalRetrievalRequestV1 {
         &self.session_id
     }
 
+    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
+    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
@@ -77,6 +80,7 @@ impl SessionTemporalRetrievalRequestV1 {
         &self.snapshot
     }
 
+    #[hotpath::skip]
     pub const fn page_size(&self) -> usize {
         self.page_size
     }
@@ -102,6 +106,7 @@ pub struct SessionRetrievalPageV1 {
     next_after_occurrence_id: Option<MessageOccurrenceIdV1>,
 }
 
+#[hotpath::measure_all]
 impl SessionRetrievalPageV1 {
     pub fn new(
         snapshot: SessionTemporalSnapshotV1,
@@ -196,6 +201,7 @@ impl SessionRetrievalPageV1 {
     }
 }
 
+#[hotpath::measure]
 fn deep_record_count(
     occurrences: &[MessageOccurrenceRecordV1],
     copies: &[LogicalCopyRecordV1],

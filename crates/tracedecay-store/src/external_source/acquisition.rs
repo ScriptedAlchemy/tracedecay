@@ -49,6 +49,7 @@ pub enum SourceAcquisitionRequestV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl SourceAcquisitionRequestV1 {
     pub fn github_review(
         provider: ProviderId,
@@ -158,6 +159,7 @@ pub struct SourceScheduledRefetchV1 {
     not_before: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl SourceScheduledRefetchV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -278,6 +280,7 @@ pub struct SourceAcquisitionQueueStateV1 {
     state_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl SourceAcquisitionQueueStateV1 {
     pub fn new(
         definition: SourceDefinitionV1,
@@ -410,6 +413,7 @@ pub struct SourceAcquisitionQueueCasV1 {
     next: SourceAcquisitionQueueStateV1,
 }
 
+#[hotpath::measure_all]
 impl SourceAcquisitionQueueCasV1 {
     pub fn new(
         binding: SourceBindingIdentityV1,

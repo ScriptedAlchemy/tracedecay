@@ -28,6 +28,7 @@ pub struct ProjectMemoryEntityIdV1 {
     entity: String,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryEntityIdV1 {
     pub fn new(owner: FactOwnerV1, entity: String) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -55,6 +56,7 @@ pub struct ProjectMemoryFactCurationReviewRefV1 {
     expected_last_event_id: FactEventId,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactCurationReviewRefV1 {
     pub fn new(fact: ProjectMemoryFactIdV1, expected_last_event_id: FactEventId) -> Self {
         Self {
@@ -80,6 +82,7 @@ pub struct ProjectMemoryFactNormalizeTagsV1 {
     confidence: Confidence,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactNormalizeTagsV1 {
     pub fn new(
         fact: ProjectMemoryFactCurationReviewRefV1,
@@ -130,6 +133,7 @@ pub struct ProjectMemoryFactLinkV1 {
     evidence_facts: Vec<ProjectMemoryFactCurationReviewRefV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactLinkV1 {
     pub fn new(
         relation: tracedecay_domain::FactRelationV1,
@@ -194,6 +198,7 @@ pub enum ProjectMemoryFactCurationMutationKindV1 {
     Remove,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactCurationMutationKindV1 {
     fn as_str(self) -> &'static str {
         match self {
@@ -205,6 +210,7 @@ impl ProjectMemoryFactCurationMutationKindV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn derive_project_memory_fact_curation_child_operation_id(
     outer_operation_id: &ProvenanceId,
     operation_index: usize,
@@ -225,6 +231,7 @@ pub fn derive_project_memory_fact_curation_child_operation_id(
     ProvenanceId::new(format!("memory-curation-child.{digest}")).map_err(FactStoreError::Contract)
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactCurationOperationV1 {
     pub fn child_operation_id(&self) -> Option<&ProvenanceId> {
         match self {
@@ -349,6 +356,7 @@ impl ProjectMemoryFactCurationOperationV1 {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn validate_mutation_authority(
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
@@ -377,6 +385,7 @@ pub struct ProjectMemoryFactCurationBatchV1 {
     operations: Vec<ProjectMemoryFactCurationOperationV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactCurationBatchV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -486,6 +495,7 @@ impl ProjectMemoryFactCurationBatchV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_changed_fact_capacity(
     operations: &[ProjectMemoryFactCurationOperationV1],
 ) -> FactStoreResult<()> {
@@ -510,6 +520,7 @@ fn validate_changed_fact_capacity(
     validate_limit(changed_fact_capacity, MAX_PROJECT_MEMORY_CURATION_TARGETS)
 }
 
+#[hotpath::measure]
 fn validate_child_operation_ids(
     outer_operation_id: &ProvenanceId,
     operations: &[ProjectMemoryFactCurationOperationV1],
@@ -539,10 +550,12 @@ fn validate_child_operation_ids(
     Ok(())
 }
 
+#[hotpath::measure]
 fn curation_fact_identity(target: &ProjectMemoryFactIdV1) -> Value {
     json!({ "fact_id": target.fact_id().as_str() })
 }
 
+#[hotpath::measure]
 fn curation_review_identity(target: &ProjectMemoryFactCurationReviewRefV1) -> Value {
     json!({
         "fact_id": target.fact().fact_id().as_str(),
@@ -550,6 +563,7 @@ fn curation_review_identity(target: &ProjectMemoryFactCurationReviewRefV1) -> Va
     })
 }
 
+#[hotpath::measure]
 fn curation_evidence_digest(evidence: &super::ProjectMemoryFactCurationEvidenceV1) -> Value {
     json!({
         "facts": evidence
@@ -562,6 +576,7 @@ fn curation_evidence_digest(evidence: &super::ProjectMemoryFactCurationEvidenceV
     })
 }
 
+#[hotpath::measure]
 fn curation_operation_digest(
     operation: &ProjectMemoryFactCurationOperationV1,
 ) -> FactStoreResult<Value> {

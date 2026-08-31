@@ -22,6 +22,7 @@ pub struct RemoteObservationReplayWriteV1 {
     pub observation: AnchoredObservationWrite,
 }
 
+#[hotpath::measure_all]
 impl RemoteObservationReplayWriteV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         let valid_event_id = |event_id: &str| {
@@ -76,6 +77,7 @@ pub struct RemoteWriterFenceInstallV1 {
     pub installed_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl RemoteWriterFenceInstallV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         let same_lineage = self.expected.brain_id == self.replacement.brain_id

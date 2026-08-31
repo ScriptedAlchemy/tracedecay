@@ -97,6 +97,7 @@ sha256_digest!(
     "graph canonical replay source digest"
 );
 
+#[hotpath::measure_all]
 impl GraphCanonicalReplaySourceDigestV1 {
     #[hotpath::measure(label = "store.graph_publication.replay_source_digest")]
     pub fn for_source(source: &[u8]) -> Self {
@@ -109,6 +110,7 @@ impl GraphCanonicalReplaySourceDigestV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_sha256_digest(
     value: &str,
     field: &'static str,
@@ -138,6 +140,7 @@ pub struct GraphPublicationKeyV1 {
     pub idempotency_key: GraphPublicationIdempotencyKeyV1,
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationKeyV1 {
     pub fn new(
         projection: GraphProjectionIdentityV1,
@@ -160,6 +163,7 @@ pub struct GraphDependencyGenerationIdentityV1 {
     pub generation: GraphGenerationIdV1,
 }
 
+#[hotpath::measure_all]
 impl GraphDependencyGenerationIdentityV1 {
     pub fn new(projection: GraphProjectionIdentityV1, generation: GraphGenerationIdV1) -> Self {
         Self {
@@ -187,6 +191,7 @@ pub struct GraphPublicationReplayV1 {
     pub canonical_replay_source: Vec<u8>,
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationReplayV1 {
     pub fn new(
         key: GraphPublicationKeyV1,
@@ -287,6 +292,7 @@ impl GraphPublicationReplayV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_direct_dependency_generations(
     owner: &GraphPublicationKeyV1,
     dependencies: &[GraphDependencyGenerationIdentityV1],
@@ -318,6 +324,7 @@ fn validate_direct_dependency_generations(
     encoded_direct_dependency_bytes(dependencies).map(|_| ())
 }
 
+#[hotpath::measure]
 fn validate_graph_publication_shard(
     shard_id: &StoreShardIdV1,
     operation: &'static str,
@@ -335,6 +342,7 @@ fn validate_graph_publication_shard(
     }
 }
 
+#[hotpath::measure]
 fn encoded_direct_dependency_bytes(
     dependencies: &[GraphDependencyGenerationIdentityV1],
 ) -> Result<usize, StorageRuntimeContractErrorV1> {
@@ -357,6 +365,7 @@ fn encoded_direct_dependency_bytes(
 #[serde(try_from = "u64", into = "u64")]
 pub struct GraphPublicationSequenceV1(u64);
 
+#[hotpath::measure_all]
 impl GraphPublicationSequenceV1 {
     pub fn new(value: u64) -> Result<Self, StorageRuntimeContractErrorV1> {
         if value == 0 {
@@ -374,6 +383,7 @@ impl GraphPublicationSequenceV1 {
         Ok(Self(value))
     }
 
+    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -400,6 +410,7 @@ pub struct GraphPublicationReplayCursorV1 {
     pub sequence: GraphPublicationSequenceV1,
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationReplayCursorV1 {
     pub fn new(
         projection: GraphProjectionIdentityV1,
@@ -420,6 +431,7 @@ pub struct GraphPublicationReplayRecordV1 {
     pub publication: GraphPublicationReplayV1,
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationReplayRecordV1 {
     pub fn new(
         sequence: GraphPublicationSequenceV1,
@@ -442,6 +454,7 @@ pub struct GraphPublicationReplayPageRequestV1 {
     pub max_records: u16,
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationReplayPageRequestV1 {
     pub fn new(
         projection: GraphProjectionIdentityV1,
@@ -498,6 +511,7 @@ pub struct GraphPublicationReplayPageV1 {
     pub continuation: Option<GraphPublicationReplayCursorV1>,
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationReplayPageV1 {
     pub fn new(
         records: Vec<GraphPublicationReplayRecordV1>,
@@ -580,6 +594,7 @@ pub struct GraphPublicationProjectionPageRequestV1 {
     pub max_records: u16,
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationProjectionPageRequestV1 {
     pub fn new(
         shard_id: StoreShardIdV1,
@@ -629,6 +644,7 @@ pub struct GraphPublicationProjectionPageV1 {
     pub continuation: Option<GraphProjectionIdentityV1>,
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationProjectionPageV1 {
     pub fn new(
         projections: Vec<GraphProjectionIdentityV1>,
@@ -704,6 +720,7 @@ pub struct GraphPublicationReplayRetirementV1 {
     pub canonical_replay_source_digest: GraphCanonicalReplaySourceDigestV1,
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationReplayRetirementV1 {
     pub fn new(
         key: GraphPublicationKeyV1,
@@ -755,6 +772,7 @@ impl GraphPublicationReplayRetirementV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphPublicationReplayTombstoneV1 {
     pub fn new(
         sequence: GraphPublicationSequenceV1,
@@ -835,6 +853,7 @@ pub struct GraphVerifiedHeadV1 {
     pub recovered_digest: GraphRecoveredGenerationDigestV1,
 }
 
+#[hotpath::measure_all]
 impl GraphVerifiedHeadV1 {
     pub fn from_replay(
         replay: &GraphPublicationReplayRecordV1,
@@ -868,6 +887,7 @@ pub struct GraphVerifiedHeadCompareAndSwapV1 {
     pub expected_prior_head: Option<GraphVerifiedHeadV1>,
 }
 
+#[hotpath::measure_all]
 impl GraphVerifiedHeadCompareAndSwapV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         validate_graph_publication_shard(

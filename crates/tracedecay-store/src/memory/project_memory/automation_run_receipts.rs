@@ -21,6 +21,7 @@ pub struct ProjectMemoryAutomationRunReceiptsV1 {
     automatic_fact_receipts: Vec<ProjectMemoryAutomaticFactReceiptV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryAutomationRunReceiptsV1 {
     pub fn new(
         owner: FactOwnerV1,

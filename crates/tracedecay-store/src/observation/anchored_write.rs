@@ -6,6 +6,7 @@ use tracedecay_domain::{
 
 use super::{ObservationStoreError, ObservationStoreResult, ObservationWrite};
 
+#[hotpath::measure]
 pub(super) fn validate_retrieval_anchor_binding(
     observation: &DurableObservationV1,
     retrieval_anchor: &RetrievalAnchorRecordV2,
@@ -45,6 +46,7 @@ pub struct RepositoryProvenanceAttachmentV1 {
     anchor: Option<RetrievalAnchorRecordV2>,
 }
 
+#[hotpath::measure_all]
 impl RepositoryProvenanceAttachmentV1 {
     pub fn new(
         availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
@@ -158,6 +160,7 @@ pub struct AnchoredObservationWrite {
     repository_provenance: RepositoryProvenanceAttachmentV1,
 }
 
+#[hotpath::measure_all]
 impl AnchoredObservationWrite {
     pub fn new(
         write: ObservationWrite,

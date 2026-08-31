@@ -33,6 +33,7 @@ pub struct ProjectMemoryFactAddMaterialV1 {
     input_digest: String,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactAddMaterialV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -177,6 +178,7 @@ impl ProjectMemoryFactAddMaterialV1 {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn project_memory_fact_add_input_digest(
     owner: &FactOwnerV1,
     content: &str,
@@ -226,6 +228,7 @@ pub struct ProjectMemoryFactAddCommandV1 {
     operation_id: ProvenanceId,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactAddCommandV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         self.material.owner()
@@ -279,6 +282,7 @@ pub struct ProjectMemoryFactUpdatePatchV1 {
     trust: Option<Confidence>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactUpdatePatchV1 {
     pub fn new(
         content: Option<String>,
@@ -362,6 +366,7 @@ pub struct ProjectMemoryFactUpdateCommandV1 {
     actor: Option<ActorId>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactUpdateCommandV1 {
     pub fn new(
         target: ProjectMemoryFactIdV1,
@@ -411,6 +416,7 @@ pub struct ProjectMemoryFactRemoveCommandV1 {
     actor: Option<ActorId>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactRemoveCommandV1 {
     pub fn new(
         target: ProjectMemoryFactIdV1,
@@ -458,6 +464,7 @@ pub struct ProjectMemoryFactFeedbackCommandV1 {
     reason: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactFeedbackCommandV1 {
     pub fn new(
         target: ProjectMemoryFactIdV1,
@@ -541,6 +548,7 @@ pub struct ProjectMemoryFactAddOutcomeV1 {
     commit_replayed: bool,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactAddOutcomeV1 {
     pub fn added(
         fact: ProjectMemoryFactProjectionV1,
@@ -665,6 +673,7 @@ pub struct ProjectMemoryFactUpdateOutcomeV1 {
     commit_replayed: bool,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactUpdateOutcomeV1 {
     pub fn committed(
         fact: ProjectMemoryFactProjectionV1,
@@ -716,6 +725,7 @@ pub struct ProjectMemoryFactRemoveOutcomeV1 {
     commit_replayed: bool,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactRemoveOutcomeV1 {
     pub fn removed(
         fact: ProjectMemoryFactProjectionV1,
@@ -806,6 +816,7 @@ pub struct ProjectMemoryFactFeedbackOutcomeV1 {
     commit_replayed: bool,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactFeedbackOutcomeV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn committed(
@@ -869,6 +880,7 @@ impl ProjectMemoryFactFeedbackOutcomeV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_feedback_trust_delta(
     old_trust: Confidence,
     new_trust: Confidence,

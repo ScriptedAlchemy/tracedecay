@@ -21,6 +21,7 @@ pub struct ProjectMemoryFactMergeTargetV1 {
     expected_last_event_id: FactEventId,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactMergeTargetV1 {
     pub fn new(
         fact: ProjectMemoryFactIdV1,
@@ -52,6 +53,7 @@ pub struct ProjectMemoryFactMergeCommandV1 {
     actor: Option<ActorId>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactMergeCommandV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -244,6 +246,7 @@ impl<'de> Deserialize<'de> for ProjectMemoryFactMergeOutcomeV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactMergeOutcomeV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(

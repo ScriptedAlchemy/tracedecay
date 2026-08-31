@@ -172,6 +172,7 @@ pub fn derive_canonical_projection(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn canonical_session_message_record(
     provider: &str,
     session_id: &str,
@@ -212,6 +213,7 @@ struct CanonicalSessionFields {
     location_provenance: Option<String>,
 }
 
+#[hotpath::measure]
 fn canonical_session_fields(
     envelope: &CanonicalObservationEnvelopeV1,
 ) -> Option<CanonicalSessionFields> {
@@ -243,6 +245,7 @@ fn canonical_session_fields(
     })
 }
 
+#[hotpath::measure]
 fn canonical_session_metadata_map(
     provider: &str,
     session: Option<&CanonicalSessionFields>,
@@ -288,6 +291,7 @@ fn canonical_session_metadata_map(
     metadata
 }
 
+#[hotpath::measure]
 fn serialize_metadata_map(
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> ProjectionStoreResult<Option<String>> {
@@ -331,6 +335,7 @@ fn canonical_message_metadata(
         .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
 }
 
+#[hotpath::measure]
 fn canonical_workflow_facts(
     envelope: &CanonicalObservationEnvelopeV1,
 ) -> ProjectionStoreResult<Vec<WorkflowFactRecord>> {
@@ -468,6 +473,7 @@ struct CanonicalDerivedMessageFields {
     fields: CanonicalMessageFields,
 }
 
+#[hotpath::measure]
 fn canonical_compatibility_message_fields(
     envelope: &CanonicalObservationEnvelopeV1,
     session: Option<&CanonicalSessionFields>,
@@ -484,6 +490,7 @@ fn canonical_compatibility_message_fields(
     }
 }
 
+#[hotpath::measure]
 fn canonical_composer_compatibility_message_fields(
     envelope: &CanonicalObservationEnvelopeV1,
 ) -> ProjectionStoreResult<Vec<CanonicalDerivedMessageFields>> {
@@ -605,6 +612,7 @@ fn canonical_composer_compatibility_message_fields(
     Ok(derived)
 }
 
+#[hotpath::measure]
 fn canonical_cursor_compatibility_message_fields(
     envelope: &CanonicalObservationEnvelopeV1,
     primary: &mut Option<CanonicalMessageFields>,
@@ -671,6 +679,7 @@ fn canonical_cursor_compatibility_message_fields(
     Ok((primary_message_id, derived))
 }
 
+#[hotpath::measure]
 fn canonical_message_fields(
     envelope: &CanonicalObservationEnvelopeV1,
 ) -> ProjectionStoreResult<Option<CanonicalMessageFields>> {
@@ -831,6 +840,7 @@ fn canonical_message_fields(
     Ok(None)
 }
 
+#[hotpath::measure]
 pub fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<String> {
     if let Some(text) = value.as_str() {
         return Ok(text.to_owned());
@@ -844,6 +854,7 @@ pub fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<S
         .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
 }
 
+#[hotpath::measure]
 fn canonical_role(role: CanonicalMessageRoleV1) -> &'static str {
     match role {
         CanonicalMessageRoleV1::User => "user",
@@ -854,6 +865,7 @@ fn canonical_role(role: CanonicalMessageRoleV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn reasoning_kind(visibility: CanonicalReasoningVisibilityV1) -> &'static str {
     match visibility {
         CanonicalReasoningVisibilityV1::Visible => "reasoning_visible",
@@ -863,6 +875,7 @@ fn reasoning_kind(visibility: CanonicalReasoningVisibilityV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn git_kind(kind: CanonicalGitEvidenceKindV1) -> &'static str {
     match kind {
         CanonicalGitEvidenceKindV1::Diff => "git_diff",
@@ -874,6 +887,7 @@ fn git_kind(kind: CanonicalGitEvidenceKindV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn workflow_kind(kind: CanonicalWorkflowEvidenceKindV1) -> &'static str {
     match kind {
         CanonicalWorkflowEvidenceKindV1::Plan => "workflow_plan",
@@ -886,6 +900,7 @@ fn workflow_kind(kind: CanonicalWorkflowEvidenceKindV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 pub fn workflow_semantic_kind(kind: CanonicalWorkflowSemanticKindV1) -> &'static str {
     match kind {
         CanonicalWorkflowSemanticKindV1::Goal => "goal",

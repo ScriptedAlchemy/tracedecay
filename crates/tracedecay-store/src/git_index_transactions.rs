@@ -38,6 +38,7 @@ pub enum GitIndexTransactionStoreError {
     InvalidData(String),
 }
 
+#[hotpath::measure_all]
 impl GitIndexTransactionStoreError {
     pub fn unavailable(source: impl std::fmt::Display) -> Self {
         Self::Unavailable(source.to_string())
@@ -72,6 +73,7 @@ pub struct GitIndexTransactionRecordV1 {
     pub terminal_receipt: Option<GitIndexTransactionReceiptV1>,
 }
 
+#[hotpath::measure_all]
 impl GitIndexTransactionRecordV1 {
     /// Verify immutable receipt fields against this record's durable preview.
     /// Terminal phase/timestamp checks remain in `validate` because recovery
@@ -157,6 +159,7 @@ pub struct GitIndexTransactionBeginRequestV1 {
     pub journal: GitIndexTransactionJournalV1,
 }
 
+#[hotpath::measure_all]
 impl GitIndexTransactionBeginRequestV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         GitIndexTransactionRecordV1 {
@@ -197,6 +200,7 @@ pub struct GitIndexTransactionTerminalWriteV1 {
     pub receipt: GitIndexTransactionReceiptV1,
 }
 
+#[hotpath::measure_all]
 impl GitIndexTransactionTerminalWriteV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.idempotency_key.validate()?;

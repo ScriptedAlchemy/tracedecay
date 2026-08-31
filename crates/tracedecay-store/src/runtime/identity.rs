@@ -98,6 +98,7 @@ canonical_id!(StoreEffectIdV1, "store effect id");
 canonical_id!(StoreEffectOrderingKeyV1, "store effect ordering key");
 canonical_id!(StoreIdempotencyKeyV1, "store idempotency key");
 
+#[hotpath::measure]
 pub(super) fn validate_canonical_id(
     value: &str,
     field: &'static str,
@@ -160,6 +161,7 @@ pub enum StoreShardScopeV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl StoreShardScopeV1 {
     pub fn project_id(&self) -> Option<&ProjectId> {
         match self {
@@ -205,6 +207,7 @@ pub struct StoreShardIdV1 {
     pub scope: StoreShardScopeV1,
 }
 
+#[hotpath::measure_all]
 impl StoreShardIdV1 {
     pub fn new(brain_id: BrainId, profile_id: UserProfileId, scope: StoreShardScopeV1) -> Self {
         Self {
@@ -282,6 +285,7 @@ impl StoreShardIdV1 {
 #[serde(try_from = "u64", into = "u64")]
 pub struct StoreIncarnationV1(u64);
 
+#[hotpath::measure_all]
 impl StoreIncarnationV1 {
     pub fn new(value: u64) -> Result<Self, StorageRuntimeContractErrorV1> {
         if value == 0 {
@@ -292,6 +296,7 @@ impl StoreIncarnationV1 {
         Ok(Self(value))
     }
 
+    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -320,6 +325,7 @@ impl From<StoreIncarnationV1> for u64 {
 #[serde(try_from = "u64", into = "u64")]
 pub struct StoreAuthorityEpochV1(u64);
 
+#[hotpath::measure_all]
 impl StoreAuthorityEpochV1 {
     pub fn new(value: u64) -> Result<Self, StorageRuntimeContractErrorV1> {
         if value == 0 {
@@ -330,6 +336,7 @@ impl StoreAuthorityEpochV1 {
         Ok(Self(value))
     }
 
+    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -372,6 +379,7 @@ pub struct StoreRuntimeBindingV1 {
     pub authority_epoch: StoreAuthorityEpochV1,
 }
 
+#[hotpath::measure_all]
 impl StoreRuntimeBindingV1 {
     pub fn new(
         shard_id: StoreShardIdV1,
@@ -450,6 +458,7 @@ impl fmt::Display for RetainedGraphStoreOwnerOperationLeaseErrorV1 {
 
 impl std::error::Error for RetainedGraphStoreOwnerOperationLeaseErrorV1 {}
 
+#[hotpath::measure_all]
 impl VerifiedStoreLocatorV1 {
     pub fn new(
         shard_id: StoreShardIdV1,
@@ -467,6 +476,7 @@ impl VerifiedStoreLocatorV1 {
 /// Binds one exact canonical or prospective physical path to a verified
 /// runtime locator. Filesystem resolution remains daemon-owned; this pure
 /// function is the sole digest authority shared by resolvers and consumers.
+#[hotpath::measure]
 pub fn canonical_store_locator_digest(
     path: &Path,
 ) -> Result<LocatorDigest, StorageRuntimeContractErrorV1> {
@@ -497,6 +507,7 @@ pub fn canonical_store_locator_digest(
 /// authority. This pure contract places one ordinary `.grafeo` database file
 /// beside its relational store; it never creates or opens filesystem artifacts.
 /// Grafeo owns the file and its documented transient WAL sidecar.
+#[hotpath::measure]
 pub fn graph_store_locator_path(
     canonical_store_root: &Path,
     relational_store_path: &Path,

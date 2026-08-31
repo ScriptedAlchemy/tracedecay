@@ -42,6 +42,7 @@ const SUBAGENT_DISPATCH_TOOLS: &[&str] = &["task", "subagent"];
 /// The name is trimmed: a whitespace-padded spelling names the same model as
 /// its bare form, and leaving the padding on splits one model into two
 /// attribution identities.
+#[hotpath::measure]
 pub fn cursor_model_string(value: &Value) -> Option<String> {
     CURSOR_MODEL_KEYS.iter().copied().find_map(|key| {
         value
@@ -54,6 +55,7 @@ pub fn cursor_model_string(value: &Value) -> Option<String> {
 }
 
 /// Model of a dispatch item, preferring its `input` payload over the item.
+#[hotpath::measure]
 pub fn cursor_dispatch_model(item: &Value) -> Option<String> {
     item.get("input")
         .and_then(cursor_model_string)
@@ -61,6 +63,7 @@ pub fn cursor_dispatch_model(item: &Value) -> Option<String> {
 }
 
 /// Whether a tool name denotes a subagent dispatch.
+#[hotpath::measure]
 pub fn is_subagent_dispatch_tool(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     SUBAGENT_DISPATCH_TOOLS.contains(&name.as_str())
@@ -70,6 +73,7 @@ pub fn is_subagent_dispatch_tool(name: &str) -> bool {
 ///
 /// Each key is read from the `input` payload first and from the item second, so
 /// a partially nested dispatch still contributes every field it carries.
+#[hotpath::measure]
 pub fn dispatch_text(item: &Value) -> Option<String> {
     let input = item.get("input").unwrap_or(item);
     let mut parts = Vec::new();

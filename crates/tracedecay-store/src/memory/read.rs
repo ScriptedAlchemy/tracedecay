@@ -5,6 +5,7 @@ pub struct FactReadControl {
     interrupted: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
+#[hotpath::measure_all]
 impl FactReadControl {
     pub fn new(interrupted: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         Self { interrupted }

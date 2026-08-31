@@ -32,6 +32,7 @@ pub enum ConfigurationStoreError {
     Unavailable(String),
 }
 
+#[hotpath::measure_all]
 impl ConfigurationStoreError {
     pub fn unavailable(source: impl std::fmt::Display) -> Self {
         Self::Unavailable(source.to_string())
@@ -56,6 +57,7 @@ pub struct ConfigurationRevisionRecordV1 {
     pub created_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl ConfigurationRevisionRecordV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.revision_id.validate()?;
@@ -89,6 +91,7 @@ pub struct ConfigurationMutationReceiptV1 {
     pub effective_deadline_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl ConfigurationMutationReceiptV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.receipt_id.validate()?;
@@ -123,6 +126,7 @@ pub struct ConfigurationCommitV1 {
     pub audit_event: ConfigurationAuditEvent,
 }
 
+#[hotpath::measure_all]
 impl ConfigurationCommitV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.expected_base_revision_id.validate()?;
@@ -158,6 +162,7 @@ pub enum ConfigurationProtectedOperationV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl ConfigurationProtectedOperationV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         match self {
@@ -191,6 +196,7 @@ pub struct ConfigurationProtectedPlanRecordV1 {
     pub operation: ConfigurationProtectedOperationV1,
 }
 
+#[hotpath::measure_all]
 impl ConfigurationProtectedPlanRecordV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.plan.validate()?;

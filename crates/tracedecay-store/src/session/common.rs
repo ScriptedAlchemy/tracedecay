@@ -34,6 +34,7 @@ pub struct SessionTemporalCapabilitiesV1 {
     capabilities: BTreeSet<SessionTemporalCapabilityV1>,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalCapabilitiesV1 {
     pub fn new(capabilities: impl IntoIterator<Item = SessionTemporalCapabilityV1>) -> Self {
         Self {
@@ -68,7 +69,9 @@ pub struct SessionFrozenWatermarksV1 {
     cursor_key: Option<SignedCursorKeyRefV1>,
 }
 
+#[hotpath::measure_all]
 impl SessionFrozenWatermarksV1 {
+    #[hotpath::skip]
     pub const fn new(
         active_generation: SessionProjectionGenerationV1,
         source_frontier: u64,
@@ -89,18 +92,22 @@ impl SessionFrozenWatermarksV1 {
         self
     }
 
+    #[hotpath::skip]
     pub const fn active_generation(&self) -> SessionProjectionGenerationV1 {
         self.active_generation
     }
 
+    #[hotpath::skip]
     pub const fn source_frontier(&self) -> u64 {
         self.source_frontier
     }
 
+    #[hotpath::skip]
     pub const fn projection_frontier(&self) -> u64 {
         self.projection_frontier
     }
 
+    #[hotpath::skip]
     pub const fn summary_frontier(&self) -> u64 {
         self.summary_frontier
     }
@@ -126,6 +133,7 @@ pub struct SessionTemporalSnapshotV1 {
     capabilities: SessionTemporalCapabilitiesV1,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalSnapshotV1 {
     pub fn new(
         session_id: SessionId,
@@ -145,6 +153,7 @@ impl SessionTemporalSnapshotV1 {
         &self.session_id
     }
 
+    #[hotpath::skip]
     pub const fn frozen_at(&self) -> UtcMicros {
         self.frozen_at
     }
@@ -164,6 +173,7 @@ pub struct SessionTemporalSnapshotRequestV1 {
     session_id: SessionId,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalSnapshotRequestV1 {
     pub fn new(session_id: SessionId) -> Self {
         Self { session_id }
@@ -203,6 +213,7 @@ pub enum SessionTemporalDigestInvalidReasonV1 {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionTemporalDigestV1(DataVersionDigest);
 
+#[hotpath::measure_all]
 impl SessionTemporalDigestV1 {
     /// `sha512:` plus 128 lowercase hexadecimal digits.
     pub const MAX_LEN: usize = 135;
@@ -309,6 +320,7 @@ pub enum SessionStoreError {
     },
 }
 
+#[hotpath::measure_all]
 impl SessionStoreError {
     /// Map only adapter/infrastructure failures to `Storage`; semantic and
     /// contract failures should be returned unchanged.
@@ -319,6 +331,7 @@ impl SessionStoreError {
         }
     }
 
+    #[hotpath::skip]
     pub const fn is_storage(&self) -> bool {
         matches!(self, Self::Storage { .. })
     }
@@ -381,6 +394,7 @@ pub(super) trait SessionTemporalOperation {
     const CAPABILITY: SessionTemporalCapabilityV1;
 }
 
+#[hotpath::measure_all]
 impl<Operation> SessionTemporalOperationPermit<Operation> {
     pub(super) fn grant(capabilities: &SessionTemporalCapabilitiesV1) -> SessionStoreResult<Self>
     where
@@ -472,6 +486,7 @@ declare_session_temporal_operation!(
     SessionRefreshReceiptReadPermit,
     SessionTemporalCapabilityV1::RefreshProgressPersistence
 );
+#[hotpath::measure]
 pub(super) fn require_snapshot_session(
     session_id: &SessionId,
     snapshot: &SessionTemporalSnapshotV1,
@@ -483,6 +498,7 @@ pub(super) fn require_snapshot_session(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn require_capability(
     snapshot: &SessionTemporalSnapshotV1,
     capability: SessionTemporalCapabilityV1,
@@ -490,6 +506,7 @@ pub(super) fn require_capability(
     require_declared_capability(snapshot.capabilities(), capability)
 }
 
+#[hotpath::measure]
 pub(super) fn require_declared_capability(
     capabilities: &SessionTemporalCapabilitiesV1,
     capability: SessionTemporalCapabilityV1,
@@ -500,6 +517,7 @@ pub(super) fn require_declared_capability(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn require_newer_generation(
     candidate: SessionProjectionGenerationV1,
     active: SessionProjectionGenerationV1,

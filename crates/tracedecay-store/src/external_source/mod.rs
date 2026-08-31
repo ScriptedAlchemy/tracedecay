@@ -81,6 +81,7 @@ pub type SourceStoreResult<T> = Result<T, SourceStoreErrorV1>;
 #[derive(Debug, Default)]
 struct ValidationMemoV1(AtomicBool);
 
+#[hotpath::measure_all]
 impl ValidationMemoV1 {
     fn is_verified(&self) -> bool {
         self.0.load(Ordering::Relaxed)
@@ -135,6 +136,7 @@ pub struct SourceObservationEvidenceV1 {
     verified: ValidationMemoV1,
 }
 
+#[hotpath::measure_all]
 impl SourceObservationEvidenceV1 {
     pub fn new(
         binding: SourceBindingIdentityV1,
@@ -319,6 +321,7 @@ pub struct SourceObjectMutationV1 {
     verified: ValidationMemoV1,
 }
 
+#[hotpath::measure_all]
 impl SourceObjectMutationV1 {
     pub fn new(
         observation: SourceObjectObservationV1,
@@ -430,6 +433,7 @@ pub struct SourceObjectLineageV1 {
     verified: ValidationMemoV1,
 }
 
+#[hotpath::measure_all]
 impl SourceObjectLineageV1 {
     fn new(
         partition: SourcePartitionIdV1,
@@ -537,6 +541,7 @@ pub struct SourceCommitV1 {
     verified: ValidationMemoV1,
 }
 
+#[hotpath::measure_all]
 impl SourceCommitV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -727,6 +732,7 @@ pub struct SourceCommitReceiptV1 {
     verified: ValidationMemoV1,
 }
 
+#[hotpath::measure_all]
 impl SourceCommitReceiptV1 {
     fn new(
         commit: &SourceCommitV1,
@@ -889,6 +895,7 @@ pub struct SourceAuthorityPublicationV1 {
     request_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl SourceAuthorityPublicationV1 {
     pub fn new(
         definition: &SourceDefinitionV1,
@@ -944,6 +951,7 @@ pub struct SourceAuthorityPublicationReceiptV1 {
     binding_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl SourceAuthorityPublicationReceiptV1 {
     pub fn idempotency_key(&self) -> &ManifestDigest {
         &self.idempotency_key
@@ -1198,6 +1206,7 @@ impl SourceStoreStateV1 {
     }
 }
 
+#[hotpath::measure]
 fn frontier_is_ahead(
     candidate: &SourceAggregateFrontierV1,
     current: &SourceAggregateFrontierV1,
@@ -1328,6 +1337,7 @@ pub struct SourceAuthorityPublicationApplyOutcomeV1 {
     receipt: SourceAuthorityPublicationReceiptV1,
 }
 
+#[hotpath::measure_all]
 impl SourceAuthorityPublicationApplyOutcomeV1 {
     pub fn into_parts(self) -> (Box<SourceStoreStateV1>, SourceAuthorityPublicationReceiptV1) {
         (self.state, self.receipt)

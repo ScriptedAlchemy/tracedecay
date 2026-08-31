@@ -24,6 +24,7 @@ pub struct FactWriteControl {
     try_begin_commit: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
+#[hotpath::measure_all]
 impl FactWriteControl {
     pub fn new(
         interrupted: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -57,6 +58,7 @@ pub struct FactWriteBatch {
     expected_last_event_id: Option<FactEventId>,
 }
 
+#[hotpath::measure_all]
 impl FactWriteBatch {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -254,6 +256,7 @@ impl FactWriteBatch {
     }
 }
 
+#[hotpath::measure]
 fn validate_normalized_tag_curation(
     assertion: Option<&FactAssertionV1>,
     events: &[FactLineageEventV1],
@@ -306,12 +309,14 @@ fn validate_normalized_tag_curation(
     Ok(())
 }
 
+#[hotpath::measure]
 fn invalid_normalized_tag_batch() -> FactStoreError {
     FactStoreError::Contract(DomainError::NonCanonical {
         field: "normalized tag curation batch",
     })
 }
 
+#[hotpath::measure]
 fn validate_anchor_lineage(
     new_anchors: &[RetrievalAnchorRecordV2],
     referenced_anchor_ids: &[RetrievalAnchorId],
@@ -365,6 +370,7 @@ pub struct FactCommitReceipt {
     committed_state_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl FactCommitReceipt {
     pub fn new(
         fact_id: FactId,

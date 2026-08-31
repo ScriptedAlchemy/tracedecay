@@ -32,6 +32,7 @@ struct EffectIdentityWireV1 {
     target_watermark: ShardWatermarkV1,
 }
 
+#[hotpath::measure_all]
 impl EffectIdentityV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.source_watermark.shard_id == self.target_watermark.shard_id {
@@ -77,6 +78,7 @@ impl EffectIdentityV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_watermark_history(
     side: &'static str,
     expected: &ShardWatermarkV1,
@@ -132,6 +134,7 @@ pub enum OutboxEffectStateV1 {
     Acknowledged,
 }
 
+#[hotpath::measure_all]
 impl OutboxEffectStateV1 {
     pub fn can_transition_to(self, next: Self) -> bool {
         self == next
@@ -183,6 +186,7 @@ struct TransactionalInboxReceiptWireV1 {
     committed_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl TransactionalInboxReceiptV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.validate_for(&self.identity)
@@ -252,6 +256,7 @@ struct OutboxAcknowledgementReceiptWireV1 {
     acknowledged_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl OutboxAcknowledgementReceiptV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.identity.validate()?;
@@ -317,6 +322,7 @@ struct TransactionalOutboxEntryWireV1 {
     updated_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl TransactionalOutboxEntryV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.identity.validate()?;

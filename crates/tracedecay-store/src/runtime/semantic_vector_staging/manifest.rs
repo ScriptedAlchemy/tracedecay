@@ -21,6 +21,7 @@ pub struct SemanticVectorChunkManifestAccumulator {
     last_chunk_id: Option<SemanticVectorChunkId>,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorChunkManifestAccumulator {
     pub fn new() -> Self {
         let mut hasher = Sha256::new();

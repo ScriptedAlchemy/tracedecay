@@ -24,6 +24,7 @@ pub struct ProjectMemoryDashboardMemoryOverviewQueryV1 {
     graph_limit: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardMemoryOverviewQueryV1 {
     pub fn new(owner: FactOwnerV1, fact_limit: usize, graph_limit: usize) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -63,6 +64,7 @@ pub struct ProjectMemoryDashboardEntityV1 {
     pub fact_count: u64,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardEntityV1 {
     pub fn new(
         target: ProjectMemoryEntityIdV1,
@@ -85,6 +87,7 @@ pub struct ProjectMemoryDashboardFactEntityLinkV1 {
     pub entity: ProjectMemoryEntityIdV1,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardFactEntityLinkV1 {
     pub fn new(
         fact: ProjectMemoryFactIdV1,
@@ -105,6 +108,7 @@ pub struct ProjectMemoryDashboardNamedCountV1 {
     pub count: u64,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardNamedCountV1 {
     pub fn new(name: String, count: u64) -> FactStoreResult<Self> {
         validate_project_memory_text(&name, "dashboard count name")?;
@@ -119,6 +123,7 @@ pub struct ProjectMemoryDashboardGrowthPointV1 {
     pub cumulative_fact_count: u64,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardGrowthPointV1 {
     pub fn new(
         period: String,
@@ -149,6 +154,7 @@ pub struct ProjectMemoryDashboardMemoryOverviewV1 {
     pub growth: Vec<ProjectMemoryDashboardGrowthPointV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardMemoryOverviewV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -215,6 +221,7 @@ pub struct ProjectMemoryDashboardFactDetailQueryV1 {
     target: ProjectMemoryFactIdV1,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardFactDetailQueryV1 {
     pub fn new(target: ProjectMemoryFactIdV1) -> FactStoreResult<Self> {
         target.owner().validate()?;
@@ -235,6 +242,7 @@ pub struct ProjectMemoryDashboardFactDetailV1 {
     pub history: Option<ProjectMemoryFactHistoryV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardFactDetailV1 {
     pub fn new(
         fact: ProjectMemoryFactProjectionV1,
@@ -274,6 +282,7 @@ pub struct ProjectMemoryDashboardVectorPointsQueryV1 {
     limit: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardVectorPointsQueryV1 {
     pub fn new(owner: FactOwnerV1, search: Option<String>, limit: usize) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -311,6 +320,7 @@ pub struct ProjectMemoryDashboardVectorPointV1 {
     pub connection_count: u64,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardVectorPointV1 {
     pub fn new(
         fact: ProjectMemoryDashboardFactSummaryV1,
@@ -345,6 +355,7 @@ pub struct ProjectMemoryDashboardOplogQueryV1 {
     limit: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardOplogQueryV1 {
     pub fn new(owner: FactOwnerV1, limit: usize) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -369,6 +380,7 @@ pub struct ProjectMemoryDashboardOplogEntryV1 {
     pub fact: Option<ProjectMemoryFactIdV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryDashboardOplogEntryV1 {
     pub fn new(
         id: i64,

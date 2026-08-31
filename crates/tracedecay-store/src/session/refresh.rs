@@ -24,6 +24,7 @@ pub struct SessionRefreshFrontierV1 {
     committed_through: u64,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshFrontierV1 {
     pub fn new(observed_through: u64, committed_through: u64) -> SessionStoreResult<Self> {
         if committed_through > observed_through {
@@ -38,14 +39,17 @@ impl SessionRefreshFrontierV1 {
         })
     }
 
+    #[hotpath::skip]
     pub const fn observed_through(&self) -> u64 {
         self.observed_through
     }
 
+    #[hotpath::skip]
     pub const fn committed_through(&self) -> u64 {
         self.committed_through
     }
 
+    #[hotpath::skip]
     pub const fn is_complete(&self) -> bool {
         self.observed_through == self.committed_through
     }
@@ -60,6 +64,7 @@ pub struct SessionRefreshBeginOrJoinRequestV1 {
     coverage_request: SessionTemporalCoverageRequestV1,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshBeginOrJoinRequestV1 {
     pub fn new(session_id: SessionId, target_frontier: SessionRefreshFrontierV1) -> Self {
         Self {
@@ -85,6 +90,7 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         self
     }
 
+    #[hotpath::skip]
     pub const fn coverage_request(&self) -> &SessionTemporalCoverageRequestV1 {
         &self.coverage_request
     }
@@ -93,6 +99,7 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         &self.session_id
     }
 
+    #[hotpath::skip]
     pub const fn target_frontier(&self) -> SessionRefreshFrontierV1 {
         self.target_frontier
     }
@@ -126,6 +133,7 @@ pub struct SessionRefreshBeginOrJoinReceiptV1 {
     accepted_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshBeginOrJoinReceiptV1 {
     pub fn new(
         operation_id: SessionRefreshOperationIdV1,
@@ -151,14 +159,17 @@ impl SessionRefreshBeginOrJoinReceiptV1 {
         &self.session_id
     }
 
+    #[hotpath::skip]
     pub const fn target_frontier(&self) -> SessionRefreshFrontierV1 {
         self.target_frontier
     }
 
+    #[hotpath::skip]
     pub const fn disposition(&self) -> SessionRefreshDispositionV1 {
         self.disposition
     }
 
+    #[hotpath::skip]
     pub const fn accepted_at(&self) -> UtcMicros {
         self.accepted_at
     }
@@ -171,6 +182,7 @@ pub struct SessionRefreshProgressRequestV1 {
     session_id: SessionId,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshProgressRequestV1 {
     pub fn new(operation_id: SessionRefreshOperationIdV1, session_id: SessionId) -> Self {
         Self {
@@ -201,6 +213,7 @@ pub struct SessionRefreshProgressV1 {
     updated_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshProgressV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -232,6 +245,7 @@ impl SessionRefreshProgressV1 {
         &self.session_id
     }
 
+    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -249,14 +263,17 @@ impl SessionRefreshProgressV1 {
         self.source_coverage.as_ref()
     }
 
+    #[hotpath::skip]
     pub const fn committed_batches(&self) -> u64 {
         self.committed_batches
     }
 
+    #[hotpath::skip]
     pub const fn committed_records(&self) -> u64 {
         self.committed_records
     }
 
+    #[hotpath::skip]
     pub const fn updated_at(&self) -> UtcMicros {
         self.updated_at
     }
@@ -292,6 +309,7 @@ impl SessionRefreshProgressV1 {
     }
 }
 
+#[hotpath::measure]
 fn source_coverage_is_successor(
     current: Option<&SessionSourceCoverageReceiptV1>,
     next: Option<&SessionSourceCoverageReceiptV1>,
@@ -326,6 +344,7 @@ pub struct SessionRefreshCompletionRequestV1 {
     source_coverage: Option<SessionSourceCoverageReceiptV1>,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshCompletionRequestV1 {
     pub fn new(
         operation_id: SessionRefreshOperationIdV1,
@@ -361,6 +380,7 @@ impl SessionRefreshCompletionRequestV1 {
         &self.session_id
     }
 
+    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -383,6 +403,7 @@ impl SessionRefreshCompletionRequestV1 {
 #[serde(transparent)]
 pub struct SessionRefreshFailureCodeV1(String);
 
+#[hotpath::measure_all]
 impl SessionRefreshFailureCodeV1 {
     pub const MAX_LEN: usize = 64;
 
@@ -454,6 +475,7 @@ impl<'de> Deserialize<'de> for SessionRefreshFailureCodeV1 {
     }
 }
 
+#[hotpath::measure]
 fn is_canonical_failure_code(bytes: &[u8]) -> bool {
     bytes[0].is_ascii_lowercase()
         && bytes
@@ -474,6 +496,7 @@ pub struct SessionRefreshFailureRequestV1 {
     failure_code: SessionRefreshFailureCodeV1,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshFailureRequestV1 {
     pub fn new(
         operation_id: SessionRefreshOperationIdV1,
@@ -505,6 +528,7 @@ impl SessionRefreshFailureRequestV1 {
         &self.session_id
     }
 
+    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -532,6 +556,7 @@ pub struct SessionRefreshCancellationRequestV1 {
     source_coverage: Option<SessionSourceCoverageReceiptV1>,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshCancellationRequestV1 {
     pub fn new(
         operation_id: SessionRefreshOperationIdV1,
@@ -561,6 +586,7 @@ impl SessionRefreshCancellationRequestV1 {
         &self.session_id
     }
 
+    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -595,6 +621,7 @@ pub struct SessionRefreshReceiptV1 {
     terminal_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshReceiptV1 {
     pub fn completed(request: SessionRefreshCompletionRequestV1, terminal_at: UtcMicros) -> Self {
         Self {
@@ -643,6 +670,7 @@ impl SessionRefreshReceiptV1 {
         &self.session_id
     }
 
+    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -660,6 +688,7 @@ impl SessionRefreshReceiptV1 {
         self.source_coverage.as_ref()
     }
 
+    #[hotpath::skip]
     pub const fn state(&self) -> SessionRefreshTerminalStateV1 {
         self.state
     }
@@ -668,6 +697,7 @@ impl SessionRefreshReceiptV1 {
         self.failure_code.as_ref()
     }
 
+    #[hotpath::skip]
     pub const fn terminal_at(&self) -> UtcMicros {
         self.terminal_at
     }
@@ -708,6 +738,7 @@ pub struct SessionRefreshReceiptRequestV1 {
     session_id: SessionId,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshReceiptRequestV1 {
     pub fn new(operation_id: SessionRefreshOperationIdV1, session_id: SessionId) -> Self {
         Self {

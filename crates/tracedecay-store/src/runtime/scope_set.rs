@@ -29,6 +29,7 @@ pub struct AuthorizedScopeSetRecordV1 {
     pub canonical_payload: Vec<u8>,
 }
 
+#[hotpath::measure_all]
 impl AuthorizedScopeSetRecordV1 {
     pub fn new(
         scope_set_id: ScopeSetId,
@@ -72,6 +73,7 @@ pub struct ScopeSetCompareAndSwapV1 {
     pub next: AuthorizedScopeSetRecordV1,
 }
 
+#[hotpath::measure_all]
 impl ScopeSetCompareAndSwapV1 {
     pub fn new(
         expected_revision: Option<ScopeSetRevision>,

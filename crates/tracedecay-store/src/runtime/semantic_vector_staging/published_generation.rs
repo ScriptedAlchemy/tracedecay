@@ -21,6 +21,7 @@ pub struct SemanticVectorPublishedGenerationKey {
     pub semantic_generation_id: VectorGenerationIdV1,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorPublishedGenerationKey {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.semantic_generation_id.validate().map_err(|_| {

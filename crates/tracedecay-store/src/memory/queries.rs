@@ -26,7 +26,9 @@ pub struct FactQueryCoverageV1 {
     redacted: u64,
 }
 
+#[hotpath::measure_all]
 impl FactQueryCoverageV1 {
+    #[hotpath::skip]
     pub const fn new(visible: u64, hidden: u64, unknown: u64, redacted: u64) -> Self {
         Self {
             visible,
@@ -36,18 +38,22 @@ impl FactQueryCoverageV1 {
         }
     }
 
+    #[hotpath::skip]
     pub const fn visible(&self) -> u64 {
         self.visible
     }
 
+    #[hotpath::skip]
     pub const fn hidden(&self) -> u64 {
         self.hidden
     }
 
+    #[hotpath::skip]
     pub const fn unknown(&self) -> u64 {
         self.unknown
     }
 
+    #[hotpath::skip]
     pub const fn redacted(&self) -> u64 {
         self.redacted
     }
@@ -64,6 +70,7 @@ pub enum FactContradictionStateV1 {
     Present { contradicted_by: Vec<FactId> },
 }
 
+#[hotpath::measure_all]
 impl FactContradictionStateV1 {
     pub fn from_positive(mut contradicted_by: Vec<FactId>) -> Self {
         contradicted_by.sort_unstable();
@@ -83,6 +90,7 @@ impl FactContradictionStateV1 {
         }
     }
 
+    #[hotpath::skip]
     pub const fn is_positive(&self) -> bool {
         matches!(self, Self::Present { .. })
     }
@@ -96,6 +104,7 @@ pub struct FactCurrentResponseV1 {
     contradiction: FactContradictionStateV1,
 }
 
+#[hotpath::measure_all]
 impl FactCurrentResponseV1 {
     pub fn new(
         fact: Option<StoredFactV1>,
@@ -113,10 +122,12 @@ impl FactCurrentResponseV1 {
         self.fact.as_ref()
     }
 
+    #[hotpath::skip]
     pub const fn coverage(&self) -> &FactQueryCoverageV1 {
         &self.coverage
     }
 
+    #[hotpath::skip]
     pub const fn contradiction(&self) -> &FactContradictionStateV1 {
         &self.contradiction
     }
@@ -130,6 +141,7 @@ pub struct FactAsOfResponseV1 {
     contradiction: FactContradictionStateV1,
 }
 
+#[hotpath::measure_all]
 impl FactAsOfResponseV1 {
     pub fn new(
         fact: Option<StoredFactV1>,
@@ -147,10 +159,12 @@ impl FactAsOfResponseV1 {
         self.fact.as_ref()
     }
 
+    #[hotpath::skip]
     pub const fn coverage(&self) -> &FactQueryCoverageV1 {
         &self.coverage
     }
 
+    #[hotpath::skip]
     pub const fn contradiction(&self) -> &FactContradictionStateV1 {
         &self.contradiction
     }
@@ -164,6 +178,7 @@ pub struct FactLineageResponseV1 {
     contradiction: FactContradictionStateV1,
 }
 
+#[hotpath::measure_all]
 impl FactLineageResponseV1 {
     pub fn new(
         events: Vec<FactLineageEventV1>,
@@ -181,10 +196,12 @@ impl FactLineageResponseV1 {
         &self.events
     }
 
+    #[hotpath::skip]
     pub const fn coverage(&self) -> &FactQueryCoverageV1 {
         &self.coverage
     }
 
+    #[hotpath::skip]
     pub const fn contradiction(&self) -> &FactContradictionStateV1 {
         &self.contradiction
     }
@@ -205,6 +222,7 @@ pub struct FactCurrentQuery {
     fact_id: FactId,
 }
 
+#[hotpath::measure_all]
 impl FactCurrentQuery {
     pub fn new(owner: FactOwnerV1, fact_id: FactId) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -222,6 +240,7 @@ impl FactCurrentQuery {
     }
 }
 
+#[hotpath::measure_all]
 impl CurrentFactsQuery {
     pub fn new(
         owner: FactOwnerV1,
@@ -262,6 +281,7 @@ pub struct FactAsOfQuery {
     as_of: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl FactAsOfQuery {
     pub fn new(owner: FactOwnerV1, fact_id: FactId, as_of: UtcMicros) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -294,6 +314,7 @@ pub struct FactLineageCursor {
     event_id: FactEventId,
 }
 
+#[hotpath::measure_all]
 impl FactLineageCursor {
     pub fn new(occurred_at: UtcMicros, event_id: FactEventId) -> FactStoreResult<Self> {
         event_id.validate()?;
@@ -321,6 +342,7 @@ pub struct FactLineageQuery {
     limit: usize,
 }
 
+#[hotpath::measure_all]
 impl FactLineageQuery {
     pub fn new(
         owner: FactOwnerV1,
@@ -364,6 +386,7 @@ pub struct RetrievalAnchorQuery {
     anchor_id: RetrievalAnchorId,
 }
 
+#[hotpath::measure_all]
 impl RetrievalAnchorQuery {
     pub fn new(owner: FactOwnerV1, anchor_id: RetrievalAnchorId) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -380,6 +403,7 @@ impl RetrievalAnchorQuery {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_limit(limit: usize, max: usize) -> FactStoreResult<()> {
     if !(1..=max).contains(&limit) {
         return Err(FactStoreError::InvalidQueryLimit { limit, max });
@@ -396,6 +420,7 @@ pub struct ProjectMemoryFactContentDigestQueryV1 {
     content_digest: LocatorDigest,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactContentDigestQueryV1 {
     pub fn new(owner: FactOwnerV1, content_digest: LocatorDigest) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -427,6 +452,7 @@ pub struct ProjectMemoryFactSearchQuery {
     limit: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactSearchQuery {
     pub fn new(
         owner: FactOwnerV1,
@@ -513,6 +539,7 @@ pub struct ProjectMemoryFactListQueryV1 {
     limit: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactListQueryV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -559,6 +586,7 @@ pub struct ProjectMemoryFactHistoryQueryV1 {
     limit: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactHistoryQueryV1 {
     pub fn new(
         target: ProjectMemoryFactIdV1,
@@ -591,6 +619,7 @@ pub struct ProjectMemoryFactFeedbackHistoryQueryV1 {
     limit: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactFeedbackHistoryQueryV1 {
     pub fn new(
         target: ProjectMemoryFactIdV1,

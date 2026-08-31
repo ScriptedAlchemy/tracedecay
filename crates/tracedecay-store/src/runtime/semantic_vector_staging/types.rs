@@ -94,6 +94,7 @@ macro_rules! sha256_digest {
     };
 }
 
+#[hotpath::measure]
 fn validate_sha256(value: &str, field: &'static str) -> Result<(), StorageRuntimeContractErrorV1> {
     let Some(hex) = value.strip_prefix("sha256:") else {
         return Err(StorageRuntimeContractErrorV1::NonCanonical { field });
@@ -119,6 +120,7 @@ canonical_id!(SemanticVectorChunkId, "semantic vector chunk id");
 #[serde(transparent)]
 pub struct SemanticVectorCodeScopeHash(String);
 
+#[hotpath::measure_all]
 impl SemanticVectorCodeScopeHash {
     pub fn new(value: impl Into<String>) -> Result<Self, StorageRuntimeContractErrorV1> {
         let value = value.into();
@@ -218,6 +220,7 @@ pub struct SemanticVectorWriterFence {
     pub binding: StoreRuntimeBindingV1,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorWriterFence {
     pub fn validate_for(
         &self,
@@ -245,6 +248,7 @@ pub struct SemanticVectorReconstructionRecipe {
     pub expected_chunk_manifest_digest: SemanticVectorChunkManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorReconstructionRecipe {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.embedding_dimension == 0
@@ -283,6 +287,7 @@ pub struct SemanticVectorStagePlan {
     pub writer_fence: SemanticVectorWriterFence,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorStagePlan {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -471,6 +476,7 @@ pub struct SemanticVectorStageBatchKey {
     pub ordinal: u64,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorStageBatchKey {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.ordinal > i64::MAX.unsigned_abs() {
@@ -494,7 +500,9 @@ pub enum SemanticVectorStageChunkOperation {
     Tombstone,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorStageChunkOperation {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Embed => "embed",
@@ -525,6 +533,7 @@ pub struct SemanticVectorStageChunkReceipt {
     pub output_digest: Option<SemanticVectorOutputDigest>,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorStageChunkReceipt {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         let valid_output = matches!(
@@ -555,6 +564,7 @@ pub struct SemanticVectorStageBatchReceipt {
     pub chunks: Vec<SemanticVectorStageChunkReceipt>,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorStageBatchReceipt {
     pub fn new(
         key: SemanticVectorStageBatchKey,
@@ -701,6 +711,7 @@ pub enum SemanticVectorStageEffectState {
 #[serde(try_from = "u64", into = "u64")]
 pub struct SemanticVectorOutboxSequence(u64);
 
+#[hotpath::measure_all]
 impl SemanticVectorOutboxSequence {
     pub fn new(value: u64) -> Result<Self, StorageRuntimeContractErrorV1> {
         if value == 0 {
@@ -718,6 +729,7 @@ impl SemanticVectorOutboxSequence {
         Ok(Self(value))
     }
 
+    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -796,6 +808,7 @@ pub struct SemanticVectorStageBatchPageRequest {
     pub max_records: u16,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorStageBatchPageRequest {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         validate_page(self.max_records, MAX_SEMANTIC_VECTOR_STAGE_PAGE_RECORDS)?;
@@ -832,6 +845,7 @@ pub struct SemanticVectorStagePendingEffectPageRequest {
     pub max_records: u16,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorStagePendingEffectPageRequest {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         validate_page(
@@ -914,6 +928,7 @@ pub struct SemanticVectorStagePublicationPrepareRequest {
     pub publication_intent_digest: SemanticVectorPublicationIntentDigest,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorStagePublicationPrepareRequest {
     pub fn new(
         stage: SemanticVectorStageKey,
@@ -1015,6 +1030,7 @@ pub struct SemanticVectorReadyPublicationPageRequest {
     pub max_records: u16,
 }
 
+#[hotpath::measure_all]
 impl SemanticVectorReadyPublicationPageRequest {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         validate_page(self.max_records, MAX_SEMANTIC_VECTOR_STAGE_PAGE_RECORDS)?;
@@ -1055,6 +1071,7 @@ pub enum SemanticVectorStagePublishOutcome {
     MissingStage,
 }
 
+#[hotpath::measure]
 fn validate_page(actual: u16, max: u16) -> Result<(), StorageRuntimeContractErrorV1> {
     if actual == 0 {
         return Err(StorageRuntimeContractErrorV1::Zero {

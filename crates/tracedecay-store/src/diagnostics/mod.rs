@@ -27,6 +27,7 @@ pub struct DiagnosticGenerationSupersessionV1 {
     successor_generation: CodeGenerationId,
 }
 
+#[hotpath::measure_all]
 impl DiagnosticGenerationSupersessionV1 {
     pub fn new(
         prior_generation: CodeGenerationId,
@@ -76,6 +77,7 @@ pub struct SanitizedCleanDiagnosticSnapshotV1 {
     records: Vec<GenerationDiagnosticV1>,
 }
 
+#[hotpath::measure_all]
 impl SanitizedCleanDiagnosticSnapshotV1 {
     pub fn new(
         generation_id: CodeGenerationId,
@@ -145,6 +147,7 @@ pub struct DiagnosticPublicationReceiptV1 {
     disposition: DiagnosticPublicationDispositionV1,
 }
 
+#[hotpath::measure_all]
 impl DiagnosticPublicationReceiptV1 {
     pub fn new(
         generation_id: CodeGenerationId,
@@ -164,14 +167,17 @@ impl DiagnosticPublicationReceiptV1 {
         &self.generation_id
     }
 
+    #[hotpath::skip]
     pub const fn inserted_records(&self) -> u64 {
         self.inserted_records
     }
 
+    #[hotpath::skip]
     pub const fn cleared_records(&self) -> u64 {
         self.cleared_records
     }
 
+    #[hotpath::skip]
     pub const fn disposition(&self) -> DiagnosticPublicationDispositionV1 {
         self.disposition
     }

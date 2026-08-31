@@ -4,6 +4,7 @@ use super::super::super::{FactStoreError, FactStoreResult};
 use super::super::ProjectMemoryFactIdV1;
 use super::{MAX_PROJECT_MEMORY_CURATION_TARGETS, ProjectMemoryFactCurationReviewRefV1};
 
+#[hotpath::measure]
 pub(super) fn validate_curation_confidence(
     confidence: Confidence,
     min_confidence: Confidence,
@@ -16,6 +17,7 @@ pub(super) fn validate_curation_confidence(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_curation_fact_target(
     owner: &FactOwnerV1,
     target: &ProjectMemoryFactIdV1,
@@ -26,6 +28,7 @@ pub(super) fn validate_curation_fact_target(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_curation_evidence(
     owner: &FactOwnerV1,
     evidence_facts: &[ProjectMemoryFactCurationReviewRefV1],

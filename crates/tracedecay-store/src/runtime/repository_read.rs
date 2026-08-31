@@ -50,6 +50,7 @@ pub enum RepositoryReadOperationV1 {
     Effects(EffectsReadOperationV1),
 }
 
+#[hotpath::measure_all]
 impl RepositoryReadOperationV1 {
     pub(crate) fn validate_for_binding(
         &self,
@@ -89,6 +90,7 @@ impl RepositoryReadOperationV1 {
     }
 }
 
+#[hotpath::measure]
 fn fact_read_owner(operation: &FactReadOperationV1) -> &tracedecay_domain::FactOwnerV1 {
     match operation {
         FactReadOperationV1::Current(query) => query.owner(),
@@ -96,6 +98,7 @@ fn fact_read_owner(operation: &FactReadOperationV1) -> &tracedecay_domain::FactO
     }
 }
 
+#[hotpath::measure]
 fn fact_owner_matches_shard(
     owner: &tracedecay_domain::FactOwnerV1,
     shard: &StoreShardIdV1,
@@ -113,6 +116,7 @@ fn fact_owner_matches_shard(
     }
 }
 
+#[hotpath::measure]
 fn observation_read_matches_shard(
     operation: &ObservationReadOperationV1,
     shard: &StoreShardIdV1,
@@ -142,6 +146,7 @@ fn observation_read_matches_shard(
     }
 }
 
+#[hotpath::measure]
 fn evidence_read_owner(
     operation: &EvidenceAssemblyReadOperationV1,
 ) -> &crate::EvidenceAssemblyOwnerV1 {
@@ -151,6 +156,7 @@ fn evidence_read_owner(
     }
 }
 
+#[hotpath::measure]
 fn evidence_owner_matches_shard(
     owner: &crate::EvidenceAssemblyOwnerV1,
     shard: &StoreShardIdV1,
@@ -171,6 +177,7 @@ fn evidence_owner_matches_shard(
         }
 }
 
+#[hotpath::measure]
 fn external_source_read_matches_shard(
     operation: &ExternalSourceReadOperationV1,
     shard: &StoreShardIdV1,
@@ -205,6 +212,7 @@ fn external_source_read_matches_shard(
         }
 }
 
+#[hotpath::measure]
 fn retrieval_read_owner(operation: &RetrievalAnchorReadOperationV1) -> &RetrievalAnchorOwnerV1 {
     match operation {
         RetrievalAnchorReadOperationV1::AnchorById { owner, .. }
@@ -214,6 +222,7 @@ fn retrieval_read_owner(operation: &RetrievalAnchorReadOperationV1) -> &Retrieva
     }
 }
 
+#[hotpath::measure]
 fn retrieval_owner_matches_shard(owner: &RetrievalAnchorOwnerV1, shard: &StoreShardIdV1) -> bool {
     match owner {
         RetrievalAnchorOwnerV1::V3(owner) => {
@@ -248,6 +257,7 @@ fn retrieval_owner_matches_shard(owner: &RetrievalAnchorOwnerV1, shard: &StoreSh
     }
 }
 
+#[hotpath::measure]
 fn code_read_matches_shard(operation: &CodeReadOperationV1, shard: &StoreShardIdV1) -> bool {
     let StoreShardScopeV1::Code { repository_id, .. } = &shard.scope else {
         return false;
@@ -260,6 +270,7 @@ fn code_read_matches_shard(operation: &CodeReadOperationV1, shard: &StoreShardId
     }
 }
 
+#[hotpath::measure]
 fn effects_read_binding(operation: &EffectsReadOperationV1) -> &StoreRuntimeBindingV1 {
     match operation {
         EffectsReadOperationV1::OutboxEntry { binding, .. }
@@ -269,6 +280,7 @@ fn effects_read_binding(operation: &EffectsReadOperationV1) -> &StoreRuntimeBind
     }
 }
 
+#[hotpath::measure]
 fn shard_family(scope: &StoreShardScopeV1) -> &'static str {
     match scope {
         StoreShardScopeV1::Profile => "profile",

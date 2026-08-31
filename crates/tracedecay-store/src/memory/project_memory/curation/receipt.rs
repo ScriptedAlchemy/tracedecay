@@ -283,6 +283,7 @@ impl<'de> Deserialize<'de> for ProjectMemoryFactCurationReceiptV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactCurationOperationEffectWire {
     fn into_effect(
         self,
@@ -349,6 +350,7 @@ impl ProjectMemoryFactCurationOperationEffectWire {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectMemoryFactCurationReceiptV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -552,6 +554,7 @@ impl ProjectMemoryFactCurationReceiptV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_digest(input_digest: &str) -> FactStoreResult<()> {
     if input_digest.len() != 64
         || !input_digest
@@ -565,6 +568,7 @@ fn validate_digest(input_digest: &str) -> FactStoreResult<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn summary_overflow() -> FactStoreError {
     FactStoreError::Contract(DomainError::NonCanonical {
         field: "curation receipt summary",
