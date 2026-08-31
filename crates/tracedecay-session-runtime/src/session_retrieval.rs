@@ -15,8 +15,6 @@ use tracedecay_domain::{
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_domain::{RepositoryId, WorktreeId};
-use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
-use tracedecay_store::StoreShardIdV1;
 use tracedecay_session_memory::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
@@ -27,6 +25,8 @@ use tracedecay_session_memory::session::{
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
     SessionTemporalExecutionError, SessionTemporalQuery,
 };
+use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
+use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 
 use crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
@@ -45,7 +45,6 @@ use tracedecay_temporal_query::{
     TemporalHydratedResult, TemporalKernelError, TemporalKernelResult,
 };
 
-const MESSAGE_SEARCH_PROFILE_ID: &str = "profile.primary";
 const MESSAGE_SEARCH_SCHEMA_VERSION: u32 = 1;
 const MESSAGE_SEARCH_RANKING_VERSION: u32 = 1;
 
@@ -119,11 +118,82 @@ pub use primitive::DaemonSessionLookupPrimitiveV1;
 
 /// Serving identity of the store the daemon currently serves, extracted
 /// from the composition root's aggregate at the call site.
-#[derive(Clone, Copy)]
-pub struct SessionRetrievalServingIdentityV1<'a> {
-    pub project_id: Option<&'a str>,
-    pub serving_db: &'a Path,
-    pub project_root: &'a Path,
+#[derive(Clone)]
+pub struct SessionRetrievalServingIdentityV1 {
+    pub project_id: Option<ProjectId>,
+    pub profile_id: ProfileId,
+    pub store_id: SessionStoreId,
+    pub root_id: SessionRootId,
+    pub expected_runtime_shard: StoreShardIdV1,
+    pub serving_db: std::path::PathBuf,
+    pub project_root: std::path::PathBuf,
+}
+
+impl SessionRetrievalServingIdentityV1 {
+    pub async fn resolve_project(
+        project_id: &str,
+        serving_db: &Path,
+        project_root: &Path,
+        profile_id: &tracedecay_domain::UserProfileId,
+        expected_runtime_shard: &StoreShardIdV1,
+        registry: &RegisteredGlobalDb,
+    ) -> Option<Self> {
+        let project_id = ProjectId::new(project_id.to_owned()).ok()?;
+        let profile_id = ProfileId::new(profile_id.as_str().to_owned()).ok()?;
+        let (store_id, root_id) = project_store_and_root(registry, &project_id, serving_db).await?;
+        let serving = Self {
+            project_id: Some(project_id),
+            profile_id,
+            store_id,
+            root_id,
+            expected_runtime_shard: expected_runtime_shard.clone(),
+            serving_db: serving_db.to_path_buf(),
+            project_root: project_root.to_path_buf(),
+        };
+        serving.valid_project_shard().then_some(serving)
+    }
+
+    pub fn resolve_profile(
+        profile_id: &tracedecay_domain::UserProfileId,
+        expected_runtime_shard: &StoreShardIdV1,
+        serving_db: &Path,
+        profile_root: &Path,
+    ) -> Option<Self> {
+        if profile_id != &expected_runtime_shard.profile_id
+            || !matches!(
+                expected_runtime_shard.scope,
+                StoreShardScopeV1::ProfileSessions
+            )
+        {
+            return None;
+        }
+        let suffix = profile_id.as_str().strip_prefix("profile.")?;
+        if suffix.is_empty() {
+            return None;
+        }
+        Some(Self {
+            project_id: None,
+            profile_id: ProfileId::new(profile_id.as_str().to_owned()).ok()?,
+            store_id: SessionStoreId::new(format!("store.profile.{suffix}")).ok()?,
+            root_id: SessionRootId::new(format!("root.profile.{suffix}")).ok()?,
+            expected_runtime_shard: expected_runtime_shard.clone(),
+            serving_db: serving_db.to_path_buf(),
+            project_root: profile_root.to_path_buf(),
+        })
+    }
+
+    fn valid_project_shard(&self) -> bool {
+        let Some(project_id) = self.project_id.as_ref() else {
+            return false;
+        };
+        self.profile_id.as_str() == self.expected_runtime_shard.profile_id.as_str()
+            && matches!(
+                &self.expected_runtime_shard.scope,
+                StoreShardScopeV1::ProjectSessions {
+                    project_id: shard_project_id,
+                } if shard_project_id == project_id
+            )
+    }
 }
 
 #[derive(Clone)]
@@ -144,20 +214,60 @@ impl DaemonSessionRetrievalRoot {
         self.expected_runtime_shard.as_ref()
     }
 
+    fn bind_runtime_shard(&mut self, shard: &StoreShardIdV1) -> bool {
+        if self.identity.profile_id().as_str() != shard.profile_id.as_str() {
+            return false;
+        }
+        if let Some(expected) = self.expected_runtime_shard.as_ref() {
+            if expected != shard {
+                return false;
+            }
+        } else if self.project_id.is_some() {
+            return false;
+        } else {
+            let Some(suffix) = self.identity.profile_id().as_str().strip_prefix("profile.") else {
+                return false;
+            };
+            if suffix.is_empty()
+                || self.identity.store_id().as_str() != format!("store.profile.{suffix}")
+                || self.identity.root_id().as_str() != format!("root.profile.{suffix}")
+            {
+                return false;
+            }
+            self.expected_runtime_shard = Some(shard.clone());
+        }
+        match (&self.project_id, &shard.scope) {
+            (None, StoreShardScopeV1::ProfileSessions) => self.identity.project_id().is_none(),
+            (
+                Some(project_id),
+                StoreShardScopeV1::ProjectSessions {
+                    project_id: shard_project_id,
+                },
+            ) => {
+                self.identity.project_id().map(ProjectId::as_str) == Some(project_id.as_str())
+                    && shard_project_id.as_str() == project_id
+            }
+            _ => false,
+        }
+    }
+
     pub async fn project(
-        serving: SessionRetrievalServingIdentityV1<'_>,
+        serving: SessionRetrievalServingIdentityV1,
         registry: &RegisteredGlobalDb,
     ) -> Option<Self> {
-        let project_id = serving.project_id?;
+        if !serving.valid_project_shard() {
+            return None;
+        }
+        let project_id = serving.project_id.as_ref()?;
         let context = registry
-            .project_registry_context_by_id(project_id)
+            .project_registry_context_by_id(project_id.as_str())
             .await
             .ok()??;
         Self::from_project_context(&serving, registry, context)
     }
 
     fn from_project_context(
-        serving: &SessionRetrievalServingIdentityV1<'_>,
+        serving: &SessionRetrievalServingIdentityV1,
         registry: &RegisteredGlobalDb,
         context: ProjectRegistryContext,
     ) -> Option<Self> {
@@ -168,7 +278,7 @@ impl DaemonSessionRetrievalRoot {
                 if scope.writable
                     && scope.project_id == context.project.project_id
                     && scope.store_id == store.store.store_id
-                    && profile_root.join(&scope.db_relpath) == *serving.serving_db
+                    && profile_root.join(&scope.db_relpath) == serving.serving_db
                 {
                     if selected.is_some() {
                         return None;
@@ -182,23 +292,26 @@ impl DaemonSessionRetrievalRoot {
             }
         }
         let (store_id, graph_scope_id, branch_name) = selected?;
+        if store_id != serving.store_id.as_str() || graph_scope_id != serving.root_id.as_str() {
+            return None;
+        }
 
         let project_key = ProjectId::new(context.project.project_id.clone()).ok()?;
         let repository_id =
             tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
-                serving.project_root,
+                &serving.project_root,
             )
             .ok()?;
         let worktree_id =
             tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
-                serving.project_root,
+                &serving.project_root,
             )
             .ok()?;
         let identity = ResolvedSessionIdentity::for_project(
-            ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).ok()?,
+            serving.profile_id.clone(),
             project_key,
-            SessionStoreId::new(store_id).ok()?,
-            SessionRootId::new(graph_scope_id.clone()).ok()?,
+            serving.store_id.clone(),
+            serving.root_id.clone(),
             ResolvedGitRoute::new(repository_id, worktree_id, BranchId::new(branch_name).ok()?),
         );
         Some(Self {
@@ -206,156 +319,98 @@ impl DaemonSessionRetrievalRoot {
             identity,
             project_id: Some(context.project.project_id),
             authorized_root: Some(context.project.display_root),
-            expected_runtime_shard: None,
+            expected_runtime_shard: Some(serving.expected_runtime_shard.clone()),
         })
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn project_for_test(project_root: &Path, project_id: Option<String>) -> Self {
-        let project_root = project_root.to_path_buf();
-        let project_key_value = project_id
-            .clone()
-            .unwrap_or_else(|| project_root.display().to_string());
-        let project_key = ProjectId::new(project_key_value.clone())
-            .unwrap_or_else(|error| panic!("test project identity: {error}"));
-        let identity = ResolvedSessionIdentity::for_project(
-            ProfileId::new(MESSAGE_SEARCH_PROFILE_ID)
-                .unwrap_or_else(|error| panic!("test profile identity: {error}")),
-            project_key,
-            SessionStoreId::new("store.project.test")
-                .unwrap_or_else(|error| panic!("test store identity: {error}")),
-            SessionRootId::new("root.project.test")
-                .unwrap_or_else(|error| panic!("test root identity: {error}")),
-            ResolvedGitRoute::new(
-                tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
-                    &project_root,
-                )
-                .unwrap_or_else(|error| panic!("test repository identity: {error}")),
-                tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
-                    &project_root,
-                )
-                .unwrap_or_else(|error| panic!("test worktree identity: {error}")),
-                BranchId::new(
-                    tracedecay_runtime_core::branch::current_branch(&project_root)
-                        .unwrap_or_else(|| "detached".to_owned()),
-                )
-                .unwrap_or_else(|error| panic!("test branch identity: {error}")),
-            ),
-        );
-        Self {
-            store_scope: SessionRetrievalStoreScope::Project,
-            identity,
-            project_id,
-            authorized_root: Some(project_key_value),
-            expected_runtime_shard: None,
-        }
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
     pub fn project_identity_for_test(
+        profile_id: ProfileId,
+        store_id: SessionStoreId,
+        root_id: SessionRootId,
+        expected_runtime_shard: StoreShardIdV1,
         project_id: ProjectId,
         repository_id: RepositoryId,
         worktree_id: WorktreeId,
+        branch_id: BranchId,
         authorized_root: String,
     ) -> Self {
         let identity = ResolvedSessionIdentity::for_project(
-            ProfileId::new(MESSAGE_SEARCH_PROFILE_ID)
-                .unwrap_or_else(|error| panic!("test profile identity: {error}")),
+            profile_id,
             project_id.clone(),
-            SessionStoreId::new("store.project.test")
-                .unwrap_or_else(|error| panic!("test store identity: {error}")),
-            SessionRootId::new("root.project.test")
-                .unwrap_or_else(|error| panic!("test root identity: {error}")),
-            ResolvedGitRoute::new(
-                repository_id,
-                worktree_id,
-                BranchId::new("branch.project.test")
-                    .unwrap_or_else(|error| panic!("test branch identity: {error}")),
-            ),
+            store_id,
+            root_id,
+            ResolvedGitRoute::new(repository_id, worktree_id, branch_id),
         );
         Self {
             store_scope: SessionRetrievalStoreScope::Project,
             identity,
             project_id: Some(project_id.as_str().to_owned()),
             authorized_root: Some(authorized_root),
-            expected_runtime_shard: None,
+            expected_runtime_shard: Some(expected_runtime_shard),
         }
     }
 
-    pub fn profile() -> Option<Self> {
+    pub fn profile(serving: SessionRetrievalServingIdentityV1) -> Option<Self> {
+        if serving.project_id.is_some()
+            || serving.profile_id.as_str() != serving.expected_runtime_shard.profile_id.as_str()
+            || !matches!(
+                serving.expected_runtime_shard.scope,
+                StoreShardScopeV1::ProfileSessions
+            )
+        {
+            return None;
+        }
+        let suffix = serving.profile_id.as_str().strip_prefix("profile.")?;
+        if suffix.is_empty()
+            || serving.store_id.as_str() != format!("store.profile.{suffix}")
+            || serving.root_id.as_str() != format!("root.profile.{suffix}")
+        {
+            return None;
+        }
         Some(Self {
             store_scope: SessionRetrievalStoreScope::Profile,
             identity: ResolvedSessionIdentity::for_profile(
-                ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).ok()?,
-                SessionStoreId::new("store.profile.primary").ok()?,
-                SessionRootId::new("root.profile.primary").ok()?,
+                serving.profile_id,
+                serving.store_id,
+                serving.root_id,
             ),
             project_id: None,
             authorized_root: None,
-            expected_runtime_shard: None,
+            expected_runtime_shard: Some(serving.expected_runtime_shard),
         })
     }
+}
 
-    pub fn with_project_runtime_shard(
-        self,
-        profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
-    ) -> Option<Self> {
-        self.with_project_runtime_identity(
-            profile_identity.brain_id().clone(),
-            profile_identity.profile_id().clone(),
-        )
+async fn project_store_and_root(
+    registry: &RegisteredGlobalDb,
+    project_id: &ProjectId,
+    serving_db: &Path,
+) -> Option<(SessionStoreId, SessionRootId)> {
+    let context = registry
+        .project_registry_context_by_id(project_id.as_str())
+        .await
+        .ok()??;
+    let profile_root = registry.db_path().parent()?;
+    let mut selected = None;
+    for store in &context.stores {
+        for scope in &store.graph_scopes {
+            if scope.writable
+                && scope.project_id == context.project.project_id
+                && scope.store_id == store.store.store_id
+                && profile_root.join(&scope.db_relpath) == serving_db
+            {
+                if selected.is_some() {
+                    return None;
+                }
+                selected = Some((
+                    SessionStoreId::new(store.store.store_id.clone()).ok()?,
+                    SessionRootId::new(scope.graph_scope_id.clone()).ok()?,
+                ));
+            }
+        }
     }
-
-    fn with_project_runtime_identity(
-        mut self,
-        brain_id: tracedecay_domain::BrainId,
-        profile_id: tracedecay_domain::UserProfileId,
-    ) -> Option<Self> {
-        let runtime_project_id = ProjectId::new(self.project_id.as_deref()?).ok()?;
-        let request_project_id = self.identity.project_id()?.clone();
-        let store_id = self.identity.store_id().clone();
-        let root_id = self.identity.root_id().clone();
-        let git_route = self.identity.git_route()?.clone();
-        self.identity = ResolvedSessionIdentity::for_project(
-            ProfileId::new(profile_id.as_str().to_owned()).ok()?,
-            request_project_id,
-            store_id,
-            root_id,
-            git_route,
-        );
-        self.expected_runtime_shard = Some(StoreShardIdV1::project_sessions(
-            brain_id,
-            profile_id,
-            runtime_project_id,
-        ));
-        Some(self)
-    }
-
-    pub fn with_profile_runtime_shard(
-        self,
-        profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
-    ) -> Option<Self> {
-        self.with_profile_runtime_identity(
-            profile_identity.brain_id().clone(),
-            profile_identity.profile_id().clone(),
-        )
-    }
-
-    fn with_profile_runtime_identity(
-        mut self,
-        brain_id: tracedecay_domain::BrainId,
-        profile_id: tracedecay_domain::UserProfileId,
-    ) -> Option<Self> {
-        let store_id = self.identity.store_id().clone();
-        let root_id = self.identity.root_id().clone();
-        self.identity = ResolvedSessionIdentity::for_profile(
-            ProfileId::new(profile_id.as_str().to_owned()).ok()?,
-            store_id,
-            root_id,
-        );
-        self.expected_runtime_shard = Some(StoreShardIdV1::profile_sessions(brain_id, profile_id));
-        Some(self)
-    }
+    selected
 }
 
 #[derive(Clone, Copy)]
@@ -442,9 +497,12 @@ impl DaemonSessionRetrievalService {
 
     pub fn new_with_serving_port(
         database: RegisteredGlobalDbLeaseV1,
-        root: DaemonSessionRetrievalRoot,
+        mut root: DaemonSessionRetrievalRoot,
         refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
     ) -> Option<Self> {
+        if !root.bind_runtime_shard(&database.binding().shard_id) {
+            return None;
+        }
         Some(Self {
             database,
             root,
@@ -460,11 +518,10 @@ impl DaemonSessionRetrievalService {
     pub fn new_registered_with_serving_port(
         database: RegisteredGlobalDbLeaseV1,
         registered_database: RegisteredGlobalDbLeaseV1,
-        root: DaemonSessionRetrievalRoot,
+        mut root: DaemonSessionRetrievalRoot,
         refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
     ) -> Option<Self> {
-        let expected = root.expected_runtime_shard.as_ref()?;
-        if &registered_database.binding().shard_id != expected {
+        if !root.bind_runtime_shard(&registered_database.binding().shard_id) {
             return None;
         }
         if database.binding() != registered_database.binding() {

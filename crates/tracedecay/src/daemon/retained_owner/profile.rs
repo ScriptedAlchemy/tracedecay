@@ -362,6 +362,9 @@ mod tests {
     use tracedecay_session_memory::context::{
         ProfileId, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     };
+    use tracedecay_session_runtime::session_retrieval::{
+        DaemonSessionRetrievalRoot, SessionRetrievalServingIdentityV1,
+    };
 
     use super::*;
 
@@ -371,6 +374,25 @@ mod tests {
             SessionStoreId::new(format!("store.{profile}")).expect("store id"),
             SessionRootId::new(format!("root.{profile}")).expect("root id"),
         )
+    }
+
+    fn profile_retrieval_root(
+        profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
+    ) -> DaemonSessionRetrievalRoot {
+        let shard = tracedecay_store::StoreShardIdV1::profile_sessions(
+            profile_identity.brain_id().clone(),
+            profile_identity.profile_id().clone(),
+        );
+        let serving_db =
+            tracedecay_sessions::runtime::user_sessions_db_path(profile_identity.profile_root());
+        let serving = SessionRetrievalServingIdentityV1::resolve_profile(
+            profile_identity.profile_id(),
+            &shard,
+            &serving_db,
+            profile_identity.profile_root(),
+        )
+        .expect("profile serving identity");
+        DaemonSessionRetrievalRoot::profile(serving).expect("profile retrieval root")
     }
 
     fn digest(byte: char) -> ManifestDigest {
@@ -677,9 +699,7 @@ mod tests {
             "retained scope beacon from project decoy",
         )
         .await;
-        let session_root = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::profile()
-            .and_then(|root| root.with_profile_runtime_shard(&profile_identity))
-            .expect("profile session retrieval root");
+        let session_root = profile_retrieval_root(&profile_identity);
         let session_identity = session_root.identity().clone();
         let connection =
             profile_retained_connection_authority(&profile_identity, &session_identity)
@@ -751,9 +771,7 @@ mod tests {
             )
             .await
             .expect("profile session runtime registry");
-        let session_root = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::profile()
-            .and_then(|root| root.with_profile_runtime_shard(&profile_identity))
-            .expect("profile session retrieval root");
+        let session_root = profile_retrieval_root(&profile_identity);
         let session_identity = session_root.identity().clone();
         let connection =
             profile_retained_connection_authority(&profile_identity, &session_identity)
@@ -811,9 +829,7 @@ mod tests {
             )
             .await
             .expect("profile session runtime registry");
-        let session_root = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::profile()
-            .and_then(|root| root.with_profile_runtime_shard(&profile_identity))
-            .expect("profile session retrieval root");
+        let session_root = profile_retrieval_root(&profile_identity);
         let session_identity = session_root.identity().clone();
         let connection =
             profile_retained_connection_authority(&profile_identity, &session_identity)

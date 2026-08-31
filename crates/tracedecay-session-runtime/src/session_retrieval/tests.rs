@@ -322,7 +322,7 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
     }
     let service = DaemonSessionRetrievalService::new(
         harness.registered.clone(),
-        DaemonSessionRetrievalRoot::profile().expect("profile retrieval root"),
+        registered_profile_retrieval_root(&harness.registered),
         None,
     )
     .expect("registered retrieval service");
@@ -478,7 +478,7 @@ async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
     let fixture = seed_real_page_fixture(harness.registered.as_ref(), &root, 0).await;
     let service = DaemonSessionRetrievalService::new(
         harness.registered.clone(),
-        DaemonSessionRetrievalRoot::profile().expect("profile retrieval root"),
+        registered_profile_retrieval_root(&harness.registered),
         None,
     )
     .expect("registered retrieval service");
@@ -622,60 +622,149 @@ where
 }
 
 #[test]
-fn registered_profile_binding_replaces_the_legacy_request_profile_identity() {
+fn profile_serving_identity_rejects_mismatched_profile_and_runtime_shard() {
+    assert!(
+        profile_retrieval_root(
+            "profile.durable-session-retrieval",
+            "profile.foreign",
+            "store.profile.durable-session-retrieval",
+            "root.profile.durable-session-retrieval",
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn profile_serving_identity_rejects_mismatched_store() {
+    assert!(
+        profile_retrieval_root(
+            "profile.durable-session-retrieval",
+            "profile.durable-session-retrieval",
+            "store.profile.foreign",
+            "root.profile.durable-session-retrieval",
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn profile_serving_identity_rejects_mismatched_root() {
+    assert!(
+        profile_retrieval_root(
+            "profile.durable-session-retrieval",
+            "profile.durable-session-retrieval",
+            "store.profile.durable-session-retrieval",
+            "root.profile.foreign",
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn profile_serving_identity_accepts_exact_profile_store_root_and_shard() {
     let brain_id = typed::<tracedecay_domain::BrainId>("brain.session-retrieval");
     let profile_id = typed::<tracedecay_domain::UserProfileId>("profile.durable-session-retrieval");
-    let root = DaemonSessionRetrievalRoot::profile().expect("profile root");
-    assert_eq!(
-        root.identity.profile_id().as_str(),
-        MESSAGE_SEARCH_PROFILE_ID
-    );
-
-    let root = root
-        .with_profile_runtime_identity(brain_id.clone(), profile_id.clone())
-        .expect("durable profile binding");
+    let root = profile_retrieval_root(
+        profile_id.as_str(),
+        profile_id.as_str(),
+        "store.profile.durable-session-retrieval",
+        "root.profile.durable-session-retrieval",
+    )
+    .expect("exact profile retrieval identity");
 
     assert_eq!(root.identity.profile_id().as_str(), profile_id.as_str());
+    assert_eq!(
+        root.identity.store_id().as_str(),
+        "store.profile.durable-session-retrieval"
+    );
+    assert_eq!(
+        root.identity.root_id().as_str(),
+        "root.profile.durable-session-retrieval"
+    );
     assert_eq!(
         root.expected_runtime_shard,
         Some(StoreShardIdV1::profile_sessions(brain_id, profile_id))
     );
 }
 
-#[test]
-fn registered_project_binding_uses_one_durable_profile_and_typed_project() {
-    let brain_id = typed::<tracedecay_domain::BrainId>("brain.session-retrieval");
-    let profile_id = typed::<tracedecay_domain::UserProfileId>("profile.durable-session-retrieval");
-    let project_id = ProjectId::new("project.session-retrieval").expect("project identity");
-    let identity = ResolvedSessionIdentity::for_project(
-        ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).expect("legacy profile"),
-        project_id.clone(),
-        SessionStoreId::new("store.project.test").expect("store identity"),
-        SessionRootId::new("root.project.test").expect("root identity"),
-        ResolvedGitRoute::new(
-            RepositoryId::new("repository.project.test").expect("repository identity"),
-            WorktreeId::new("/project/test").expect("worktree identity"),
-            BranchId::new("branch.project.test").expect("branch identity"),
-        ),
-    );
-    let root = DaemonSessionRetrievalRoot {
-        store_scope: SessionRetrievalStoreScope::Project,
-        identity,
-        project_id: Some(project_id.as_str().to_owned()),
-        authorized_root: None,
-        expected_runtime_shard: None,
-    }
-    .with_project_runtime_identity(brain_id.clone(), profile_id.clone())
-    .expect("durable project binding");
+#[tokio::test]
+async fn service_rejects_foreign_shard_before_read_admission() {
+    let harness =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("foreign-shard")
+            .await;
+    let before = harness
+        .registered
+        .read_connection()
+        .reader_pool_occupancy()
+        .expect("registered reader pool")
+        .snapshot_admissions;
+    let root = profile_retrieval_root(
+        "profile.foreign",
+        "profile.foreign",
+        "store.profile.foreign",
+        "root.profile.foreign",
+    )
+    .expect("foreign profile retrieval root");
 
-    assert_eq!(root.identity.profile_id().as_str(), profile_id.as_str());
-    assert_eq!(root.identity.project_id(), Some(&project_id));
+    assert!(DaemonSessionRetrievalService::new(harness.registered.clone(), root, None).is_none());
     assert_eq!(
-        root.expected_runtime_shard,
-        Some(StoreShardIdV1::project_sessions(
-            brain_id, profile_id, project_id,
-        ))
+        harness
+            .registered
+            .read_connection()
+            .reader_pool_occupancy()
+            .expect("registered reader pool")
+            .snapshot_admissions,
+        before,
+        "identity mismatch must fail before retrieval admits a read snapshot"
     );
+}
+
+#[tokio::test]
+async fn service_accepts_exact_registered_identity() {
+    let harness =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("exact-shard").await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+
+    assert!(DaemonSessionRetrievalService::new(harness.registered.clone(), root, None).is_some());
+}
+
+fn profile_retrieval_root(
+    profile_id: &str,
+    shard_profile_id: &str,
+    store_id: &str,
+    root_id: &str,
+) -> Option<DaemonSessionRetrievalRoot> {
+    let profile_id = typed::<tracedecay_domain::UserProfileId>(profile_id);
+    let shard_profile_id = typed::<tracedecay_domain::UserProfileId>(shard_profile_id);
+    let store_id = SessionStoreId::new(store_id).expect("store identity");
+    let root_id = SessionRootId::new(root_id).expect("root identity");
+    let runtime_shard = StoreShardIdV1::profile_sessions(
+        typed::<tracedecay_domain::BrainId>("brain.session-retrieval"),
+        shard_profile_id,
+    );
+    DaemonSessionRetrievalRoot::profile(SessionRetrievalServingIdentityV1 {
+        project_id: None,
+        profile_id: ProfileId::new(profile_id.as_str().to_owned()).expect("profile identity"),
+        store_id,
+        root_id,
+        expected_runtime_shard: runtime_shard,
+        serving_db: Path::new("/profile/session.db").to_path_buf(),
+        project_root: Path::new("/profile").to_path_buf(),
+    })
+}
+
+fn registered_profile_retrieval_root(
+    database: &RegisteredGlobalDbLeaseV1,
+) -> DaemonSessionRetrievalRoot {
+    let profile_root = database.db_path().parent().expect("profile root");
+    let serving = SessionRetrievalServingIdentityV1::resolve_profile(
+        &database.binding().shard_id.profile_id,
+        &database.binding().shard_id,
+        database.db_path(),
+        profile_root,
+    )
+    .expect("registered profile serving identity");
+    DaemonSessionRetrievalRoot::profile(serving).expect("registered profile retrieval identity")
 }
 
 #[test]
@@ -824,7 +913,7 @@ async fn cursor_stale_session_retrieval_remains_typed_at_daemon_boundary() {
         tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("cursor-stale").await;
     let service = DaemonSessionRetrievalService::new(
         harness.registered.clone(),
-        DaemonSessionRetrievalRoot::profile().expect("profile retrieval root"),
+        registered_profile_retrieval_root(&harness.registered),
         None,
     )
     .expect("registered retrieval service");

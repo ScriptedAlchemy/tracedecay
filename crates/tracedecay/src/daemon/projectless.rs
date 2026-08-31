@@ -4,11 +4,16 @@
 use serde_json::json;
 
 use tracedecay_daemon_protocol::DaemonClientIdentity;
+use tracedecay_domain::errors::Result;
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, tool_error_response,
     tool_result_has_semantic_error,
 };
-use tracedecay_domain::errors::Result;
+use tracedecay_session_runtime::session_retrieval::{
+    DaemonSessionRetrievalRoot, SessionRetrievalServingIdentityV1,
+};
+use tracedecay_sessions::runtime::user_sessions_db_path;
+use tracedecay_store::StoreShardIdV1;
 
 use super::*;
 
@@ -43,12 +48,24 @@ fn admit_projectless_connection(
                 .to_owned(),
         });
     }
+    let shard = StoreShardIdV1::profile_sessions(
+        profile_identity.brain_id().clone(),
+        profile_identity.profile_id().clone(),
+    );
+    let serving_db = user_sessions_db_path(profile_identity.profile_root());
+    let serving = SessionRetrievalServingIdentityV1::resolve_profile(
+        profile_identity.profile_id(),
+        &shard,
+        &serving_db,
+        profile_identity.profile_root(),
+    )
+    .ok_or_else(|| TraceDecayError::Config {
+        message: "projectless profile session identity is unavailable".to_owned(),
+    })?;
     let profile_session_root =
-        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::profile()
-            .and_then(|root| root.with_profile_runtime_shard(profile_identity))
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "projectless profile session authority is unavailable".to_owned(),
-            })?;
+        DaemonSessionRetrievalRoot::profile(serving).ok_or_else(|| TraceDecayError::Config {
+            message: "projectless profile session authority is unavailable".to_owned(),
+        })?;
     let profile_authority = crate::daemon::retained_owner::profile_retained_connection_authority(
         profile_identity,
         profile_session_root.identity(),

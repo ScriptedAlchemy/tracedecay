@@ -24,7 +24,7 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     SessionRefreshReceiptRequestV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
 };
-use tracedecay_session_memory::context::{SessionRootId, SessionStoreId};
+use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
 
 use super::{DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1};
 use crate::daemon::StoreOwnerKey;
@@ -81,9 +81,15 @@ impl RetiredRefreshFixture {
         registry.retire_project(&owner).await;
 
         let retrieval_root = DaemonSessionRetrievalRoot::project_identity_for_test(
+            ProfileId::new(database.binding().shard_id.profile_id.as_str().to_owned())
+                .expect("profile id"),
+            SessionStoreId::new(format!("store.refresh-{label}")).expect("session store id"),
+            SessionRootId::new(format!("root.refresh-{label}")).expect("session root id"),
+            database.binding().shard_id.clone(),
             project_id.clone(),
             repository_id.clone(),
             worktree_id.clone(),
+            BranchId::new(format!("branch.refresh-{label}")).expect("branch id"),
             project_root.display().to_string(),
         );
         let identity = retrieval_root.identity().clone();
