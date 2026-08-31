@@ -280,12 +280,7 @@ async fn service_with_canonical_application(
     )
     .expect("canonical application handshake");
     let client = tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_identity::DaemonConnection {
-            endpoint: broker_endpoint,
-            auth_token: None,
-            authority_record: None,
-        }
-        .into_protocol(),
+        tracedecay_daemon_protocol::DaemonConnection::new(broker_endpoint, None),
         handshake,
     );
     let canonical =
