@@ -638,8 +638,8 @@ fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
     // checksum (see verified_generation_contract/verify_once.rs).
     let mut bytes = std::fs::read(&crashed_container).unwrap();
     assert!(bytes.len() > 512);
-    for offset in 0..64 {
-        bytes[offset] ^= 0xFF;
+    for byte in bytes.iter_mut().take(64) {
+        *byte ^= 0xFF;
     }
     let corrupted = bytes.clone();
     std::fs::write(&crashed_container, &bytes).unwrap();
