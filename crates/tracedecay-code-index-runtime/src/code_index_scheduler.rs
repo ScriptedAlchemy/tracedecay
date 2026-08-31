@@ -5733,6 +5733,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.reconcile_now()
     }
 
+    #[hotpath::measure(label = "daemon.code_index.reconcile.pass")]
     pub fn reconcile_now(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
