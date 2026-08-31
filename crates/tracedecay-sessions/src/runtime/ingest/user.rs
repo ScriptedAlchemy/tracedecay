@@ -17,7 +17,7 @@ use super::failure::{
 };
 use super::scheduler::{
     USER_CATCH_UP_PROVIDERS, USER_INGEST_PROVIDER_FRONTIER_KEY, default_ingest_pass_bounds,
-    finish_user_provider_coverage, plan_user_provider_admission, read_ingest_frontier,
+    finish_user_provider_coverage, plan_provider_rotation_admission, read_ingest_frontier,
     write_ingest_frontier,
 };
 use super::startup::TranscriptIngestOutcome;
@@ -570,7 +570,7 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
     else {
         return IngestPassOutcome::failed(TranscriptCatchUpFailure::pass_frontier_unavailable());
     };
-    let plan = plan_user_provider_admission(selected.len(), frontier, bounds);
+    let plan = plan_provider_rotation_admission(selected.len(), frontier, bounds);
     let mut coverage = plan.coverage;
 
     let mut provider_runs = ProviderRunFold::default();

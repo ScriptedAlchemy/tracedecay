@@ -271,6 +271,12 @@ pub(super) struct DatabaseInner {
     /// resolve it at use time without retaining this inner allocation.
     pub(super) memory_graph_runtime:
         Arc<OnceLock<Weak<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>>>,
+    /// Watermark of the projected memory-graph source, keyed by the exact
+    /// append-only lineage stamp it was computed under. See
+    /// [`super::graph_binding`] for the invariant that makes the stamp a
+    /// change token for the projected source.
+    pub(super) memory_graph_source_watermark:
+        std::sync::Mutex<Option<super::graph_binding::MemoryGraphSourceStampedWatermarkV1>>,
 }
 
 impl DatabaseInner {
@@ -348,6 +354,7 @@ impl DatabaseInner {
             ),
             _authority: authority,
             memory_graph_runtime: Arc::new(OnceLock::new()),
+            memory_graph_source_watermark: std::sync::Mutex::new(None),
         })
     }
 
