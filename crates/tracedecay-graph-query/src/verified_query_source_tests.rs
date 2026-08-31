@@ -24,10 +24,10 @@ use super::{
     CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
     VerifiedGraphQuery, VerifiedGraphQueryRequest, open_verified_graph_query,
 };
-use tracedecay_session_memory::context::read_cache::{self, GLOBAL_SESSION};
+use crate::SourceReadRuntimePort;
 use crate::context::read_modes::ReadMode;
 use crate::context::source_read::SourceReadRequest;
-use crate::SourceReadRuntimePort;
+use tracedecay_session_memory::context::read_cache::{self, GLOBAL_SESSION};
 
 /// Identity-only runtime: bind-time denial must refuse it before consulting
 /// any other surface, so touching the database is a test failure.
@@ -122,7 +122,10 @@ struct FixtureSourceBind {
 }
 
 impl CodeGraphSourceAuthorityPort for FixtureSourceBind {
-    fn bind<'a>(&'a self, _request: CodeGraphSourceBindRequest<'a>) -> CodeGraphSourceBindFuture<'a> {
+    fn bind<'a>(
+        &'a self,
+        _request: CodeGraphSourceBindRequest<'a>,
+    ) -> CodeGraphSourceBindFuture<'a> {
         let runtime = Arc::clone(&self.runtime);
         Box::pin(async move { Ok(runtime) })
     }
@@ -154,7 +157,9 @@ fn fixture_context(project_id: &str, cancellation: &CancellationSignal) -> Reque
         UtcMicros(1),
         UtcMicros(i64::MAX),
         scope.clone(),
-        BTreeSet::from([CapabilityId::new("capability.verified-query-source").expect("capability")]),
+        BTreeSet::from(
+            [CapabilityId::new("capability.verified-query-source").expect("capability")],
+        ),
         BTreeSet::from([UseCaseId::new("use-case.verified-query-source").expect("use case")]),
         DisclosureClass::Evidence,
     )
@@ -174,7 +179,8 @@ fn fixture_query(project_id: &str) -> VerifiedGraphQuery {
     let cancellation =
         CancellationSignal::active("cancel.verified-query-source").expect("cancellation");
     let projection = HermeticCodeGraphProjectionStore::memory(&cancellation).expect("projection");
-    let generation = CodeGenerationId::new("generation.verified-query-source.1").expect("generation");
+    let generation =
+        CodeGenerationId::new("generation.verified-query-source.1").expect("generation");
     projection
         .publish_with_cancellation(&generation, &[], &[], Arc::new(NeverCancelled))
         .expect("publish");
@@ -227,14 +233,13 @@ async fn resolve_rejects_absolute_path_under_another_project_root() {
     std::fs::create_dir_all(project_b.join("src")).expect("project b");
     std::fs::write(project_b.join("src/secret.rs"), "fn secret() {}\n").expect("foreign file");
     let db = test_database(&project_a.join("bound.db")).await;
-    let query = fixture_query("project.verified-query-source.a").with_source(Arc::new(
-        CountingSource {
+    let query =
+        fixture_query("project.verified-query-source.a").with_source(Arc::new(CountingSource {
             project_root: project_a,
             project_id: "project.verified-query-source.a".to_owned(),
             db,
             db_hits: Arc::new(AtomicUsize::new(0)),
-        },
-    ));
+        }));
     let error = query
         .resolve_indexed_source_file(project_b.join("src/secret.rs").to_str().expect("utf8"))
         .expect_err("foreign root must be denied");
@@ -253,14 +258,13 @@ async fn read_source_rejects_request_project_id_outside_bound_source() {
     let project_a = home.path().join("project-a");
     std::fs::create_dir_all(&project_a).expect("project a");
     let db = test_database(&project_a.join("bound.db")).await;
-    let query = fixture_query("project.verified-query-source.a").with_source(Arc::new(
-        CountingSource {
+    let query =
+        fixture_query("project.verified-query-source.a").with_source(Arc::new(CountingSource {
             project_root: project_a,
             project_id: "project.verified-query-source.a".to_owned(),
             db,
             db_hits: Arc::new(AtomicUsize::new(0)),
-        },
-    ));
+        }));
     let error = match query
         .read_source(full_read_request("project.verified-query-source.b"))
         .await

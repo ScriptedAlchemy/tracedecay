@@ -20,8 +20,8 @@ use tracedecay_application::{
     CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
 };
 use tracedecay_domain::{FactOwnerV1, ObservationScopeV1, ProjectId};
-use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 
 use crate::daemon::retained_owner::{MemoryTargetAccessV1, open_project_retained_memory_target};
 use crate::tracedecay::TraceDecay;

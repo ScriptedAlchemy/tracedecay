@@ -1,13 +1,11 @@
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_lcm::types::{
-    LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition,
-};
+use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition};
 use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmGrepRequest, LcmGrepSort, LcmScope,
     LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::common::{lcm_dag_message as raw_message, lcm_dag_session as sample_session};
 
@@ -63,8 +61,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn lcm_publish_immutable_summary(
         &self,
         publication: LcmImmutableSummaryPublication,
-    ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError>
-    {
+    ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError> {
         self.lcm_publish_immutable_summary_for_test(HostAdmissionScope::Profile, publication)
             .await
     }

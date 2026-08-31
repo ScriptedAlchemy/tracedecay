@@ -48,14 +48,42 @@ impl fmt::Display for GraphBudgetKind {
     }
 }
 
+/// Structured identity of one graph-conflict verdict: the guard site that
+/// refused, and the evidence it compared when the site has any. Rendered into
+/// the error display so every operator log line names the failing check
+/// instead of an undiagnosable bare "graph database conflict" (issue #765).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphConflictContextV1 {
+    /// Static, greppable name of the refusing guard site.
+    pub site: &'static str,
+    /// The state the guard required (head/sequence/digest rendering).
+    pub expected: Option<String>,
+    /// The state the guard observed.
+    pub actual: Option<String>,
+}
+
+impl fmt::Display for GraphConflictContextV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "at `{}`", self.site)?;
+        match (&self.expected, &self.actual) {
+            (Some(expected), Some(actual)) => {
+                write!(formatter, " (expected {expected}, actual {actual})")
+            }
+            (Some(expected), None) => write!(formatter, " (expected {expected})"),
+            (None, Some(actual)) => write!(formatter, " (actual {actual})"),
+            (None, None) => Ok(()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum GraphDbError {
     #[error("operation cancelled")]
     Cancelled,
     #[error("invalid graph database request: {message}")]
     InvalidRequest { message: String },
-    #[error("graph database conflict")]
-    Conflict,
+    #[error("graph database conflict {context}")]
+    Conflict { context: GraphConflictContextV1 },
     #[error("graph {kind} budget exhausted (limit {limit})")]
     BudgetExhausted { kind: GraphBudgetKind, limit: u64 },
     #[error("graph operation deadline exceeded")]
@@ -100,6 +128,36 @@ impl GraphDbError {
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::InvalidRequest {
             message: message.into(),
+        }
+    }
+
+    /// A conflict verdict from `site` with no compared evidence.
+    #[must_use]
+    #[hotpath::skip]
+    pub const fn conflict(site: &'static str) -> Self {
+        Self::Conflict {
+            context: GraphConflictContextV1 {
+                site,
+                expected: None,
+                actual: None,
+            },
+        }
+    }
+
+    /// A conflict verdict from `site` carrying the compared evidence: what
+    /// the guard required and what it observed.
+    #[must_use]
+    pub fn conflict_observed(
+        site: &'static str,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::Conflict {
+            context: GraphConflictContextV1 {
+                site,
+                expected: Some(expected.into()),
+                actual: Some(actual.into()),
+            },
         }
     }
 
@@ -169,6 +227,30 @@ mod tests {
         );
         assert_eq!(GraphBudgetKind::from_name(""), None);
         assert_eq!(GraphBudgetKind::from_name("unnamed"), None);
+    }
+
+    #[test]
+    fn conflict_renders_site_and_compared_evidence() {
+        assert_eq!(
+            GraphDbError::conflict("publication.expected_prior_head").to_string(),
+            "graph database conflict at `publication.expected_prior_head`"
+        );
+        let observed = GraphDbError::conflict_observed(
+            "publication.expected_prior_head",
+            "head seq 3",
+            "head seq 5",
+        );
+        assert_eq!(
+            observed.to_string(),
+            "graph database conflict at `publication.expected_prior_head` \
+             (expected head seq 3, actual head seq 5)"
+        );
+        let GraphDbError::Conflict { context } = observed else {
+            panic!("conflict constructor must produce the conflict variant");
+        };
+        assert_eq!(context.site, "publication.expected_prior_head");
+        assert_eq!(context.expected.as_deref(), Some("head seq 3"));
+        assert_eq!(context.actual.as_deref(), Some("head seq 5"));
     }
 
     #[test]

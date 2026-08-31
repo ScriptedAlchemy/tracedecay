@@ -323,12 +323,13 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .identity()
         .session_request_scope()
         .expect("Work scope");
-    let retrieval = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
-        database.clone(),
-        retrieval_root,
-        None,
-    )
-    .expect("mounted session retrieval");
+    let retrieval =
+        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
+            database.clone(),
+            retrieval_root,
+            None,
+        )
+        .expect("mounted session retrieval");
     let evidence_retrieval =
         crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::new(
             retrieval,

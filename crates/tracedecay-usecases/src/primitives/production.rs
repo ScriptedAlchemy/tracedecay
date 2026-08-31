@@ -60,15 +60,9 @@ use crate::diagnostics_query::{
     DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
 };
 use crate::graph_health_delta::compute_verified_health_delta;
-use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
-use tracedecay_graph_query::{
-    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
-    request_graph_cancellation,
-};
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use crate::operation_stream::OperationEventAuthority;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
-use tracedecay_graph_query::SourceReadRuntime;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
@@ -83,6 +77,12 @@ use tracedecay_code_index::test_attribution::{
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_graph_query::SourceReadRuntime;
+use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
+use tracedecay_graph_query::{
+    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
+    request_graph_cancellation,
+};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_session_temporal_store::GlobalDbCursorKeyProvider;
 use tracedecay_temporal_query::cursor::{
@@ -2969,12 +2969,11 @@ mod storage_table_detail_tests {
 
     #[test]
     fn an_unsampled_store_says_so_instead_of_reporting_no_bytes() {
-        let details = largest_table_details(Err(
-            tracedecay_domain::errors::TraceDecayError::Database {
+        let details =
+            largest_table_details(Err(tracedecay_domain::errors::TraceDecayError::Database {
                 message: "reader lease timed out".to_owned(),
                 operation: "sample graph-store table sizes".to_owned(),
-            },
-        ));
+            }));
 
         assert_eq!(details.len(), 1);
         assert!(

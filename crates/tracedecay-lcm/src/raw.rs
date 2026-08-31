@@ -6,13 +6,13 @@ use tracedecay_domain::{ComponentVersion, SanitizationReceiptV1, SanitizerDispos
 pub use crate::retrieval_content::derived_text_for_index;
 pub use crate::retrieval_content::derived_text_for_snippet;
 use crate::retrieval_content::projected_content_hash;
-use tracedecay_store::SessionMessageRecord;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_runtime_core::privacy::{
     LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, PrivacyDetectorV1,
     bind_sanitized_lcm_payload_text, quarantine_lcm_payload_text, sanitize_lcm_payload_text,
     sanitize_provider_metadata_json, verify_sanitized_json_payload,
 };
+use tracedecay_store::SessionMessageRecord;
 
 use super::{
     LcmError, LcmPayloadRef, LcmRawMessage, LcmRawMessageMetadata, LcmStorageKind, payload,
