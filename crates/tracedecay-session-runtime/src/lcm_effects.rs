@@ -8,7 +8,8 @@ use tracedecay_lcm::{LcmCompressionRequest, LcmCompressionResponse, LcmError, Lc
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
 
-const LCM_EFFECT_CEILING: Duration = Duration::from_secs(30);
+pub(super) const LCM_EFFECT_CEILING: Duration =
+    tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE;
 const LCM_EFFECT_WORK_LIMIT: usize = 4_096;
 
 /// Daemon-owned execution boundary for retained LCM mutations.

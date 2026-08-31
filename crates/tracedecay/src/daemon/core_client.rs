@@ -19,8 +19,11 @@ use tracedecay_framing::{
 
 pub use tracedecay_daemon_protocol::{
     DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
-    DEFAULT_TOOL_REQUEST_DEADLINE, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
-    tool_request_deadline,
+    DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_TOOL_REQUEST_DEADLINE, MAX_TOOL_REQUEST_DEADLINE,
+    TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
+};
+pub(crate) use tracedecay_daemon_protocol::{
+    DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT, DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
 };
 
 #[cfg(unix)]
@@ -30,9 +33,6 @@ use super::{
     JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
     TraceDecayError, error_message_is_project_open_retryable,
 };
-
-pub(crate) const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
-pub(crate) const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Bounded grace a client keeps reading for *after* the caller's request
 /// deadline has elapsed.
@@ -47,7 +47,6 @@ pub(crate) const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_s
 /// outcome was already on the wire. The read bound must therefore outlive the
 /// request deadline; this is by how much. It bounds only a dead or wedged
 /// daemon, never the request.
-pub const DAEMON_TOOL_RESPONSE_GRACE: Duration = Duration::from_secs(30);
 
 /// The local read bound for a request whose caller deadline is `request_deadline`.
 pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> {

@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
@@ -13,16 +14,56 @@ use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
 /// project resolution and every daemon RPC. Override with
 /// `TRACEDECAY_STATUS_DEADLINE_MS` (milliseconds) for tests. Values above 24h
 /// fail closed so the budget cannot exceed the supported monotonic range.
-const DEFAULT_STATUS_COMMAND_DEADLINE: Duration = Duration::from_secs(30);
-const MAX_STATUS_COMMAND_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
+///
+/// The command stays alive after the carried server deadline so the daemon's
+/// typed operation receipt wins the race against the CLI backstop.
+const STATUS_RESPONSE_MARGIN: Duration = Duration::from_secs(15);
+const MAX_STATUS_COMMAND_DEADLINE: Duration = Duration::from_hours(24);
 const STATUS_DEADLINE_ENV: &str = "TRACEDECAY_STATUS_DEADLINE_MS";
 
+fn default_status_command_deadline() -> Duration {
+    tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE
+        .saturating_add(STATUS_RESPONSE_MARGIN)
+}
+
+fn status_command_deadline_from(
+    raw: Option<&str>,
+) -> tracedecay_domain::errors::Result<Duration> {
+    let deadline = raw
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or_else(default_status_command_deadline, Duration::from_millis);
+    if deadline > MAX_STATUS_COMMAND_DEADLINE {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("{STATUS_DEADLINE_ENV} exceeds the supported monotonic deadline range"),
+        });
+    }
+    Ok(deadline)
+}
+
 fn status_command_deadline() -> tracedecay_domain::errors::Result<Duration> {
-    commands::env_duration_ms(
-        STATUS_DEADLINE_ENV,
-        DEFAULT_STATUS_COMMAND_DEADLINE,
-        MAX_STATUS_COMMAND_DEADLINE,
-    )
+    let raw = std::env::var(STATUS_DEADLINE_ENV).ok();
+    status_command_deadline_from(raw.as_deref())
+}
+
+fn status_server_request_budget(command_budget: Duration) -> Duration {
+    command_budget
+        .saturating_sub(STATUS_RESPONSE_MARGIN)
+        .min(tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE)
+}
+
+async fn await_daemon_tool_result<T>(
+    response_deadline: Instant,
+    tool_name: &str,
+    response: impl Future<Output = tracedecay_domain::errors::Result<T>>,
+) -> tracedecay_domain::errors::Result<T> {
+    timeout_at(response_deadline, response).await.map_err(|_| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "timed out waiting for daemon tool {tool_name} before status deadline"
+            ),
+        }
+    })?
 }
 
 fn should_print_status_logo(short: bool, stdout_is_terminal: bool) -> bool {
@@ -47,22 +88,25 @@ fn compact_status_tool_args() -> Value {
 }
 
 async fn daemon_tool_json_within(
-    deadline: Instant,
+    response_deadline: Instant,
+    request_deadline: Instant,
     project_path: &Path,
     tool_name: &str,
     arguments: Value,
 ) -> tracedecay_domain::errors::Result<Value> {
-    // The deadline rides inside the call so a warming project open is waited
-    // out on the caller's budget; the outer timeout is only a backstop against
-    // stages that cannot observe it.
-    timeout_at(
-        deadline,
-        commands::daemon_tool_json_until(deadline, Some(project_path), tool_name, arguments),
+    // The shorter deadline rides inside the call so the daemon can settle a
+    // typed terminal. The command deadline is only the response backstop.
+    await_daemon_tool_result(
+        response_deadline,
+        tool_name,
+        commands::daemon_tool_json_until(
+            request_deadline,
+            Some(project_path),
+            tool_name,
+            arguments,
+        ),
     )
     .await
-    .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-        message: format!("timed out waiting for daemon tool {tool_name} before status deadline"),
-    })?
 }
 
 pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
@@ -120,11 +164,22 @@ pub(crate) async fn handle_status_command(
     runtime: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     let budget = status_command_deadline()?;
-    let deadline = Instant::now() + budget;
+    let started_at = Instant::now();
+    let deadline = started_at.checked_add(budget).ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "status deadline exceeds the supported monotonic range".to_owned(),
+        }
+    })?;
+    let server_deadline = started_at
+        .checked_add(status_server_request_budget(budget))
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "status server deadline exceeds the supported monotonic range".to_owned(),
+        })?;
     timeout_at(
         deadline,
         handle_status_command_within(
             deadline,
+            server_deadline,
             path,
             project_id,
             project_path,
@@ -147,6 +202,7 @@ pub(crate) async fn handle_status_command(
 #[allow(clippy::too_many_arguments)]
 async fn handle_status_command_within(
     deadline: Instant,
+    server_deadline: Instant,
     path: Option<String>,
     project_id: Option<String>,
     project_path: Option<String>,
@@ -158,6 +214,7 @@ async fn handle_status_command_within(
     if runtime {
         let result = daemon_tool_json_within(
             deadline,
+            server_deadline,
             &project_path,
             "tracedecay_runtime",
             serde_json::json!({ "format": "json" }),
@@ -177,6 +234,7 @@ async fn handle_status_command_within(
     }
     let daemon_status = daemon_tool_json_within(
         deadline,
+        server_deadline,
         &project_path,
         "tracedecay_status",
         compact_status_tool_args(),
@@ -207,6 +265,7 @@ async fn handle_status_command_within(
         .transpose()?;
     let accounting = daemon_tool_json_within(
         deadline,
+        server_deadline,
         &project_path,
         "tracedecay_admin_project",
         serde_json::json!({ "action": "status_accounting" }),
@@ -360,10 +419,72 @@ async fn handle_status_command_within(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_status_tool_args, reject_truncation_envelope,
+        await_daemon_tool_result, compact_status_tool_args, reject_truncation_envelope,
         should_fetch_online_status_embellishments, should_print_status_logo,
+        status_command_deadline_from, status_server_request_budget,
     };
     use serde_json::json;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn status_deadline_keeps_response_margin_beyond_server_budget() {
+        let default = status_command_deadline_from(None).expect("default status deadline");
+        assert_eq!(default, Duration::from_secs(45));
+        assert_eq!(
+            status_server_request_budget(default),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn status_deadline_boundaries_preserve_override_and_maximum() {
+        assert_eq!(
+            status_command_deadline_from(Some("0")).expect("zero falls back"),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            status_command_deadline_from(Some("14999")).expect("sub-margin override"),
+            Duration::from_millis(14_999)
+        );
+        assert_eq!(
+            status_server_request_budget(Duration::from_millis(14_999)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            status_command_deadline_from(Some("86400000")).expect("24h maximum"),
+            Duration::from_hours(24)
+        );
+        assert!(
+            status_command_deadline_from(Some("86400001")).is_err(),
+            "an override above 24h must fail closed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn typed_server_failure_beats_cli_response_timeout() {
+        let started_at = Instant::now();
+        let server_deadline = started_at + Duration::from_secs(30);
+        let response_deadline = started_at + Duration::from_secs(45);
+        let result = await_daemon_tool_result(response_deadline, "tracedecay_status", async move {
+            tokio::time::sleep_until(server_deadline).await;
+            Err::<(), _>(tracedecay_domain::errors::TraceDecayError::project_route(
+                "status_deadline_exceeded",
+                true,
+                "typed server deadline receipt",
+            ))
+        })
+        .await
+        .expect_err("server deadline must be reported");
+
+        assert_eq!(
+            result
+                .project_route_context()
+                .map(|(reason, retryable, _)| (reason, retryable)),
+            Some(("status_deadline_exceeded", true))
+        );
+        assert!(Instant::now() < response_deadline);
+    }
 
     #[test]
     fn status_logo_requires_interactive_stdout() {

@@ -22,6 +22,8 @@ pub const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const DAEMON_TOOL_RESPONSE_GRACE: Duration = Duration::from_secs(30);
 pub const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
 pub const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Canonical execution budget for daemon-owned retained operations.
+pub const DEFAULT_DAEMON_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Default caller request deadline for one-shot daemon tool clients.
 ///

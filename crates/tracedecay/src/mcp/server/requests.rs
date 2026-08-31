@@ -174,7 +174,10 @@ pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
 }
 
 pub(super) fn dispatch_deadline_horizon_micros(bounded_operation: bool) -> Option<i64> {
-    bounded_operation.then_some(30_000_000)
+    if !bounded_operation {
+        return None;
+    }
+    i64::try_from(tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE.as_micros()).ok()
 }
 
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.

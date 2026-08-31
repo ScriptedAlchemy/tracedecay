@@ -64,6 +64,9 @@ use tracedecay_query::retrieval::{
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
 const MAX_GENERATION_RESOLUTION_WAIT: Duration = Duration::from_secs(30);
+/// Leave enough of the carried dispatch budget for timeout projection and the
+/// typed response to cross the enclosing boundary.
+const GENERATION_RESOLUTION_SETTLEMENT_MARGIN: Duration = Duration::from_secs(1);
 
 type GenerationResolutionResultV1<T> =
     Result<Option<T>, code_search::CodeIndexSearchUnavailableReasonV1>;
@@ -598,6 +601,13 @@ fn query_finished_at() -> UtcMicros {
 }
 
 #[hotpath::measure]
+fn generation_resolution_wait_from_remaining(remaining: Duration) -> Duration {
+    remaining
+        .saturating_sub(GENERATION_RESOLUTION_SETTLEMENT_MARGIN)
+        .min(MAX_GENERATION_RESOLUTION_WAIT)
+}
+
+#[hotpath::measure]
 fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Duration> {
     let now = current_utc_micros().ok()?;
     if request.admission_at(now) != RequestAdmission::Admitted {
@@ -605,7 +615,7 @@ fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Dura
     }
     let remaining = request.deadline().expires_at.0.checked_sub(now.0)?;
     let remaining = u64::try_from(remaining).ok().map(Duration::from_micros)?;
-    Some(remaining.min(MAX_GENERATION_RESOLUTION_WAIT))
+    Some(generation_resolution_wait_from_remaining(remaining))
 }
 
 #[hotpath::measure]
@@ -3033,6 +3043,41 @@ fn navigation_symbol_query<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_resolution_wait_reserves_outer_settlement_margin() {
+        assert_eq!(
+            generation_resolution_wait_from_remaining(Duration::ZERO),
+            Duration::ZERO
+        );
+        assert_eq!(
+            generation_resolution_wait_from_remaining(Duration::from_millis(999)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            generation_resolution_wait_from_remaining(Duration::from_secs(11)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            generation_resolution_wait_from_remaining(Duration::from_secs(90)),
+            MAX_GENERATION_RESOLUTION_WAIT
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn generation_resolution_inner_timeout_precedes_outer_dispatch_expiry() {
+        let remaining = Duration::from_secs(5);
+        let inner = generation_resolution_wait_from_remaining(remaining);
+        let settled = tokio::time::timeout(remaining, async move {
+            tokio::time::timeout(inner, std::future::pending::<()>()).await
+        })
+        .await;
+
+        assert!(
+            matches!(settled, Ok(Err(_))),
+            "the inner typed timeout must settle before the outer dispatch horizon"
+        );
+    }
 
     #[test]
     fn generation_resolution_terminal_projection_records_exactly_one_outcome() {

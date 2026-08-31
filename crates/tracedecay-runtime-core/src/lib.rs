@@ -78,6 +78,8 @@
 
 /// Upper bound for daemon-owned shutdown persistence work.
 pub const DAEMON_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+/// Grace retained for forced task abort and join during daemon shutdown.
+pub const DAEMON_TASK_ABORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub mod branch;
 pub mod branch_meta;

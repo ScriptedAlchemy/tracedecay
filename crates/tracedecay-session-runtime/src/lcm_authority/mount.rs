@@ -28,7 +28,9 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 const LCM_ACTOR_ID: &str = "actor.daemon.lcm";
 const LCM_GRANT_ID: &str = "grant.daemon.lcm";
-const LCM_REQUEST_TIMEOUT: Duration = Duration::from_secs(115);
+/// Capability validity retained after execution ends so the typed terminal can
+/// settle without leaving a broadly usable grant alive.
+const LCM_GRANT_SETTLEMENT_MARGIN: Duration = Duration::from_secs(1);
 // The canonical LCM operation budgets. LCM reads verify content hashes over
 // whole payloads before slicing, so their byte budget covers verified read
 // I/O — not the response, which stays bounded by the context budget and the
@@ -61,6 +63,17 @@ struct MountedLcmAuthority {
     identity: ResolvedSessionIdentity,
 }
 
+fn lcm_operation_and_grant_expiries(
+    observed_at: UtcMicros,
+) -> Option<(UtcMicros, UtcMicros)> {
+    let operation_micros =
+        i64::try_from(crate::lcm_effects::LCM_EFFECT_CEILING.as_micros()).ok()?;
+    let operation_expires_at = UtcMicros(observed_at.0.checked_add(operation_micros)?);
+    let settlement_micros = i64::try_from(LCM_GRANT_SETTLEMENT_MARGIN.as_micros()).ok()?;
+    let grant_expires_at = UtcMicros(operation_expires_at.0.checked_add(settlement_micros)?);
+    Some((operation_expires_at, grant_expires_at))
+}
+
 impl MountedLcmAuthority {
     fn invocation(&self, request: LcmAuthorityRequest) -> Option<LcmAuthorityInvocation> {
         let operation = request.operation();
@@ -76,8 +89,8 @@ impl MountedLcmAuthority {
         let budgets =
             RequestBudgets::new(LCM_MAX_RESULTS, LCM_MAX_BYTES, LCM_MAX_WORK_UNITS).ok()?;
         let observed_at = application_observed_at();
-        let timeout_micros = i64::try_from(LCM_REQUEST_TIMEOUT.as_micros()).ok()?;
-        let expires_at = UtcMicros(observed_at.0.checked_add(timeout_micros)?);
+        let (operation_expires_at, grant_expires_at) =
+            lcm_operation_and_grant_expiries(observed_at)?;
         let grant = CapabilityGrantSnapshot::new(
             CapabilityGrantId::new(LCM_GRANT_ID).ok()?,
             1,
@@ -91,7 +104,7 @@ impl MountedLcmAuthority {
             .ok()?,
             actor.clone(),
             observed_at,
-            expires_at,
+            grant_expires_at,
             scope.clone(),
             BTreeSet::from([capability]),
             BTreeSet::from([use_case]),
@@ -103,7 +116,7 @@ impl MountedLcmAuthority {
             scope,
             grant,
             request_id,
-            Deadline::new(expires_at).ok()?,
+            Deadline::new(operation_expires_at).ok()?,
             CancellationContext::active(cancellation.application_token_id()?).ok()?,
         )
         .ok()?;
@@ -252,4 +265,30 @@ pub fn mount_registered_lcm_authority(
         authority: DaemonLcmAuthority::registered(database),
         identity,
     }))
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::lcm_operation_and_grant_expiries;
+    use tracedecay_domain::UtcMicros;
+
+    #[test]
+    fn grant_expiry_is_derived_from_operation_deadline_with_settlement_margin() {
+        let observed_at = UtcMicros(1_000_000);
+        let (operation_expires_at, grant_expires_at) =
+            lcm_operation_and_grant_expiries(observed_at).expect("bounded LCM deadlines");
+
+        assert_eq!(operation_expires_at, UtcMicros(31_000_000));
+        assert_eq!(grant_expires_at, UtcMicros(32_000_000));
+        assert_eq!(
+            grant_expires_at.0 - operation_expires_at.0,
+            1_000_000,
+            "the capability may outlive execution only by the settlement margin"
+        );
+    }
+
+    #[test]
+    fn lcm_deadline_derivation_fails_closed_on_clock_overflow() {
+        assert!(lcm_operation_and_grant_expiries(UtcMicros(i64::MAX)).is_none());
+    }
 }

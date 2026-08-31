@@ -1,31 +1,7 @@
-use std::time::Duration;
-
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::time::Instant;
 use tracedecay_application::{ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope};
-
-/// Parse a positive millisecond duration from `name`, falling back to
-/// `default`. Values above `max` fail closed so CLI budgets cannot exceed
-/// the supported monotonic range.
-pub(crate) fn env_duration_ms(
-    name: &str,
-    default: Duration,
-    max: Duration,
-) -> tracedecay_domain::errors::Result<Duration> {
-    let deadline = std::env::var(name)
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(default);
-    if deadline > max {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("{name} exceeds the supported monotonic deadline range"),
-        });
-    }
-    Ok(deadline)
-}
 
 /// Resolves the daemon handshake for the current client. One labeled
 /// boundary so a slow CLI invocation can attribute time to client identity

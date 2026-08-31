@@ -44,13 +44,11 @@
 #![allow(clippy::single_match_else)]
 #![allow(clippy::large_futures)]
 
-use std::time::Duration;
-
 /// Abort bound for in-flight invocation tasks during shutdown.
 ///
-/// Matches the composition-root OS-lifecycle constant so process-wide drain
-/// and invocation abort stay the same two-second pin.
-pub const TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
+/// Re-exported here as the daemon-service authority while the lower runtime
+/// crate remains the cycle-free owner shared with code-index runtime.
+pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
 
 pub mod invocation;
 pub mod project_runtime;

@@ -67,8 +67,8 @@ pub(crate) use tracedecay_code_index as code_index;
 pub(crate) use tracedecay_query as query;
 pub(crate) use tracedecay_search_eval as search_eval;
 
-/// Same two-second abort bound the daemon shutdown path uses.
-pub const DAEMON_TASK_ABORT_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(2);
+/// Same abort authority re-exported by `tracedecay-daemon-service`.
+pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
 
 pub use code_graph_seat::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
