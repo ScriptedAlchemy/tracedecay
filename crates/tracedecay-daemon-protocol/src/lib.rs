@@ -78,8 +78,8 @@ pub use connection::{
 };
 pub use contract::{
     CanonicalQualificationBlob, CanonicalQualificationBlobError, DAEMON_INVOCATION_PROTOCOL,
-    DAEMON_INVOCATION_REVISION, DaemonFeedbackResult, DaemonGitEffectResult,
-    DaemonGitPreviewResult, DaemonInvocationCancellationRequest,
+    DAEMON_INVOCATION_REVISION, DAEMON_SHUTDOWN_METHOD, DaemonFeedbackResult,
+    DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationCancellationRequest,
     DaemonInvocationDeliveryAckRejectReason, DaemonInvocationDeliveryAckRequest,
     DaemonInvocationDeliveryAckResponse, DaemonInvocationDeliveryAckResponseOutcome,
     DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationPayload,
