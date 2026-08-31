@@ -11,19 +11,20 @@ use tracedecay_domain::{
 };
 
 use super::{
-    RegisteredSemanticAcceptedProfileAuthorityV1, SemanticAcceptedProfileAuthorityErrorV1,
-    SemanticAcceptedProfileAuthorityPortV1, SemanticActivationCoordinationErrorV1,
-    SemanticEvaluationLifecycleVerificationV1, SemanticRuntimeFuture,
+    ProjectSemanticActivationExt, RegisteredSemanticAcceptedProfileAuthorityV1,
+    SemanticAcceptedProfileAuthorityErrorV1, SemanticAcceptedProfileAuthorityPortV1,
+    SemanticActivationCoordinationErrorV1, SemanticEvaluationLifecycleVerificationV1,
+    SemanticRuntimeFuture,
 };
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1,
     RetrievalProfileCasV1, RetrievalRuntimeCompatibilityV1, SemanticResourceRequirementV1,
 };
-use crate::configuration::{
+use tracedecay_configuration::{
     ConfigurationCurrentStateV1, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
     DirectConfigurationMutation, ProjectConfigurationRuntime,
 };
-use tracedecay_search_eval::{
+use tracedecay_query::search_quality::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
     NativeQualificationExecutionResourceKeyV1, NativeQualificationExpectationsV1,
     NativeQualificationModelKeyV1, NativeQualificationPlatformV1, NativeQualificationRuntimeKeyV1,
@@ -825,14 +826,13 @@ fn prepare_query_fallback_publication(
     report: &DirectEvaluationReportV1,
     observed_runtime: &RetrievalRuntimeCompatibilityV1,
 ) -> Result<PreparedQueryFallbackPublicationV1, SemanticActivationCoordinationErrorV1> {
-    let material = tracedecay_search_eval::load_default_evaluated_profile_material(
-        "query-fallback",
-    )
-    .map_err(|error| {
-        SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
-            "query fallback material is unavailable: {error}"
-        ))
-    })?;
+    let material =
+        tracedecay_query::search_quality::load_default_evaluated_profile_material("query-fallback")
+            .map_err(|error| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                    "query fallback material is unavailable: {error}"
+                ))
+            })?;
     let evaluation =
         PassingRetrievalEvaluationV1::from_report(report, "query-fallback").map_err(|error| {
             SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
@@ -1685,12 +1685,15 @@ mod tests {
 
     #[test]
     fn packaged_semantic_pass_prepares_the_exact_query_fallback() {
-        let qualification: tracedecay_search_eval::PackagedNativeQualificationV1 =
-            serde_json::from_slice(tracedecay_search_eval::packaged_native_qualification_bytes())
-                .expect("reviewed packaged qualification");
-        let material =
-            tracedecay_search_eval::load_default_evaluated_profile_material(EVALUATED_PROFILE_ID)
-                .expect("checked-in query fallback material");
+        let qualification: tracedecay_query::search_quality::PackagedNativeQualificationV1 =
+            serde_json::from_slice(
+                tracedecay_query::search_quality::packaged_native_qualification_bytes(),
+            )
+            .expect("reviewed packaged qualification");
+        let material = tracedecay_query::search_quality::load_default_evaluated_profile_material(
+            EVALUATED_PROFILE_ID,
+        )
+        .expect("checked-in query fallback material");
         let observed_runtime = RetrievalRuntimeCompatibilityV1 {
             retrieval_ceiling: material.profile.retrieval_budget,
             semantic: Some(semantic_compatibility(semantic_resources(10))),
@@ -1732,8 +1735,8 @@ mod tests {
         let database = database_runtime
             .project_database_arc()
             .expect("project database");
-        let configuration = crate::config::PinnedRuntimeConfiguration {
-            target: crate::config::RuntimeConfigurationTarget {
+        let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration {
+            target: tracedecay_configuration::config::RuntimeConfigurationTarget {
                 project_id,
                 project_root,
             },
@@ -1743,10 +1746,13 @@ mod tests {
             .expect("configuration revision"),
             snapshot: ConfigurationSnapshotV1::new(BTreeMap::new(), BTreeMap::new())
                 .expect("empty configuration snapshot"),
-            config: crate::config::TraceDecayConfig::default(),
+            config: tracedecay_configuration::config::TraceDecayConfig::default(),
         };
         let (configuration, _) = ProjectConfigurationRuntime::open(
-            crate::config::OpenedRuntimeConfiguration::new(configuration, database.clone()),
+            tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
+                configuration,
+                database.clone(),
+            ),
         )
         .expect("configuration runtime");
         ProductionSemanticConfigurationOperationV1::new(
@@ -1869,7 +1875,7 @@ mod tests {
             .parent()
             .and_then(Path::parent)
             .expect("workspace root above crates/tracedecay-usecases");
-        let material = tracedecay_search_eval::load_direct_evaluated_profile_material(
+        let material = tracedecay_query::search_quality::load_direct_evaluated_profile_material(
             workspace_root,
             None,
             "query-fallback",

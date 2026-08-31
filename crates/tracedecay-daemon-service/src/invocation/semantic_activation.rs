@@ -11,9 +11,9 @@
 
 use super::*;
 
+use tracedecay_configuration::ConfigurationCurrentStateV1;
 use tracedecay_domain::configuration::{ConfigurationValueV1, SettingKey};
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_usecases::configuration::ConfigurationCurrentStateV1;
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
