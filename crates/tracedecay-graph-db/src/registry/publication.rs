@@ -447,6 +447,10 @@ impl GraphDbRegistry {
     /// diagnosis is refused with its evidence instead of deleted. On
     /// `Discarded` the journal position is open again and a fresh replay for
     /// the same generation can be journaled and published (issue #765).
+    #[hotpath::measure(
+        label = "graph_db.generation.discard_interrupted",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn discard_interrupted_publication(
         &self,
         registration: GraphDbRegistration,

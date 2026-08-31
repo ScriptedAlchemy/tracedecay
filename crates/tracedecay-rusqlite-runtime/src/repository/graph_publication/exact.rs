@@ -641,6 +641,7 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         }
     }
 
+    #[hotpath::measure(label = "rusqlite_runtime.graph_publication.discard_pending_replay")]
     fn discard_pending_replay(
         &mut self,
         request: &GraphPendingReplayDiscardV1,

@@ -1117,6 +1117,7 @@ impl RetainedCodeGraphRuntimeV1 {
     /// refusal from the compare-and-swap-shaped discard means the journal
     /// moved since the diagnosis — the caller re-reads and proceeds, so a
     /// completed or re-journaled publication is never swept (issue #765).
+    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.discard_interrupted")]
     fn discard_interrupted_publication_row(
         &self,
         storage: &mut dyn GraphPublicationStoreV1,
