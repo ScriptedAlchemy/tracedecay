@@ -237,7 +237,6 @@ pub use http_application::live_remote_operational_status;
 mod http_application_router;
 pub(crate) mod remote_protocol;
 mod remote_query;
-mod remote_replay_transaction;
 pub(crate) mod retained_owner;
 use http_application_router::{
     install_http_application_cold_resolver, install_remote_http_application_router,
@@ -354,6 +353,9 @@ mod query_mcp_admission;
 mod scheduler;
 #[cfg(test)]
 pub(crate) mod session_runtime_tests;
+
+#[cfg(test)]
+pub(crate) mod store_runtime_tests;
 
 pub(crate) mod store_runtime;
 mod store_writer_gate;

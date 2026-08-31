@@ -4808,6 +4808,11 @@ esac
         // staged artifact by renaming it into `lifecycle`, and rename cannot
         // cross a filesystem boundary.
         let lifecycle = host_cli_tempdir();
+        // One bin for stage + component-set render + registration activate so
+        // Codex hook-trust's safety valve sees matching commands (not
+        // `which_tracedecay` vs `current_exe` drift under cargo-test).
+        let tracedecay_bin =
+            tracedecay::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let agents_dir = home.path().join(".codex/agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
         let stale_path = agents_dir.join("tracedecay-legacy.toml");
@@ -4833,18 +4838,18 @@ esac
         integration
             .prepare_non_interactive_install(&tracedecay::agents::InstallContext {
                 home: home.path().to_path_buf(),
-                tracedecay_bin: tracedecay::agents::which_tracedecay()
-                    .unwrap_or_else(|| "tracedecay".to_string()),
+                tracedecay_bin: tracedecay_bin.clone(),
                 tool_permissions: tracedecay::agents::expected_tool_perms(),
                 project_root: None,
                 dashboard: true,
             })
             .unwrap();
 
-        let component_set = canonical_host_component_set(
+        let component_set = canonical_host_component_set_with_tracedecay_bin(
             "codex",
             Some(crate::cli::HostBundleComponentArg::Core),
             0,
+            &tracedecay_bin,
         )
         .unwrap()
         .unwrap();
@@ -4852,11 +4857,12 @@ esac
             component_set_request(&component_set, HostBundleCliOperation::Repair, true, false)
                 .unwrap();
         let mut registration = VerifyFailureRegistration {
-            inner: CatalogHostComponentRegistrationAuthority::new(
+            inner: CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
                 "codex",
                 home.path(),
                 lifecycle.path(),
                 request.lifecycle.operation,
+                tracedecay_bin,
             )
             .unwrap(),
             stale_export_path: stale_path.clone(),

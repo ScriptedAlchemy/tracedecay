@@ -1802,6 +1802,27 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
     .unwrap();
     let profile_root = dir.path().join("unavailable-user-lcm-profile");
     let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("missing-store profile identity");
+    let profile_id = profile_identity.profile_id().as_str();
+    let suffix = profile_id
+        .strip_prefix("profile.")
+        .expect("canonical profile identity prefix");
+    let session_identity = tracedecay_session_memory::context::ResolvedSessionIdentity::for_profile(
+        tracedecay_session_memory::context::ProfileId::new(profile_id.to_owned())
+            .expect("profile session identity"),
+        tracedecay_session_memory::context::SessionStoreId::new(format!("store.profile.{suffix}"))
+            .expect("profile store identity"),
+        tracedecay_session_memory::context::SessionRootId::new(format!("root.profile.{suffix}"))
+            .expect("profile root identity"),
+    );
+    let profile_retained_authority =
+        crate::daemon::retained_owner::profile_retained_connection_authority(
+            &profile_identity,
+            &session_identity,
+        )
+        .expect("canonical profile retained authority");
 
     let result = handle_tool_call_with_registry_options(
         &cg,
@@ -1811,6 +1832,8 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
         None,
         ToolCallRegistryOptions {
             profile_root: Some(&profile_root),
+            session_authorities: SessionAuthorities::default()
+                .with_profile_retained_authority(Some(&profile_retained_authority)),
             ..Default::default()
         },
     )
@@ -1823,7 +1846,10 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
             .expect("LCM Doctor text response"),
     )
     .expect("LCM Doctor unavailable payload");
-    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(
+        payload["problem"]["kind"], "unavailable",
+        "missing-store LCM Doctor renders the application problem kind, got {payload}"
+    );
     assert!(
         !sessions_db.exists(),
         "read-only LCM Doctor must not open a missing profile store"
@@ -1866,7 +1892,13 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     .await
     .unwrap_err();
 
-    assert!(error.to_string().contains("unknown"));
+    let message = error.to_string();
+    assert!(
+        message.contains(
+            "storage_scope=user is unavailable for non-retained tool `tracedecay_lcm_compress`"
+        ),
+        "a known-but-unavailable LCM effect must report its typed reason, got {message}"
+    );
     assert!(
         !sessions_db.exists(),
         "unavailable LCM must not open its profile store"
