@@ -784,10 +784,7 @@ impl McpServer {
 /// whether this caller claimed the (single-flighted) background refresh. The
 /// warning always reflects the last completed check; an expired cache serves
 /// that stale answer rather than making the caller wait for a fetch.
-fn cached_version_warning(
-    cache: &mut VersionCheckState,
-    current: &str,
-) -> (Option<String>, bool) {
+fn cached_version_warning(cache: &mut VersionCheckState, current: &str) -> (Option<String>, bool) {
     let fresh = cache
         .checked_at
         .is_some_and(|checked_at| checked_at.elapsed() < VERSION_CHECK_INTERVAL);
@@ -903,14 +900,19 @@ mod version_check_tests {
 
         let (warning, claimed) = cached_version_warning(&mut cache, "0.1.0");
         assert!(
-            warning.expect("stale answer still serves").contains("99.0.0"),
+            warning
+                .expect("stale answer still serves")
+                .contains("99.0.0"),
             "an expired cache must answer from the last completed check instead of blocking"
         );
         assert!(claimed, "the first caller past expiry claims the refresh");
         assert!(cache.refreshing);
 
         let (warning, claimed) = cached_version_warning(&mut cache, "0.1.0");
-        assert!(warning.is_some(), "in-flight refresh still serves the cache");
+        assert!(
+            warning.is_some(),
+            "in-flight refresh still serves the cache"
+        );
         assert!(
             !claimed,
             "a refresh already in flight must not be claimed again"
