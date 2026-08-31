@@ -1,6 +1,7 @@
 use super::connection::Database;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+#[hotpath::measure_all]
 impl Database {
     /// Owner-bound metadata-only semantic-vector staging authority.
     pub fn semantic_vector_publication_authority(

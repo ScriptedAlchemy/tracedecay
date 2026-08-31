@@ -1,5 +1,6 @@
 use super::{is_assignment_key, is_yaml_preamble_line, looks_like_yaml_mapping};
 
+#[hotpath::measure]
 pub(super) fn has_code_shape_context(text: &str) -> bool {
     for line in text.lines().map(str::trim_start) {
         if line.is_empty()
@@ -23,6 +24,7 @@ pub(super) fn has_code_shape_context(text: &str) -> bool {
     false
 }
 
+#[hotpath::measure]
 fn looks_like_code_line(line: &str) -> bool {
     let declaration = line
         .strip_prefix("pub ")

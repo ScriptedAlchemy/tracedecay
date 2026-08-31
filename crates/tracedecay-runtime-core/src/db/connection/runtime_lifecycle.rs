@@ -7,6 +7,7 @@ use super::{
     Result, StoreRuntimeClientLease, TraceDecayError, integrity,
 };
 
+#[hotpath::measure_all]
 impl Database {
     pub fn is_writable(&self) -> bool {
         self.client.is_writable()
@@ -136,6 +137,7 @@ impl Database {
     /// opened file identity. A read-write facade additionally retains the
     /// originating authority; a read-only facade never requests it. Neither
     /// mode derives identity from a path or extracts the physical attachment.
+    #[hotpath::skip]
     pub async fn publish_runtime(
         runtime: StoreRuntimeClientLease,
         access: DatabaseAccessMode,

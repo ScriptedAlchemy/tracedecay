@@ -6,6 +6,7 @@ use super::{
     canonical_or_prospective_regular_file, local_filesystem_safety, verified_locator,
 };
 
+#[hotpath::measure_all]
 impl LocalStoreRuntimeResolverV1 {
     /// Resolves the Grafeo database file paired with one exact project/profile
     /// relational authority.

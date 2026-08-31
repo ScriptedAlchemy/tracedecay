@@ -19,6 +19,7 @@ static ROLE_ENTITY_FHRR: LazyLock<Result<Fhrr2048, HolographicEncodingError>> =
         to_fhrr(&HolographicEncoder::new().encode_atom(HolographicEncoder::ROLE_ENTITY))
     });
 
+#[hotpath::measure]
 fn role_fhrr(
     role: &'static LazyLock<Result<Fhrr2048, HolographicEncodingError>>,
 ) -> Result<&'static Fhrr2048, HolographicEncodingError> {
@@ -42,11 +43,13 @@ pub struct HolographicEncoder;
 /// for every candidate.
 pub struct HolographicQueryVector(Fhrr2048);
 
+#[hotpath::measure_all]
 impl HolographicEncoder {
     pub const DIMENSIONS: usize = 2048;
     pub const ROLE_CONTENT: &'static str = "__hrr_role_content__";
     pub const ROLE_ENTITY: &'static str = "__hrr_role_entity__";
 
+    #[hotpath::skip]
     pub const fn new() -> Self {
         Self
     }
@@ -115,6 +118,7 @@ impl HolographicEncoder {
     }
 }
 
+#[hotpath::measure]
 fn deterministic_coefficients(label: &str) -> Vec<f64> {
     let mut coefficients = Vec::with_capacity(HolographicEncoder::DIMENSIONS);
     let mut counter = 0_u64;
@@ -142,6 +146,7 @@ fn deterministic_coefficients(label: &str) -> Vec<f64> {
     coefficients
 }
 
+#[hotpath::measure]
 fn tokenize_text(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -160,6 +165,7 @@ fn tokenize_text(text: &str) -> Vec<String> {
     tokens
 }
 
+#[hotpath::measure]
 fn push_token(tokens: &mut Vec<String>, current: &mut String) {
     if current.len() >= 2 {
         tokens.push(std::mem::take(current));
@@ -168,6 +174,7 @@ fn push_token(tokens: &mut Vec<String>, current: &mut String) {
     }
 }
 
+#[hotpath::measure]
 fn average_coefficients(
     first: Vec<f64>,
     rest: impl IntoIterator<Item = Vec<f64>>,
@@ -198,6 +205,7 @@ fn average_coefficients(
     Ok(normalize_coefficients(average))
 }
 
+#[hotpath::measure]
 fn normalize_coefficients(mut coefficients: Vec<f64>) -> Vec<f64> {
     let norm = coefficients
         .iter()
@@ -214,6 +222,7 @@ fn normalize_coefficients(mut coefficients: Vec<f64>) -> Vec<f64> {
     coefficients
 }
 
+#[hotpath::measure]
 fn to_fhrr(coefficients: &[f64]) -> Result<Fhrr2048, HolographicEncodingError> {
     if coefficients.len() != HolographicEncoder::DIMENSIONS {
         return Err(HolographicEncodingError::DimensionMismatch {

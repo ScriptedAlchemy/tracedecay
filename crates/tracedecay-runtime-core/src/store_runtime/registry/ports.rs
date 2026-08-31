@@ -28,6 +28,7 @@ pub struct ResolvedStoreLocator {
     prospective: bool,
 }
 
+#[hotpath::measure_all]
 impl ResolvedStoreLocator {
     pub fn new(verified: VerifiedStoreLocatorV1, path: PathBuf) -> Self {
         Self {
@@ -53,6 +54,7 @@ impl ResolvedStoreLocator {
         &self.path
     }
 
+    #[hotpath::skip]
     pub(crate) const fn is_prospective(&self) -> bool {
         self.prospective
     }
@@ -68,6 +70,7 @@ pub struct RuntimeLocatorRecord {
     locator: ResolvedStoreLocator,
 }
 
+#[hotpath::measure_all]
 impl RuntimeLocatorRecord {
     pub(super) fn new(key: StoreRuntimeKey, locator: ResolvedStoreLocator) -> Self {
         Self { key, locator }
@@ -85,6 +88,7 @@ impl RuntimeLocatorRecord {
         self.locator.path()
     }
 
+    #[hotpath::skip]
     pub(crate) const fn is_prospective(&self) -> bool {
         self.locator.is_prospective()
     }
@@ -178,6 +182,7 @@ async fn publish_lifecycle_runtime(
     Ok(PublishedShardRuntime::new(runtime, attachment.into_box()))
 }
 
+#[hotpath::measure]
 fn runtime_core_final_schema_applies(scope: &StoreShardScopeV1) -> bool {
     matches!(
         scope,
@@ -226,7 +231,9 @@ struct LifecycleShardRuntimeAttachment {
     repository: RepositoryPhysicalAttachmentFactory,
 }
 
+#[hotpath::measure_all]
 impl LifecycleShardRuntimeAttachment {
+    #[hotpath::skip]
     const fn new(repository: RepositoryPhysicalAttachmentFactory) -> Self {
         Self { repository }
     }
@@ -272,6 +279,7 @@ impl LifecycleShardRuntimeAttachment {
     }
 }
 
+#[hotpath::measure_all]
 impl LifecyclePhysicalAttachment {
     fn as_physical(&self) -> &dyn PhysicalRuntimeAttachment {
         &self.0
@@ -594,6 +602,7 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
     }
 }
 
+#[hotpath::measure]
 fn retained_storage_page_counts(
     handle: tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
     reader_wait: Duration,
@@ -618,6 +627,7 @@ pub struct ShardRuntimeBuildRequest {
     database_authority: Option<crate::db::DatabaseAuthority>,
 }
 
+#[hotpath::measure_all]
 impl ShardRuntimeBuildRequest {
     pub(super) fn new(
         binding: StoreRuntimeBindingV1,
@@ -643,10 +653,12 @@ impl ShardRuntimeBuildRequest {
         &self.locator
     }
 
+    #[hotpath::skip]
     pub const fn mode(&self) -> StoreRuntimeOpenMode {
         self.mode
     }
 
+    #[hotpath::skip]
     pub const fn access(&self) -> StoreRuntimeAccessMode {
         self.access
     }
@@ -656,6 +668,7 @@ impl ShardRuntimeBuildRequest {
     }
 }
 
+#[hotpath::measure]
 fn runtime_lifecycle_failure(error: ShardRuntimeError) -> StoreRuntimeRegistryFailure {
     StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
         message: error.to_string(),

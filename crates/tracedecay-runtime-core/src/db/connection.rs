@@ -71,6 +71,7 @@ pub(crate) struct WeakDatabase {
     client: Weak<DatabaseClientLeaseV1>,
 }
 
+#[hotpath::measure_all]
 impl WeakDatabase {
     pub(crate) fn upgrade(&self) -> Option<Database> {
         let inner = self.inner.upgrade()?;
@@ -85,7 +86,9 @@ pub enum DatabaseAccessMode {
     ReadWrite,
 }
 
+#[hotpath::measure_all]
 impl DatabaseAccessMode {
+    #[hotpath::skip]
     const fn is_writable(&self) -> bool {
         matches!(self, Self::ReadWrite)
     }
@@ -172,6 +175,7 @@ pub struct DatabaseStorageTelemetryHandle {
     _client_guard: DatabaseClientGuardV1,
 }
 
+#[hotpath::measure_all]
 impl DatabaseStorageTelemetryHandle {
     #[must_use]
     pub fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
@@ -234,6 +238,7 @@ pub struct DatabaseWriteTransaction<'a> {
     _client_guard: DatabaseClientGuardV1,
 }
 
+#[hotpath::measure]
 fn database_checkpoint_probe() -> Result<DatabaseCheckpointProbe> {
     let cancellation_id = RuntimeCancellationIdV1::new("cancellation.database-checkpoint")
         .map_err(|error| TraceDecayError::Database {
@@ -256,6 +261,7 @@ fn database_checkpoint_probe() -> Result<DatabaseCheckpointProbe> {
     })
 }
 
+#[hotpath::measure]
 fn database_query_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         message: error.to_string(),

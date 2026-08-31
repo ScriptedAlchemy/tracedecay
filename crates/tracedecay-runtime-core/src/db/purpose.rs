@@ -1,6 +1,7 @@
 use super::connection::Database;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+#[hotpath::measure_all]
 impl Database {
     /// Retains the issuing database client with one exact-SQL purpose adapter.
     ///

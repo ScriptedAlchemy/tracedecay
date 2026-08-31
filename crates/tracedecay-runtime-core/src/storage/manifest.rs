@@ -9,6 +9,7 @@ use super::{
     ValidatedProfileShard, has_sqlite_database_header, profile_sharded_data_root,
 };
 
+#[hotpath::measure]
 pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
     let path = layout
         .manifest_path
@@ -25,10 +26,12 @@ pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
 }
 
 /// Writes `manifest` to `path` without rebuilding it from a [`StoreLayout`].
+#[hotpath::measure]
 pub fn write_store_manifest_to_path(path: &Path, manifest: &StoreManifest) -> Result<()> {
     write_store_manifest_payload(path, manifest)
 }
 
+#[hotpath::measure]
 fn write_store_manifest_payload(path: &Path, manifest: &StoreManifest) -> Result<()> {
     let text = serde_json::to_string_pretty(manifest).map_err(|e| TraceDecayError::Config {
         message: format!(
@@ -44,6 +47,7 @@ fn write_store_manifest_payload(path: &Path, manifest: &StoreManifest) -> Result
     })
 }
 
+#[hotpath::measure]
 pub fn read_store_manifest(path: &Path) -> Result<StoreManifest> {
     let text = fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
         message: format!("failed to read store manifest '{}': {e}", path.display()),
@@ -53,6 +57,7 @@ pub fn read_store_manifest(path: &Path) -> Result<StoreManifest> {
     })
 }
 
+#[hotpath::measure_all]
 impl ValidatedProfileShard {
     /// Resolves an already-registered profile shard without creating artifacts
     /// or letting the database library touch an invalid database family.
@@ -132,6 +137,7 @@ enum RequiredArtifactKind {
     File,
 }
 
+#[hotpath::measure_all]
 impl RequiredArtifactKind {
     fn description(self) -> &'static str {
         match self {
@@ -148,6 +154,7 @@ impl RequiredArtifactKind {
     }
 }
 
+#[hotpath::measure]
 fn require_regular_artifact(
     path: &Path,
     kind: RequiredArtifactKind,
@@ -169,6 +176,7 @@ fn require_regular_artifact(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_profile_shard_manifest(
     project_id: &str,
     store_root: &Path,

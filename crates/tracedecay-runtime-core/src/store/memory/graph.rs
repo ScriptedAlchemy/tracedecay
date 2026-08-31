@@ -74,6 +74,7 @@ struct SourceLoadMeasurement {
     bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl SourceLoadMeasurement {
     fn record_row(&mut self, values: &[&str]) -> FactStoreResult<()> {
         self.rows = self.rows.checked_add(1).ok_or_else(|| {
@@ -300,6 +301,7 @@ async fn expected_source_watermark(
     Ok((loaded.lineage_stamp, watermark))
 }
 
+#[hotpath::measure]
 pub(super) fn schedule_project_memory_graph_reconciliation(
     db: Database,
 ) -> super::ProjectMemoryGraphReconciliationScheduleV1 {
@@ -470,6 +472,7 @@ async fn verified_head_matches_expected(
     }))
 }
 
+#[hotpath::measure]
 fn issue_memory_graph_operation(
     db: &Database,
 ) -> FactStoreResult<crate::db::MemoryGraphRuntimeOperationV1> {
@@ -491,6 +494,7 @@ pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
     }
 }
 
+#[hotpath::measure]
 fn bound_owner(db: &Database) -> FactStoreResult<FactOwnerV1> {
     match &db.registered_binding().shard_id.scope {
         StoreShardScopeV1::ProfileMemory => Ok(FactOwnerV1::Profile),
@@ -515,6 +519,7 @@ const fn reconciliation_error_kind(error: &FactStoreError) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_rooted_relations(
     accepted_entities: &BTreeSet<GraphEntityId>,
     relations: Vec<ProjectedRelation>,
@@ -537,6 +542,7 @@ pub(super) fn validate_rooted_relations(
     Ok(relations)
 }
 
+#[hotpath::measure]
 fn ensure_not_cancelled(read_control: &FactReadControl) -> FactStoreResult<()> {
     if read_control.interrupted() {
         return Err(FactStoreError::GraphCancelled);
@@ -931,6 +937,7 @@ async fn load_source(
     }
 }
 
+#[hotpath::measure]
 fn ensure_projected_fact_exists(
     facts: &BTreeSet<FactId>,
     owner: &FactOwnerV1,
@@ -972,6 +979,7 @@ pub(in crate::store::memory) async fn relation_kinds_from_canonical_source_for_t
         .collect()
 }
 
+#[hotpath::measure]
 fn push_source_entity(entities: &mut Vec<String>, entity: String) -> FactStoreResult<()> {
     if entities.len() >= MAX_VERIFIED_GENERATION_ENTITIES {
         return Err(storage_message(
@@ -983,6 +991,7 @@ fn push_source_entity(entities: &mut Vec<String>, entity: String) -> FactStoreRe
     Ok(())
 }
 
+#[hotpath::measure]
 fn push_source_relation(
     relations: &mut BTreeSet<SourceRelation>,
     relation: SourceRelation,
@@ -1061,12 +1070,14 @@ pub(in crate::store::memory) async fn hydrate_roots_from_canonical_source_for_te
     hydrate_page(db, owner, roots, Vec::new(), read_control).await
 }
 
+#[hotpath::measure]
 fn namespace(owner: &FactOwnerV1) -> FactStoreResult<GraphNamespace> {
     let encoded = serde_json::to_vec(owner).map_err(|error| storage_error(OPERATION, error))?;
     GraphNamespace::new(format!("project-memory:{}", sha256_hex(&encoded)))
         .map_err(|error| graph_error(owner, error))
 }
 
+#[hotpath::measure]
 fn relation_kinds() -> Result<BTreeSet<GraphRelationKind>, tracedecay_graph_db::GraphDbError> {
     [
         CONTRADICTS,
@@ -1082,6 +1093,7 @@ fn relation_kinds() -> Result<BTreeSet<GraphRelationKind>, tracedecay_graph_db::
     .collect()
 }
 
+#[hotpath::measure]
 fn public_relation_kind(value: &str) -> FactStoreResult<ProjectMemoryGraphRelationKindV1> {
     match value {
         CONTRADICTS => Ok(ProjectMemoryGraphRelationKindV1::Contradicts),
@@ -1098,6 +1110,7 @@ fn public_relation_kind(value: &str) -> FactStoreResult<ProjectMemoryGraphRelati
     }
 }
 
+#[hotpath::measure]
 fn fact_entity_id(fact_id: &FactId) -> Result<GraphEntityId, tracedecay_graph_db::GraphDbError> {
     GraphEntityId::new(format!(
         "memory-fact:{}",
@@ -1105,11 +1118,13 @@ fn fact_entity_id(fact_id: &FactId) -> Result<GraphEntityId, tracedecay_graph_db
     ))
 }
 
+#[hotpath::measure]
 fn fact_entity_id_from_str(value: &str) -> FactStoreResult<String> {
     FactId::new(value.to_owned())?;
     Ok(format!("memory-fact:{}", hex::encode(value.as_bytes())))
 }
 
+#[hotpath::measure]
 fn assertion_entity_id_from_str(fact: &str, assertion: &str) -> FactStoreResult<String> {
     FactId::new(fact.to_owned())?;
     FactAssertionId::new(assertion.to_owned())?;
@@ -1120,15 +1135,18 @@ fn assertion_entity_id_from_str(fact: &str, assertion: &str) -> FactStoreResult<
     ))
 }
 
+#[hotpath::measure]
 fn entity_entity_id(entity: &ProjectMemoryEntityIdV1) -> String {
     format!("memory-entity:{}", hex::encode(entity.entity().as_bytes()))
 }
 
+#[hotpath::measure]
 fn anchor_entity_id_from_str(value: &str) -> FactStoreResult<String> {
     RetrievalAnchorId::new(value.to_owned())?;
     Ok(format!("memory-anchor:{}", hex::encode(value.as_bytes())))
 }
 
+#[hotpath::measure]
 fn parse_target(
     owner: &FactOwnerV1,
     identity: &str,
@@ -1166,11 +1184,13 @@ fn parse_target(
     ))
 }
 
+#[hotpath::measure]
 fn decode_identity(value: &str) -> FactStoreResult<String> {
     let bytes = hex::decode(value).map_err(|error| storage_error(OPERATION, error))?;
     String::from_utf8(bytes).map_err(|error| storage_error(OPERATION, error))
 }
 
+#[hotpath::measure]
 pub(super) fn graph_error(
     owner: &FactOwnerV1,
     error: tracedecay_graph_db::GraphDbError,

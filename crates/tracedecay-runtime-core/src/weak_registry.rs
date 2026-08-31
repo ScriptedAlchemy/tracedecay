@@ -30,6 +30,7 @@ impl<K, V> Default for WeakRegistry<K, V> {
     }
 }
 
+#[hotpath::measure_all]
 impl<K: Eq + Hash, V> WeakRegistry<K, V> {
     pub fn new() -> Self {
         Self::default()

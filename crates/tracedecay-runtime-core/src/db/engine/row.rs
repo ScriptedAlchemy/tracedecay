@@ -8,6 +8,7 @@ pub struct Row {
     values: Vec<Value>,
 }
 
+#[hotpath::measure_all]
 impl Row {
     pub fn from_values(values: Vec<Value>) -> Self {
         Self { values }
@@ -26,6 +27,7 @@ pub struct Rows {
     rows: VecDeque<Row>,
 }
 
+#[hotpath::measure_all]
 impl Rows {
     pub fn from_rows(rows: Vec<Row>) -> Self {
         Self::from_parts(Vec::new(), rows)
@@ -49,6 +51,7 @@ impl Rows {
             .map(String::as_str)
     }
 
+    #[hotpath::skip]
     pub async fn next(&mut self) -> Result<Option<Row>> {
         Ok(self.rows.pop_front())
     }

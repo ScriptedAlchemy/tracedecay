@@ -21,6 +21,7 @@ use super::super::primitives::{
     storage_message,
 };
 
+#[hotpath::measure]
 fn relation_kinds_conflict(left: FactRelationKindV1, right: FactRelationKindV1) -> bool {
     matches!(
         (left, right),
@@ -177,6 +178,7 @@ pub(super) async fn exact_relation_exists_tx(
     Ok(false)
 }
 
+#[hotpath::measure]
 pub(super) fn normalize_tags(tags: &[String]) -> Vec<String> {
     tags.iter()
         .map(|tag| {
@@ -286,6 +288,7 @@ pub(super) async fn link_facts_tx(
     ))
 }
 
+#[hotpath::measure]
 pub(super) fn curated_correction_batch(
     fact: &StoredFactV1,
     payload: FactPayloadV1,
@@ -295,6 +298,7 @@ pub(super) fn curated_correction_batch(
     correction_batch(fact, payload, FactCurationActionV1::Retained, actor, now)
 }
 
+#[hotpath::measure]
 fn normalized_tags_correction_batch(
     fact: &StoredFactV1,
     payload: FactPayloadV1,
@@ -315,6 +319,7 @@ fn normalized_tags_correction_batch(
     )
 }
 
+#[hotpath::measure]
 fn correction_batch(
     fact: &StoredFactV1,
     payload: FactPayloadV1,

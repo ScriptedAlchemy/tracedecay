@@ -34,6 +34,7 @@ pub(super) enum ProjectMemoryAddClassification {
     },
 }
 
+#[hotpath::measure]
 fn holographic_store_error(error: HolographicEncodingError) -> FactStoreError {
     match error {
         HolographicEncodingError::DimensionMismatch { expected, actual } => {
@@ -42,6 +43,7 @@ fn holographic_store_error(error: HolographicEncodingError) -> FactStoreError {
     }
 }
 
+#[hotpath::measure]
 fn classification_similarity(
     encoder: &HolographicEncoder,
     proposed_tokens: &[String],

@@ -30,6 +30,7 @@ const NEGATION_CUES: &[&str] = &[
 ];
 
 /// True when `text` contains one of the negation / state-change cues.
+#[hotpath::measure]
 pub fn contains_negation_cue(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     NEGATION_CUES.iter().any(|cue| lower.contains(cue))
@@ -37,6 +38,7 @@ pub fn contains_negation_cue(text: &str) -> bool {
 
 /// Exact add deduplication is deliberately narrower than semantic similarity:
 /// only case-folding and whitespace normalization may suppress a new commit.
+#[hotpath::measure]
 pub fn normalized_equivalent(left: &str, right: &str) -> bool {
     fn normalize(value: &str) -> String {
         value

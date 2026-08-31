@@ -2,6 +2,7 @@ use std::path::Path;
 
 use tracedecay_domain::errors::TraceDecayError;
 
+#[hotpath::measure]
 pub(super) fn read_only_upgrade_error(db_path: &Path, operation: &str) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!(

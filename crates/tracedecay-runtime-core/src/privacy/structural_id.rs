@@ -13,6 +13,7 @@ pub struct StructuralIdProtectionError;
 
 /// True when `value` is already a protected structural-ID token or an opaque
 /// Claude observation source digest that must not be re-hashed.
+#[hotpath::measure]
 pub(crate) fn is_already_protected_structural_id(value: &str) -> bool {
     is_tagged_lowercase_hex(value, PROTECTION_PREFIX_V1, 64)
         || is_tagged_lowercase_hex(value, CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1, 64)
@@ -21,6 +22,7 @@ pub(crate) fn is_already_protected_structural_id(value: &str) -> bool {
 /// Replaces credential-shaped structural identifiers with a stable,
 /// versioned digest. Public identifiers and values already protected by this
 /// version are preserved byte-for-byte.
+#[hotpath::measure]
 pub fn protect_sensitive_structural_id(value: &str) -> Result<String, StructuralIdProtectionError> {
     if is_already_protected_structural_id(value) {
         return Ok(value.to_owned());
@@ -38,6 +40,7 @@ pub fn protect_sensitive_structural_id(value: &str) -> Result<String, Structural
 
 /// Protects an optional structural identifier. Empty and missing values stay
 /// absent; already-protected and public values are preserved byte-for-byte.
+#[hotpath::measure]
 pub fn protect_optional_sensitive_structural_id(
     value: Option<&str>,
 ) -> Result<Option<String>, StructuralIdProtectionError> {

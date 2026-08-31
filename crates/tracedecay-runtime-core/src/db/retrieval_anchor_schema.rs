@@ -146,6 +146,7 @@ pub(super) const IMMUTABILITY_TRIGGERS: &str = "
     END;
 ";
 
+#[hotpath::measure]
 fn database_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!("{operation}: {error}"),
@@ -153,6 +154,7 @@ fn database_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayE
     }
 }
 
+#[hotpath::measure]
 fn schema_error(operation: &str, message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!("{operation}: {}", message.into()),

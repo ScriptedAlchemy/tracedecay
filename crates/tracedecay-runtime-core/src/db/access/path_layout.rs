@@ -4,6 +4,7 @@ use tracedecay_domain::errors::Result;
 
 use super::access_io_error;
 
+#[hotpath::measure]
 pub(super) fn canonical_profile_root(profile_root: &Path) -> Result<PathBuf> {
     let absolute = if profile_root.is_absolute() {
         profile_root.to_path_buf()
@@ -17,10 +18,12 @@ pub(super) fn canonical_profile_root(profile_root: &Path) -> Result<PathBuf> {
     ))
 }
 
+#[hotpath::measure]
 pub(super) fn platform_identity_key(path: &Path) -> PathBuf {
     crate::lifecycle_lease::canonical_or_original(path)
 }
 
+#[hotpath::measure]
 pub(super) fn database_profile_root(database_path: &Path, fallback_parent: &Path) -> PathBuf {
     profile_project_root(database_path)
         .or_else(|| profile_remote_node_root(database_path))
@@ -28,6 +31,7 @@ pub(super) fn database_profile_root(database_path: &Path, fallback_parent: &Path
         .to_path_buf()
 }
 
+#[hotpath::measure]
 fn profile_project_root(database_path: &Path) -> Option<&Path> {
     let parent = database_path.parent()?;
     // Branch graphs live one level below their project data root and share
@@ -63,6 +67,7 @@ fn profile_project_root(database_path: &Path) -> Option<&Path> {
     }
 }
 
+#[hotpath::measure]
 fn profile_remote_node_root(database_path: &Path) -> Option<&Path> {
     if database_path
         .file_name()
@@ -86,6 +91,7 @@ fn profile_remote_node_root(database_path: &Path) -> Option<&Path> {
     remote_root.parent()
 }
 
+#[hotpath::measure]
 pub(super) fn is_legacy_repository_database(database_path: &Path) -> bool {
     let Some(parent) = database_path.parent() else {
         return false;

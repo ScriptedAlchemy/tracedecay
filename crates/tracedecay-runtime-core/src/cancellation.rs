@@ -13,13 +13,16 @@ use tokio_util::sync::CancellationToken as TokioCancellationToken;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MonotonicDeadline(Instant);
 
+#[hotpath::measure_all]
 impl MonotonicDeadline {
     #[must_use]
+    #[hotpath::skip]
     pub const fn at(deadline: Instant) -> Self {
         Self(deadline)
     }
 
     #[must_use]
+    #[hotpath::skip]
     pub const fn instant(self) -> Instant {
         self.0
     }
@@ -46,6 +49,7 @@ impl Default for CancellationToken {
     }
 }
 
+#[hotpath::measure_all]
 impl CancellationToken {
     #[must_use]
     pub fn new() -> Self {
@@ -121,6 +125,7 @@ impl CancellationToken {
     }
 
     /// Resolves once the token is cancelled.
+    #[hotpath::skip]
     pub async fn cancelled(&self) {
         self.inner.cancelled().await;
     }

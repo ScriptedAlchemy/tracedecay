@@ -25,6 +25,7 @@ const COMMIT_OPERATION: &str = "commit fact through storage runtime";
 const CURRENT_OPERATION: &str = "query current fact through storage runtime";
 const LINEAGE_OPERATION: &str = "query fact lineage through storage runtime";
 
+#[hotpath::measure]
 pub(super) fn retained_fact_runtime(
     db: &Database,
 ) -> FactStoreResult<Option<DatabaseRuntimeClientV1>> {
@@ -36,6 +37,7 @@ pub(super) fn retained_fact_runtime(
     Ok(Some(runtime))
 }
 
+#[hotpath::measure]
 fn validate_mount(db: &Database, runtime: &DatabaseRuntimeClientV1) -> FactStoreResult<()> {
     validate_mount_parts(
         db.registered_binding(),
@@ -45,6 +47,7 @@ fn validate_mount(db: &Database, runtime: &DatabaseRuntimeClientV1) -> FactStore
     )
 }
 
+#[hotpath::measure]
 fn validate_mount_parts(
     database_binding: &StoreRuntimeBindingV1,
     database_locator: &tracedecay_store::VerifiedStoreLocatorV1,
@@ -70,6 +73,7 @@ fn validate_mount_parts(
     Ok(())
 }
 
+#[hotpath::measure]
 fn fact_capable_scope(scope: &StoreShardScopeV1) -> bool {
     matches!(
         scope,
@@ -77,6 +81,7 @@ fn fact_capable_scope(scope: &StoreShardScopeV1) -> bool {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn validate_owner_binding(
     binding: &StoreRuntimeBindingV1,
     owner: &FactOwnerV1,
@@ -176,6 +181,7 @@ pub(super) async fn commit_fact(
     finish_commit_outcome(&batch, last_event_id, current, replay)
 }
 
+#[hotpath::measure]
 fn finish_commit_outcome(
     batch: &FactWriteBatch,
     last_event_id: FactEventId,
@@ -210,6 +216,7 @@ fn finish_commit_outcome(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn query_fact_current(
     runtime: &DatabaseRuntimeClientV1,
     query: FactCurrentQuery,
@@ -228,6 +235,7 @@ pub(super) fn query_fact_current(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn query_fact_lineage(
     runtime: &DatabaseRuntimeClientV1,
     query: FactLineageQuery,
@@ -246,6 +254,7 @@ pub(super) fn query_fact_lineage(
     }
 }
 
+#[hotpath::measure]
 fn dispatch_fact_read(
     runtime: &DatabaseRuntimeClientV1,
     operation: FactReadOperationV1,
@@ -285,6 +294,7 @@ fn dispatch_fact_read(
     }
 }
 
+#[hotpath::measure]
 fn build_read_request(
     binding: &StoreRuntimeBindingV1,
     operation: FactReadOperationV1,
@@ -317,6 +327,7 @@ fn build_read_request(
     .map_err(|error| runtime_error(operation_name, error.to_string()))
 }
 
+#[hotpath::measure]
 fn build_submit_request(
     binding: &StoreRuntimeBindingV1,
     payload: RepositoryWritePayloadV1,
@@ -364,6 +375,7 @@ fn build_submit_request(
     .map_err(|error| runtime_error(COMMIT_OPERATION, error.to_string()))
 }
 
+#[hotpath::measure]
 fn fact_command(batch: &FactWriteBatch) -> serde_json::Value {
     serde_json::json!({
         "kind": "fact",
@@ -378,6 +390,7 @@ fn fact_command(batch: &FactWriteBatch) -> serde_json::Value {
     })
 }
 
+#[hotpath::measure]
 fn request_control(
     suffix: &str,
     requested_at: UtcMicros,
@@ -414,6 +427,7 @@ impl Write for CountingSink {
     }
 }
 
+#[hotpath::measure]
 fn serialized_admission_bytes<T: Serialize>(
     value: &T,
     operation_name: &'static str,
@@ -424,6 +438,7 @@ fn serialized_admission_bytes<T: Serialize>(
     Ok(output.written.max(1))
 }
 
+#[hotpath::measure]
 fn digest_suffix<'digest>(
     digest: &'digest str,
     operation: &'static str,
@@ -444,6 +459,7 @@ struct RuntimeFactProbe {
     mode: RuntimeFactProbeMode,
 }
 
+#[hotpath::measure_all]
 impl RuntimeFactProbe {
     fn for_read(control: &RuntimeRequestControlV1) -> Self {
         Self {
@@ -492,6 +508,7 @@ impl RuntimeRequestProbeV1 for RuntimeFactProbe {
     }
 }
 
+#[hotpath::measure]
 fn runtime_error(operation: &'static str, message: impl Into<String>) -> FactStoreError {
     FactStoreError::Storage {
         operation,

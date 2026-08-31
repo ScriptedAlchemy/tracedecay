@@ -20,6 +20,7 @@ use tracedecay_store::{
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactIdV1,
 };
 
+#[hotpath::measure]
 fn automatic_fact_required_string(
     object: &serde_json::Map<String, Value>,
     field: &'static str,
@@ -36,6 +37,7 @@ fn automatic_fact_required_string(
         })
 }
 
+#[hotpath::measure]
 fn automatic_fact_optional_string(
     object: &serde_json::Map<String, Value>,
     field: &'static str,
@@ -50,6 +52,7 @@ fn automatic_fact_optional_string(
     }
 }
 
+#[hotpath::measure]
 pub(in crate::store::memory) fn project_memory_automatic_fact_request_value(
     request: &ProjectMemoryFactAddCommandV1,
 ) -> Value {
@@ -69,6 +72,7 @@ pub(in crate::store::memory) fn project_memory_automatic_fact_request_value(
     })
 }
 
+#[hotpath::measure]
 fn automatic_fact_request_from_value(
     owner: &FactOwnerV1,
     value: Value,
@@ -182,6 +186,7 @@ fn automatic_fact_request_from_value(
     .into_command(operation_id)
 }
 
+#[hotpath::measure]
 pub(in crate::store::memory) fn project_memory_automatic_fact_state_label(
     state: ProjectMemoryAutomaticFactStateV1,
 ) -> &'static str {
@@ -191,6 +196,7 @@ pub(in crate::store::memory) fn project_memory_automatic_fact_state_label(
     }
 }
 
+#[hotpath::measure]
 fn automatic_fact_state(value: &str) -> FactStoreResult<ProjectMemoryAutomaticFactStateV1> {
     match value {
         "applied" => Ok(ProjectMemoryAutomaticFactStateV1::Applied),

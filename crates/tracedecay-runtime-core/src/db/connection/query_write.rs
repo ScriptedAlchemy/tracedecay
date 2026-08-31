@@ -4,6 +4,7 @@ use super::{
     TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
 
+#[hotpath::measure_all]
 impl Database {
     /// Runs a bounded scalar inspection on the retained runtime, projecting the
     /// first column of the first row.
@@ -32,24 +33,28 @@ impl Database {
 
     /// Runs a bounded scalar integer inspection on the retained runtime.
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn query_scalar_i64(&self, operation: &str, sql: &str) -> Result<i64> {
         self.query_scalar(operation, sql, ()).await
     }
 
     /// Runs a bounded scalar blob inspection on the retained runtime.
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn query_scalar_blob(&self, operation: &str, sql: &str) -> Result<Vec<u8>> {
         self.query_scalar(operation, sql, ()).await
     }
 
     /// Runs a bounded scalar text inspection on the retained runtime.
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn query_scalar_text(&self, operation: &str, sql: &str) -> Result<String> {
         self.query_scalar(operation, sql, ()).await
     }
 
     /// Runs a bounded scalar integer inspection with one text identity bound.
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn query_scalar_i64_with_text(
         &self,
         operation: &str,
@@ -72,6 +77,7 @@ impl Database {
     // Visible outside the crate: integration suites in `tests/` are external
     // crates and exercise this fixture path directly.
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn execute_write<P>(&self, operation: &str, sql: &str, params: P) -> Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -79,6 +85,7 @@ impl Database {
         self.execute_write_engine(operation, sql, params).await
     }
 
+    #[hotpath::skip]
     pub async fn execute_write_engine<P>(
         &self,
         operation: &str,
@@ -102,6 +109,7 @@ impl Database {
 
     /// Executes a SQL batch atomically through the canonical writer broker.
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn execute_write_batch(&self, operation: &str, sql: &str) -> Result<()> {
         let transaction = self.begin_write_transaction(operation).await?;
         transaction
@@ -120,6 +128,7 @@ impl Database {
     /// The retained client guard stays alive for the entire transaction, and
     /// the exact write authority is checked before writer admission and again
     /// continuously by the runtime's authority-revalidated batch execution.
+    #[hotpath::skip]
     pub async fn execute_authority_revalidated_batch(
         &self,
         operation: &str,
@@ -165,6 +174,7 @@ impl Database {
     ///
     /// Writable handles opened for the same database share one `DatabaseInner`,
     /// so this guard coordinates MCP, dashboard, and automation mutations.
+    #[hotpath::skip]
     pub async fn writer(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.inner.writer.lock().await
     }
@@ -185,6 +195,7 @@ impl Database {
             .require_active_write_scope(operation)
     }
 
+    #[hotpath::skip]
     pub(super) async fn open_writer_connection_unguarded(
         &self,
         operation: &str,
@@ -198,6 +209,7 @@ impl Database {
     /// Opens an isolated writer while holding the process-local writer lane.
     /// The handle cannot escape the guard, preventing raw DML from bypassing
     /// serialization or joining a transaction on the retained reader.
+    #[hotpath::skip]
     pub async fn writer_connection(&self, operation: &str) -> Result<DatabaseWriterConnection<'_>> {
         let guard = self.writer().await;
         let conn = self.open_writer_connection_unguarded(operation).await?;
@@ -210,6 +222,7 @@ impl Database {
 
     /// Starts a query-only snapshot on a separate connection that cannot join
     /// a transaction running on the retained writable connection.
+    #[hotpath::skip]
     pub(crate) async fn begin_isolated_read_snapshot(
         &self,
         operation: &str,
@@ -229,6 +242,7 @@ impl Database {
         })
     }
 
+    #[hotpath::skip]
     pub async fn begin_engine_read_snapshot(
         &self,
         operation: &str,
@@ -236,6 +250,7 @@ impl Database {
         self.begin_isolated_read_snapshot(operation).await
     }
 
+    #[hotpath::skip]
     pub async fn begin_memory_read_transaction(
         &self,
         operation: &str,
@@ -247,6 +262,7 @@ impl Database {
 
     /// Starts an immediate transaction that owns the canonical writer lane.
     /// Dropping the returned capability rolls back before releasing the lane.
+    #[hotpath::skip]
     pub async fn begin_write_transaction(
         &self,
         operation: &str,
@@ -274,6 +290,7 @@ impl Database {
     /// transaction lease while continuously making progress. The runtime's
     /// long-lease policy renews that lease only after successful commands;
     /// idle transactions, revoked authority, and shutdown still cancel it.
+    #[hotpath::skip]
     pub async fn begin_bulk_write_transaction(
         &self,
         operation: &str,
@@ -294,6 +311,7 @@ impl Database {
         })
     }
 
+    #[hotpath::skip]
     pub async fn begin_memory_write_transaction(
         &self,
         operation: &str,

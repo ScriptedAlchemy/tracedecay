@@ -48,6 +48,7 @@ impl Transaction {
         }
     }
 
+    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
@@ -66,6 +67,7 @@ impl Transaction {
         .map(|result| result.changed_rows as u64)
     }
 
+    #[hotpath::skip]
     pub async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let filename = path.to_str().ok_or_else(|| {
@@ -83,6 +85,7 @@ impl Transaction {
         .map_err(join_error)?
     }
 
+    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -109,6 +112,7 @@ impl Transaction {
         ))
     }
 
+    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
@@ -126,6 +130,7 @@ impl Transaction {
 
     /// Executes one separately authorized authority-revalidated batch without the ordinary
     /// statement deadline.
+    #[hotpath::skip]
     pub async fn execute_authority_revalidated_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
@@ -141,6 +146,7 @@ impl Transaction {
         .map_err(join_error)?
     }
 
+    #[hotpath::skip]
     pub async fn validate(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, ())?;
@@ -160,6 +166,7 @@ impl Transaction {
         self.connection_runtime.last_insert_rowid()
     }
 
+    #[hotpath::skip]
     pub async fn commit(self) -> Result<()> {
         let runtime = self.take_runtime()?;
         tokio::task::spawn_blocking(move || {
@@ -169,6 +176,7 @@ impl Transaction {
         .map_err(join_error)?
     }
 
+    #[hotpath::skip]
     pub async fn rollback(self) -> Result<()> {
         let runtime = self.take_runtime()?;
         tokio::task::spawn_blocking(move || {
@@ -185,12 +193,14 @@ impl Transaction {
     }
 }
 
+#[hotpath::measure]
 fn lock_runtime<T>(runtime: &ProfiledMutex<T>) -> Result<ProfiledMutexGuard<'_, T>> {
     runtime
         .lock()
         .map_err(|_| super::Error::Runtime("exact SQL transaction lock poisoned".to_owned()))
 }
 
+#[hotpath::measure]
 fn join_error(error: tokio::task::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL transaction task failed: {error}"))
 }

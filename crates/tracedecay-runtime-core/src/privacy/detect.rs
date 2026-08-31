@@ -107,6 +107,7 @@ pub struct SanitizationEvidenceAnchorV1 {
     structural_location: String,
 }
 
+#[hotpath::measure_all]
 impl SanitizationEvidenceAnchorV1 {
     fn structural(location: impl Into<String>) -> Self {
         Self {
@@ -233,6 +234,7 @@ impl TryFrom<SanitizationFindingWireV1> for SanitizationFindingV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl SanitizationFindingV1 {
     pub fn new(
         detector: PrivacyDetectorV1,
@@ -349,6 +351,7 @@ impl SanitizationFindingV1 {
     }
 }
 
+#[hotpath::measure]
 fn remediation_class(detector: PrivacyDetectorV1) -> SanitizationRemediationClassV1 {
     match detector {
         PrivacyDetectorV1::ExactCredential
@@ -367,6 +370,7 @@ fn remediation_class(detector: PrivacyDetectorV1) -> SanitizationRemediationClas
     }
 }
 
+#[hotpath::measure]
 fn is_safe_structural_location(location: &str) -> bool {
     if matches!(
         location,
@@ -464,6 +468,7 @@ impl SensitiveKeyPolicy for ConfiguredSensitiveKeyPolicy<'_> {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn is_semantically_sensitive_key(key: &NormalizedSensitiveKey) -> bool {
     const SAFE_METADATA_KEYS: &[&str] = &[
         "api_key_hint",
@@ -553,6 +558,7 @@ pub(crate) fn redact_sensitive_values(
     })
 }
 
+#[hotpath::measure]
 pub fn verify_sanitized_json_payload(
     payload: &Value,
     receipt: &SanitizationReceiptV1,
@@ -575,6 +581,7 @@ pub fn verify_sanitized_json_payload(
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn serialize_verified_json_payload(
     payload: &Value,
     receipt: &SanitizationReceiptV1,
@@ -584,6 +591,7 @@ pub fn serialize_verified_json_payload(
     serde_json::to_vec(payload).map_err(|_| SanitizedPayloadVerificationError::CanonicalEncoding)
 }
 
+#[hotpath::measure]
 pub fn verify_memory_fact_sanitization(
     payload: &Value,
     receipt: &SanitizationReceiptV1,
@@ -602,6 +610,7 @@ pub fn verify_memory_fact_sanitization(
 /// Sanitizes one structured legacy fact payload and binds durable output to
 /// an exact content reference. Raw input is never included in errors or the
 /// receipt identifier. Quarantine deliberately carries no payload or receipt.
+#[hotpath::measure]
 pub fn sanitize_memory_fact_payload(
     payload: Value,
 ) -> Result<MemoryFactSanitizationV1, DetectionError> {
@@ -651,6 +660,7 @@ pub fn sanitize_memory_fact_payload(
     })
 }
 
+#[hotpath::measure]
 fn memory_fact_receipt(
     payload: &Value,
     disposition: SanitizerDispositionV1,
@@ -683,6 +693,7 @@ fn memory_fact_receipt(
     .map_err(|_| DetectionError::Receipt)
 }
 
+#[hotpath::measure]
 pub(super) fn redact_text(
     text: &mut String,
     path: &str,
@@ -780,6 +791,7 @@ pub(super) fn redact_text(
     changed
 }
 
+#[hotpath::measure]
 pub(super) fn credential_patterns() -> Result<&'static CredentialPatternSet, DetectionError> {
     static PATTERNS: OnceLock<Result<CredentialPatternSet, CredentialRuleSetError>> =
         OnceLock::new();
@@ -789,6 +801,7 @@ pub(super) fn credential_patterns() -> Result<&'static CredentialPatternSet, Det
         .map_err(|_| DetectionError::Initialization)
 }
 
+#[hotpath::measure]
 fn pattern_metadata(
     kind: CredentialPatternKind,
 ) -> (PrivacyDetectorV1, DetectionConfidenceV1, &'static str) {
@@ -816,10 +829,12 @@ fn pattern_metadata(
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn normalize_key(key: &str) -> String {
     NormalizedSensitiveKey::new(key).ascii_compact().to_string()
 }
 
+#[hotpath::measure]
 fn structural_location(path: &[JsonPathSegment]) -> String {
     let mut location = String::from("$");
     for segment in path {
@@ -838,6 +853,7 @@ fn structural_location(path: &[JsonPathSegment]) -> String {
     location
 }
 
+#[hotpath::measure]
 fn bounded_location(location: String) -> String {
     if location.len() <= MAX_FINDING_LOCATION_BYTES {
         location

@@ -49,6 +49,7 @@ pub struct LocalProfileStoreAuthorityV1 {
     profile_root: PathBuf,
 }
 
+#[hotpath::measure_all]
 impl LocalProfileStoreAuthorityV1 {
     pub fn new(brain_id: BrainId, profile_id: UserProfileId, profile_root: PathBuf) -> Self {
         Self {
@@ -82,6 +83,7 @@ pub struct LocalProjectEnrollmentAuthorityV1 {
     enrollment_roots: Vec<PathBuf>,
 }
 
+#[hotpath::measure_all]
 impl LocalProjectEnrollmentAuthorityV1 {
     pub fn new(project_id: ProjectId, enrollment_roots: impl IntoIterator<Item = PathBuf>) -> Self {
         let mut enrollment_roots = enrollment_roots.into_iter().collect::<Vec<_>>();
@@ -109,6 +111,7 @@ pub struct LocalCodeStoreAuthorityV1 {
     database_path: PathBuf,
 }
 
+#[hotpath::measure_all]
 impl LocalCodeStoreAuthorityV1 {
     pub fn new(
         shard_id: StoreShardIdV1,
@@ -188,6 +191,7 @@ impl fmt::Debug for LocalStoreRuntimeResolverV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl LocalStoreRuntimeResolverV1 {
     pub fn new(profile_authority: LocalProfileStoreAuthorityV1) -> Self {
         Self {
@@ -745,6 +749,7 @@ pub struct VerifiedLocalStoreLocatorV1 {
     metadata: LocalStoreLocatorMetadataV1,
 }
 
+#[hotpath::measure_all]
 impl VerifiedLocalStoreLocatorV1 {
     pub fn locator(&self) -> &ResolvedStoreLocator {
         &self.locator
@@ -773,6 +778,7 @@ pub struct LocalStoreLocatorUnavailableV1 {
     pub reason: LocalStoreLocatorUnavailableReasonV1,
 }
 
+#[hotpath::measure_all]
 impl LocalStoreLocatorUnavailableV1 {
     fn into_registry_failure(self) -> StoreRuntimeRegistryFailure {
         match self.reason {
@@ -825,6 +831,7 @@ pub enum LocalStoreLocatorUnavailableReasonV1 {
     LocatorDigestUnavailable,
 }
 
+#[hotpath::measure_all]
 impl LocalStoreLocatorUnavailableReasonV1 {
     fn allows_alias_fallback(&self) -> bool {
         matches!(self, Self::ProjectEnrollmentRootUnavailable)
@@ -893,6 +900,7 @@ type LocalStoreLocatorResult<T> = Result<T, LocalStoreLocatorUnavailableReasonV1
 /// authority, registered by the daemon after registry-backed identity
 /// resolution, and every store path is still derived from the typed project
 /// id — never from the root.
+#[hotpath::measure]
 fn require_matching_repository_identity(
     canonical_project_root: &Path,
     expected_project_id: &ProjectId,
@@ -913,6 +921,7 @@ fn require_matching_repository_identity(
 /// error means the probe itself could not be answered, and the reason carries
 /// the probed path and `io::ErrorKind` so a permission denial is never
 /// reported as the same fact as a device that refuses to be opened.
+#[hotpath::measure]
 fn filesystem_probe_failure(
     path: &Path,
     error: &io::Error,
@@ -938,6 +947,7 @@ fn filesystem_probe_failure(
 /// would let a second alias claim the same profile under a different name.
 /// Its ancestors are a different matter — they belong to the host, not to the
 /// caller — and are resolved by `fs::canonicalize` below.
+#[hotpath::measure]
 fn canonical_existing_directory(path: &Path) -> LocalStoreLocatorResult<PathBuf> {
     reject_traversal_or_relative(path)?;
     let metadata =
@@ -948,6 +958,7 @@ fn canonical_existing_directory(path: &Path) -> LocalStoreLocatorResult<PathBuf>
     fs::canonicalize(path).map_err(|error| filesystem_probe_failure(path, &error))
 }
 
+#[hotpath::measure]
 fn canonical_or_prospective_directory(
     path: &Path,
     canonical_parent: &Path,
@@ -970,6 +981,7 @@ fn canonical_or_prospective_directory(
     }
 }
 
+#[hotpath::measure]
 fn canonical_or_prospective_regular_file(
     path: &Path,
     canonical_parent: &Path,
@@ -1004,6 +1016,7 @@ fn canonical_or_prospective_regular_file(
 /// verbatim form for every Windows path, so a probe of the leading component
 /// opened the volume device, returned an error that was not `NotFound`, and
 /// typed every canonical locator root on that host as unavailable.
+#[hotpath::measure]
 fn reject_traversal_or_relative(path: &Path) -> LocalStoreLocatorResult<()> {
     if !path.is_absolute()
         || path
@@ -1028,6 +1041,7 @@ fn reject_traversal_or_relative(path: &Path) -> LocalStoreLocatorResult<()> {
 /// decided by the canonical identity the callers compute; the walk only has
 /// to stop a symlink planted in the tail that is still prospective, which is
 /// the one stretch of the path no canonicalization has resolved yet.
+#[hotpath::measure]
 fn reject_symlink_components_below(boundary: &Path, path: &Path) -> LocalStoreLocatorResult<()> {
     reject_traversal_or_relative(path)?;
     let tail = path
@@ -1055,6 +1069,7 @@ fn reject_symlink_components_below(boundary: &Path, path: &Path) -> LocalStoreLo
     Ok(())
 }
 
+#[hotpath::measure]
 fn verified_locator(
     key: &StoreRuntimeKey,
     kind: LocalStoreLocatorKindV1,
@@ -1083,6 +1098,7 @@ struct LocalFilesystemMetadata {
     filesystem_type: String,
 }
 
+#[hotpath::measure]
 fn require_local_filesystem(
     path: &Path,
     filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
@@ -1100,11 +1116,13 @@ fn require_local_filesystem(
     }
 }
 
+#[hotpath::measure]
 fn canonical_locator_digest(path: &Path) -> LocalStoreLocatorResult<LocatorDigest> {
     store_locator_digest(path)
         .map_err(|_| LocalStoreLocatorUnavailableReasonV1::LocatorDigestUnavailable)
 }
 
+#[hotpath::measure]
 pub fn canonical_store_locator_digest(path: &Path) -> Result<LocatorDigest, String> {
     canonical_locator_digest(path).map_err(|reason| format!("{reason:?}"))
 }
@@ -1118,6 +1136,7 @@ enum FilesystemSafety {
 
 const UNKNOWN_FILESYSTEM_TYPE: &str = "unknown";
 
+#[hotpath::measure]
 fn undetectable_filesystem() -> FilesystemSafety {
     FilesystemSafety::NotDetectable {
         filesystem_type: UNKNOWN_FILESYSTEM_TYPE.to_owned(),
@@ -1140,6 +1159,7 @@ struct FilesystemEvidence {
 ///
 /// Every platform funnels through here so the three outcomes stay identical
 /// across targets, and so the decision itself is testable on any host.
+#[hotpath::measure]
 fn classify_filesystem(evidence: FilesystemEvidence) -> FilesystemSafety {
     let FilesystemEvidence {
         filesystem_type,
@@ -1174,6 +1194,7 @@ fn classify_filesystem(evidence: FilesystemEvidence) -> FilesystemSafety {
 /// object, and the prospective path's locality is that of the nearest directory
 /// that will contain it.
 #[cfg(any(target_os = "macos", windows))]
+#[hotpath::measure]
 fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
     let mut candidate = Some(path);
     while let Some(current) = candidate {
@@ -1186,6 +1207,7 @@ fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
 }
 
 #[cfg(target_os = "linux")]
+#[hotpath::measure]
 fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
     let Ok(mountinfo) = fs::read_to_string("/proc/self/mountinfo") else {
         return undetectable_filesystem();
@@ -1199,6 +1221,7 @@ fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
 /// table, so no longest-prefix matching is needed. `MNT_LOCAL` is the kernel's
 /// own record that the mount is served by hardware attached to this machine.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
     use std::ffi::CString;
     use std::mem::MaybeUninit;
@@ -1228,6 +1251,7 @@ fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
 }
 
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 fn nul_terminated_c_string(field: &[libc::c_char]) -> String {
     let bytes = field
         .iter()
@@ -1246,6 +1270,7 @@ fn nul_terminated_c_string(field: &[libc::c_char]) -> String {
 /// separates `DRIVE_REMOTE` from locally attached storage, and
 /// `GetVolumeInformationW` names the filesystem for the locator's metadata.
 #[cfg(windows)]
+#[hotpath::measure]
 fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
     use std::os::windows::ffi::OsStrExt;
 
@@ -1322,6 +1347,7 @@ fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn nul_terminated_wide_string(field: &[u16]) -> String {
     let length = field
         .iter()
@@ -1331,6 +1357,7 @@ fn nul_terminated_wide_string(field: &[u16]) -> String {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[hotpath::measure]
 fn local_filesystem_safety(_path: &Path) -> FilesystemSafety {
     // No mount classifier is implemented for these targets. Returning
     // unavailable is safer than assuming an arbitrary path is local.
@@ -1338,6 +1365,7 @@ fn local_filesystem_safety(_path: &Path) -> FilesystemSafety {
 }
 
 #[cfg(target_os = "linux")]
+#[hotpath::measure]
 fn filesystem_safety_from_linux_mountinfo(path: &Path, mountinfo: &str) -> FilesystemSafety {
     let mut best_match = None::<(usize, String)>;
     for line in mountinfo.lines() {
@@ -1376,6 +1404,7 @@ fn filesystem_safety_from_linux_mountinfo(path: &Path, mountinfo: &str) -> Files
 }
 
 #[cfg(target_os = "linux")]
+#[hotpath::measure]
 fn unescape_mountinfo_path(value: &str) -> Option<PathBuf> {
     let bytes = value.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
@@ -1401,6 +1430,7 @@ fn unescape_mountinfo_path(value: &str) -> Option<PathBuf> {
 ///
 /// Names come from Linux `mountinfo`, macOS `f_fstypename`, and the Windows
 /// volume filesystem name, so the table spans all three vocabularies.
+#[hotpath::measure]
 fn is_network_filesystem(filesystem_type: &str) -> bool {
     matches!(
         filesystem_type,
@@ -1428,6 +1458,7 @@ fn is_network_filesystem(filesystem_type: &str) -> bool {
 }
 
 /// Lowercase filesystem-type names known to be backed by attached storage.
+#[hotpath::measure]
 fn is_known_local_filesystem(filesystem_type: &str) -> bool {
     matches!(
         filesystem_type,

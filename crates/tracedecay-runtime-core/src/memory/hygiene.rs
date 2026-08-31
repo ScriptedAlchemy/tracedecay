@@ -16,6 +16,7 @@ use crate::privacy::detector_kernel::{
     compile_credential_patterns, looks_high_entropy_token,
 };
 
+#[hotpath::measure]
 fn compile_patterns(
     patterns: &[(&'static str, &'static str)],
 ) -> Result<Vec<(Regex, &'static str)>, regex::Error> {
@@ -25,6 +26,7 @@ fn compile_patterns(
         .collect()
 }
 
+#[hotpath::measure]
 fn regex_set() -> Result<&'static [CredentialPattern], &'static CredentialRuleSetError> {
     static PATTERNS: OnceLock<Result<Vec<CredentialPattern>, CredentialRuleSetError>> =
         OnceLock::new();
@@ -33,6 +35,7 @@ fn regex_set() -> Result<&'static [CredentialPattern], &'static CredentialRuleSe
         .as_deref()
 }
 
+#[hotpath::measure]
 fn credential_reason(kind: CredentialPatternKind) -> &'static str {
     match kind {
         CredentialPatternKind::PrivateKey => "PEM private-key block",
@@ -44,6 +47,7 @@ fn credential_reason(kind: CredentialPatternKind) -> &'static str {
 
 /// Conservative secret-likeness check. Returns a short reason when `content`
 /// matches a credential pattern, or `None` when it looks safe to store.
+#[hotpath::measure]
 pub fn detect_secret_like(content: &str) -> Option<String> {
     let Ok(patterns) = regex_set() else {
         return Some("credential detector unavailable".to_string());
@@ -62,6 +66,7 @@ pub fn detect_secret_like(content: &str) -> Option<String> {
     None
 }
 
+#[hotpath::measure]
 fn transient_regexes() -> Result<&'static [(Regex, &'static str)], &'static regex::Error> {
     static PATTERNS: OnceLock<Result<Vec<(Regex, &'static str)>, regex::Error>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -85,6 +90,7 @@ fn transient_regexes() -> Result<&'static [(Regex, &'static str)], &'static rege
 /// /tmp paths, run-log lines) rather than durable knowledge. Used ONLY by the
 /// curation planner to mark prune CANDIDATES — never to reject or delete
 /// anything on its own.
+#[hotpath::measure]
 pub fn detect_transient(content: &str) -> Option<String> {
     let Ok(patterns) = transient_regexes() else {
         return Some("transient detector unavailable".to_string());

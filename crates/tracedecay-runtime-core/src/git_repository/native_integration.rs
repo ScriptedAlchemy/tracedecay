@@ -57,6 +57,7 @@ pub struct GitNativeApplyOutcome {
     pub final_tree: GitOidV1,
 }
 
+#[hotpath::measure_all]
 impl GitRepositoryAuthority {
     /// Preflight one exact pair without changing refs, index, worktree, or the
     /// real object database.
@@ -341,6 +342,7 @@ impl GitRepositoryAuthority {
     }
 }
 
+#[hotpath::measure]
 fn merge_candidate(
     repository: &gix::Repository,
     destination_tip: gix::ObjectId,
@@ -372,6 +374,7 @@ fn merge_candidate(
     Ok((GitNativePreflightDisposition::Eligible, Some(tree)))
 }
 
+#[hotpath::measure]
 fn cherry_pick_candidate(
     repository: &gix::Repository,
     mut current_tree: gix::ObjectId,
@@ -438,6 +441,7 @@ fn cherry_pick_candidate(
     Ok((GitNativePreflightDisposition::Eligible, Some(current_tree)))
 }
 
+#[hotpath::measure]
 fn materialize_cherry_pick_chain(
     repository: &gix::Repository,
     destination_ref: &str,
@@ -548,6 +552,7 @@ fn materialize_cherry_pick_chain(
     Ok(parent)
 }
 
+#[hotpath::measure]
 fn linear_commit_closure(
     repository: &gix::Repository,
     source_tip: gix::ObjectId,
@@ -589,6 +594,7 @@ fn linear_commit_closure(
     Ok(commits)
 }
 
+#[hotpath::measure]
 fn exact_reference_tip(
     repository: &gix::Repository,
     reference: &str,
@@ -611,6 +617,7 @@ fn exact_reference_tip(
     Ok(target)
 }
 
+#[hotpath::measure]
 fn update_ref_cas(
     repository: &gix::Repository,
     reference: &str,
@@ -628,6 +635,7 @@ fn update_ref_cas(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_ref_pair(source: &str, destination: &str) -> Result<(), GitRepositoryError> {
     if source == destination
         || !source.starts_with("refs/heads/")
@@ -641,6 +649,7 @@ fn validate_ref_pair(source: &str, destination: &str) -> Result<(), GitRepositor
     Ok(())
 }
 
+#[hotpath::measure]
 fn parse_oid(
     value: &GitOidV1,
     operation_name: &'static str,
@@ -649,6 +658,7 @@ fn parse_oid(
         .map_err(|error| operation(operation_name, error))
 }
 
+#[hotpath::measure]
 fn oid(value: gix::ObjectId) -> Result<GitOidV1, GitRepositoryError> {
     GitOidV1::new(value.to_string()).map_err(|error| GitRepositoryError::Operation {
         operation: "native integration object identity",
@@ -656,6 +666,7 @@ fn oid(value: gix::ObjectId) -> Result<GitOidV1, GitRepositoryError> {
     })
 }
 
+#[hotpath::measure]
 fn default_labels() -> gix::merge::blob::builtin_driver::text::Labels<'static> {
     gix::merge::blob::builtin_driver::text::Labels {
         ancestor: Some("base".into()),
@@ -664,6 +675,7 @@ fn default_labels() -> gix::merge::blob::builtin_driver::text::Labels<'static> {
     }
 }
 
+#[hotpath::measure]
 fn default_tree_labels() -> gix::merge::blob::builtin_driver::text::Labels<'static> {
     gix::merge::blob::builtin_driver::text::Labels {
         ancestor: Some("parent".into()),
@@ -672,6 +684,7 @@ fn default_tree_labels() -> gix::merge::blob::builtin_driver::text::Labels<'stat
     }
 }
 
+#[hotpath::measure]
 fn fixed_merge_message(source_ref: &str, destination_ref: &str) -> String {
     format!("Merge {source_ref} into {destination_ref}")
 }

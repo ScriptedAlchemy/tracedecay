@@ -28,10 +28,12 @@ fn authority_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 fn database_error(error: impl std::fmt::Display) -> TraceDecayError {
     authority_error(error.to_string())
 }
 
+#[hotpath::measure]
 fn owner_json(owner: &impl serde::Serialize) -> Result<String> {
     serde_json::to_string(owner).map_err(database_error)
 }
@@ -42,6 +44,7 @@ fn owner_json(owner: &impl serde::Serialize) -> Result<String> {
 // the two must never disagree about what an anchor's history permits. Only
 // the refusal wording below is local, and it is observable, so it stays.
 
+#[hotpath::measure]
 fn disposition_transition_allowed(
     current: Option<AnchorDispositionStateV1>,
     next: AnchorDispositionStateV1,
@@ -49,6 +52,7 @@ fn disposition_transition_allowed(
     AnchorDispositionStateV1::transition_allowed(current, next)
 }
 
+#[hotpath::measure]
 fn suppresses_derivatives(state: AnchorDispositionStateV1) -> bool {
     state.suppresses_derivatives()
 }
@@ -262,6 +266,7 @@ where
         .map_err(database_error)
 }
 
+#[hotpath::measure_all]
 impl super::Database {
     #[hotpath::measure(label = "runtime_core.db.anchor_disposition_append")]
     pub(crate) async fn append_retrieval_anchor_disposition(
@@ -340,6 +345,7 @@ impl super::Database {
         Ok(AnchorDispositionAppendOutcomeV1::Appended)
     }
 
+    #[hotpath::skip]
     pub(crate) async fn publish_retrieval_anchor_derivative(
         &self,
         derivative: &RetrievalAnchorDerivativeV1,
@@ -403,6 +409,7 @@ impl super::Database {
         Ok(outcome)
     }
 
+    #[hotpath::skip]
     pub(crate) async fn resolve_retrieval_anchor_derivatives<O>(
         &self,
         owner: &O,
@@ -416,6 +423,7 @@ impl super::Database {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(crate) async fn resolve_retrieval_anchor_derivative(
         &self,
         owner: &FactOwnerV1,
@@ -426,6 +434,7 @@ impl super::Database {
         resolve_anchor_derivative(&connection, owner, kind, derivative_id).await
     }
 
+    #[hotpath::skip]
     pub(crate) async fn retrieval_anchor_disposition_history(
         &self,
         owner: &impl serde::Serialize,
@@ -552,6 +561,7 @@ impl RetrievalAnchorDispositionStore for super::Database {
     }
 }
 
+#[hotpath::measure]
 fn store_error(_error: TraceDecayError) -> RetrievalAnchorStoreError {
     RetrievalAnchorStoreError::Unavailable
 }

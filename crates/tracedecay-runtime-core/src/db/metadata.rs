@@ -12,6 +12,7 @@ pub enum BoundedMetadataValue {
     Oversized { encoded_bytes: usize },
 }
 
+#[hotpath::measure_all]
 impl Database {
     /// Reads a metadata value by key, returning `None` if not set.
     pub async fn get_metadata(&self, key: &str) -> Result<Option<String>> {
@@ -44,6 +45,7 @@ impl Database {
     /// `SQLite` measures the stored value as bytes and conditionally projects
     /// the value in the same query. The runtime therefore receives only the
     /// measured length and `NULL` when the value exceeds the caller's limit.
+    #[hotpath::skip]
     pub async fn get_metadata_bounded(
         &self,
         key: &str,
@@ -114,6 +116,7 @@ impl Database {
     /// Reads a metadata value through an already-open canonical write
     /// transaction. Compound durable operations use this to keep their
     /// compare-and-set and metadata update on one writer lane.
+    #[hotpath::skip]
     pub async fn get_metadata_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
@@ -143,6 +146,7 @@ impl Database {
     }
 
     /// Sets a metadata value, creating or replacing the entry.
+    #[hotpath::skip]
     pub async fn set_metadata(&self, key: &str, value: &str) -> Result<()> {
         let transaction = self.begin_write_transaction("set_metadata").await?;
         self.set_metadata_unguarded(&transaction, key, value)
@@ -150,6 +154,7 @@ impl Database {
         transaction.commit().await
     }
 
+    #[hotpath::skip]
     pub async fn set_metadata_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,

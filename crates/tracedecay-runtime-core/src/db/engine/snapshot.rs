@@ -13,6 +13,7 @@ pub struct ReadSnapshot {
     runtime: Arc<ProfiledMutex<ExactSqlReadSnapshot>>,
 }
 
+#[hotpath::measure_all]
 impl ReadSnapshot {
     pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
         hotpath::gauge!("runtime_core.db.snapshots_active").inc(1.0);
@@ -24,6 +25,7 @@ impl ReadSnapshot {
         }
     }
 
+    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -55,12 +57,14 @@ impl Drop for ReadSnapshot {
     }
 }
 
+#[hotpath::measure]
 fn lock_runtime<T>(runtime: &ProfiledMutex<T>) -> Result<ProfiledMutexGuard<'_, T>> {
     runtime
         .lock()
         .map_err(|_| super::Error::Runtime("exact SQL read snapshot lock poisoned".to_owned()))
 }
 
+#[hotpath::measure]
 fn join_error(error: tokio::task::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL read snapshot task failed: {error}"))
 }

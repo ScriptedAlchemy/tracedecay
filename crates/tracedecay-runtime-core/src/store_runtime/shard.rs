@@ -50,7 +50,9 @@ pub enum ShardRuntimeLeaseKind {
     Client,
 }
 
+#[hotpath::measure_all]
 impl ShardRuntimeLeaseKind {
+    #[hotpath::skip]
     const fn resource(self) -> ShardRuntimeResource {
         match self {
             Self::GeneralReader => ShardRuntimeResource::GeneralReader,
@@ -62,6 +64,7 @@ impl ShardRuntimeLeaseKind {
         }
     }
 
+    #[hotpath::skip]
     const fn counter_name(self) -> &'static str {
         match self {
             Self::GeneralReader => "general reader leases",
@@ -186,6 +189,7 @@ pub struct ShardRuntimeEvictionEligibility {
     pub blockers: Vec<ShardRuntimeEvictionBlocker>,
 }
 
+#[hotpath::measure_all]
 impl ShardRuntimeEvictionEligibility {
     pub(crate) fn is_eligible(&self) -> bool {
         self.blockers.is_empty()
@@ -248,6 +252,7 @@ struct ShardRuntimeState {
     health: ShardRuntimeHealth,
 }
 
+#[hotpath::measure_all]
 impl ShardRuntime {
     pub fn new(binding: StoreRuntimeBindingV1, pinned_profile: bool) -> Self {
         static NEXT_INSTANCE_ID: std::sync::atomic::AtomicU64 =
@@ -629,6 +634,7 @@ impl ShardRuntime {
     }
 }
 
+#[hotpath::measure_all]
 impl ShardRuntimeState {
     fn touch(&mut self) {
         self.last_activity = Instant::now();
@@ -904,6 +910,7 @@ pub struct ShardRuntimeLease<'a> {
     kind: Option<ShardRuntimeLeaseKind>,
 }
 
+#[hotpath::measure_all]
 impl ShardRuntimeLease<'_> {
     pub fn release(mut self) {
         if let Some(kind) = self.kind.take() {
@@ -927,6 +934,7 @@ struct ShardRuntimeLifetimeLeaseToken {
     active: AtomicBool,
 }
 
+#[hotpath::measure_all]
 impl ShardRuntimeLifetimeLeaseToken {
     fn release(&self) -> bool {
         if !self.active.swap(false, Ordering::AcqRel) {
@@ -954,6 +962,7 @@ pub(crate) struct ShardRuntimeClientLifetimeLease {
     inner: std::sync::Arc<ShardRuntimeLifetimeLeaseToken>,
 }
 
+#[hotpath::measure_all]
 impl ShardRuntimeClientLifetimeLease {
     pub(crate) fn token(&self) -> u64 {
         self.inner.token
@@ -979,6 +988,7 @@ pub(super) struct ShardRuntimeClientLifetimeWeakLease {
     inner: std::sync::Weak<ShardRuntimeLifetimeLeaseToken>,
 }
 
+#[hotpath::measure_all]
 impl ShardRuntimeClientLifetimeWeakLease {
     pub(super) fn release(&self) -> bool {
         self.inner.upgrade().is_some_and(|inner| inner.release())

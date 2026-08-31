@@ -20,6 +20,7 @@ pub enum SqliteFileIdentityError {
 /// file's inode (Unix) or volume/file-index handle identity (Windows). Callers
 /// layer their own generation/resume fingerprints on top; the hashed inputs must
 /// stay byte-identical across authorities that persist this identity.
+#[hotpath::measure]
 pub fn sqlite_generation_identity(path: &Path) -> Result<u64, SqliteFileIdentityError> {
     #[cfg(unix)]
     {
@@ -45,6 +46,7 @@ pub fn sqlite_generation_identity(path: &Path) -> Result<u64, SqliteFileIdentity
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 fn stable_file_identity(file: &std::fs::File, path: &Path) -> std::io::Result<u64> {
     let metadata = file.metadata()?;
     let mut hasher = Sha256::new();

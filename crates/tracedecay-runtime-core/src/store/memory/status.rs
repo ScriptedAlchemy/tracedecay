@@ -28,6 +28,7 @@ struct StatusCounts {
     rated_fact_count: u64,
 }
 
+#[hotpath::measure]
 fn estimated_holographic_capacity() -> FactStoreResult<u64> {
     u64::try_from(
         FHRRAlgebra::<{ HolographicEncoder::DIMENSIONS }>::fhrr_identity().theoretical_capacity(),

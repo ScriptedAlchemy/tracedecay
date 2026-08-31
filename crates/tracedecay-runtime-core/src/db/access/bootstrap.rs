@@ -1,5 +1,6 @@
 use super::*;
 
+#[hotpath::measure]
 pub(super) fn reject_hard_linked_database(path: &Path) -> Result<()> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| access_io_error("inspect database links", path, &error))?;
@@ -23,6 +24,7 @@ pub(super) fn reject_hard_linked_database(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
+#[hotpath::measure]
 pub fn windows_hard_link_count(path: &Path) -> Result<u32> {
     let file = std::fs::File::open(path)
         .map_err(|error| access_io_error("inspect database links", path, &error))?;

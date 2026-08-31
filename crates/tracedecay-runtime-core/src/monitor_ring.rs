@@ -40,6 +40,7 @@ pub const MMAP_FILENAME: &str = "monitor.mmap";
 pub const LOCK_FILENAME: &str = "monitor.lock";
 
 /// Resolve the user-level data directory (`~/.tracedecay/` by default).
+#[hotpath::measure]
 fn global_tracedecay_dir() -> Option<PathBuf> {
     crate::config::user_data_dir()
 }
@@ -55,6 +56,7 @@ pub struct MonitorEntry {
     pub timestamp: u64,
 }
 
+#[hotpath::measure_all]
 impl MonitorEntry {
     /// Display label: `prefix - project - tool_name`
     pub fn label(&self) -> String {
@@ -69,6 +71,7 @@ impl MonitorEntry {
 /// `project_root` is used to derive the folder name. `prefix` identifies
 /// the tool suite (e.g. "tracedecay"). Best-effort: silently returns on
 /// any failure.
+#[hotpath::measure]
 pub fn write_entry(project_root: &Path, prefix: &str, tool_name: &str, delta: u64, before: u64) {
     let Some(dir) = global_tracedecay_dir() else {
         return;
@@ -83,6 +86,7 @@ pub fn write_entry(project_root: &Path, prefix: &str, tool_name: &str, delta: u6
 }
 
 /// Write a tool-call entry to a specific mmap directory (for testing).
+#[hotpath::measure]
 pub fn write_entry_to(
     dir: &Path,
     project_root: &Path,
@@ -100,6 +104,7 @@ pub fn write_entry_to(
     let _ = write_entry_inner(&mmap_path, prefix, &project, tool_name, delta, before);
 }
 
+#[hotpath::measure]
 fn write_str(mmap: &mut memmap2::MmapMut, offset: usize, value: &str) {
     let bytes = value.as_bytes();
     let copy_len = bytes.len().min(FIELD_LEN - 1);
@@ -166,12 +171,14 @@ pub struct MmapReader {
     dir: PathBuf,
 }
 
+#[hotpath::measure]
 fn read_str(mmap: &memmap2::Mmap, offset: usize) -> String {
     let bytes = &mmap[offset..offset + FIELD_LEN];
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(FIELD_LEN);
     String::from_utf8_lossy(&bytes[..end]).to_string()
 }
 
+#[hotpath::measure_all]
 impl MmapReader {
     /// Open the global monitor mmap for reading.
     pub fn open() -> std::io::Result<Self> {

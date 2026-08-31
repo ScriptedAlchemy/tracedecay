@@ -18,6 +18,7 @@ pub struct StoreRuntimeRegistryConfig {
     exclusive_maintenance: bool,
 }
 
+#[hotpath::measure_all]
 impl StoreRuntimeRegistryConfig {
     pub fn new(
         project_code_open_runtime_budget: usize,
@@ -55,6 +56,7 @@ impl StoreRuntimeRegistryConfig {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(crate) const fn project_code_open_runtime_budget(self) -> usize {
         self.project_code_open_runtime_budget
     }
@@ -76,10 +78,12 @@ impl StoreRuntimeRegistryConfig {
         Ok(())
     }
 
+    #[hotpath::skip]
     pub(super) const fn project_budget(self) -> usize {
         self.project_code_open_runtime_budget
     }
 
+    #[hotpath::skip]
     pub(super) const fn eviction_idle(self) -> Duration {
         self.eviction_idle
     }
@@ -107,6 +111,7 @@ pub(super) struct EvictionReservation {
     owner: std::sync::Arc<super::StoreRuntimeOwnerAttachment>,
 }
 
+#[hotpath::measure_all]
 impl StoreRuntimeRegistry {
     pub(super) fn reserve_project_code_capacity(
         &self,
@@ -218,6 +223,7 @@ impl StoreRuntimeRegistry {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn drain_and_close_physical(
     handle: &super::StoreRuntimeOwnerAttachment,
 ) -> Result<(), StoreRuntimeRegistryFailure> {
@@ -236,6 +242,7 @@ pub(super) fn drain_and_close_physical(
     Ok(())
 }
 
+#[hotpath::measure]
 fn drain_and_close(
     handle: &super::StoreRuntimeOwnerAttachment,
 ) -> Result<(), StoreRuntimeRegistryFailure> {

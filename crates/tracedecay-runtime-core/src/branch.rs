@@ -34,6 +34,7 @@ pub const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration:
 /// primary HEAD instead of the worktree-specific HEAD.
 ///
 /// Returns `None` for detached HEAD or if the repository cannot be opened.
+#[hotpath::measure]
 pub fn current_branch(project_root: &Path) -> Option<String> {
     crate::git_repository::GitRepositoryAuthority::discover(project_root)
         .ok()?
@@ -60,6 +61,7 @@ pub struct BranchMemo {
     resolved: std::sync::OnceLock<Option<String>>,
 }
 
+#[hotpath::measure_all]
 impl BranchMemo {
     /// A memo that will resolve the live branch of `root` at most once.
     #[must_use]
@@ -108,6 +110,7 @@ impl BranchMemo {
 }
 
 /// Acquires the shared branch-add lock.
+#[hotpath::measure]
 pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::File> {
     use fs2::FileExt;
 
@@ -128,10 +131,12 @@ pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::Fil
 /// Blocking-with-timeout variant of [`try_acquire_branch_add_lock`] for
 /// synchronous callers. Retries a briefly-contended lock (a concurrent branch
 /// add is only holding it for the duration of a DB clone) before giving up.
+#[hotpath::measure]
 pub fn acquire_branch_lock_blocking(tracedecay_dir: &Path) -> Result<std::fs::File> {
     acquire_branch_add_lock_blocking_with(tracedecay_dir, try_acquire_branch_add_lock)
 }
 
+#[hotpath::measure]
 fn acquire_branch_add_lock_blocking_with(
     tracedecay_dir: &Path,
     acquire: fn(&Path) -> Result<std::fs::File>,
@@ -167,6 +172,7 @@ fn acquire_branch_add_lock_blocking_with(
 /// The final fallback deliberately returns `None` for detached HEAD rather
 /// than inventing a default branch.
 #[must_use]
+#[hotpath::measure]
 pub fn detect_default_branch(project_root: &Path) -> Option<String> {
     let authority = crate::git_repository::GitRepositoryAuthority::discover(project_root).ok()?;
     let references = authority.references().ok()?;
@@ -194,6 +200,7 @@ pub fn detect_default_branch(project_root: &Path) -> Option<String> {
 /// Replaces `/` with `_`, strips characters unsafe for filenames,
 /// and collapses `..` sequences to prevent path traversal.
 #[must_use]
+#[hotpath::measure]
 pub fn sanitize_branch_name(name: &str) -> String {
     let sanitized: String = name
         .chars()
@@ -224,6 +231,7 @@ pub fn sanitize_branch_name(name: &str) -> String {
 /// If the branch is tracked in metadata, returns its `db_file` path.
 /// Returns `None` if untracked or if the path would escape `tracedecay_dir`.
 #[must_use]
+#[hotpath::measure]
 pub fn resolve_branch_db_path(
     tracedecay_dir: &Path,
     branch: &str,

@@ -49,6 +49,7 @@ pub(super) async fn project_memory_available_facts_tx(
         .collect())
 }
 
+#[hotpath::measure]
 fn project_memory_fts_query(tokens: &[String]) -> Option<String> {
     (!tokens.is_empty()).then(|| {
         tokens
@@ -66,6 +67,7 @@ fn project_memory_fts_query(tokens: &[String]) -> Option<String> {
     })
 }
 
+#[hotpath::measure]
 fn project_memory_escape_like(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -73,6 +75,7 @@ fn project_memory_escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+#[hotpath::measure]
 fn project_memory_candidate_values(
     query: &ProjectMemoryFactSearchQuery,
     min_trust: Confidence,
@@ -86,6 +89,7 @@ fn project_memory_candidate_values(
     ])
 }
 
+#[hotpath::measure]
 fn project_memory_category_filter(
     query: &ProjectMemoryFactSearchQuery,
     values: &mut Vec<Value>,
@@ -475,6 +479,7 @@ pub(super) async fn project_memory_reason_candidates_tx(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn project_memory_matches_entity(fact: &ProjectMemoryFactV1, entity: &str) -> bool {
     let normalized = normalize_entity(entity).to_ascii_lowercase();
     !normalized.is_empty()
@@ -484,6 +489,7 @@ pub(super) fn project_memory_matches_entity(fact: &ProjectMemoryFactV1, entity: 
             .any(|candidate| normalize_entity(candidate).eq_ignore_ascii_case(normalized.as_str()))
 }
 
+#[hotpath::measure]
 pub(super) fn project_memory_matches_all_entities(
     fact: &ProjectMemoryFactV1,
     entities: &[String],

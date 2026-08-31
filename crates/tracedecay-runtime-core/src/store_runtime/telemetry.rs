@@ -71,6 +71,7 @@ pub struct ShardRuntimeLeaseCounts {
     pub clients: u32,
 }
 
+#[hotpath::measure_all]
 impl ShardRuntimeLeaseCounts {
     fn from_health(health: &ShardRuntimeHealthSnapshot) -> Self {
         Self {
@@ -123,6 +124,7 @@ pub struct RuntimeStateCounts {
     pub faulted: u32,
 }
 
+#[hotpath::measure_all]
 impl RuntimeStateCounts {
     fn observe(&mut self, state: RuntimeMaintenanceStateV1) {
         let count = match state {
@@ -147,6 +149,7 @@ pub struct RuntimeHealthCounts {
     pub faulted: u32,
 }
 
+#[hotpath::measure_all]
 impl RuntimeHealthCounts {
     fn observe(&mut self, health: ShardRuntimeHealth) {
         let count = match health {
@@ -206,6 +209,7 @@ pub struct RuntimeTelemetryAggregate {
     pub global_queued_bytes: Option<u64>,
 }
 
+#[hotpath::measure_all]
 impl RuntimeTelemetryAggregate {
     fn observe(&mut self, entry: &RuntimeRegistryInventoryEntry) {
         let health = &entry.health;
@@ -318,12 +322,14 @@ pub struct RuntimeTelemetryProjection {
 }
 
 /// Projects a registry inventory with the standard per-shard detail bound.
+#[hotpath::measure]
 pub fn project_runtime_telemetry(
     inventory: &RuntimeRegistryInventory,
 ) -> RuntimeTelemetryProjection {
     project_runtime_telemetry_with_limit(inventory, MAX_PROJECTED_RUNTIME_SHARDS)
 }
 
+#[hotpath::measure]
 fn project_runtime_telemetry_with_limit(
     inventory: &RuntimeRegistryInventory,
     max_shards: usize,
@@ -373,6 +379,7 @@ fn project_runtime_telemetry_with_limit(
     }
 }
 
+#[hotpath::measure]
 fn project_shard(
     entry: &RuntimeRegistryInventoryEntry,
     admission: &AdmissionConfigV1,
@@ -403,6 +410,7 @@ fn project_shard(
     }
 }
 
+#[hotpath::measure]
 fn compare_binding(left: &StoreRuntimeBindingV1, right: &StoreRuntimeBindingV1) -> Ordering {
     left.shard_id
         .cmp(&right.shard_id)
@@ -410,14 +418,17 @@ fn compare_binding(left: &StoreRuntimeBindingV1, right: &StoreRuntimeBindingV1) 
         .then_with(|| left.authority_epoch.cmp(&right.authority_epoch))
 }
 
+#[hotpath::measure]
 fn bounded_count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+#[hotpath::measure]
 fn sum_complete_sample(total: Option<u64>, sample: Option<u64>) -> Option<u64> {
     Some(total?.saturating_add(sample?))
 }
 
+#[hotpath::measure]
 fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }

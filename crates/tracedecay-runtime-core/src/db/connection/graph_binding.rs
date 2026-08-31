@@ -32,6 +32,7 @@ pub struct MemoryGraphRuntimeOperationV1 {
     runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
 }
 
+#[hotpath::measure_all]
 impl MemoryGraphRuntimeOperationV1 {
     #[must_use]
     pub fn runtime(&self) -> &dyn VerifiedGraphRuntimePortV1 {
@@ -48,6 +49,7 @@ pub enum MemoryGraphRuntimeOperationErrorV1 {
     IdentityMismatch,
 }
 
+#[hotpath::measure_all]
 impl Database {
     /// Binds the exact registered Grafeo runtime paired with this memory
     /// shard. The binding is weak: its map owner retains the graph authority,

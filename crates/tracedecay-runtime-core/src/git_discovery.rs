@@ -62,8 +62,10 @@ pub enum GitRepositoryIdentityOutcome {
     Unknown(GitDiscoveryUnknown),
 }
 
+#[hotpath::measure_all]
 impl GitRepositoryIdentityOutcome {
     /// True when membership could not be decided.
+    #[hotpath::skip]
     pub const fn is_unknown(&self) -> bool {
         matches!(self, Self::Unknown(_))
     }
@@ -122,6 +124,7 @@ pub async fn discover_repository_identity(
 /// Synchronous bounded discovery for legacy parser seams that cannot await.
 ///
 /// Daemon and other async callers should use [`discover_repository_identity`].
+#[hotpath::measure]
 pub fn discover_repository_identity_bounded(directory: &Path) -> GitRepositoryIdentityOutcome {
     discover_repository_identity_with_control(
         directory,
@@ -185,6 +188,7 @@ pub fn discover_repository_identity_with_control(
 /// not fall through to in-process discovery. An unreadable authority after a
 /// failed helper is [`GitDiscoveryUnknown::ProbeFailed`], not
 /// [`GitRepositoryIdentityOutcome::NotRepository`].
+#[hotpath::measure]
 pub fn discover_repository_identity_cli_first(directory: &Path) -> GitRepositoryIdentityOutcome {
     if !repository_control_may_exist(directory) {
         return GitRepositoryIdentityOutcome::NotRepository;
@@ -196,6 +200,7 @@ pub fn discover_repository_identity_cli_first(directory: &Path) -> GitRepository
     )
 }
 
+#[hotpath::measure]
 fn discover_repository_identity_from_cli(
     directory: &Path,
     cli: crate::git::GitCaptureAtResult,
@@ -217,6 +222,7 @@ fn discover_repository_identity_from_cli(
     }
 }
 
+#[hotpath::measure]
 fn repository_control_may_exist(directory: &Path) -> bool {
     let direct = directory.ancestors().any(git_control_exists_or_unknown);
     if direct {
@@ -228,10 +234,12 @@ fn repository_control_may_exist(directory: &Path) -> bool {
         .is_some_and(|canonical| canonical.ancestors().any(git_control_exists_or_unknown))
 }
 
+#[hotpath::measure]
 fn git_control_exists_or_unknown(candidate: &Path) -> bool {
     candidate.join(".git").try_exists().unwrap_or(true)
 }
 
+#[hotpath::measure]
 fn repository_identity_from_authority(directory: &Path) -> Option<GitRepositoryIdentityOutcome> {
     match crate::git_repository::GitRepositoryAuthority::discover(directory) {
         Ok(repository) => {
@@ -253,6 +261,7 @@ fn repository_identity_from_authority(directory: &Path) -> Option<GitRepositoryI
     }
 }
 
+#[hotpath::measure]
 fn repository_identity_command(
     directory: &Path,
 ) -> Result<Command, crate::git::GitProgramUnavailable> {
@@ -270,6 +279,7 @@ fn repository_identity_command(
     Ok(command)
 }
 
+#[hotpath::measure]
 fn async_repository_identity_command(
     directory: &Path,
 ) -> Result<tokio::process::Command, crate::git::GitProgramUnavailable> {
@@ -288,6 +298,7 @@ fn async_repository_identity_command(
     Ok(command)
 }
 
+#[hotpath::measure]
 fn parse_repository_identity(
     directory: &Path,
     stdout: &[u8],
@@ -337,6 +348,7 @@ enum ChildCaptureOutcome {
     Failed,
 }
 
+#[hotpath::measure]
 fn capture_child(
     mut child: Child,
     deadline: MonotonicDeadline,
@@ -374,6 +386,7 @@ fn capture_child(
     }
 }
 
+#[hotpath::measure]
 fn kill_and_reap(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();

@@ -125,6 +125,7 @@ pub struct OwnedMaintenanceDatabaseScope {
     _lifecycle: crate::lifecycle_lease::LifecycleLease,
 }
 
+#[hotpath::measure_all]
 impl MaintenanceDatabaseScope<'_> {
     /// Issues database authority for one exact artifact beneath this retained
     /// exclusive-maintenance profile scope.
@@ -153,6 +154,7 @@ impl MaintenanceDatabaseScope<'_> {
     }
 }
 
+#[hotpath::measure_all]
 impl OwnedMaintenanceDatabaseScope {
     #[cfg(not(test))]
     pub fn lifecycle(&self) -> &crate::lifecycle_lease::LifecycleLease {
@@ -211,6 +213,7 @@ pub enum WriterOwnership {
     ActiveUnknown,
 }
 
+#[hotpath::measure_all]
 impl DatabaseAuthority {
     #[cfg(test)]
     pub(crate) fn acquire_daemon(db_path: &Path, intent: &str) -> Result<Self> {
@@ -445,6 +448,7 @@ impl DatabaseAuthority {
     }
 }
 
+#[hotpath::measure_all]
 impl DatabaseIdentity {
     fn for_path(db_path: &Path) -> Result<Self> {
         let absolute = if db_path.is_absolute() {
@@ -494,6 +498,7 @@ impl DatabaseIdentity {
     }
 }
 
+#[hotpath::measure]
 fn access_error(operation: &str, path: &Path, message: &str) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!("{message} at '{}'", path.display()),
@@ -501,6 +506,7 @@ fn access_error(operation: &str, path: &Path, message: &str) -> TraceDecayError 
     }
 }
 
+#[hotpath::measure]
 fn access_io_error(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecayError {
     access_error(operation, path, &error.to_string())
 }

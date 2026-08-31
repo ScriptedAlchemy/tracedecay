@@ -10,10 +10,12 @@ use super::{
     StoreLayout, read_repository_identity_marker, validate_project_id,
 };
 
+#[hotpath::measure]
 pub fn profile_sharded_data_root(profile_root: &Path, project_id: &str) -> PathBuf {
     profile_root.join("projects").join(project_id)
 }
 
+#[hotpath::measure]
 fn project_id_for_identity_root(identity_root: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(identity_root.to_string_lossy().as_bytes());
@@ -29,6 +31,7 @@ fn project_id_for_identity_root(identity_root: &Path) -> String {
 /// ever minted for this exact directory" — and answering it with the
 /// repository id would report every linked worktree of an initialized
 /// repository as independently initialized.
+#[hotpath::measure]
 pub fn path_local_profile_project_id(project_root: &Path) -> String {
     project_id_for_identity_root(
         &project_root
@@ -44,6 +47,7 @@ pub fn path_local_profile_project_id(project_root: &Path) -> String {
 /// missed: the fallback itself resolves to the repository. A primary checkout
 /// resolves to itself, so every id minted before repository collapse existed
 /// is byte-identical and no live store is orphaned.
+#[hotpath::measure]
 pub fn default_profile_project_id(project_root: &Path) -> String {
     match crate::worktree::repository_identity_root(project_root) {
         Some(repository_root) => project_id_for_identity_root(&repository_root),
@@ -55,6 +59,7 @@ pub fn default_profile_project_id(project_root: &Path) -> String {
 ///
 /// See [`path_local_profile_project_id`] for why discovery must not consult
 /// the repository-collapsed identity here.
+#[hotpath::measure]
 pub(crate) fn has_path_local_profile_store(project_root: &Path) -> bool {
     let Ok(profile_root) = default_profile_root() else {
         return false;
@@ -64,6 +69,7 @@ pub(crate) fn has_path_local_profile_store(project_root: &Path) -> bool {
     data_root.join(config::db_filename(&data_root)).exists()
 }
 
+#[hotpath::measure]
 pub fn default_profile_sharded_layout(
     project_root: &Path,
     profile_root: &Path,
@@ -75,6 +81,7 @@ pub fn default_profile_sharded_layout(
     profile_sharded_layout(project_root, profile_root, &marker)
 }
 
+#[hotpath::measure]
 pub fn profile_sharded_layout(
     project_root: &Path,
     profile_root: &Path,
@@ -110,6 +117,7 @@ pub fn profile_sharded_layout(
     ))
 }
 
+#[hotpath::measure]
 pub fn resolve_layout(project_root: &Path, profile_root: &Path) -> Result<StoreLayout> {
     if let Some(layout) = resolve_persisted_layout(project_root, profile_root)? {
         return Ok(layout);
@@ -117,6 +125,7 @@ pub fn resolve_layout(project_root: &Path, profile_root: &Path) -> Result<StoreL
     default_profile_sharded_layout(project_root, profile_root)
 }
 
+#[hotpath::measure]
 pub fn resolve_persisted_layout(
     project_root: &Path,
     profile_root: &Path,
@@ -159,6 +168,7 @@ pub fn resolve_persisted_layout(
     Ok(None)
 }
 
+#[hotpath::measure]
 pub fn default_profile_root() -> Result<PathBuf> {
     config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not resolve user profile data directory".to_string(),
@@ -174,6 +184,7 @@ pub fn default_profile_root() -> Result<PathBuf> {
 /// about the same directory and split one repository across shards. It now
 /// consults every authority available without awaiting — the same enrollment
 /// marker and repository identity marker via [`resolve_persisted_layout`].
+#[hotpath::measure]
 pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLayout> {
     let profile_root = default_profile_root()?;
     match resolve_enrolled_layout(project_root, &profile_root)? {
@@ -189,6 +200,7 @@ pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLa
 /// motivating one — must not enroll a directory as a side effect. Every
 /// directory this resolver declines is a store shard that never gets minted for
 /// a path that was never a project.
+#[hotpath::measure]
 pub fn resolve_enrolled_layout_for_current_profile(
     project_root: &Path,
 ) -> Result<Option<StoreLayout>> {
@@ -196,6 +208,7 @@ pub fn resolve_enrolled_layout_for_current_profile(
     resolve_enrolled_layout(project_root, &profile_root)
 }
 
+#[hotpath::measure]
 fn resolve_enrolled_layout(
     project_root: &Path,
     profile_root: &Path,
@@ -203,14 +216,17 @@ fn resolve_enrolled_layout(
     resolve_persisted_layout(project_root, profile_root)
 }
 
+#[hotpath::measure]
 pub fn resolve_project_session_db_path(project_root: &Path) -> Result<PathBuf> {
     Ok(resolve_layout_for_current_profile(project_root)?.sessions_db_path)
 }
 
+#[hotpath::measure]
 pub fn resolve_response_handle_root(project_root: &Path) -> Result<PathBuf> {
     Ok(resolve_layout_for_current_profile(project_root)?.response_handle_root)
 }
 
+#[hotpath::measure]
 pub fn resolve_lcm_payload_root(project_root: &Path) -> Result<PathBuf> {
     Ok(resolve_layout_for_current_profile(project_root)?.lcm_payload_root)
 }

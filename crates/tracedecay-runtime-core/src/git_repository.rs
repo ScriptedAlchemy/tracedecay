@@ -66,6 +66,7 @@ pub struct GitRepositoryAuthority {
     common_dir: PathBuf,
 }
 
+#[hotpath::measure_all]
 impl GitRepositoryAuthority {
     #[hotpath::measure(label = "runtime_core.git.repository_discover")]
     pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
@@ -474,6 +475,7 @@ struct TrackedStatusBuilder {
     submodule: bool,
 }
 
+#[hotpath::measure_all]
 impl TrackedStatusBuilder {
     fn new(path: String) -> Self {
         Self {
@@ -523,6 +525,7 @@ impl TrackedStatusBuilder {
 
 /// Preserve the repository's normal configuration and attribute semantics
 /// while rejecting `GIT_*` redirection from the daemon environment.
+#[hotpath::measure]
 fn repository_open_options() -> gix::open::Options {
     let mut permissions = gix::open::Permissions::secure();
     permissions.env.git_prefix = gix::sec::Permission::Deny;
@@ -531,6 +534,7 @@ fn repository_open_options() -> gix::open::Options {
     gix::open::Options::default().permissions(permissions)
 }
 
+#[hotpath::measure]
 fn head_from_gix(repository: &gix::Repository) -> Result<GitHeadStateV1, GitRepositoryError> {
     let head = repository
         .head()
@@ -557,6 +561,7 @@ fn head_from_gix(repository: &gix::Repository) -> Result<GitHeadStateV1, GitRepo
     }
 }
 
+#[hotpath::measure]
 fn repository_error(path: &Path, error: impl std::fmt::Display) -> GitRepositoryError {
     GitRepositoryError::UnreadableRepository {
         path: path.display().to_string(),
@@ -564,6 +569,7 @@ fn repository_error(path: &Path, error: impl std::fmt::Display) -> GitRepository
     }
 }
 
+#[hotpath::measure]
 fn path_text(
     path: &gix::bstr::BStr,
     operation_name: &'static str,
@@ -576,10 +582,12 @@ fn path_text(
         })
 }
 
+#[hotpath::measure]
 fn mode(mode: gix::index::entry::Mode) -> Result<GitFileModeV1, GitRepositoryError> {
     GitFileModeV1::new(format!("{:06o}", mode.bits())).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn worktree_mode(
     root: Option<&Path>,
     path: &str,
@@ -614,6 +622,7 @@ fn worktree_mode(
     GitFileModeV1::new(value).map(Some).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn has_ignored_collision(entries: &[GitStatusEntryV1]) -> bool {
     let ignored = entries
         .iter()
@@ -636,16 +645,19 @@ fn has_ignored_collision(entries: &[GitStatusEntryV1]) -> bool {
     })
 }
 
+#[hotpath::measure]
 fn parent_dir(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
     trimmed.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
 
+#[hotpath::measure]
 fn canonical(path: &Path, operation_name: &'static str) -> Result<PathBuf, GitRepositoryError> {
     path.canonicalize()
         .map_err(|error| operation(operation_name, error))
 }
 
+#[hotpath::measure]
 fn operation(operation: &'static str, error: impl std::fmt::Display) -> GitRepositoryError {
     GitRepositoryError::Operation {
         operation,

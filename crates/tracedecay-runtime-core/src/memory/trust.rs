@@ -15,10 +15,12 @@ pub const LOW_TRUST_REPRESENTATIVE: f64 = 0.15;
 /// `DEFAULT_TRUST` is the representative for "medium".
 pub const HIGH_TRUST_REPRESENTATIVE: f64 = 0.85;
 
+#[hotpath::measure]
 pub fn clamp_trust(score: f64) -> f64 {
     score.clamp(TRUST_MIN, TRUST_MAX)
 }
 
+#[hotpath::measure]
 pub fn trust_bucket(score: f64) -> &'static str {
     let clamped = clamp_trust(score);
     if clamped < DEFAULT_MIN_TRUST {
@@ -30,6 +32,7 @@ pub fn trust_bucket(score: f64) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 pub fn trust_distribution(scores: &[f64]) -> (usize, usize, usize) {
     scores.iter().fold((0, 0, 0), |(low, medium, high), score| {
         match trust_bucket(*score) {

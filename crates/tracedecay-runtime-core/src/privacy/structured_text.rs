@@ -74,6 +74,7 @@ pub struct CodeSourceSanitizationV1 {
     receipt: SanitizationReceiptV1,
 }
 
+#[hotpath::measure_all]
 impl CodeSourceSanitizationV1 {
     #[cfg(test)]
     pub fn sanitized_bytes(&self) -> &[u8] {
@@ -97,6 +98,7 @@ pub struct LcmPayloadSanitizationV1 {
     findings: Vec<SanitizationFindingV1>,
 }
 
+#[hotpath::measure_all]
 impl LcmPayloadSanitizationV1 {
     pub fn sanitized_text(&self) -> &str {
         &self.sanitized_text
@@ -115,6 +117,7 @@ impl LcmPayloadSanitizationV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl StructuredTextSanitizationV1 {
     #[cfg(test)]
     pub(crate) fn sanitized_text(&self) -> &str {
@@ -155,6 +158,7 @@ struct SensitiveCandidate {
 ///
 /// Text that does not parse whole is treated as untrusted raw input and scanned
 /// exactly as before — never implicitly safe.
+#[hotpath::measure]
 pub(crate) fn sanitize_structured_text(
     raw: &str,
 ) -> Result<StructuredTextSanitizationV1, DetectionError> {
@@ -266,6 +270,7 @@ pub(crate) fn sanitize_structured_text(
     })
 }
 
+#[hotpath::measure]
 fn raw_only(raw: &str, patterns: &CredentialPatternSet) -> StructuredTextSanitizationV1 {
     let mut sanitized_text = raw.to_owned();
     let mut findings = Vec::new();
@@ -289,6 +294,7 @@ fn raw_only(raw: &str, patterns: &CredentialPatternSet) -> StructuredTextSanitiz
 /// A malformed structured-looking document cannot prove that field semantics
 /// were scanned. Keep a best-effort raw redaction only for transient handling,
 /// then emit a typed quarantine finding so every durable caller rejects it.
+#[hotpath::measure]
 fn quarantined_structured_text(
     raw: &str,
     patterns: &CredentialPatternSet,
@@ -309,6 +315,7 @@ fn quarantined_structured_text(
 /// Deterministic rank of each candidate within the document: longest value
 /// first, then key order, then position. Naming the comparison set and the
 /// components is what makes the rank meaningful; it is not a probability.
+#[hotpath::measure]
 fn ordinal_ranks(candidates: &[SensitiveCandidate]) -> Result<Vec<u32>, DetectionError> {
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     order.sort_by(|&left, &right| {
@@ -326,6 +333,7 @@ fn ordinal_ranks(candidates: &[SensitiveCandidate]) -> Result<Vec<u32>, Detectio
     Ok(ranks)
 }
 
+#[hotpath::measure]
 fn line_candidates(
     raw: &str,
     fields: &[StructuredTextFieldV1],
@@ -367,6 +375,7 @@ fn line_candidates(
 /// Detects whether an already-decoded value carries a credential the encoded
 /// bytes hid. `Authorization=Bearer%20…` only looks like a bearer token once
 /// the percent escapes are resolved.
+#[hotpath::measure]
 fn trips_a_detector(decoded: &str, patterns: &CredentialPatternSet) -> bool {
     let mut probe = decoded.to_owned();
     let mut ignored = Vec::new();
@@ -379,6 +388,7 @@ fn trips_a_detector(decoded: &str, patterns: &CredentialPatternSet) -> bool {
     )
 }
 
+#[hotpath::measure]
 fn tree_candidates(
     raw: &str,
     parsed: &ParsedStructuredTextV1,
@@ -420,6 +430,7 @@ fn tree_candidates(
     candidates
 }
 
+#[hotpath::measure]
 fn collect_tree_fields(
     value: &Value,
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
@@ -461,6 +472,7 @@ fn collect_tree_fields(
     }
 }
 
+#[hotpath::measure]
 fn collect_scalars(
     value: &Value,
     key: &str,
@@ -492,6 +504,7 @@ fn collect_scalars(
 /// repeated values (two entries sharing one password) each redacted at their
 /// own site. A value that occurs exactly once in the document is claimed
 /// outright, because there is nothing else it could be.
+#[hotpath::measure]
 fn locate_value(raw: &str, key: &str, value: &str) -> Option<Vec<Range<usize>>> {
     if value.is_empty() {
         return None;
@@ -527,6 +540,7 @@ fn locate_value(raw: &str, key: &str, value: &str) -> Option<Vec<Range<usize>>> 
 /// decoy's line while the real value sails through untouched is a redaction
 /// fail-open, so a candidate with no qualifying key occurrence returns `None`
 /// here and is quarantined by the caller instead of guessing.
+#[hotpath::measure]
 fn locate_key_line_tail(raw: &str, key: &str) -> Option<Range<usize>> {
     let index = find_key_occurrence(raw, key)?;
     let after = index + key.len();
@@ -556,6 +570,7 @@ fn locate_key_line_tail(raw: &str, key: &str) -> Option<Range<usize>> {
 /// earlier string value ("remember to rotate the `api_key` weekly") does not
 /// qualify, so it can never redirect the redaction span away from the real
 /// key's line.
+#[hotpath::measure]
 fn find_key_occurrence(raw: &str, key: &str) -> Option<usize> {
     if key.is_empty() {
         return None;
@@ -589,6 +604,7 @@ fn find_key_occurrence(raw: &str, key: &str) -> Option<usize> {
 
 /// Sanitizes free-form provider metadata through the structured parse-first
 /// route used by GitHub bodies, fact labels, and Claude text metadata.
+#[hotpath::measure]
 pub fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
     let result = sanitize_structured_text(text).ok()?;
     if !result.quarantine_findings().is_empty() {
@@ -621,6 +637,7 @@ pub enum CodeSourceShapeV1 {
 /// Sanitizes arbitrary source bytes and issues receipt evidence bound to both
 /// raw input and sanitized text. Declared structured source files retain
 /// their shape.
+#[hotpath::measure]
 pub fn sanitize_code_source_bytes(
     raw: &[u8],
     shape: CodeSourceShapeV1,
@@ -669,6 +686,7 @@ pub fn sanitize_code_source_bytes(
 /// bytes were evaluated under the current rules. This revision changes exactly
 /// when the vendored catalogue or the local supplement changes, which is
 /// exactly when a completed-rescan watermark must invalidate.
+#[hotpath::measure]
 pub fn lcm_payload_detector_revision() -> &'static str {
     static REVISION: OnceLock<String> = OnceLock::new();
     REVISION.get_or_init(|| {
@@ -677,11 +695,13 @@ pub fn lcm_payload_detector_revision() -> &'static str {
     })
 }
 
+#[hotpath::measure]
 pub fn sanitize_lcm_payload_text(raw: &str) -> Result<LcmPayloadSanitizationV1, DetectionError> {
     let (sanitized_text, findings) = detect_lcm_payload(raw)?;
     bind_lcm_payload(raw, sanitized_text, findings)
 }
 
+#[hotpath::measure]
 pub fn bind_sanitized_lcm_payload_text(
     raw: &str,
     candidate: &str,
@@ -694,6 +714,7 @@ pub fn bind_sanitized_lcm_payload_text(
     bind_lcm_payload(raw, sanitized_text, findings)
 }
 
+#[hotpath::measure]
 pub fn quarantine_lcm_payload_text(raw: &str) -> Result<SanitizationReceiptV1, DetectionError> {
     if raw.len() > MAX_LCM_PAYLOAD_BYTES_V1 {
         return Err(DetectionError::ScanLimitExceeded);
@@ -720,6 +741,7 @@ pub fn quarantine_lcm_payload_text(raw: &str) -> Result<SanitizationReceiptV1, D
         .map_err(|_| DetectionError::Receipt)
 }
 
+#[hotpath::measure]
 fn bind_lcm_payload(
     raw: &str,
     sanitized_text: String,
@@ -749,6 +771,7 @@ fn bind_lcm_payload(
     })
 }
 
+#[hotpath::measure]
 fn detect_lcm_payload(raw: &str) -> Result<(String, Vec<SanitizationFindingV1>), DetectionError> {
     if raw.len() > MAX_LCM_PAYLOAD_BYTES_V1 {
         return Err(DetectionError::ScanLimitExceeded);
@@ -797,6 +820,7 @@ fn detect_lcm_payload(raw: &str) -> Result<(String, Vec<SanitizationFindingV1>),
 /// refusals. A parsed document can contain both an unlocatable sensitive value
 /// and a credential-bearing key; the unlocatable-field result takes precedence
 /// because reporting only the key would conceal the value-location failure.
+#[hotpath::measure]
 fn quarantine_detection_error(findings: &[SanitizationFindingV1]) -> DetectionError {
     if findings
         .iter()
@@ -818,6 +842,7 @@ fn quarantine_detection_error(findings: &[SanitizationFindingV1]) -> DetectionEr
 /// stay bounded-scan refusals, an unavailable or misconfigured detector is an
 /// initialization failure, and [`DetectionError::Receipt`] is reserved for
 /// actual receipt/canonical construction faults.
+#[hotpath::measure]
 fn detection_error_from_structured_sanitization(
     error: StructuredSanitizationError,
 ) -> DetectionError {
@@ -837,6 +862,7 @@ fn detection_error_from_structured_sanitization(
     }
 }
 
+#[hotpath::measure]
 fn issue_text_receipt(
     raw: &[u8],
     sanitized: &str,

@@ -24,6 +24,7 @@ pub struct StoreRuntimeRetirementTarget {
     graph_owner_attachment: Option<CanonicalGraphStoreOwnerRetirementTargetV1>,
 }
 
+#[hotpath::measure_all]
 impl StoreRuntimeRetirementTarget {
     #[must_use]
     pub fn new(binding: StoreRuntimeBindingV1, authority: DatabaseAuthority) -> Self {
@@ -162,6 +163,7 @@ pub struct DatabaseGraphOwnerRetirementHandoffV1 {
     graph_owner_target: CanonicalGraphStoreOwnerRetirementTargetV1,
 }
 
+#[hotpath::measure_all]
 impl DatabaseGraphOwnerRetirementHandoffV1 {
     /// Returns the exact move-only reservations for one later Store attempt.
     #[must_use]
@@ -188,6 +190,7 @@ impl DatabaseGraphOwnerRetirementHandoffV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl StoreRuntimeRetirementTarget {
     /// Recovers the paired database and graph owner reservations after an
     /// uncommitted Store refusal or cancellation.
@@ -304,6 +307,7 @@ pub struct StoreRuntimeRetirementRefusal {
     targets: Vec<StoreRuntimeRetirementTarget>,
 }
 
+#[hotpath::measure_all]
 impl StoreRuntimeRetirementRefusal {
     fn new(
         blockers: Vec<StoreRuntimeRetirementBlocker>,
@@ -356,6 +360,7 @@ pub struct StoreRuntimeRetirementCommit {
     outcomes: Vec<StoreRuntimeRetirementOutcome>,
 }
 
+#[hotpath::measure_all]
 impl StoreRuntimeRetirementCommit {
     #[must_use]
     pub fn outcomes(&self) -> &[StoreRuntimeRetirementOutcome] {
@@ -377,6 +382,7 @@ pub struct StoreRuntimeRetirementReservation {
     armed: bool,
 }
 
+#[hotpath::measure_all]
 impl StoreRuntimeRegistry {
     /// Preflights every target beneath one registry lock and transitions the
     /// whole batch to `Retiring` only if every exact target is clear.
@@ -855,6 +861,7 @@ impl StoreRuntimeRegistry {
     }
 }
 
+#[hotpath::measure_all]
 impl StoreRuntimeRetirementReservation {
     /// Cancels this uncommitted reservation, restores its exact ready entries,
     /// and returns the original targets for a later attempt.
@@ -1011,6 +1018,7 @@ impl Drop for StoreRuntimeRetirementReservation {
     }
 }
 
+#[hotpath::measure]
 fn authorities_match(left: &DatabaseAuthority, right: &DatabaseAuthority) -> bool {
     left.token() == right.token()
         && left.role() == right.role()

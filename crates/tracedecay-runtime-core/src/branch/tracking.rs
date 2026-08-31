@@ -10,6 +10,7 @@ use super::{
 };
 
 /// Returns true if `branch` exists as a local `refs/heads/*` branch.
+#[hotpath::measure]
 pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
     if branch.is_empty() {
         return false;
@@ -27,6 +28,7 @@ pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
     crate::git::git_output(project_root, &["show-ref", "--verify", "--quiet", &refname]).is_some()
 }
 
+#[hotpath::measure]
 fn git_rev_list_count(project_root: &Path, from_ref: &str, to_ref: &str) -> Option<usize> {
     crate::git::git_capture(
         project_root,
@@ -39,6 +41,7 @@ fn git_rev_list_count(project_root: &Path, from_ref: &str, to_ref: &str) -> Opti
 /// In-process equivalent of `git rev-list --count hidden..tip`: commits
 /// reachable from `tip` but not from `hidden`. Saves a `git` subprocess
 /// spawn on every branch-add parent ranking.
+#[hotpath::measure]
 fn gix_rev_distance(
     repo: &gix::Repository,
     tip: gix::ObjectId,
@@ -484,6 +487,7 @@ fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
     );
 }
 
+#[hotpath::measure]
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
     // Load-modify-save under the shared branch lock; the preparation no
     // longer holds it across the sync.
@@ -518,6 +522,7 @@ fn rollback_branch_tracking(
     super::admin::rollback_published_branch_tracking(tracedecay_dir, branch_name, db_file)
 }
 
+#[hotpath::measure]
 fn prune_missing_branch_dbs(
     tracedecay_dir: &Path,
     meta: &mut crate::branch_meta::BranchMeta,
@@ -544,6 +549,7 @@ fn prune_missing_branch_dbs(
 ///
 /// Thin alias over [`local_branch_exists`] under the name the branch-store GC
 /// design refers to; keeping both avoids churning existing call sites.
+#[hotpath::measure]
 pub fn is_branch_ref_present(project_root: &Path, branch: &str) -> bool {
     local_branch_exists(project_root, branch)
 }
@@ -551,10 +557,12 @@ pub fn is_branch_ref_present(project_root: &Path, branch: &str) -> bool {
 /// Parses a `last_synced_at` / `created_at` unix-seconds string defensively.
 /// Returns 0 (epoch, i.e. maximally stale) when unparseable so a corrupt
 /// timestamp never protects a dead store from collection.
+#[hotpath::measure]
 pub(crate) fn parse_unix_secs(ts: &str) -> u64 {
     ts.trim().parse::<u64>().unwrap_or(0)
 }
 
+#[hotpath::measure]
 pub(crate) fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

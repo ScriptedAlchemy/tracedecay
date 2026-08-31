@@ -28,6 +28,7 @@ pub const PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1: &str = "TRACEDECAY_RESIDENT_MEMO
 
 /// Derive the concurrent resident-allocation authority for a known host size.
 #[must_use]
+#[hotpath::measure]
 pub fn process_resident_memory_limit_for_system_v1(total_memory_bytes: u64) -> NonZeroU64 {
     NonZeroU64::new(total_memory_bytes.saturating_sub(total_memory_bytes / 4))
         .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
@@ -38,6 +39,7 @@ pub fn process_resident_memory_limit_for_system_v1(total_memory_bytes: u64) -> N
 /// Unset, unparseable, and zero values yield `None` so the caller keeps the
 /// RAM-derived authority.
 #[must_use]
+#[hotpath::measure]
 fn process_resident_memory_limit_override_v1() -> Option<NonZeroU64> {
     std::env::var(PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1)
         .ok()
@@ -54,6 +56,7 @@ fn process_resident_memory_limit_override_v1() -> Option<NonZeroU64> {
 /// not yet participate in this authority. The remaining authority throttles
 /// simultaneous scratch ownership; it never limits repository bytes on disk.
 #[must_use]
+#[hotpath::measure]
 pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
     if let Some(limit) = process_resident_memory_limit_override_v1() {
         hotpath::gauge!("resident_memory.admission_limit_bytes").set(limit.get() as f64);
@@ -99,6 +102,7 @@ pub const RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1: u64 = 8 * 1024 * 10
 
 /// Resolve one watermark in bytes from a permille fraction of the limit.
 #[must_use]
+#[hotpath::measure]
 pub fn resident_memory_watermark_bytes_v1(limit_bytes: NonZeroU64, permille: u64) -> u64 {
     let scaled = u128::from(limit_bytes.get()) * u128::from(permille) / 1_000;
     u64::try_from(scaled).unwrap_or(u64::MAX)
@@ -113,6 +117,7 @@ pub fn resident_memory_watermark_bytes_v1(limit_bytes: NonZeroU64, permille: u64
 /// Returns `None` where the kernel surface is unavailable (non-Linux hosts),
 /// which callers must treat as unobserved, never as zero.
 #[must_use]
+#[hotpath::measure]
 pub fn sampled_process_resident_bytes_v1() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -156,14 +161,17 @@ pub enum ResidentMemoryPressureStateV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl ResidentMemoryPressureStateV1 {
     #[must_use]
+    #[hotpath::skip]
     pub const fn is_over_budget(self) -> bool {
         matches!(self, Self::OverBudget { .. })
     }
 
     /// The last measured RSS, or `None` when nothing has been sampled.
     #[must_use]
+    #[hotpath::skip]
     pub const fn observed_bytes(self) -> Option<u64> {
         match self {
             Self::Unobserved => None,
@@ -228,6 +236,7 @@ impl fmt::Debug for ResidentMemoryPressureV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ResidentMemoryPressureV1 {
     #[must_use]
     pub fn new(limit_bytes: NonZeroU64) -> Self {
@@ -255,16 +264,19 @@ impl ResidentMemoryPressureV1 {
     }
 
     #[must_use]
+    #[hotpath::skip]
     pub const fn limit_bytes(&self) -> u64 {
         self.limit_bytes.get()
     }
 
     #[must_use]
+    #[hotpath::skip]
     pub const fn high_watermark_bytes(&self) -> u64 {
         self.high_watermark_bytes
     }
 
     #[must_use]
+    #[hotpath::skip]
     pub const fn low_watermark_bytes(&self) -> u64 {
         self.low_watermark_bytes
     }
@@ -412,6 +424,7 @@ static PROCESS_RESIDENT_MEMORY_PRESSURE_V1: OnceLock<Arc<ResidentMemoryPressureV
 /// build isolated cells and pass them to
 /// [`ProcessResidentMemoryV1::with_pressure`] instead of touching this.
 #[must_use]
+#[hotpath::measure]
 pub fn process_resident_memory_pressure_v1() -> &'static Arc<ResidentMemoryPressureV1> {
     PROCESS_RESIDENT_MEMORY_PRESSURE_V1.get_or_init(|| {
         Arc::new(ResidentMemoryPressureV1::new(
@@ -424,6 +437,7 @@ pub fn process_resident_memory_pressure_v1() -> &'static Arc<ResidentMemoryPress
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResidentMemoryComponentIdV1(&'static str);
 
+#[hotpath::measure_all]
 impl ResidentMemoryComponentIdV1 {
     pub fn new(value: &'static str) -> Result<Self, ResidentMemoryComponentIdErrorV1> {
         if value.is_empty()
@@ -436,6 +450,7 @@ impl ResidentMemoryComponentIdV1 {
         Ok(Self(value))
     }
 
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         self.0
     }
@@ -485,8 +500,10 @@ pub enum ResidentMemoryAdmissionFailureV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl ResidentMemoryAdmissionFailureV1 {
     #[must_use]
+    #[hotpath::skip]
     pub const fn requested_bytes(&self) -> u64 {
         match self {
             Self::ReservationCeiling {
@@ -499,6 +516,7 @@ impl ResidentMemoryAdmissionFailureV1 {
     }
 
     #[must_use]
+    #[hotpath::skip]
     pub const fn limit_bytes(&self) -> u64 {
         match self {
             Self::ReservationCeiling { limit_bytes, .. }
@@ -510,6 +528,7 @@ impl ResidentMemoryAdmissionFailureV1 {
     /// ceiling. Over-budget refusals clear as pressure falls, so callers retry
     /// them instead of treating the input as permanently unservable.
     #[must_use]
+    #[hotpath::skip]
     pub const fn is_observed_over_budget(&self) -> bool {
         matches!(self, Self::ObservedOverBudget { .. })
     }
@@ -548,6 +567,7 @@ pub struct ProcessSharedMemoryChargeV1 {
     pub bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl ResidentMemorySnapshotV1 {
     pub fn charge_for(&self, key: &ResidentMemoryKeyV1) -> u64 {
         self.charges
@@ -607,6 +627,7 @@ impl fmt::Debug for ProcessResidentMemoryV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ProcessResidentMemoryV1 {
     /// Production constructor: binds the one process-wide measured-RSS cell.
     pub fn new(limit_bytes: NonZeroU64) -> Self {
@@ -955,11 +976,13 @@ impl fmt::Debug for ResidentMemoryReservationV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ResidentMemoryReservationV1 {
     pub fn key(&self) -> &ResidentMemoryKeyV1 {
         &self.key
     }
 
+    #[hotpath::skip]
     pub const fn reserved_bytes(&self) -> u64 {
         self.reserved_bytes
     }
@@ -987,7 +1010,9 @@ pub struct ProcessSharedMemoryReservationV1 {
     reserved_bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl ProcessSharedMemoryReservationV1 {
+    #[hotpath::skip]
     pub const fn reserved_bytes(&self) -> u64 {
         self.reserved_bytes
     }

@@ -49,6 +49,7 @@ use tracedecay_store::{
     ProjectMemoryFactHistoryV1, ProjectMemoryFactIdV1, ProjectMemoryFactInspectionV1,
     ProjectMemoryFactProjectionV1, StoredFactV1,
 };
+#[hotpath::measure]
 fn project_memory_receipt_i32(receipt: &Value, field: &'static str) -> FactStoreResult<i32> {
     receipt
         .get(field)
@@ -62,6 +63,7 @@ fn project_memory_receipt_i32(receipt: &Value, field: &'static str) -> FactStore
         })
 }
 
+#[hotpath::measure]
 fn project_memory_receipt_confidence(
     receipt: &Value,
     field: &'static str,
@@ -76,12 +78,14 @@ fn project_memory_receipt_confidence(
     Confidence::new(millionths as f64 / 1_000_000.0).map_err(FactStoreError::from)
 }
 
+#[hotpath::measure]
 fn project_memory_feedback_detail(value: Option<&str>) -> Option<String> {
     value
         .and_then(sanitize_provider_metadata_text)
         .filter(|value| !value.trim().is_empty())
 }
 
+#[hotpath::measure]
 fn project_memory_feedback_details(
     source_label: Option<&str>,
     reason: Option<&str>,
@@ -113,6 +117,7 @@ fn project_memory_feedback_details(
     }
 }
 
+#[hotpath::measure]
 fn project_memory_feedback_batch(
     fact: &StoredFactV1,
     new_trust: Confidence,
@@ -150,6 +155,7 @@ fn project_memory_feedback_batch(
     )
 }
 
+#[hotpath::measure]
 fn project_memory_feedback_details_label(
     availability: ProjectMemoryFactFeedbackDetailsAvailabilityV1,
 ) -> &'static str {
@@ -160,6 +166,7 @@ fn project_memory_feedback_details_label(
     }
 }
 
+#[hotpath::measure]
 fn project_memory_feedback_details_availability(
     value: &str,
 ) -> FactStoreResult<ProjectMemoryFactFeedbackDetailsAvailabilityV1> {
@@ -174,6 +181,7 @@ fn project_memory_feedback_details_availability(
     }
 }
 
+#[hotpath::measure]
 fn project_memory_feedback_action(
     value: &str,
 ) -> FactStoreResult<ProjectMemoryFactFeedbackActionV1> {
@@ -738,6 +746,7 @@ pub(in crate::store::memory) async fn apply_project_memory_automatic_fact_tx(
     )
 }
 
+#[hotpath::measure]
 fn automatic_fact_apply_result(
     receipt: ProjectMemoryAutomaticFactReceiptV1,
     disposition: ProjectMemoryAutomaticFactApplyDispositionV1,

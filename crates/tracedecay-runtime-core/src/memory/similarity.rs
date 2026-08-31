@@ -20,6 +20,7 @@ const TOKEN_STOPWORDS: &[&str] = &[
     "it", "of", "on", "or", "that", "the", "this", "to", "was", "were", "with",
 ];
 
+#[hotpath::measure]
 pub(crate) fn content_tokens(content: &str) -> BTreeSet<String> {
     let mut tokens = BTreeSet::new();
     let mut current = String::new();
@@ -49,11 +50,13 @@ pub(crate) fn content_tokens(content: &str) -> BTreeSet<String> {
         .collect()
 }
 
+#[hotpath::measure]
 pub fn lexical_overlap(a: &str, b: &str) -> (serde_json::Value, f64, f64) {
     lexical_overlap_tokens(&content_tokens(a), &content_tokens(b))
 }
 
 /// Pre-tokenized variant of [`lexical_overlap`].
+#[hotpath::measure]
 pub(crate) fn lexical_overlap_tokens(
     a_tokens: &BTreeSet<String>,
     b_tokens: &BTreeSet<String>,
@@ -82,6 +85,7 @@ pub(crate) fn lexical_overlap_tokens(
     (payload, token_overlap, overlap_coefficient)
 }
 
+#[hotpath::measure]
 pub fn similarity_classification(
     similarity: f64,
     token_overlap: f64,

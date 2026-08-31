@@ -17,6 +17,7 @@ use std::sync::OnceLock;
 /// `metadata.mcp_instance_id`. The daemon should stamp this *same* id on its own
 /// events so a single process lifetime can be grouped across the MCP server and
 /// the daemon, rather than each component minting an independent id.
+#[hotpath::measure]
 pub fn process_run_id() -> &'static str {
     static RUN_ID: OnceLock<String> = OnceLock::new();
     RUN_ID.get_or_init(|| {

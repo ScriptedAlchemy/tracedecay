@@ -39,6 +39,7 @@ pub struct BranchEntry {
     pub graph_source: Option<BranchGraphSourceV1>,
 }
 
+#[hotpath::measure_all]
 impl BranchEntry {
     /// True when this branch is served by the single project graph store.
     ///
@@ -77,6 +78,7 @@ pub struct BranchGraphSourceDraftV1 {
     pub source_oid: String,
 }
 
+#[hotpath::measure_all]
 impl BranchGraphSourceV1 {
     #[must_use]
     pub fn matches_draft(&self, draft: &BranchGraphSourceDraftV1) -> bool {
@@ -112,6 +114,7 @@ pub struct BranchGraphSourcePublicationV1 {
     installed_entry: BranchEntry,
 }
 
+#[hotpath::measure_all]
 impl BranchGraphSourcePublicationV1 {
     #[must_use]
     pub fn source(&self) -> Option<&BranchGraphSourceV1> {
@@ -136,6 +139,7 @@ pub struct BranchMeta {
     pub branches: HashMap<String, BranchEntry>,
 }
 
+#[hotpath::measure_all]
 impl BranchMeta {
     /// Creates a new metadata with a single default branch entry pointing at
     /// the standard `tracedecay.db`.
@@ -288,6 +292,7 @@ impl BranchMeta {
     }
 }
 
+#[hotpath::measure]
 fn serialize_branches<S>(
     branches: &HashMap<String, BranchEntry>,
     serializer: S,
@@ -301,6 +306,7 @@ where
         .serialize(serializer)
 }
 
+#[hotpath::measure]
 fn validate_db_file(name: &str, entry: &BranchEntry, is_default: bool) -> Result<(), String> {
     let relative = Path::new(&entry.db_file);
     if relative.as_os_str().is_empty()
@@ -336,6 +342,7 @@ fn validate_db_file(name: &str, entry: &BranchEntry, is_default: bool) -> Result
 /// this rejects — invalid JSON *or* valid JSON with the wrong schema — makes
 /// the runtime fall back to single-DB mode. Every reader must go through this
 /// one predicate so invalid metadata is never treated as authority.
+#[hotpath::measure]
 pub fn parse(content: &str) -> serde_json::Result<BranchMeta> {
     let meta: BranchMeta = serde_json::from_str(content)?;
     meta.validate()
@@ -347,6 +354,7 @@ pub fn parse(content: &str) -> serde_json::Result<BranchMeta> {
 ///
 /// Returns `None` if the file doesn't exist (single-DB mode / pre-branch projects).
 /// Prints a warning to stderr if the file exists but is malformed.
+#[hotpath::measure]
 pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
     let path = data_dir.join(BRANCH_META_FILENAME);
     let metadata = match std::fs::symlink_metadata(&path) {
@@ -390,6 +398,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
 }
 
 /// Serializes validated branch metadata in the canonical persisted form.
+#[hotpath::measure]
 pub fn serialize_branch_meta(meta: &BranchMeta) -> std::io::Result<String> {
     meta.validate()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -399,6 +408,7 @@ pub fn serialize_branch_meta(meta: &BranchMeta) -> std::io::Result<String> {
 /// Publishes already-serialized branch metadata after validating that it is the
 /// same canonical schema accepted by runtime readers. This is crate-private so
 /// the deletion journal can persist and later compare the exact commit bytes.
+#[hotpath::measure]
 pub fn save_branch_meta_serialized(data_dir: &Path, serialized: &str) -> std::io::Result<()> {
     parse(serialized)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -412,6 +422,7 @@ pub fn save_branch_meta_serialized(data_dir: &Path, serialized: &str) -> std::io
 /// Writes via a sibling temp file and renames it into place (the same
 /// atomic-write helper used for `store-manifest.json`), so a concurrent
 /// reader never observes a torn or truncated file.
+#[hotpath::measure]
 pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<()> {
     let serialized = serialize_branch_meta(meta)?;
     save_branch_meta_serialized(data_dir, &serialized)
@@ -427,6 +438,7 @@ pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<(
 /// `branch` is untracked — a sync of an untracked branch has no entry to touch.
 /// The shared branch lock serializes this load-modify-save sequence with branch
 /// add, removal, GC, and pending deletion recovery.
+#[hotpath::measure]
 pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
     update_synced_timestamp_with(tracedecay_dir, branch, || {});
 }
@@ -439,6 +451,7 @@ pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
 /// after that precondition succeeds while holding the shared branch lock, so
 /// concurrent branch publications cannot reuse an epoch or overwrite newer
 /// provenance.
+#[hotpath::measure]
 pub fn publish_graph_source(
     tracedecay_dir: &Path,
     branch: &str,
@@ -509,6 +522,7 @@ pub fn publish_graph_source(
 /// Restores the entry immediately preceding one exact graph-source
 /// publication. A no-match means another writer owns the metadata now and
 /// must be preserved.
+#[hotpath::measure]
 pub fn rollback_graph_source_publication(
     tracedecay_dir: &Path,
     publication: &BranchGraphSourcePublicationV1,
@@ -529,6 +543,7 @@ pub fn rollback_graph_source_publication(
     Ok(BranchGraphSourceRollbackOutcomeV1::Restored)
 }
 
+#[hotpath::measure]
 fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock: impl FnOnce()) {
     let Ok(_branch_lock) = crate::branch::acquire_branch_lock_blocking(tracedecay_dir) else {
         return;
@@ -545,12 +560,14 @@ fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock:
 }
 
 /// Returns the path to the `branches/` subdirectory, creating it if needed.
+#[hotpath::measure]
 pub fn ensure_branches_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
     let dir = data_dir.join("branches");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
+#[hotpath::measure]
 fn now_unix_str() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -560,6 +577,7 @@ fn now_unix_str() -> String {
 }
 
 /// Formats a UNIX timestamp string as a human-readable relative time.
+#[hotpath::measure]
 pub fn format_timestamp(ts: &str) -> String {
     let Ok(secs) = ts.parse::<u64>() else {
         return ts.to_string();

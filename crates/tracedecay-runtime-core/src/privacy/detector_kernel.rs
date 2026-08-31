@@ -19,6 +19,7 @@ pub struct NormalizedSensitiveKey {
     compact: String,
 }
 
+#[hotpath::measure_all]
 impl NormalizedSensitiveKey {
     pub fn new(key: &str) -> Self {
         let ascii_compact = key
@@ -88,6 +89,7 @@ pub enum JsonVisitMut<'a, M> {
     String(&'a mut String),
 }
 
+#[hotpath::measure]
 pub(crate) fn visit_json_object_keys<P, V>(value: &Value, policy: &P, mut visit: V) -> bool
 where
     P: SensitiveKeyPolicy,
@@ -127,6 +129,7 @@ where
     walk(value, policy, &mut Vec::new(), &mut visit)
 }
 
+#[hotpath::measure]
 pub fn visit_sensitive_json_mut<P, V>(value: &mut Value, policy: &P, mut visit: V) -> bool
 where
     P: SensitiveKeyPolicy,
@@ -176,6 +179,7 @@ where
     walk(value, policy, &mut Vec::new(), &mut visit)
 }
 
+#[hotpath::measure]
 pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
     let bytes = text.as_bytes();
     let mut ranges = Vec::new();
@@ -209,6 +213,7 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
     ranges
 }
 
+#[hotpath::measure]
 fn is_lcm_payload_ref(candidate: &str) -> bool {
     candidate
         .strip_prefix("ref=")
@@ -226,6 +231,7 @@ fn is_lcm_payload_ref(candidate: &str) -> bool {
 /// it on a versioned scale. Integer arithmetic keeps it exactly reproducible.
 /// `None` means the fixed-point value could not be represented, so callers
 /// retain the redaction but abstain from emitting an invented score.
+#[hotpath::measure]
 pub(crate) fn entropy_bits_per_mille(token: &str) -> Option<u32> {
     if token.is_empty() {
         return Some(0);
@@ -244,6 +250,7 @@ pub(crate) fn entropy_bits_per_mille(token: &str) -> Option<u32> {
     u32::try_from(entropy_sum * 1_000 / (len * ENTROPY_SCALE)).ok()
 }
 
+#[hotpath::measure]
 pub(crate) fn looks_high_entropy_token(token: &str) -> bool {
     if token.len() < 36
         || !token.bytes().all(token_byte)
@@ -273,6 +280,7 @@ pub(crate) fn looks_high_entropy_token(token: &str) -> bool {
 
 const ENTROPY_SCALE: u128 = 1 << 20;
 
+#[hotpath::measure]
 fn fixed_log2(value: usize) -> u128 {
     debug_assert!(value > 0);
     let integer = usize::BITS - 1 - value.leading_zeros();
@@ -288,6 +296,7 @@ fn fixed_log2(value: usize) -> u128 {
     result
 }
 
+#[hotpath::measure]
 fn token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=' | b'_' | b'-')
 }

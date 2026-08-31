@@ -38,6 +38,7 @@ struct StoredAssertionHeaderV1<'a> {
     actor_id: Option<&'a tracedecay_domain::ActorId>,
 }
 
+#[hotpath::measure]
 fn assertion_header_json(assertion: &FactAssertionV1) -> FactStoreResult<String> {
     let payload_reference = assertion.payload().payload_reference()?;
     to_json(
@@ -250,6 +251,7 @@ async fn batch_identity_collision(
     Ok(None)
 }
 
+#[hotpath::measure]
 pub(super) fn collision(kind: &'static str, id: &str) -> FactCommitConflict {
     FactCommitConflict::IdentityCollision {
         kind,
@@ -628,6 +630,7 @@ async fn insert_assertion(
     Ok(())
 }
 
+#[hotpath::measure]
 fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
     match kind {
         FactAssertionKindV1::Correction { supersedes } => vec![supersedes],

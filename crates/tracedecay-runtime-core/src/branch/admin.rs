@@ -60,6 +60,7 @@ pub struct PreparedBranchAdminMutation {
     _branch_lock: std::fs::File,
 }
 
+#[hotpath::measure_all]
 impl PreparedBranchAdminMutation {
     pub fn database_paths(&self) -> &[PathBuf] {
         &self.database_paths
@@ -395,6 +396,7 @@ pub(super) fn rollback_published_branch_tracking(
 }
 
 /// Strict removal entry point used by daemon-owned administrative operations.
+#[hotpath::measure]
 pub fn remove_tracked_branch_store_checked(
     _tracedecay_dir: &Path,
     _branch: &str,
@@ -405,6 +407,7 @@ pub fn remove_tracked_branch_store_checked(
     })
 }
 
+#[hotpath::measure]
 fn load_branch_meta_exact(
     tracedecay_dir: &Path,
 ) -> tracedecay_domain::errors::Result<(Option<BranchMeta>, Option<String>)> {
@@ -450,6 +453,7 @@ fn load_branch_meta_exact(
 
 use super::acquire_branch_lock_blocking as acquire_branch_add_lock_blocking;
 
+#[hotpath::measure]
 fn branch_db_family_paths(db_path: &Path) -> [PathBuf; 3] {
     let mut wal = db_path.to_path_buf();
     wal.set_extension("db-wal");
@@ -458,6 +462,7 @@ fn branch_db_family_paths(db_path: &Path) -> [PathBuf; 3] {
     [db_path.to_path_buf(), wal, shm]
 }
 
+#[hotpath::measure]
 pub(super) fn remove_branch_db_files_checked(
     db_path: &Path,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -478,6 +483,7 @@ pub(super) fn remove_branch_db_files_checked(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn select_orphan_dbs(
     tracedecay_dir: &Path,
     referenced: &std::collections::HashSet<PathBuf>,

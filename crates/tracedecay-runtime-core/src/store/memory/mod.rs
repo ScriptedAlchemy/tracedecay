@@ -118,13 +118,16 @@ pub enum ProjectMemoryGraphReconciliationScheduleV1 {
 /// Product callers mutate canonical facts through [`ProjectMemoryFactStore`];
 /// they never reconcile topology directly.
 #[doc(hidden)]
+#[hotpath::measure]
 pub fn schedule_project_memory_graph_reconciliation(
     db: Database,
 ) -> ProjectMemoryGraphReconciliationScheduleV1 {
     graph::schedule_project_memory_graph_reconciliation(db)
 }
 
+#[hotpath::measure_all]
 impl<'a> DatabaseFactStore<'a> {
+    #[hotpath::skip]
     pub const fn new(db: &'a Database) -> Self {
         Self { db }
     }
@@ -158,6 +161,7 @@ impl FactStore for DatabaseFactStore<'_> {
         }
     }
 
+    #[hotpath::skip]
     async fn query_current_facts(
         &self,
         query: CurrentFactsQuery,
@@ -171,6 +175,7 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
+    #[hotpath::skip]
     async fn query_fact_current(
         &self,
         query: FactCurrentQuery,
@@ -187,6 +192,7 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
+    #[hotpath::skip]
     async fn query_fact_current_response(
         &self,
         query: FactCurrentQuery,
@@ -218,6 +224,7 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
+    #[hotpath::skip]
     async fn query_fact_as_of(
         &self,
         query: FactAsOfQuery,
@@ -231,6 +238,7 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
+    #[hotpath::skip]
     async fn query_fact_as_of_response(
         &self,
         query: FactAsOfQuery,
@@ -300,6 +308,7 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
+    #[hotpath::skip]
     async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
@@ -315,6 +324,7 @@ impl FactStore for DatabaseFactStore<'_> {
 }
 
 impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
+    #[hotpath::skip]
     async fn purge_project_memory_superseded_payloads(
         &self,
         owner: FactOwnerV1,
@@ -340,6 +350,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,
@@ -354,6 +365,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn search_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
@@ -362,6 +374,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         search_project_memory_facts(self.db, &query, read_control).await
     }
 
+    #[hotpath::skip]
     async fn probe_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
@@ -380,6 +393,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         Ok(page)
     }
 
+    #[hotpath::skip]
     async fn related_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
@@ -388,6 +402,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         related_project_memory_facts(self.db, &query, read_control).await
     }
 
+    #[hotpath::skip]
     async fn reason_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
@@ -406,6 +421,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         Ok(page)
     }
 
+    #[hotpath::skip]
     async fn find_project_memory_contradictions(
         &self,
         query: ProjectMemoryFactContradictionQueryV1,
@@ -420,6 +436,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn get_project_memory_fact(
         &self,
         target: ProjectMemoryFactIdV1,
@@ -434,6 +451,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn project_memory_fact_history(
         &self,
         query: ProjectMemoryFactHistoryQueryV1,
@@ -448,6 +466,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn project_memory_status(
         &self,
         owner: FactOwnerV1,
@@ -462,6 +481,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn inspect_project_memory_fact(
         &self,
         target: ProjectMemoryFactIdV1,
@@ -528,6 +548,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn record_project_memory_fact_feedback(
         &self,
         request: ProjectMemoryFactFeedbackCommandV1,
@@ -545,6 +566,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn project_memory_fact_feedback_history(
         &self,
         query: ProjectMemoryFactFeedbackHistoryQueryV1,
@@ -559,6 +581,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn find_project_memory_fact_by_content_digest(
         &self,
         query: ProjectMemoryFactContentDigestQueryV1,
@@ -578,6 +601,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn apply_project_memory_fact_curation(
         &self,
         request: ProjectMemoryFactCurationBatchV1,
@@ -597,6 +621,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn merge_project_memory_facts(
         &self,
         request: ProjectMemoryFactMergeCommandV1,
@@ -612,6 +637,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn dashboard_project_memory_overview(
         &self,
         query: ProjectMemoryDashboardMemoryOverviewQueryV1,
@@ -626,6 +652,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn dashboard_project_memory_fact_detail(
         &self,
         query: ProjectMemoryDashboardFactDetailQueryV1,
@@ -640,6 +667,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn dashboard_project_memory_vector_points(
         &self,
         query: ProjectMemoryDashboardVectorPointsQueryV1,
@@ -654,6 +682,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn dashboard_project_memory_oplog(
         &self,
         query: ProjectMemoryDashboardOplogQueryV1,
@@ -668,6 +697,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn record_project_memory_fact_retrieval(
         &self,
         request: ProjectMemoryFactRetrievalCommandV1,
@@ -685,6 +715,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn apply_project_memory_automatic_fact(
         &self,
         apply_id: ProvenanceId,
@@ -712,6 +743,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn get_project_memory_automatic_fact_receipt(
         &self,
         owner: FactOwnerV1,
@@ -733,6 +765,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn list_project_memory_automatic_fact_receipts(
         &self,
         owner: FactOwnerV1,
@@ -758,6 +791,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::skip]
     async fn project_memory_automation_run_receipts(
         &self,
         owner: FactOwnerV1,
@@ -788,6 +822,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
 }
 
 impl ProjectMemoryGraphStore for DatabaseFactStore<'_> {
+    #[hotpath::skip]
     async fn project_memory_graph(
         &self,
         query: ProjectMemoryGraphQueryV1,
@@ -812,6 +847,7 @@ pub enum ProjectMemoryDbHandle<'a> {
     Owned(Box<Database>),
 }
 
+#[hotpath::measure_all]
 impl<'a> ProjectMemoryDbHandle<'a> {
     /// Borrows the resolved database regardless of ownership.
     pub fn as_db(&self) -> &Database {
@@ -841,8 +877,10 @@ pub struct ProjectFactStore<'a> {
     db: ProjectMemoryDbHandle<'a>,
 }
 
+#[hotpath::measure_all]
 impl<'a> ProjectFactStore<'a> {
     /// Wraps the active database without taking ownership.
+    #[hotpath::skip]
     pub const fn borrowed(db: &'a Database) -> Self {
         Self {
             db: ProjectMemoryDbHandle::Active(db),
@@ -850,6 +888,7 @@ impl<'a> ProjectFactStore<'a> {
     }
 
     /// Takes ownership of a separately opened project-store handle.
+    #[hotpath::skip]
     pub const fn owned(db: Box<Database>) -> Self {
         Self {
             db: ProjectMemoryDbHandle::Owned(db),
@@ -865,6 +904,7 @@ impl<'a> ProjectFactStore<'a> {
 macro_rules! delegate_fact_store_methods {
     ( $( fn $name:ident ( $( $arg:ident : $ty:ty ),* $(,)? ) -> $ret:ty; )+ ) => {
         $(
+            #[hotpath::skip]
             async fn $name(&self, $( $arg : $ty ),* ) -> $ret {
                 self.store().$name( $( $arg ),* ).await
             }

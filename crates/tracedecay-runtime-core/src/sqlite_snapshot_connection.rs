@@ -28,6 +28,7 @@ impl SnapshotConnection {
         })
     }
 
+    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: IntoParams,
@@ -35,6 +36,7 @@ impl SnapshotConnection {
         Executor::execute(self, sql, params).await
     }
 
+    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,
@@ -42,6 +44,7 @@ impl SnapshotConnection {
         QueryExecutor::query(self, sql, params).await
     }
 
+    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         Executor::execute_batch(self, sql).await
     }
@@ -53,6 +56,7 @@ impl SnapshotConnection {
 }
 
 impl QueryExecutor for SnapshotConnection {
+    #[hotpath::skip]
     async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,
@@ -94,6 +98,7 @@ impl QueryExecutor for SnapshotConnection {
 }
 
 impl Executor for SnapshotConnection {
+    #[hotpath::skip]
     async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: IntoParams,
@@ -118,6 +123,7 @@ impl Executor for SnapshotConnection {
         .map_err(|error| EngineError::Runtime(format!("snapshot execute task failed: {error}")))?
     }
 
+    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
@@ -133,6 +139,7 @@ impl Executor for SnapshotConnection {
     }
 }
 
+#[hotpath::measure]
 fn engine_value_to_rusqlite(value: Value) -> rusqlite::types::Value {
     match value {
         Value::Null => rusqlite::types::Value::Null,
@@ -143,6 +150,7 @@ fn engine_value_to_rusqlite(value: Value) -> rusqlite::types::Value {
     }
 }
 
+#[hotpath::measure]
 fn snapshot_value(value: ValueRef<'_>) -> crate::db::engine::Result<Value> {
     Ok(match value {
         ValueRef::Null => Value::Null,
@@ -157,6 +165,7 @@ fn snapshot_value(value: ValueRef<'_>) -> crate::db::engine::Result<Value> {
     })
 }
 
+#[hotpath::measure]
 fn snapshot_sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
     match error {
         rusqlite::Error::SqliteFailure(code, message) => EngineError::Sqlite {

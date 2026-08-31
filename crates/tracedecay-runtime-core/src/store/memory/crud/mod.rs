@@ -9,6 +9,7 @@ use tracedecay_store::{FactStoreError, FactStoreResult};
 
 pub(super) const DEFAULT_TRUST: f64 = 0.5;
 
+#[hotpath::measure]
 pub(super) fn content_digest(content: &str) -> FactStoreResult<LocatorDigest> {
     LocatorDigest::new(encode_tagged_lowercase_hex(
         "sha256:",

@@ -96,11 +96,13 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
     }
 }
 
+#[hotpath::measure_all]
 impl Error {
     pub fn invalid_operation(message: impl Into<String>) -> Self {
         Self::InvalidOperation(message.into())
     }
 
+    #[hotpath::skip]
     pub const fn sqlite_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { code, .. } => *code,
@@ -108,6 +110,7 @@ impl Error {
         }
     }
 
+    #[hotpath::skip]
     pub const fn sqlite_extended_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { extended_code, .. } => *extended_code,

@@ -73,6 +73,7 @@ pub struct ClaudeSanitizerPolicyV1 {
     valid: bool,
 }
 
+#[hotpath::measure_all]
 impl ClaudeSanitizerPolicyV1 {
     pub fn claude_v1() -> Result<Self, PrivacySanitizerError> {
         let version = ComponentVersion::new(CLAUDE_SANITIZER_VERSION_V1)
@@ -177,6 +178,7 @@ impl ClaudeSanitizerPolicyV1 {
     }
 }
 
+#[hotpath::measure]
 fn default_sensitive_keys() -> BTreeSet<String> {
     [
         "api_key",
@@ -209,6 +211,7 @@ pub struct ClaudeRecordSanitizerV1 {
     policy: ClaudeSanitizerPolicyV1,
 }
 
+#[hotpath::measure_all]
 impl ClaudeRecordSanitizerV1 {
     pub fn new(policy: ClaudeSanitizerPolicyV1) -> Self {
         Self { policy }
@@ -436,6 +439,7 @@ impl ClaudeRecordSanitizerV1 {
     }
 }
 
+#[hotpath::measure]
 fn protect_observation_identity(
     identity: &ClaudeObservationIdentityMaterialV1,
 ) -> Result<(ClaudeObservationIdentityMaterialV1, bool), PrivacySanitizerError> {
@@ -486,6 +490,7 @@ fn protect_observation_identity(
     ))
 }
 
+#[hotpath::measure]
 fn protected_session_id(value: &str) -> Result<(SessionId, bool), PrivacySanitizerError> {
     let protected = protect_sensitive_structural_id(value)?;
     let changed = protected != value;
@@ -496,6 +501,7 @@ fn protected_session_id(value: &str) -> Result<(SessionId, bool), PrivacySanitiz
         })
 }
 
+#[hotpath::measure]
 fn protected_observation_id(value: &str) -> Result<(ObservationId, bool), PrivacySanitizerError> {
     let protected = protect_sensitive_structural_id(value)?;
     let changed = protected != value;
@@ -508,6 +514,7 @@ fn protected_observation_id(value: &str) -> Result<(ObservationId, bool), Privac
         })
 }
 
+#[hotpath::measure]
 fn protect_string_field(
     object: &mut serde_json::Map<String, Value>,
     field: &str,
@@ -521,6 +528,7 @@ fn protect_string_field(
     Ok(changed)
 }
 
+#[hotpath::measure]
 fn protect_canonical_payload_structural_ids(
     payload: &mut Value,
 ) -> Result<bool, PrivacySanitizerError> {
@@ -562,6 +570,7 @@ fn protect_canonical_payload_structural_ids(
     Ok(changed)
 }
 
+#[hotpath::measure]
 fn validate_canonical_structural_identity(
     payload: &Value,
     identity: &ClaudeObservationIdentityMaterialV1,
@@ -594,6 +603,7 @@ fn validate_canonical_structural_identity(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SanitizedClaudeRecordV1(Box<DurableClaudeObservationV1>);
 
+#[hotpath::measure_all]
 impl SanitizedClaudeRecordV1 {
     fn issue(observation: &DurableClaudeObservationV1) -> Self {
         Self(Box::new(observation.clone()))
@@ -629,6 +639,7 @@ pub type RecordSanitizerV1 = ClaudeRecordSanitizerV1;
 pub type SanitizedObservationRecordV1 = SanitizedClaudeRecordV1;
 pub type ObservationSanitizationOutcomeV1 = ClaudeSanitizationOutcomeV1;
 
+#[hotpath::measure_all]
 impl ClaudeSanitizationOutcomeV1 {
     pub fn durable_observation(&self) -> Option<&DurableClaudeObservationV1> {
         match self {
