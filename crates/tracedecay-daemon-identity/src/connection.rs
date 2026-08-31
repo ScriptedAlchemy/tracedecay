@@ -7,7 +7,10 @@
 //! instead of silence. Transport — connects, retries, tool calls — stays with
 //! the caller; nothing here opens a stream.
 
+use std::net::SocketAddr;
 use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracedecay_daemon_protocol::{DaemonEndpoint, DaemonLivenessProbe};
@@ -15,16 +18,24 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::authority;
 
-/// A discovered daemon endpoint plus the credential and authority record that
-/// named it.
+/// A discovered daemon endpoint plus its credential and private authority
+/// provenance.
 #[derive(Clone)]
 pub struct DaemonConnection {
     pub endpoint: DaemonEndpoint,
     pub auth_token: Option<String>,
-    pub authority_record: Option<authority::DaemonAuthorityRecord>,
+    authority_record: Option<authority::DaemonAuthorityRecord>,
 }
 
 impl DaemonConnection {
+    /// The loopback HTTP application endpoint published by this connection's
+    /// authority, when one is available.
+    pub fn http_application_endpoint(&self) -> Option<SocketAddr> {
+        self.authority_record
+            .as_ref()
+            .and_then(|record| record.http_application_endpoint)
+    }
+
     pub fn into_protocol(self) -> tracedecay_daemon_protocol::DaemonConnection {
         let connection =
             tracedecay_daemon_protocol::DaemonConnection::new(self.endpoint, self.auth_token);
@@ -151,5 +162,39 @@ pub fn client_connection(socket_path: &Path) -> Result<DaemonConnection> {
     {
         let _ = socket_path;
         current_daemon_connection()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_exposes_only_the_published_http_application_endpoint() {
+        let http_application_endpoint = "127.0.0.1:43124".parse().unwrap();
+        let endpoint = DaemonEndpoint::loopback("127.0.0.1:43123".parse().unwrap()).unwrap();
+        let connection = DaemonConnection {
+            endpoint: endpoint.clone(),
+            auth_token: Some("11".repeat(32)),
+            authority_record: Some(authority::DaemonAuthorityRecord {
+                pid: 42,
+                process_run_id: "run-42".to_owned(),
+                started_at_unix_secs: 1_700_000_000,
+                epoch: 7,
+                version: "test".to_owned(),
+                endpoint,
+                http_application_endpoint: Some(http_application_endpoint),
+                remote_brain_tls_endpoint: None,
+                auth_token: "11".repeat(32),
+                profile_root: PathBuf::from("/tmp/tracedecay-test-profile"),
+                brain_id: None,
+                profile_id: None,
+            }),
+        };
+
+        assert_eq!(
+            connection.http_application_endpoint(),
+            Some(http_application_endpoint)
+        );
     }
 }
