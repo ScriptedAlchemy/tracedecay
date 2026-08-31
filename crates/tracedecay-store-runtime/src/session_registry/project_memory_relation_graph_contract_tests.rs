@@ -192,15 +192,17 @@ async fn reviewed_fact(
 }
 
 async fn wait_for_reconciliation(database: &tracedecay_runtime_core::db::Database) {
-    let owner = database
-        .memory_graph_reconciliation_task_owner()
-        .expect("mounted graph reconciliation owner");
-    for _ in 0..4_096 {
-        if let Ok(reservation) = owner.reserve_retirement() {
+    // Memory-graph attachment is bounded background work by design, so both
+    // the runtime binding and the reconciliation settle are awaited under one
+    // deadline instead of expecting the async mount to have already bound.
+    for _ in 0..2_000 {
+        if let Some(owner) = database.memory_graph_reconciliation_task_owner()
+            && let Ok(reservation) = owner.reserve_retirement()
+        {
             drop(reservation);
             return;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     panic!("mounted graph reconciliation did not settle");
 }
