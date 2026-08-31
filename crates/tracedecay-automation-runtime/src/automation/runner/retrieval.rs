@@ -6,6 +6,9 @@ use super::evidence::{
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -14,7 +17,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1;
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId,
+    ProfileIdentityReadPort, RequestContext, RequestId,
 };
 use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
 use tracedecay_domain::{
@@ -37,7 +40,6 @@ use crate::application::session::{
     SessionTemporalQuery,
 };
 use crate::errors::{Result, TraceDecayError};
-use crate::ports::project_runtime::ProfileIdentity;
 use crate::ports::session_evidence::LcmScope;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::TraceDecay;
@@ -601,7 +603,7 @@ async fn active_registered_automation_anchor(database: &RegisteredGlobalDb) -> O
     SessionId::new(session_id).ok()
 }
 
-fn profile_id(profile_identity: &dyn ProfileIdentity) -> Option<ProfileId> {
+fn profile_id(profile_identity: &dyn ProfileIdentityReadPort) -> Option<ProfileId> {
     ProfileId::new(profile_identity.profile_id().as_str().to_string()).ok()
 }
 
@@ -613,7 +615,7 @@ fn session_store_id(shard: &StoreShardIdV1) -> Option<SessionStoreId> {
 
 fn project_automation_identity(
     shard: &StoreShardIdV1,
-    profile_identity: &dyn ProfileIdentity,
+    profile_identity: &dyn ProfileIdentityReadPort,
     project_id: &ProjectId,
 ) -> Option<ResolvedSessionIdentity> {
     Some(ResolvedSessionIdentity::for_project(
@@ -646,7 +648,7 @@ async fn registered_automation_retrieval_for_identity(
 #[cfg(test)]
 fn profile_automation_identity(
     shard: &StoreShardIdV1,
-    profile_identity: &dyn ProfileIdentity,
+    profile_identity: &dyn ProfileIdentityReadPort,
 ) -> Option<ResolvedSessionIdentity> {
     Some(ResolvedSessionIdentity::for_profile(
         profile_id(profile_identity)?,
@@ -661,7 +663,7 @@ fn profile_automation_identity(
 
 pub async fn registered_project_automation_retrieval(
     database: RegisteredGlobalDbLeaseV1,
-    profile_identity: &dyn ProfileIdentity,
+    profile_identity: &dyn ProfileIdentityReadPort,
     project_id: &ProjectId,
 ) -> Result<Box<dyn AutomationSessionRetrieval>> {
     let shard = &database.binding().shard_id;
@@ -700,7 +702,7 @@ fn unavailable_automation_retrieval(reason: &'static str) -> Box<dyn AutomationS
 }
 
 pub(super) async fn production_user_automation_retrieval(
-    _profile_root: &std::path::Path,
+    _profile_root: &Path,
 ) -> Box<dyn AutomationSessionRetrieval> {
     unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
 }
@@ -715,20 +717,26 @@ mod authority_tests {
     use super::*;
 
     struct FixtureProfileIdentity {
+        profile_root: PathBuf,
         brain_id: BrainId,
         profile_id: UserProfileId,
     }
 
     impl FixtureProfileIdentity {
-        fn new(brain_id: BrainId, profile_id: UserProfileId) -> Self {
+        fn new(profile_root: PathBuf, brain_id: BrainId, profile_id: UserProfileId) -> Self {
             Self {
+                profile_root,
                 brain_id,
                 profile_id,
             }
         }
     }
 
-    impl ProfileIdentity for FixtureProfileIdentity {
+    impl ProfileIdentityReadPort for FixtureProfileIdentity {
+        fn profile_root(&self) -> &Path {
+            &self.profile_root
+        }
+
         fn brain_id(&self) -> &BrainId {
             &self.brain_id
         }
@@ -836,8 +844,11 @@ mod authority_tests {
             .expect("registered test runtime");
         let database = runtime.profile_database_arc();
         let shard = &database.binding().shard_id;
-        let identity =
-            FixtureProfileIdentity::new(shard.brain_id.clone(), shard.profile_id.clone());
+        let identity = FixtureProfileIdentity::new(
+            directory.path().to_path_buf(),
+            shard.brain_id.clone(),
+            shard.profile_id.clone(),
+        );
         let project_id = ProjectId::new("project.automation.wrong-scope").expect("project id");
 
         let error = registered_project_automation_retrieval(database, &identity, &project_id)
@@ -898,7 +909,11 @@ mod authority_tests {
         let database = runtime.profile_database_arc();
         let brain_id = BrainId::new("brain.automation.parity").expect("brain id");
         let profile_id = UserProfileId::new("profile.automation.parity").expect("profile id");
-        let identity = FixtureProfileIdentity::new(brain_id.clone(), profile_id.clone());
+        let identity = FixtureProfileIdentity::new(
+            directory.path().to_path_buf(),
+            brain_id.clone(),
+            profile_id.clone(),
+        );
         let profile_shard = StoreShardIdV1::profile_sessions(brain_id.clone(), profile_id.clone());
         let profile_identity =
             profile_automation_identity(&profile_shard, &identity).expect("profile identity");

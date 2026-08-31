@@ -126,8 +126,10 @@ pub(crate) enum GenerationVerification {
     Reverified,
 }
 
+#[hotpath::measure_all]
 impl GenerationVerification {
     #[cfg(feature = "hotpath")]
+    #[hotpath::skip]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::VerifiedFresh => "verified_fresh",
@@ -153,6 +155,7 @@ pub(crate) struct ContainerIdentity {
     pub(crate) modified_nanoseconds: u32,
 }
 
+#[hotpath::measure_all]
 impl ContainerIdentity {
     /// Reads the identity of `path`, or `None` when it cannot be established.
     ///
@@ -223,6 +226,7 @@ struct MarkerBody {
     generations: Vec<VerifiedGenerationRecord>,
 }
 
+#[hotpath::measure_all]
 impl MarkerBody {
     /// The self-digest over this body's canonical encoding.
     ///
@@ -261,6 +265,7 @@ pub(crate) struct ProvenGeneration {
 }
 
 /// The marker path for a container: `graph.grafeo` -> `graph.verified`.
+#[hotpath::measure]
 fn marker_path(container: &Path) -> PathBuf {
     container.with_extension("verified")
 }
@@ -270,6 +275,7 @@ fn marker_path(container: &Path) -> PathBuf {
 ///
 /// Every rejection is silent and returns an empty set: a marker is a cache of
 /// completed proofs, and the absence of one only ever costs a full proof.
+#[hotpath::measure]
 fn load(
     container: &Path,
     observed: ContainerIdentity,
@@ -324,6 +330,7 @@ struct GenerationKey {
     generation: String,
 }
 
+#[hotpath::measure_all]
 impl GenerationKey {
     fn from_locator(locator: &GenerationLocator) -> Self {
         Self {
@@ -357,6 +364,7 @@ pub(crate) struct GenerationMarkers {
     pristine: AtomicBool,
 }
 
+#[hotpath::measure_all]
 impl GenerationMarkers {
     /// Opens the marker set for a persistent container.
     ///

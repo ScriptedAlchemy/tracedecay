@@ -14,13 +14,18 @@
 //! every manifest directory a *claim boundary*, so an outer package can never
 //! be blamed for a file that belongs to an inner one.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 use ignore::overrides::OverrideBuilder;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tree_sitter::{Node, Parser};
 
-use super::*;
+use super::{
+    EcosystemAudit, EcosystemStatus, ProjectFiles, UnmountedFile, normalized, relative_display,
+};
+use crate::is_ident_byte;
 
 /// Directories a cargo package may own source under.
 ///
@@ -903,8 +908,16 @@ fn module_stem(file: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::ffi::{OsStr, OsString};
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
     use super::super::tests::{project, write};
-    use super::*;
+    use super::{
+        EcosystemAudit, audit, on_disk_spelling, scan_path_assignments, string_literal_value,
+    };
 
     fn audit_rust(root: &Path) -> EcosystemAudit {
         audit(&project(root)).expect("audit")
@@ -1478,8 +1491,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_non_utf8_file_name_is_reported_without_panicking() {
-        use std::os::unix::ffi::OsStrExt;
-
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
         package_manifest(root, "fixture");

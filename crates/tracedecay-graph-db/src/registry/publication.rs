@@ -81,6 +81,7 @@ pub enum GraphPublicationPreparationV1 {
     Proven(Box<ProvenGraphPublicationV1>),
 }
 
+#[hotpath::measure_all]
 impl GraphDbRegistry {
     /// Recovers a dependency-free verified code graph directly from its
     /// sealed derived store and the exact relational head/replay authority.
@@ -320,6 +321,12 @@ impl GraphDbRegistry {
             }
         }
         if sealed_digest_mismatch {
+            tracing::warn!(
+                event = "graph_replay_retire_digest_mismatch",
+                generation = generation.as_str(),
+                "a journaled replay for this code generation carries a different sealed \
+                 digest; retirement conflicts"
+            );
             return Err(GraphDbError::Conflict);
         }
         if candidates.is_empty() {
@@ -352,8 +359,20 @@ impl GraphDbRegistry {
             selected
         };
         let Some((locator, replay, source)) = selected else {
+            tracing::debug!(
+                event = "graph_replay_retirement_retained",
+                generation = generation.as_str(),
+                "every replay for this code generation is still referenced; nothing retires"
+            );
             return Ok(GraphReplayCollectionOutcome::Retained);
         };
+        tracing::debug!(
+            event = "graph_replay_retirement_selected",
+            generation = generation.as_str(),
+            graph_generation = %locator.generation,
+            replay_sequence = replay.sequence.get(),
+            "unreferenced sealed code-generation replay selected for retirement"
+        );
         let retirement = match GraphPublicationReplayRetirementV1::new(
             replay.publication.key.clone(),
             replay.publication.input_digest.clone(),
@@ -400,6 +419,13 @@ impl GraphDbRegistry {
             }
             GraphReplayRetirementOutcomeV1::Conflict => {
                 clear_retiring_fence(&database, &locator)?;
+                tracing::warn!(
+                    event = "graph_replay_retirement_conflict",
+                    generation = generation.as_str(),
+                    graph_generation = %locator.generation,
+                    replay_sequence = replay.sequence.get(),
+                    "relational replay retirement conflicted with a concurrent authority change"
+                );
                 Err(GraphDbError::Conflict)
             }
             GraphReplayRetirementOutcomeV1::Missing => {
@@ -467,6 +493,12 @@ impl GraphDbRegistry {
                             && &source.generation == generation
                         {
                             if &source.sealed_state_digest != sealed_state_digest {
+                                tracing::warn!(
+                                    event = "graph_replay_cleanup_digest_mismatch",
+                                    generation = generation.as_str(),
+                                    "retired cleanup for this code generation carries a \
+                                     different sealed digest; finalization conflicts"
+                                );
                                 return Err(GraphDbError::Conflict);
                             }
                             return match authority
@@ -478,6 +510,11 @@ impl GraphDbRegistry {
                                     Ok(true)
                                 }
                                 GraphRetiredReplayCleanupFinalizeOutcomeV1::Conflict => {
+                                    tracing::warn!(
+                                        event = "graph_replay_cleanup_finalize_conflict",
+                                        generation = generation.as_str(),
+                                        "retired replay cleanup finalization conflicted"
+                                    );
                                     Err(GraphDbError::Conflict)
                                 }
                                 GraphRetiredReplayCleanupFinalizeOutcomeV1::Missing => {
@@ -735,7 +772,16 @@ impl GraphDbRegistry {
             .map_err(map_publication_error)?;
         let replay = match replay {
             GraphPublicationReplayLookupV1::Active(replay) => replay,
-            GraphPublicationReplayLookupV1::Retired(_) => return Err(GraphDbError::Conflict),
+            GraphPublicationReplayLookupV1::Retired(tombstone) => {
+                tracing::warn!(
+                    event = "graph_publication_replay_retired_conflict",
+                    generation = tombstone.key.generation.as_str(),
+                    retired_sequence = tombstone.sequence.get(),
+                    "the journaled replay for this publication key is retired; \
+                     publication conflicts before any journal write"
+                );
+                return Err(GraphDbError::Conflict);
+            }
             GraphPublicationReplayLookupV1::Missing => {
                 return Err(GraphDbError::invalid(
                     "verified graph publication has no durable active replay record",
@@ -947,6 +993,21 @@ impl GraphDbRegistry {
                 )
                 .map(|commit| GraphPublicationPreparationV1::Settled(Box::new(commit)));
             }
+            let expected = replay.publication.expected_prior_head.as_ref();
+            tracing::warn!(
+                event = "graph_publication_prior_head_conflict",
+                generation = replay.publication.key.generation.as_str(),
+                replay_sequence = replay.sequence.get(),
+                expected_prior_generation =
+                    expected.map_or("none", |head| head.key.generation.as_str()),
+                expected_prior_sequence = expected.map_or(0, |head| head.sequence.get()),
+                current_generation = current
+                    .as_ref()
+                    .map_or("none", |head| head.key.generation.as_str()),
+                current_sequence = current.as_ref().map_or(0, |head| head.sequence.get()),
+                "journaled replay expects a different prior verified head and the current \
+                 head is not newer; publication conflicts before the verified-head CAS"
+            );
             return Err(GraphDbError::Conflict);
         }
         let mut visiting = BTreeSet::new();
@@ -1076,6 +1137,12 @@ impl GraphDbRegistry {
         // completion arriving through a different instance of the same store
         // must not install it.
         if !database.shares_runtime_with(operation.database()) {
+            tracing::warn!(
+                event = "graph_publication_instance_conflict",
+                generation = replay.publication.key.generation.as_str(),
+                "publication proof was bound to a different mounted graph instance; \
+                 completion conflicts"
+            );
             return Err(GraphDbError::Conflict);
         }
         let cas = GraphVerifiedHeadCompareAndSwapV1 {
@@ -1094,8 +1161,31 @@ impl GraphDbRegistry {
         {
             GraphVerifiedHeadCasOutcomeV1::Advanced(head)
             | GraphVerifiedHeadCasOutcomeV1::ExactReplay(head) => head,
-            GraphVerifiedHeadCasOutcomeV1::Conflict { .. }
-            | GraphVerifiedHeadCasOutcomeV1::ReplayInputConflict { .. } => {
+            GraphVerifiedHeadCasOutcomeV1::Conflict { actual } => {
+                let expected = cas.expected_prior_head.as_ref();
+                tracing::warn!(
+                    event = "graph_publication_cas_conflict",
+                    generation = cas.publication_key.generation.as_str(),
+                    expected_prior_generation =
+                        expected.map_or("none", |head| head.key.generation.as_str()),
+                    expected_prior_sequence = expected.map_or(0, |head| head.sequence.get()),
+                    actual_generation = actual
+                        .as_ref()
+                        .map_or("none", |head| head.key.generation.as_str()),
+                    actual_sequence = actual.as_ref().map_or(0, |head| head.sequence.get()),
+                    "relational verified-head compare-and-swap observed a different \
+                     current head"
+                );
+                return Err(GraphDbError::Conflict);
+            }
+            GraphVerifiedHeadCasOutcomeV1::ReplayInputConflict { existing } => {
+                tracing::warn!(
+                    event = "graph_publication_cas_replay_input_conflict",
+                    generation = cas.publication_key.generation.as_str(),
+                    existing_sequence = existing.sequence.get(),
+                    "relational verified-head compare-and-swap found the journaled \
+                     replay bound to different inputs"
+                );
                 return Err(GraphDbError::Conflict);
             }
             GraphVerifiedHeadCasOutcomeV1::RecoveredDigestMismatch { expected, actual } => {
@@ -1116,7 +1206,14 @@ impl GraphDbRegistry {
                         .to_owned(),
                 });
             }
-            GraphVerifiedHeadCasOutcomeV1::RetiredReplay(_) => {
+            GraphVerifiedHeadCasOutcomeV1::RetiredReplay(tombstone) => {
+                tracing::warn!(
+                    event = "graph_publication_cas_retired_replay",
+                    generation = tombstone.key.generation.as_str(),
+                    retired_sequence = tombstone.sequence.get(),
+                    "the journaled replay was retired before the verified-head \
+                     compare-and-swap"
+                );
                 return Err(GraphDbError::Conflict);
             }
         };
@@ -1235,6 +1332,14 @@ impl GraphDbRegistry {
         if current.sequence < replay.sequence
             || (current.sequence == replay.sequence && current.key != replay.publication.key)
         {
+            tracing::debug!(
+                event = "graph_generation_snapshot_superseded",
+                generation = replay.publication.key.generation.as_str(),
+                replay_sequence = replay.sequence.get(),
+                current_generation = current.key.generation.as_str(),
+                current_sequence = current.sequence.get(),
+                "exact verified generation lookup conflicts with the current verified head"
+            );
             return Err(GraphDbError::Conflict);
         }
         let historical_head = GraphVerifiedHeadV1::from_replay(
@@ -1259,6 +1364,10 @@ impl GraphDbRegistry {
         Ok(VerifiedGraphSnapshot::new(database, lease, closure))
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.load_dependencies",
+        impl_type = "GraphDbRegistry"
+    )]
     fn load_dependencies(
         &self,
         operation: &RegisteredGraphDbOperationV1,
@@ -1286,8 +1395,23 @@ impl GraphDbRegistry {
             let relational_head = authority
                 .verified_head(&key.projection, context)
                 .map_err(map_publication_error)?
-                .ok_or(GraphDbError::Conflict)?;
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        event = "graph_dependency_head_missing",
+                        dependency_generation = %dependency.generation,
+                        "dependency projection has no relational verified head; \
+                         publication conflicts"
+                    );
+                    GraphDbError::Conflict
+                })?;
             if relational_head.sequence < replay.sequence {
+                tracing::warn!(
+                    event = "graph_dependency_head_stale",
+                    dependency_generation = %dependency.generation,
+                    head_sequence = relational_head.sequence.get(),
+                    replay_sequence = replay.sequence.get(),
+                    "dependency verified head is older than its replay; publication conflicts"
+                );
                 return Err(GraphDbError::Conflict);
             }
             if relational_head.sequence == replay.sequence
@@ -1313,6 +1437,10 @@ impl GraphDbRegistry {
         Ok(loaded)
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.load_verified_head",
+        impl_type = "GraphDbRegistry"
+    )]
     fn load_verified_head(
         &self,
         operation: &RegisteredGraphDbOperationV1,
@@ -1416,6 +1544,7 @@ impl GraphDbRegistry {
 /// The lease is either freshly built from a digest proof this call just ran,
 /// or reused from this exact instance's verified-generation cache; both carry
 /// the same instance-bound proof, so seating is identical.
+#[hotpath::measure(label = "graph_db.generation.seat_historical")]
 fn seat_historical_verified_lease(
     database: GraphDbLeaseV1,
     lease: Arc<VerifiedGenerationLease>,

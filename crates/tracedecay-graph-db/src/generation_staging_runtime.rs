@@ -28,6 +28,7 @@ use crate::{
 #[path = "generation_staging_runtime/native_contract.rs"]
 mod native_contract;
 
+#[hotpath::measure_all]
 impl GraphDb {
     #[hotpath::measure(label = "graph_db.generation.stage.batch", impl_type = "GraphDb")]
     pub(crate) fn apply_staged_generation_batch(
@@ -385,6 +386,7 @@ impl GraphDb {
     }
 }
 
+#[hotpath::measure]
 fn stage_dependency(
     plan: &SemanticVectorStagePlan,
 ) -> Result<GraphGenerationDependency, GraphDbError> {
@@ -410,6 +412,7 @@ fn stage_dependency(
     ))
 }
 
+#[hotpath::measure]
 fn finalization_input_digest(
     plan: &SemanticVectorStagePlan,
     checkpoint: &SemanticVectorCheckpointDigest,
@@ -426,6 +429,7 @@ fn finalization_input_digest(
         .map_err(|error| GraphDbError::invalid(error.to_string()))
 }
 
+#[hotpath::measure]
 fn finalization_idempotency_key(
     plan: &SemanticVectorStagePlan,
     checkpoint: &SemanticVectorCheckpointDigest,
@@ -441,6 +445,7 @@ fn finalization_idempotency_key(
     GraphIdempotencyKey::new(format!("semantic-vector-finalize:{}", digest.as_str()))
 }
 
+#[hotpath::measure]
 fn staged_publication_digest(
     native_digest: &str,
     native_input_digest: &str,
@@ -500,6 +505,7 @@ pub(crate) fn validate_stage_publication_replay(
     validate_metadata_binding(replay, &manifest, false, check)
 }
 
+#[hotpath::measure_all]
 impl GraphWriteBatch {
     pub fn semantic_vector_output_digest(
         &mut self,
@@ -511,6 +517,7 @@ impl GraphWriteBatch {
     }
 }
 
+#[hotpath::measure]
 fn require_staged_batch_mutation_count(count: usize) -> Result<(), GraphDbError> {
     if count > MAX_VERIFIED_GENERATION_BATCH_MUTATIONS {
         return Err(GraphDbError::budget_exhausted_count(
@@ -521,6 +528,7 @@ fn require_staged_batch_mutation_count(count: usize) -> Result<(), GraphDbError>
     Ok(())
 }
 
+#[hotpath::measure]
 fn require_receipt_output_digest(
     actual: &SemanticVectorBatchOutputDigest,
     recorded: &SemanticVectorBatchOutputDigest,
@@ -531,6 +539,7 @@ fn require_receipt_output_digest(
     Ok(())
 }
 
+#[hotpath::measure]
 fn generation_locator(plan: &SemanticVectorStagePlan) -> Result<GenerationLocator, GraphDbError> {
     Ok(GenerationLocator::new(
         GraphProjectionIdentity::new(
@@ -541,6 +550,7 @@ fn generation_locator(plan: &SemanticVectorStagePlan) -> Result<GenerationLocato
     ))
 }
 
+#[hotpath::measure]
 fn batch_idempotency_key(
     key: &SemanticVectorStageBatchKey,
 ) -> Result<GraphIdempotencyKey, GraphDbError> {

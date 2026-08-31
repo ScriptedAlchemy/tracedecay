@@ -161,6 +161,102 @@ async fn moved_branch_label_still_opens_the_exact_checkouts_graph_read() {
     fixture.registry.shutdown().await;
 }
 
+/// The fresh-enrollment journey defect this pins: a seated complete
+/// generation stopped serving its exact scope the moment the next rebuild
+/// started. A new tip commit drifts the checkout, the ready gate's currency
+/// probe truthfully disproves the seat, and the background worker owns the
+/// scheduler for its whole 10–15 minute pass — but the seat still holds the
+/// last complete generation, and the serving contract ("retrieval serves the
+/// last complete generation while the scheduler rebuilds") applies to graph
+/// reads exactly as it does to search. The port must fall back to the seat
+/// and terminate at the same activation terminal the ready path reaches in
+/// this bare fixture (no persistent activation authority), never at the
+/// `not ready for the exact project root` refusal that orphaned exact-scope
+/// retrieval for entire regeneration windows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seated_generation_keeps_serving_its_exact_scope_while_the_scheduler_rebuilds() {
+    let fixture = Fixture::mount().await;
+    let port = project_code_graph_projection_read_port(
+        fixture.registry.clone(),
+        fixture.root().to_path_buf(),
+        fixture.retained_scope.clone(),
+    );
+
+    // Baseline terminal: the ready path in this fixture stops at the typed
+    // interactive-store terminal, not at scope or readiness refusals.
+    let baseline_context = request_context(fixture.retained_scope.clone(), "seated-baseline");
+    let baseline_terminal = port
+        .open(CodeGraphReadRequest::from_context(
+            &baseline_context,
+            UtcMicros(1),
+        ))
+        .await
+        .expect_err("this fixture has no persistent activation, so the ready path stops there");
+
+    // Enter the rebuild window: the background worker owns the scheduler for
+    // its whole pass while a new tip commit has already drifted the checkout.
+    let scheduler = fixture
+        .registry
+        .scheduler_handle(fixture.root())
+        .await
+        .expect("scheduler handle");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal scheduler lock held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("scheduler lock acquired");
+    write(
+        fixture.root(),
+        "src/lib.rs",
+        b"pub fn scope_anchor() -> u32 { 8 }\n",
+    );
+    git(fixture.root(), &["add", "."]);
+    git(fixture.root(), &["commit", "-qm", "tip commit during rebuild"]);
+
+    // The defect preconditions, asserted: the ready gate abstains for the
+    // whole window while the seat still holds the complete generation.
+    assert!(
+        fixture
+            .registry
+            .latest_complete_ready_decoded_for_root_scope(
+                fixture.root(),
+                &fixture.retained_scope
+            )
+            .await
+            .is_none(),
+        "a drifted checkout under a held scheduler must not be admitted as current"
+    );
+    assert!(
+        fixture
+            .registry
+            .latest_complete_serving_for_scope(&fixture.retained_scope)
+            .await
+            .is_some(),
+        "the last complete generation stays seated through the rebuild window"
+    );
+
+    let context = request_context(fixture.retained_scope.clone(), "rebuild-window");
+    let during_terminal = port
+        .open(CodeGraphReadRequest::from_context(&context, UtcMicros(1)))
+        .await
+        .expect_err("same fixture, same activation terminal");
+    assert_eq!(
+        format!("{during_terminal:?}"),
+        format!("{baseline_terminal:?}"),
+        "a rebuild window must serve the seated generation to the same activation \
+         terminal as the ready path, never withdraw exact-scope serving"
+    );
+
+    release_tx.send(()).expect("release scheduler lock");
+    lock_thread.join().expect("scheduler lock thread joins");
+    fixture.registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_different_worktree_is_still_denied_the_retained_graph_read() {
     let fixture = Fixture::mount().await;
@@ -236,14 +332,23 @@ async fn wait_for_initial_generation(registry: &CodeIndexSchedulerRegistryV1, pr
 
 /// The publication event races the serving swap that seats the generation
 /// behind the root-scope ready gate, so poll the exact gate the port uses.
+/// The fresh ladder itself abstains until the graph-bearing generation is
+/// seated (the lightweight text owner publishes first), so it is polled
+/// bounded exactly like the decoded gate below it.
 async fn wait_for_ready_root_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1 {
-    let latest = registry
-        .latest_complete_fresh(project_root)
-        .await
-        .expect("fresh serving generation");
+    let latest = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_fresh(project_root).await {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("fresh serving generation");
     let generation = latest.generation();
     let snapshot = generation.snapshot();
     let scope = ResolvedScope::new(

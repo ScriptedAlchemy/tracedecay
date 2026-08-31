@@ -1,7 +1,7 @@
 use serde_json::Value;
 use tracedecay_application::{ApplicationProblem, ResultContractRef};
-use tracedecay_tool_catalog::BindingSurface;
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
+use tracedecay_tool_catalog::BindingSurface;
 
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::tracedecay::TraceDecay;
@@ -70,7 +70,7 @@ async fn admitted_graph_query(
     // graph-backed tool in the graph/info/analysis/git/health groups funnels
     // through this one open, so a slow span here is admission contention or a
     // stale generation, never handler work.
-    hotpath::future!(
+    let query = hotpath::future!(
         port.open(VerifiedGraphQueryRequest::new(
             &operation,
             request_id,
@@ -79,7 +79,16 @@ async fn admitted_graph_query(
         )),
         label = "mcp.dispatch.graph_query_admission"
     )
-    .await
+    .await?;
+    if query.freshness().is_stale() {
+        // Every graph-backed tool funnels through this open, so this is the
+        // single point that reports serve-old-while-rebuilding back to the
+        // dispatch boundary for the typed response trailer.
+        let _ = options
+            .served_stale_graph_generation
+            .set(query.generation().as_str().to_owned());
+    }
+    Ok(query)
 }
 
 /// The hard ceiling every MCP tool call is bounded by, regardless of dispatch
@@ -618,14 +627,21 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_unused_imports" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_unused_imports(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_unused_imports(
+                    cg.project_root(),
+                    &graph,
+                    args,
+                    scope_prefix,
+                )
+                .await
             }
             // The one analysis tool that opens no graph query: its whole finding is
             // that the graph and the compiler disagree, so taking the graph's file
             // set as input would answer the question with the very source that is
             // under suspicion.
             "tracedecay_unmounted_files" => {
-                analysis::handle_unmounted_files(cg, args, scope_prefix).await
+                portable_analysis::handle_unmounted_files(cg.project_root(), args, scope_prefix)
+                    .await
             }
             "tracedecay_rank" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
@@ -665,7 +681,13 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_unsafe_patterns" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_unsafe_patterns(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_unsafe_patterns(
+                    cg.project_root(),
+                    &graph,
+                    args,
+                    scope_prefix,
+                )
+                .await
             }
             "tracedecay_constructors" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;

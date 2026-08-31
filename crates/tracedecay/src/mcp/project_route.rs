@@ -66,7 +66,9 @@ pub(crate) async fn resolve_registered_project_route(
             "registered project server resolver is unavailable",
         ));
     };
-    let requested_path = requested_path.to_path_buf();
+    let (requested_path, scope) =
+        crate::mcp::scope::resolve_query_scope(&context, requested_path)
+            .map_err(|error| error.into_route_failure().into_error())?;
     let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
         context.clone(),
         requested_path.clone(),
@@ -82,8 +84,6 @@ pub(crate) async fn resolve_registered_project_route(
             ),
         )
     })?;
-    let scope = crate::mcp::scope::resolve_query_scope(&context, &requested_path)
-        .map_err(|error| error.into_route_failure().into_error())?;
     Ok(ResolvedProjectRoute {
         server: Arc::downgrade(&server),
         owner: context,
