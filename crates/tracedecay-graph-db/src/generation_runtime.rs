@@ -91,10 +91,6 @@ impl GenerationStageOutcome {
             Self::Applied(commit) | Self::Reseated(commit) => commit,
         }
     }
-
-    pub(crate) fn was_applied(&self) -> bool {
-        matches!(self, Self::Applied(_))
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -2597,7 +2593,7 @@ mod tests {
                 &|| Ok(()),
             )
             .expect("an exact legacy partial stage must migrate to the wider page layout");
-        assert!(outcome.was_applied());
+        assert!(matches!(outcome, GenerationStageOutcome::Applied(_)));
         assert_eq!(
             batch_canonicalizations(),
             2,
