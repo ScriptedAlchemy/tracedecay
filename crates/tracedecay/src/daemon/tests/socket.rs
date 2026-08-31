@@ -4,6 +4,7 @@ use std::process::Command;
 use super::*;
 #[cfg(unix)]
 use tracedecay_daemon_protocol::{FramePoll, FrameSend};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
 fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_application::Deadline {
@@ -50,12 +51,7 @@ fn lsp_test_invocation(
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_identity::DaemonConnection {
-            endpoint,
-            auth_token: None,
-            authority_record: None,
-        }
-        .into_protocol(),
+        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),
         handshake,
     )
 }
@@ -126,7 +122,7 @@ fn closed_feedback_list_request(
     );
     super::super::DaemonInvocationRequest::feedback(
         request_id,
-        crate::application_surface::ApplicationSurfaceOperation::FeedbackList,
+        ApplicationSurfaceOperation::FeedbackList,
         request_handle.to_owned(),
         observed_at,
         tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
@@ -567,12 +563,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     let invocation = tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_identity::DaemonConnection {
-            endpoint,
-            auth_token: None,
-            authority_record: None,
-        }
-        .into_protocol(),
+        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),
         handshake,
     );
     let (deadline, cancellation) = active_lsp_control("cancel.lsp.reconnect-open");

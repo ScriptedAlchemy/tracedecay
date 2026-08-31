@@ -1,91 +1,97 @@
-//! Owner-family classification for canonical HTTP application operations.
+//! API-owned owner-family classification for canonical HTTP operations.
 
-use super::{HttpApplicationOperation, HttpApplicationOwnerKind};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-impl HttpApplicationOperation {
-    pub const fn owner_kind(self) -> HttpApplicationOwnerKind {
-        match self {
-            Self::GitStatus
-            | Self::GitDiff
-            | Self::GitHistory
-            | Self::GitBlame
-            | Self::GitHunks
-            | Self::GitPreview
-            | Self::GitApply
-            | Self::GitHubStackSignalExpand => HttpApplicationOwnerKind::Git,
-            Self::NativeIntegrationStackSnapshot
-            | Self::NativeIntegrationPreflight
-            | Self::NativeIntegrationApprove
-            | Self::NativeIntegrationApply
-            | Self::NativeIntegrationStatus
-            | Self::NativeIntegrationCancel
-            | Self::NativeIntegrationWorktreeInventory
-            | Self::NativeIntegrationWorktreeInspect
-            | Self::NativeIntegrationWorktreeConfirm
-            | Self::NativeIntegrationWorktreeRemove
-            | Self::NativeIntegrationWorktreeReconcile => {
-                HttpApplicationOwnerKind::NativeIntegration
-            }
-            Self::FeedbackDiagnostics
-            | Self::FeedbackGet
-            | Self::FeedbackExpand
-            | Self::FeedbackList
-            | Self::FeedbackImpact
-            | Self::FeedbackAdvisoryCycle
-            | Self::AffectedTests => HttpApplicationOwnerKind::Feedback,
-            Self::CodeExactOccurrence
-            | Self::CodePhraseSearch
-            | Self::CodeCallees
-            | Self::CodeFacets
-            | Self::CodeTimeline
-            | Self::CodeDeclaration
-            | Self::CodeDefinition
-            | Self::CodeTypeDefinition
-            | Self::CodeReferences => HttpApplicationOwnerKind::CallableCode,
-            Self::TestResults
-            | Self::CodeSymbolSearch
-            | Self::CodeSignatureSearch
-            | Self::CodeImplementations
-            | Self::CodeTypeHierarchy
-            | Self::CodeCallers
-            | Self::SessionLookup
-            | Self::QualifiedName
-            | Self::CallChain
-            | Self::FileDependents
-            | Self::SourceLines
-            | Self::SourceBody
-            | Self::SourceOutline
-            | Self::ModuleApi
-            | Self::FileMetadata
-            | Self::HealthRead
-            | Self::HealthDelta
-            | Self::StorageStatus
-            | Self::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
-            Self::ObservatoryRead => HttpApplicationOwnerKind::Observatory,
-            Self::ConfigurationList
-            | Self::ConfigurationExplain
-            | Self::ConfigurationGet
-            | Self::ConfigurationSet
-            | Self::ConfigurationUnset
-            | Self::ConfigurationBatch
-            | Self::ConfigurationWriteCredential
-            | Self::ConfigurationObservedState
-            | Self::ConfigurationProtectedPreview
-            | Self::ConfigurationProtectedApply
-            | Self::ConfigurationRollbackPreview
-            | Self::ConfigurationRollbackApply
-            | Self::ConfigurationAudit => HttpApplicationOwnerKind::Configuration,
-            Self::ContextScoutStatus
-            | Self::ContextScoutRecent
-            | Self::ContextScoutExplain
-            | Self::ContextScoutCapability
-            | Self::ContextScoutBudget
-            | Self::ContextScoutPause
-            | Self::ContextScoutResume
-            | Self::ContextScoutCancel
-            | Self::ContextScoutClaim
-            | Self::ContextScoutDelivery
-            | Self::ContextScoutFeedback => HttpApplicationOwnerKind::ContextScout,
+use super::HttpApplicationOwnerKind;
+
+pub const fn http_application_owner_kind(
+    operation: ApplicationSurfaceOperation,
+) -> HttpApplicationOwnerKind {
+    match operation {
+        ApplicationSurfaceOperation::GitStatus
+        | ApplicationSurfaceOperation::GitDiff
+        | ApplicationSurfaceOperation::GitHistory
+        | ApplicationSurfaceOperation::GitBlame
+        | ApplicationSurfaceOperation::GitHunks
+        | ApplicationSurfaceOperation::GitPreview
+        | ApplicationSurfaceOperation::GitApply
+        | ApplicationSurfaceOperation::GitHubStackSignalExpand => HttpApplicationOwnerKind::Git,
+        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+        | ApplicationSurfaceOperation::NativeIntegrationApprove
+        | ApplicationSurfaceOperation::NativeIntegrationApply
+        | ApplicationSurfaceOperation::NativeIntegrationStatus
+        | ApplicationSurfaceOperation::NativeIntegrationCancel
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
+            HttpApplicationOwnerKind::NativeIntegration
+        }
+        ApplicationSurfaceOperation::FeedbackDiagnostics
+        | ApplicationSurfaceOperation::FeedbackGet
+        | ApplicationSurfaceOperation::FeedbackExpand
+        | ApplicationSurfaceOperation::FeedbackList
+        | ApplicationSurfaceOperation::FeedbackImpact
+        | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+        | ApplicationSurfaceOperation::AffectedTests => HttpApplicationOwnerKind::Feedback,
+        ApplicationSurfaceOperation::CodeExactOccurrence
+        | ApplicationSurfaceOperation::CodePhraseSearch
+        | ApplicationSurfaceOperation::CodeCallees
+        | ApplicationSurfaceOperation::CodeFacets
+        | ApplicationSurfaceOperation::CodeTimeline
+        | ApplicationSurfaceOperation::CodeDeclaration
+        | ApplicationSurfaceOperation::CodeDefinition
+        | ApplicationSurfaceOperation::CodeTypeDefinition
+        | ApplicationSurfaceOperation::CodeReferences => HttpApplicationOwnerKind::CallableCode,
+        ApplicationSurfaceOperation::TestResults
+        | ApplicationSurfaceOperation::CodeSymbolSearch
+        | ApplicationSurfaceOperation::CodeSignatureSearch
+        | ApplicationSurfaceOperation::CodeImplementations
+        | ApplicationSurfaceOperation::CodeTypeHierarchy
+        | ApplicationSurfaceOperation::CodeCallers
+        | ApplicationSurfaceOperation::SessionLookup
+        | ApplicationSurfaceOperation::QualifiedName
+        | ApplicationSurfaceOperation::CallChain
+        | ApplicationSurfaceOperation::FileDependents
+        | ApplicationSurfaceOperation::SourceLines
+        | ApplicationSurfaceOperation::SourceBody
+        | ApplicationSurfaceOperation::SourceOutline
+        | ApplicationSurfaceOperation::ModuleApi
+        | ApplicationSurfaceOperation::FileMetadata
+        | ApplicationSurfaceOperation::HealthRead
+        | ApplicationSurfaceOperation::HealthDelta
+        | ApplicationSurfaceOperation::StorageStatus
+        | ApplicationSurfaceOperation::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
+        ApplicationSurfaceOperation::ObservatoryRead => HttpApplicationOwnerKind::Observatory,
+        ApplicationSurfaceOperation::ConfigurationList
+        | ApplicationSurfaceOperation::ConfigurationExplain
+        | ApplicationSurfaceOperation::ConfigurationGet
+        | ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationUnset
+        | ApplicationSurfaceOperation::ConfigurationBatch
+        | ApplicationSurfaceOperation::ConfigurationWriteCredential
+        | ApplicationSurfaceOperation::ConfigurationObservedState
+        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        | ApplicationSurfaceOperation::ConfigurationProtectedApply
+        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        | ApplicationSurfaceOperation::ConfigurationRollbackApply
+        | ApplicationSurfaceOperation::ConfigurationAudit => {
+            HttpApplicationOwnerKind::Configuration
+        }
+        ApplicationSurfaceOperation::ContextScoutStatus
+        | ApplicationSurfaceOperation::ContextScoutRecent
+        | ApplicationSurfaceOperation::ContextScoutExplain
+        | ApplicationSurfaceOperation::ContextScoutCapability
+        | ApplicationSurfaceOperation::ContextScoutBudget
+        | ApplicationSurfaceOperation::ContextScoutPause
+        | ApplicationSurfaceOperation::ContextScoutResume
+        | ApplicationSurfaceOperation::ContextScoutCancel
+        | ApplicationSurfaceOperation::ContextScoutClaim
+        | ApplicationSurfaceOperation::ContextScoutDelivery
+        | ApplicationSurfaceOperation::ContextScoutFeedback => {
+            HttpApplicationOwnerKind::ContextScout
         }
     }
 }

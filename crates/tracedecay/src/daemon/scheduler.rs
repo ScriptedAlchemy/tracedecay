@@ -405,6 +405,25 @@ impl DaemonEngine {
             return;
         }
 
+        let transition = self.maintenance_transition_gate(&key).await;
+        let _transition = transition.lock().await;
+        let owner_is_current = self
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .get(&key)
+            .is_some();
+        if !owner_is_current {
+            if let Some(retirement) = self
+                .retire_exact_automation_scheduler_locked(&key)
+                .await
+            {
+                let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, retirement.wait()).await;
+            }
+            return;
+        }
+
         #[cfg(test)]
         self.automation_config_probe_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -439,8 +458,6 @@ impl DaemonEngine {
             return;
         }
 
-        let transition = self.maintenance_transition_gate(&key).await;
-        let _transition = transition.lock().await;
         let scope = super::branch_admin::owner_writer_scope(&key);
         self.store_administration
             .with_writer_in(scope, || async move {
@@ -844,6 +861,23 @@ impl DaemonEngine {
         &self,
         key: &ProjectServerKey,
     ) -> Option<AutomationSchedulerRetirement> {
+        self.retire_matching_automation_scheduler_locked(key, true)
+            .await
+    }
+
+    async fn retire_exact_automation_scheduler_locked(
+        &self,
+        key: &ProjectServerKey,
+    ) -> Option<AutomationSchedulerRetirement> {
+        self.retire_matching_automation_scheduler_locked(key, false)
+            .await
+    }
+
+    async fn retire_matching_automation_scheduler_locked(
+        &self,
+        key: &ProjectServerKey,
+        allow_logical_owner: bool,
+    ) -> Option<AutomationSchedulerRetirement> {
         let (task, completion, termination, reservation) = {
             let mut schedulers = self
                 .store_administration
@@ -852,11 +886,13 @@ impl DaemonEngine {
                 .await;
             let owner = if schedulers.contains_key(key) {
                 key.clone()
-            } else {
+            } else if allow_logical_owner {
                 schedulers
                     .keys()
                     .find(|candidate| same_scheduler_owner(candidate, key))
                     .cloned()?
+            } else {
+                return None;
             };
             let handle = schedulers.get_mut(&owner)?;
             let reservation = self

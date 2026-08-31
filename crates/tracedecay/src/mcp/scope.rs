@@ -8,19 +8,19 @@
 //!
 //! Query-facing tool entry points resolve their project scope ONCE, through
 //! the already-authorized registry context, into the transport-neutral
-//! `tracedecay_application::ResolvedScope`. The resolution itself is the
-//! single consolidated canonical path
-//! (`tracedecay_session_memory::context::RegisteredScopeResolver`); this module
-//! only adapts the registry context into that path and preserves the MCP
-//! error taxonomy. Every failure state stays explicit: a CWD-relative root, a
-//! non-canonical registry identity, an unauthorized sibling root, or an
-//! inconsistent scope digest fails closed — the MCP surface never substitutes
-//! another project.
+//! `tracedecay_application::ResolvedScope`. The session-memory boundary first
+//! authorizes and canonicalizes the registered or linked-worktree root; the
+//! composition root then invokes the code-index daemon's identity authority
+//! for the exact repository/worktree IDs before any retained route lookup.
+//! Every failure state stays explicit: a CWD-relative root, a non-canonical
+//! registry identity, an unauthorized sibling root, or an inconsistent scope
+//! digest fails closed — the MCP surface never substitutes another project.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::mcp::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
+use tracedecay_application::ResolvedScope;
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_session_memory::context::ApplicationScopeError;
 
@@ -133,26 +133,36 @@ impl From<ApplicationScopeError> for QueryScopeError {
 /// `owner` is the registry authority's context for the selected project;
 /// `requested_root` is the worktree root the call will actually serve (the
 /// registered root, a path inside it, or a linked worktree of the same
-/// repository). The guards, the daemon-owned identity delegation, and the
-/// digest revalidation all live in the single root-façade path; the
-/// resolution fails closed rather than falling back to the CWD, another
-/// registered project, or a sibling repository.
+/// repository). The lower boundary authorizes and canonicalizes the root
+/// without minting a second repository/worktree namespace. This composition
+/// root then delegates identity to the daemon code-index authority and
+/// revalidates the resulting digest. Resolution fails closed rather than
+/// falling back to the CWD, another registered project, or a sibling
+/// repository.
 pub(crate) fn resolve_query_scope(
     owner: &ProjectRegistryContext,
     requested_root: &Path,
-) -> Result<tracedecay_application::ResolvedScope, QueryScopeError> {
+) -> Result<(PathBuf, ResolvedScope), QueryScopeError> {
     let project_id =
         tracedecay_domain::ProjectId::new(owner.project.project_id.clone()).map_err(|_| {
             QueryScopeError::NonCanonicalProjectId {
                 project_id: owner.project.project_id.clone(),
             }
         })?;
-    let resolved = tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
-        Path::new(&owner.project.canonical_root),
-        requested_root,
-        &project_id,
-    );
-    resolved.map_err(QueryScopeError::from)
+    let scope_root =
+        tracedecay_session_memory::context::RegisteredScopeResolver::canonical_scope_root(
+            Path::new(&owner.project.canonical_root),
+            requested_root,
+            &project_id,
+        )
+        .map_err(QueryScopeError::from)?;
+    let resolved =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&scope_root, &project_id)
+            .map_err(|error| QueryScopeError::Resolution(error.to_string()))?;
+    resolved
+        .validate()
+        .map_err(|error| QueryScopeError::InconsistentScope(error.to_string()))?;
+    Ok((scope_root, resolved))
 }
 
 #[cfg(test)]
@@ -163,8 +173,15 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{QueryScopeError, resolve_query_scope};
+    use super::{QueryScopeError, resolve_query_scope as resolve_query_scope_with_root};
     use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext};
+
+    fn resolve_query_scope(
+        owner: &ProjectRegistryContext,
+        requested_root: &Path,
+    ) -> Result<tracedecay_application::ResolvedScope, QueryScopeError> {
+        resolve_query_scope_with_root(owner, requested_root).map(|(_, scope)| scope)
+    }
 
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git")

@@ -49,12 +49,12 @@ use tracedecay_usecases::observability::{
 };
 use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
-use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
-use tracedecay_application::NativeIntegrationSurfaceRequest;
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 use tracedecay_agent_hosts::native_integration::stack_signals::{
     signal_from_preflight, signal_from_receipt,
 };
+use tracedecay_application::NativeIntegrationSurfaceRequest;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// How long a minted preview stays approvable. The preview must outlive its
 /// own request so the separate approval and apply operations can bind it, and

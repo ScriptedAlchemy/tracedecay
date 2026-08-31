@@ -6,6 +6,7 @@ use std::sync::{
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::dispatch_test_support::*;
 use super::*;
@@ -18,7 +19,7 @@ struct UnavailableEffectExecutor {
     application_surface_invocations: Mutex<Vec<(String, Value)>>,
     configuration_invocations: Mutex<
         Vec<(
-            crate::application_surface::ApplicationSurfaceOperation,
+            ApplicationSurfaceOperation,
             Value,
             tracedecay_daemon_protocol::InvocationCancellationPolicy,
         )>,
@@ -147,9 +148,17 @@ async fn available_configuration_effect_reaches_canonical_executor() {
         Some("application surface unavailable")
     );
     assert_eq!(executor.invocations.load(Ordering::SeqCst), 1);
+    let invocations = executor.application_surface_invocations.lock().unwrap();
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0].0, "configuration_set");
+    assert_eq!(
+        invocations[0].1["idempotency_key"],
+        "configuration.idempotency.mcp-unavailable-application-effect"
+    );
+    drop(invocations);
     assert!(
-        cancellation.commit_started(),
-        "canonical effect admission must win settlement before invoking the daemon"
+        !cancellation.commit_started(),
+        "pre-admission executor refusal must not claim configuration effect settlement"
     );
     cg.close();
 }
@@ -261,15 +270,27 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
             Some("application surface unavailable")
         );
         assert!(
-            cancellation.commit_started(),
-            "{tool_name} must claim authoritative effect settlement before daemon invocation"
+            !cancellation.commit_started(),
+            "{tool_name} pre-admission executor refusal must not claim effect settlement"
         );
     }
 
+    let application_invocations = executor.application_surface_invocations.lock().unwrap();
+    let migrated_effects = &effects[..2];
+    assert_eq!(application_invocations.len(), migrated_effects.len());
+    for ((actual_operation, request), (_, expected_operation, idempotency_key, _)) in
+        application_invocations.iter().zip(migrated_effects)
+    {
+        assert_eq!(actual_operation, expected_operation.as_str());
+        assert_eq!(request["idempotency_key"], *idempotency_key);
+    }
+    drop(application_invocations);
+
     let invocations = executor.configuration_invocations.lock().unwrap();
-    assert_eq!(invocations.len(), effects.len());
+    let daemon_effects = &effects[2..];
+    assert_eq!(invocations.len(), daemon_effects.len());
     for ((actual_operation, request, policy), (_, expected_operation, idempotency_key, _)) in
-        invocations.iter().zip(&effects)
+        invocations.iter().zip(daemon_effects)
     {
         assert_eq!(actual_operation, expected_operation);
         assert_eq!(

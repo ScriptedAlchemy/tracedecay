@@ -8,11 +8,11 @@ use tracedecay_application::{
 };
 use tracedecay_domain::configuration::{CredentialReferenceMetadataV1, ProtectedChangePlan};
 use tracedecay_tool_catalog::{
-    CancellationContract, CancellationPoint, CatalogSnapshotV1, ReceiptContract,
-    ReconciliationContract, TerminalState, TerminalStateContract,
+    ApplicationSurfaceOperation, CancellationContract, CancellationPoint, CatalogSnapshotV1,
+    ReceiptContract, ReconciliationContract, TerminalState, TerminalStateContract,
 };
 
-use super::{ApplicationSurfaceAdapterError, ApplicationSurfaceOperation};
+use super::ApplicationSurfaceAdapterError;
 
 pub(super) const CONFIGURATION_WIRE_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
     ApplicationSurfaceOperation::ConfigurationList,

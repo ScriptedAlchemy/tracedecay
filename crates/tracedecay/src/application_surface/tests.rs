@@ -5,6 +5,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use tracedecay_api::is_http_application_operation_exposed;
 use tracedecay_application::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, CancellationContext,
     CancellationSignal, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
@@ -17,17 +18,19 @@ use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, QueryNormalizationRevision, RefId, RepositoryId,
     SanitizerRevision, UtcMicros, WorktreeId,
 };
-use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, BindingId, CapabilityId, SchemaId, UseCaseId,
+};
 
 use super::handoff::validate_catalog_bindings as validate_handoff_catalog_bindings;
 use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bindings;
 use super::{
     APPLICATION_PROTOCOL_REVISION, ActiveHttpRequest, ApplicationSurfaceAdapterError,
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, CallableCodeSurfaceRequest,
-    ContextScoutClaimSurfaceRequest, ContextScoutClaimWindowSurfaceV1,
-    ContextScoutControlSurfaceRequest, ContextScoutSurfaceRequest, FeedbackSurfaceRequest,
-    HttpCancellationRegistry, HttpOperationEventState, NativeIntegrationSurfaceRequest,
-    PrimitiveCodeSurfaceRequest, application_http_context, application_negotiated_features,
+    ApplicationSurfaceRequest, CallableCodeSurfaceRequest, ContextScoutClaimSurfaceRequest,
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+    ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
+    HttpOperationEventState, NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
+    application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     feedback_sse_stream_event, http_operation_event_router, invocation_problem,
     normalize_application_tool_args, parse_application_surface_request,
@@ -118,8 +121,8 @@ fn every_http_exposed_operation_resolves_from_the_canonical_catalog() {
     let catalog = super::application_surface_catalog_ref().expect("application catalog");
     let resolver = tracedecay_daemon_protocol::CatalogBindingResolver::new(catalog);
 
-    for operation in tracedecay_api::HttpApplicationOperation::ALL {
-        if operation.is_http_exposed() {
+    for operation in ApplicationSurfaceOperation::ALL {
+        if is_http_application_operation_exposed(operation) {
             assert!(
                 resolve_application_binding(
                     &resolver,
@@ -379,7 +382,7 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
         let resolution_profile = &profile_id;
         // The production HTTP-exposure authority decides which operations
         // carry a public HTTP binding; everything resolves via CLI and MCP.
-        let expected_surfaces = if operation.is_http_exposed() {
+        let expected_surfaces = if is_http_application_operation_exposed(operation) {
             &[
                 (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
                 (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
@@ -419,11 +422,7 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
 }
 
 #[test]
-fn root_surface_operation_authority_is_the_http_catalog_authority() {
-    assert_eq!(
-        ApplicationSurfaceOperation::ALL,
-        tracedecay_api::HttpApplicationOperation::ALL
-    );
+fn catalog_operation_authority_preserves_tool_name_compatibility() {
     assert_eq!(
         ApplicationSurfaceOperation::from_tool_name("tracedecay_git_preview"),
         Some(ApplicationSurfaceOperation::GitPreview)
@@ -648,23 +647,23 @@ async fn http_git_read_routes_preserve_the_canonical_typed_request() {
     for (index, (route, operation)) in [
         (
             "/git/status?page_size=7",
-            tracedecay_api::HttpApplicationOperation::GitStatus,
+            ApplicationSurfaceOperation::GitStatus,
         ),
         (
             "/git/diff?page_size=7",
-            tracedecay_api::HttpApplicationOperation::GitDiff,
+            ApplicationSurfaceOperation::GitDiff,
         ),
         (
             "/git/history?page_size=7",
-            tracedecay_api::HttpApplicationOperation::GitHistory,
+            ApplicationSurfaceOperation::GitHistory,
         ),
         (
             "/git/blame?page_size=7",
-            tracedecay_api::HttpApplicationOperation::GitBlame,
+            ApplicationSurfaceOperation::GitBlame,
         ),
         (
             "/git/hunks?page_size=7",
-            tracedecay_api::HttpApplicationOperation::GitHunks,
+            ApplicationSurfaceOperation::GitHunks,
         ),
     ]
     .into_iter()

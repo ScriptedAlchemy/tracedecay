@@ -8,9 +8,11 @@ use std::sync::Arc;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_session_runtime::StoreOwnerKey;
-use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
-    projector, registry, run_session_temporal_refresh_pass, wake,
+use tracedecay_session_runtime::session_sync::test_harness::{
+    SessionTemporalRefreshPassReport, SessionTemporalRefreshWakeState,
+    run_session_temporal_refresh_pass,
 };
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::{projector, registry, wake};
 
 mod project_lifecycle_tests;
 mod retained_history_tests;
@@ -48,10 +50,10 @@ impl SessionTemporalRefreshTestAuthority {
 
     async fn run_pass(
         &self,
-        state: &Arc<wake::SessionTemporalRefreshWakeState>,
+        state: &Arc<SessionTemporalRefreshWakeState>,
         projector: &dyn projector::SessionTemporalRefreshProjector,
         policy: projector::SessionTemporalRefreshPolicy,
-    ) -> registry::SessionTemporalRefreshPassReport {
+    ) -> SessionTemporalRefreshPassReport {
         run_session_temporal_refresh_pass(&self.database, state, projector, policy).await
     }
 

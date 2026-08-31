@@ -165,6 +165,62 @@ fn diagnostics_without_an_executor_reaches_the_analysis_handler() {
     }
 }
 
+#[tokio::test]
+async fn unmounted_files_root_dispatch_reports_a_real_orphaned_rust_source() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("unmounted-files-root-dispatch");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"unmounted-files-root-dispatch\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn mounted() {}\n").unwrap();
+    fs::write(
+        project.join("src/orphan.rs"),
+        "pub fn reachable_only_if_declared() {}\n",
+    )
+    .unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-unmounted-files-root-dispatch",
+    )
+    .await
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_unmounted_files",
+        json!({"ecosystem": "rust", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("the production root dispatch reaches the portable unmounted-files handler");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("unmounted-files JSON text"),
+    )
+    .expect("unmounted-files JSON payload");
+
+    assert_eq!(payload["unmounted_file_count"], 1);
+    assert_eq!(payload["returned_count"], 1);
+    assert_eq!(payload["unmounted"][0]["file"], "src/orphan.rs");
+    assert_eq!(
+        payload["unmounted"][0]["package"],
+        "unmounted-files-root-dispatch"
+    );
+    assert_eq!(
+        payload["unmounted"][0]["suggested_declaration"],
+        "mod orphan;"
+    );
+
+    cg.close();
+}
+
 #[test]
 fn hotpath_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
     assert_eq!(

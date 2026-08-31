@@ -78,6 +78,7 @@ impl Deref for GraphDbLeaseV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDbLeaseV1 {
     /// Opens a zero-copy read snapshot without exposing shared raw ownership.
     pub fn snapshot(&self) -> Result<GraphSnapshot, GraphDbError> {
@@ -212,6 +213,7 @@ impl std::fmt::Debug for GraphDbOwnerAttachmentV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDbOwnerAttachmentV1 {
     #[must_use]
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
@@ -349,6 +351,7 @@ impl std::fmt::Debug for GraphDbRetirementTarget {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDbRetirementTarget {
     #[must_use]
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
@@ -384,6 +387,7 @@ impl std::fmt::Debug for GraphDbOwner {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDbOwner {
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     pub fn memory(cancellation: Arc<dyn GraphCancellation>) -> Result<Self, GraphDbError> {
@@ -779,6 +783,7 @@ fn issue_client_lease_with_store(
     })
 }
 
+#[hotpath::measure]
 fn next_local_id(next: &mut u64) -> Result<u64, GraphDbError> {
     let current = *next;
     *next = next
@@ -787,6 +792,7 @@ fn next_local_id(next: &mut u64) -> Result<u64, GraphDbError> {
     Ok(current)
 }
 
+#[hotpath::measure]
 fn terminal_lifecycle(result: &Result<(), GraphDbError>) -> GraphDbOwnerLifecycle {
     match result {
         Ok(()) | Err(GraphDbError::Closed) => GraphDbOwnerLifecycle::Closed,

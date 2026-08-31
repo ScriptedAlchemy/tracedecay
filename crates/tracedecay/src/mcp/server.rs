@@ -912,48 +912,48 @@ impl McpServer {
             }
         };
         let active_project_id = cg.store_layout().identity.project_id.clone();
-        let project_session_retrieval_root = match registry_db.as_deref() {
-            Some(registry) => {
+        let project_session_retrieval_root = match (
+            registry_db.as_deref(),
+            profile_identity.as_deref(),
+            registered_session_db.as_ref(),
+            active_project_id.as_deref(),
+        ) {
+            (Some(registry), Some(profile), Some(registered), Some(project_id)) => {
                 let serving_db = cg.db_path();
-                DaemonSessionRetrievalRoot::project(
-                    SessionRetrievalServingIdentityV1 {
-                        project_id: cg.store_layout().identity.project_id.as_deref(),
-                        serving_db: &serving_db,
-                        project_root: cg.project_root(),
-                    },
+                match SessionRetrievalServingIdentityV1::resolve_project(
+                    project_id,
+                    &serving_db,
+                    cg.project_root(),
+                    profile.profile_id(),
+                    &registered.binding().shard_id,
                     registry,
                 )
                 .await
+                {
+                    Some(serving) => DaemonSessionRetrievalRoot::project(serving, registry).await,
+                    None => None,
+                }
             }
-            None => None,
+            _ => None,
         };
-        #[cfg(any(test, feature = "test-transport"))]
-        let project_session_retrieval_root = project_session_retrieval_root.or_else(|| {
-            session_db.as_ref().map(|_| {
-                DaemonSessionRetrievalRoot::project_for_test(
-                    cg.project_root(),
-                    cg.store_layout().identity.project_id.clone(),
-                )
-            })
-        });
-        let project_session_retrieval_root =
-            project_session_retrieval_root.and_then(|root| match profile_identity.as_deref() {
-                Some(identity) => root.with_project_runtime_shard(identity),
-                None => Some(root),
-            });
         let project_session_store_id = project_session_retrieval_root
             .as_ref()
             .map(|root| root.identity().store_id().clone());
         let project_session_root_id = project_session_retrieval_root
             .as_ref()
             .map(|root| root.identity().root_id().clone());
-        let profile_session_retrieval_root =
-            DaemonSessionRetrievalRoot::profile().and_then(
-                |root| match profile_identity.as_deref() {
-                    Some(identity) => root.with_profile_runtime_shard(identity),
-                    None => Some(root),
-                },
-            );
+        let profile_session_retrieval_root = profile_identity
+            .as_deref()
+            .zip(registered_user_session_db.as_ref())
+            .and_then(|(profile, registered)| {
+                let serving =
+                    crate::daemon::retained_owner::profile_session_retrieval_serving_identity(
+                        profile,
+                        &registered.binding().shard_id,
+                        registered.db_path(),
+                    )?;
+                DaemonSessionRetrievalRoot::profile(serving)
+            });
         let project_session_refresh_service = session_db
             .as_ref()
             .zip(project_session_refresh_wake.as_ref())
@@ -976,12 +976,12 @@ impl McpServer {
                 let identity = root.identity().clone();
                 let service = match registered_session_db.as_ref() {
                     Some(registered) => {
-                    DaemonSessionRetrievalService::new_registered_with_serving_port(
+                        DaemonSessionRetrievalService::new_registered_with_serving_port(
                         database.clone(),
                         registered.clone(),
                         root,
                         project_session_refresh_serving.clone(),
-                    )
+                        )
                     }
                     None => DaemonSessionRetrievalService::new_with_serving_port(
                         database.clone(),
@@ -991,10 +991,7 @@ impl McpServer {
                 }?;
                 Some(MountedProjectApplicationRetrievalV1 {
                     identity,
-                    service: Arc::new(service)
-                        as Arc<
-                            dyn SessionApplicationRetrievalPortV1,
-                        >,
+                    service: Arc::new(service) as Arc<dyn SessionApplicationRetrievalPortV1>,
                 })
             });
         let project_lcm_authority = project_session_retrieval_root

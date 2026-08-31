@@ -4,7 +4,8 @@
 //! This module owns the closed read-route vocabulary and the truthful
 //! dashboard envelope assembled from an admitted feedback observation model.
 
-use crate::http::HttpApplicationOperation;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
 use crate::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessStateV1,
     DashboardFreshnessV1, DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardScopeV1,
@@ -23,7 +24,7 @@ pub struct DashboardFeedbackReadRouteV1 {
     pub dashboard_tail: &'static str,
     /// Relative path accepted by [`crate::feedback_application_router`].
     pub application_path: &'static str,
-    pub operation: HttpApplicationOperation,
+    pub operation: ApplicationSurfaceOperation,
 }
 
 const DASHBOARD_FEEDBACK_READ_ROUTES: [DashboardFeedbackReadRouteV1; 3] = [
@@ -31,19 +32,19 @@ const DASHBOARD_FEEDBACK_READ_ROUTES: [DashboardFeedbackReadRouteV1; 3] = [
         method: "POST",
         dashboard_tail: "feedback/get",
         application_path: "/get",
-        operation: HttpApplicationOperation::FeedbackGet,
+        operation: ApplicationSurfaceOperation::FeedbackGet,
     },
     DashboardFeedbackReadRouteV1 {
         method: "POST",
         dashboard_tail: "feedback/expand",
         application_path: "/expand",
-        operation: HttpApplicationOperation::FeedbackExpand,
+        operation: ApplicationSurfaceOperation::FeedbackExpand,
     },
     DashboardFeedbackReadRouteV1 {
         method: "POST",
         dashboard_tail: "feedback/list",
         application_path: "/list",
-        operation: HttpApplicationOperation::FeedbackList,
+        operation: ApplicationSurfaceOperation::FeedbackList,
     },
 ];
 
@@ -64,7 +65,7 @@ pub fn dashboard_feedback_read_route(
 }
 
 /// Resolve the operation segment accepted by the canonical feedback router.
-pub(crate) fn feedback_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
+pub(crate) fn feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     dashboard_feedback_read_routes()
         .iter()
         .find(|route| route.application_path.trim_start_matches('/') == operation)

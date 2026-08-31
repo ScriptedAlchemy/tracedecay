@@ -118,12 +118,14 @@ impl std::fmt::Debug for GraphSnapshot {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphSnapshot {
     pub(crate) fn retain_client(&mut self, client: crate::GraphDbLeaseV1) {
         self._client = Some(client);
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDb {
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub(crate) fn open(options: GraphDbOpenOptions) -> Result<Arc<Self>, GraphDbError> {
@@ -1373,6 +1375,7 @@ pub(crate) enum VectorIndexCensusPhase {
     Persist,
 }
 
+#[hotpath::measure]
 fn ensure_initial_vector_indexes(
     database: &GrafeoDB,
     batch: &GraphWriteBatch,
@@ -1383,6 +1386,7 @@ fn ensure_initial_vector_indexes(
     ensure_vector_indexes_for_batch(database, batch)
 }
 
+#[hotpath::measure]
 fn ensure_vector_indexes_for_batch(
     database: &GrafeoDB,
     batch: &GraphWriteBatch,
@@ -1420,6 +1424,7 @@ fn ensure_vector_indexes_for_batch(
     Ok(())
 }
 
+#[hotpath::measure]
 fn require_committed_vector_scalar(
     database: &GrafeoDB,
     node: grafeo_common::types::NodeId,
@@ -1441,6 +1446,7 @@ fn require_committed_vector_scalar(
     }
 }
 
+#[hotpath::measure]
 fn durability_uncertain() -> GraphDbError {
     GraphDbError::DurabilityUncertain {
         message: "the handle was poisoned after an observed post-commit persistence failure"

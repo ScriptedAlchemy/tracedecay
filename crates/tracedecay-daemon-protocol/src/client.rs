@@ -21,8 +21,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
-    BindingId, BindingSurface, CatalogSnapshotV1, FeatureId, ProfileId, SchemaRef,
-    SurfaceOperationName,
+    ApplicationSurfaceOperation, BindingId, BindingSurface, CatalogSnapshotV1, FeatureId,
+    ProfileId, SchemaRef, SurfaceOperationName,
 };
 
 use tracedecay_application::feedback::observations::{
@@ -1019,7 +1019,7 @@ impl DaemonInvocationExecutor for DaemonInvocationClient {
 /// `ConfigurationWireRequestV1` envelope before admission, so the client
 /// deserializes the inner request and wraps the operation-selected variant.
 fn configuration_request_from_surface_payload(
-    operation: crate::surface::ApplicationSurfaceOperation,
+    operation: ApplicationSurfaceOperation,
     payload: serde_json::Value,
 ) -> Result<tracedecay_application::ConfigurationWireRequestV1, InvocationError> {
     tracedecay_application::configuration_wire_request_from_invocation_payload(
@@ -1050,10 +1050,8 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                 ApplicationRequest::Surface { binding, payload } => {
                     let (_binding_id, surface, operation, result_contract, _page) =
                         binding.into_parts();
-                    let operation = crate::surface::ApplicationSurfaceOperation::from_tool_name(
-                        operation.as_str(),
-                    )
-                    .ok_or(InvocationError::InvalidRequest)?;
+                    let operation = ApplicationSurfaceOperation::from_tool_name(operation.as_str())
+                        .ok_or(InvocationError::InvalidRequest)?;
                     let observed_at = invocation_now_micros();
                     let cancellation_context = cancellation.context();
                     let scope = match target {
@@ -1062,19 +1060,19 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                     };
                     let policy = if matches!(
                         operation,
-                        crate::surface::ApplicationSurfaceOperation::ConfigurationSet
-                            | crate::surface::ApplicationSurfaceOperation::ConfigurationUnset
-                            | crate::surface::ApplicationSurfaceOperation::ConfigurationBatch
+                        ApplicationSurfaceOperation::ConfigurationSet
+                            | ApplicationSurfaceOperation::ConfigurationUnset
+                            | ApplicationSurfaceOperation::ConfigurationBatch
                     ) {
                         InvocationCancellationPolicy::AuthoritativeEffect
                     } else {
                         InvocationCancellationPolicy::ReadOnly
                     };
                     let request = match operation {
-                        crate::surface::ApplicationSurfaceOperation::ConfigurationGet
-                        | crate::surface::ApplicationSurfaceOperation::ConfigurationSet
-                        | crate::surface::ApplicationSurfaceOperation::ConfigurationUnset
-                        | crate::surface::ApplicationSurfaceOperation::ConfigurationBatch => {
+                        ApplicationSurfaceOperation::ConfigurationGet
+                        | ApplicationSurfaceOperation::ConfigurationSet
+                        | ApplicationSurfaceOperation::ConfigurationUnset
+                        | ApplicationSurfaceOperation::ConfigurationBatch => {
                             let request =
                                 configuration_request_from_surface_payload(operation, payload)?;
                             crate::contract::DaemonInvocationRequest::configuration(
@@ -1087,7 +1085,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                             )
                             .with_resolved_scope(scope)
                         }
-                        crate::surface::ApplicationSurfaceOperation::FeedbackGet => {
+                        ApplicationSurfaceOperation::FeedbackGet => {
                             let request = feedback_handle_from_surface_payload(payload)?;
                             crate::contract::DaemonInvocationRequest::feedback(
                                 request_id.as_str(),
@@ -1665,11 +1663,11 @@ mod tests {
         feedback_handle_from_surface_payload, semantic_evaluation_application_problem,
         semantic_qualification_application_problem,
     };
-    use crate::surface::ApplicationSurfaceOperation;
     use tracedecay_application::{
         ApplicationProblem, ApplicationProblemKind, CancellationStage, ConfigurationWireRequestV1,
         InvocationError, RequestId, ResultContractRef,
     };
+    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
     use tracedecay_tool_catalog::SchemaId;
 
     #[test]

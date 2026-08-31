@@ -143,7 +143,7 @@ use tracedecay_application::RetainedSurfaceOperation;
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, retained_surface_application_operation,
 };
-use tracedecay_tool_catalog::BindingSurface;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 #[cfg(test)]
 use tracedecay_tool_catalog::{ProfileId, SurfaceOperationName};
 
@@ -152,7 +152,7 @@ use super::binding::{
     McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
     tool_is_selector_bound_effect,
 };
-use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
+use crate::application_surface::resolve_catalog_tool_binding;
 use crate::tracedecay::TraceDecay;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
@@ -250,8 +250,9 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) registered_profile_session_db:
         Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) registered_savings_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
-    pub(crate) dashboard_session_retrieval_service:
-        Option<Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>>,
+    pub(crate) dashboard_session_retrieval_service: Option<
+        Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>,
+    >,
     pub(crate) dashboard_session_retrieval_identity:
         Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
     /// The canonical profile identity bound by the daemon handshake. A

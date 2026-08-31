@@ -1,10 +1,10 @@
 use super::*;
-use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 use tracedecay_application::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
     CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeNavigationSurfaceRequest,
     CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest,
 };
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn lsp_deadline() -> Deadline {
     Deadline::new(UtcMicros(i64::MAX)).expect("LSP deadline")
@@ -302,10 +302,7 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
             ApplicationSurfaceOperation::CodeCallees,
             RequestCase::Callees,
         ),
-        (
-            ApplicationSurfaceOperation::CodeFacets,
-            RequestCase::Facets,
-        ),
+        (ApplicationSurfaceOperation::CodeFacets, RequestCase::Facets),
         (
             ApplicationSurfaceOperation::CodeTimeline,
             RequestCase::Timeline,

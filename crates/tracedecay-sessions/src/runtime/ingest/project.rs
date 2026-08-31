@@ -421,7 +421,10 @@ pub(super) fn git_scan_commits(
     }
     let since = target.window_start.saturating_sub(gap_secs);
     let until = target.window_end.saturating_add(gap_secs);
-    let mut command = std::process::Command::new(tracedecay_runtime_core::git::git_program());
+    let Ok(git) = tracedecay_runtime_core::git::try_git_program() else {
+        return git_correlation::TargetScan::Unavailable;
+    };
+    let mut command = std::process::Command::new(git);
     command
         .current_dir(worktree)
         .arg("log")

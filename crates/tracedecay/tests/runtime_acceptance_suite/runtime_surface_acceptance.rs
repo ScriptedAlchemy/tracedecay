@@ -13,10 +13,9 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
 use tracedecay::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
-    FeedbackSurfaceRequest, execute_application_surface, http_application_router,
-    parse_application_surface_request, resolve_application_surface_dispatch_with_controls,
-    resolve_http_application_surface,
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, FeedbackSurfaceRequest,
+    execute_application_surface, http_application_router, parse_application_surface_request,
+    resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
 };
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay::application_surface::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
@@ -57,6 +56,7 @@ use tracedecay_mcp::application_output::json::json_line as canonical_json_line;
 use tracedecay_mcp::application_output::markdown::render as render_markdown;
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use tracedecay_mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::feedback::concrete::open_feedback_runtime;

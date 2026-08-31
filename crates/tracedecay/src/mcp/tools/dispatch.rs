@@ -8,13 +8,12 @@ use serde_json::{Map, Value};
 use tracedecay_application::{
     CancellationSignal, Deadline, InvocationTarget, PageRequest, RequestId,
 };
-use tracedecay_tool_catalog::BindingSurface;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use crate::application_surface::{
-    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
-    observe_surface_argument_rejection, resolve_application_surface_dispatch,
-    resolve_application_surface_dispatch_with_controls,
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+    execute_application_surface, observe_surface_argument_rejection,
+    resolve_application_surface_dispatch, resolve_application_surface_dispatch_with_controls,
 };
 use tracedecay_daemon_protocol::{
     DaemonInvocationExecutor, DispatchedInvocation, RequestedOutputFormat,

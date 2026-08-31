@@ -52,11 +52,14 @@ impl CodeIndexExecutionControlV1 for PauseAfterCandidatePublication {
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> String {
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(arguments)
-        .output()
-        .expect("run Git fixture command");
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(arguments)
+    .output()
+    .expect("run Git fixture command");
     assert!(
         output.status.success(),
         "Git fixture command failed: {arguments:?}: {}",

@@ -4465,21 +4465,35 @@ impl CodeIndexSchedulerRegistryV1 {
             .clone()
     }
 
+    /// Resolve one sealed generation's replay binding without joining the
+    /// scheduler mutex. A background reconcile owns that mutex for its whole
+    /// pass — sealing a production-scale corpus holds it for minutes — and
+    /// the binding is an immutable publication read the retained historical
+    /// owner answers directly, so blocking here parked the caller (and its
+    /// runtime worker thread) behind work the read never needed.
+    #[hotpath::measure(label = "daemon.code_index.registry.replay_binding", future = true)]
     pub async fn code_graph_replay_binding(
         &self,
         project_root: &Path,
         generation: &CodeGenerationId,
     ) -> Option<Result<super::CodeGraphReplayBindingV1, CodeIndexSchedulerErrorV1>> {
         let project_root = project_root.canonicalize().ok()?;
-        let scheduler = {
+        let historical = {
             let mounted = self.mounted.lock().await;
-            Arc::clone(&mounted.get(&project_root)?.scheduler)
+            mounted
+                .get(&project_root)?
+                .historical_generation_owner
+                .clone()
         };
+        let generation = generation.clone();
         Some(
-            scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .code_graph_replay_binding(generation),
+            tokio::task::spawn_blocking(move || historical.sealed_replay_binding(&generation))
+                .await
+                .unwrap_or_else(|error| {
+                    Err(CodeIndexSchedulerErrorV1::Identity(format!(
+                        "sealed replay-binding read task failed: {error}"
+                    )))
+                }),
         )
     }
 

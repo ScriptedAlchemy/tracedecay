@@ -162,20 +162,26 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 fn git(root: &Path, args: &[&str]) {
-    let status = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(args)
-        .status()
-        .expect("run git fixture command");
+    let status = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(args)
+    .status()
+    .expect("run git fixture command");
     assert!(status.success(), "git fixture command failed: {args:?}");
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> String {
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(args)
-        .output()
-        .expect("run git fixture command");
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(args)
+    .output()
+    .expect("run git fixture command");
     assert!(
         output.status.success(),
         "git fixture command failed: {args:?}"
@@ -6335,6 +6341,75 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     );
     assert_eq!(projected.coverage, "complete");
     assert_eq!(projected.hook_hint_count, Some(0));
+    let _ = release_tx.send(());
+    scheduler_holder
+        .await
+        .expect("scheduler mutex holder joined");
+    registry.shutdown().await;
+}
+
+// Two workers so the timeout timer stays live if a regression parks one
+// runtime worker on the scheduler mutex: the test then fails instead of
+// deadlocking against its own release channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_binding_does_not_wait_for_the_scheduler_mutex() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let generation_id = wait_for_initial_generation(&registry, fixture.path()).await;
+    let canonical_root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical_root)
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    // Model a background reconcile that owns the scheduler mutex for its
+    // whole pass; the sealed replay binding must stay answerable through it.
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let scheduler_holder = tokio::task::spawn_blocking(move || {
+        let _scheduler_guard = scheduler.lock().expect("hold scheduler mutex");
+        let _ = locked_tx.send(());
+        let _ = release_rx.blocking_recv();
+    });
+    locked_rx.await.expect("scheduler mutex holder started");
+    // Spawn the probe so a regression parks only its own task: the timeout
+    // then observes the parked join handle and fails cleanly instead of
+    // hanging this test task inside the probe's poll.
+    let probe_registry = registry.clone();
+    let probe_root = fixture.path().to_path_buf();
+    let probe_generation = generation_id.clone();
+    let probe = tokio::spawn(async move {
+        probe_registry
+            .code_graph_replay_binding(&probe_root, &probe_generation)
+            .await
+    });
+    let binding = tokio::time::timeout(Duration::from_secs(1), probe)
+        .await
+        .expect("replay binding must not wait for the scheduler mutex")
+        .expect("replay binding probe task joined")
+        .expect("mounted worktree resolves a replay binding")
+        .expect("sealed replay binding");
+    assert!(
+        binding.generations_root.starts_with(store.path()),
+        "replay binding must name this worktree's scoped generations root"
+    );
     let _ = release_tx.send(());
     scheduler_holder
         .await

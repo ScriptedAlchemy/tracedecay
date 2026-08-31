@@ -1,9 +1,9 @@
 use serde_json::Value;
 use tracedecay_application::{ApplicationProblem, ResultContractRef};
-use tracedecay_tool_catalog::BindingSurface;
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
-use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
+use crate::application_surface::resolve_catalog_tool_binding;
 use crate::tracedecay::TraceDecay;
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -635,14 +635,21 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_unused_imports" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_unused_imports(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_unused_imports(
+                    cg.project_root(),
+                    &graph,
+                    args,
+                    scope_prefix,
+                )
+                .await
             }
             // The one analysis tool that opens no graph query: its whole finding is
             // that the graph and the compiler disagree, so taking the graph's file
             // set as input would answer the question with the very source that is
             // under suspicion.
             "tracedecay_unmounted_files" => {
-                analysis::handle_unmounted_files(cg, args, scope_prefix).await
+                portable_analysis::handle_unmounted_files(cg.project_root(), args, scope_prefix)
+                    .await
             }
             "tracedecay_rank" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
@@ -682,7 +689,13 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_unsafe_patterns" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                analysis::handle_unsafe_patterns(cg, &graph, args, scope_prefix).await
+                portable_analysis::handle_unsafe_patterns(
+                    cg.project_root(),
+                    &graph,
+                    args,
+                    scope_prefix,
+                )
+                .await
             }
             "tracedecay_constructors" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;

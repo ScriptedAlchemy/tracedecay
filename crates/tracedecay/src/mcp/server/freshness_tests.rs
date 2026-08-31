@@ -45,13 +45,16 @@ impl FreshnessRuntime {
 }
 
 fn git(root: &std::path::Path, args: &[&str]) {
-    let ok = std::process::Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(args)
-        .output()
-        .expect("git runs")
-        .status
-        .success();
+    let ok = std::process::Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(args)
+    .output()
+    .expect("git runs")
+    .status
+    .success();
     assert!(ok, "git {args:?} failed");
 }
 

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use crate::application_surface::ApplicationSurfaceOperation;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationProblem, ProjectRuntimeRequestLeaseV1,
     WorkApplicationOutcomeV1, cancel,
@@ -309,10 +309,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                 tracedecay_application::ApplicationRequest::Surface { binding, payload } => {
                     let (_binding_id, surface, operation, result_contract, _page) =
                         binding.into_parts();
-                    let operation =
-                        crate::application_surface::ApplicationSurfaceOperation::from_tool_name(
-                            operation.as_str(),
-                        )
+                    let operation = ApplicationSurfaceOperation::from_tool_name(operation.as_str())
                         .ok_or(tracedecay_application::InvocationError::InvalidRequest)?;
                     let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
                     let cancellation_context = cancellation.context();
@@ -322,19 +319,19 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                     };
                     let policy = if matches!(
                         operation,
-                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch
+                        ApplicationSurfaceOperation::ConfigurationSet
+                            | ApplicationSurfaceOperation::ConfigurationUnset
+                            | ApplicationSurfaceOperation::ConfigurationBatch
                     ) {
                         tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect
                     } else {
                         tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly
                     };
                     let request = match operation {
-                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
-                        | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
-                        | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
-                        | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch => {
+                        ApplicationSurfaceOperation::ConfigurationGet
+                        | ApplicationSurfaceOperation::ConfigurationSet
+                        | ApplicationSurfaceOperation::ConfigurationUnset
+                        | ApplicationSurfaceOperation::ConfigurationBatch => {
                             let request = tracedecay_application::configuration_wire_request_from_invocation_payload(
                                 operation.as_str(),
                                 payload,
@@ -352,7 +349,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                             )
                             .with_resolved_scope(scope)
                         }
-                        crate::application_surface::ApplicationSurfaceOperation::FeedbackGet => {
+                        ApplicationSurfaceOperation::FeedbackGet => {
                             let typed = crate::application_surface::parse_application_surface_request(
                                 operation, payload,
                             )

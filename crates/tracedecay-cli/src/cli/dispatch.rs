@@ -6,15 +6,15 @@
 use std::time::Duration;
 
 use tracedecay::application_surface::{
-    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
-    observe_surface_argument_rejection, resolve_application_surface_dispatch_with_controls,
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+    execute_application_surface, observe_surface_argument_rejection,
+    resolve_application_surface_dispatch_with_controls,
 };
 use tracedecay_application::{
     CancellationSignal, Deadline, PageRequest, RequestId, RetryDirective,
 };
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
-use tracedecay_tool_catalog::BindingSurface;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 pub async fn resolve_cli_application_surface(
     operation: ApplicationSurfaceOperation,

@@ -1,8 +1,8 @@
 //! Project-runtime request admission and quiescence coverage.
 
 use super::*;
-use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 use tracedecay_daemon_protocol::GitReadSurfaceRequest;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[test]
 fn retained_pre_reservation_admission_preserves_cancellation_and_timeout() {
@@ -65,8 +65,7 @@ async fn project_quiescence_denies_semantic_and_git_cached_routes() {
             request_id: "request.quiesced-git".to_owned(),
             delivery_route: None,
             payload: DaemonInvocationPayload::GitRead {
-                surface_operation:
-                    ApplicationSurfaceOperation::GitStatus,
+                surface_operation: ApplicationSurfaceOperation::GitStatus,
                 request: GitReadSurfaceRequest {
                     request: tracedecay_application::git::GitReadRequestV1::Status,
                     max_entries: tracedecay_usecases::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES,

@@ -33,6 +33,7 @@ pub(crate) struct GenerationLocator {
     pub(crate) generation: GraphGenerationId,
 }
 
+#[hotpath::measure_all]
 impl GenerationLocator {
     pub(crate) fn new(projection: GraphProjectionIdentity, generation: GraphGenerationId) -> Self {
         Self {
@@ -77,6 +78,7 @@ pub(crate) struct VerifiedGenerationState {
     pub(crate) collected: BTreeSet<GenerationLocator>,
 }
 
+#[hotpath::measure_all]
 impl VerifiedGenerationState {
     pub(crate) fn retains(&self, locator: &GenerationLocator) -> bool {
         fn lease_retains(
@@ -189,6 +191,7 @@ impl fmt::Debug for VerifiedGraphSnapshot {
     }
 }
 
+#[hotpath::measure_all]
 impl VerifiedGraphSnapshot {
     /// Builds a verified in-memory generation for hermetic adapters and
     /// evaluation fixtures. It verifies the applied state directly and makes

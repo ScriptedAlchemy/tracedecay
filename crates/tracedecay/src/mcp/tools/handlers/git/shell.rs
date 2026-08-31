@@ -531,7 +531,9 @@ mod tests {
     use super::*;
 
     fn test_git(root: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
+        let git = tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve");
+        let output = std::process::Command::new(git)
             .args(args)
             .current_dir(root)
             .env("GIT_AUTHOR_NAME", "TraceDecay Test")
@@ -618,7 +620,9 @@ mod tests {
         std::fs::write(root.join("base.txt"), "base\n").expect("write base");
         test_git(root, &["add", "."]);
         test_git(root, &["commit", "-m", "base"]);
-        let local_main = std::process::Command::new("git")
+        let git = tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve");
+        let local_main = std::process::Command::new(git)
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
