@@ -64,7 +64,7 @@ fn read_line_handling_wire_oversized_inner<T: McpTransport + std::marker::Send>(
     Box::pin(async move {
         match transport.read_line().await {
             Ok(line) => Ok(line),
-            Err(error) if tracedecay_daemon_protocol::wire::is_wire_oversized_io_error(&error) => {
+            Err(error) if tracedecay_framing::is_wire_oversized_io_error(&error) => {
                 let _ =
                     tracedecay_mcp::transport::write_wire_oversized_rejection(transport, &error)
                         .await;
@@ -86,7 +86,7 @@ mod wire_bound_tests {
     };
     use rmcp::transport::Transport;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    use tracedecay_daemon_protocol::wire::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
+    use tracedecay_framing::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
     use tracedecay_mcp::McpTransport;
 
     use tracedecay_daemon_protocol::{BrokerListener, BrokerStream, default_loopback_endpoint};
@@ -107,7 +107,7 @@ mod wire_bound_tests {
             // product reader path; allocate only a small chunk buffer here.
             let chunk = vec![b'w'; 8192];
             let mut remaining =
-                tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES + 64 * 1024;
+                tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES + 64 * 1024;
             while remaining > 0 {
                 let n = remaining.min(chunk.len());
                 client.write_all(&chunk[..n]).await.expect("write");
@@ -139,7 +139,7 @@ mod wire_bound_tests {
             client
                 .write_all(&vec![
                     b'x';
-                    tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES
+                    tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES
                         + 1
                 ])
                 .await
@@ -302,7 +302,7 @@ mod wire_bound_tests {
         let writer = tokio::spawn(async move {
             let mut client = client;
             let chunk = vec![b'a'; 8192];
-            let mut remaining = tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES;
+            let mut remaining = tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES;
             while remaining > 0 {
                 let n = remaining.min(chunk.len());
                 client.write_all(&chunk[..n]).await.expect("write exact");
@@ -311,7 +311,7 @@ mod wire_bound_tests {
             client.write_all(b"\n").await.expect("exact newline");
 
             let chunk = vec![b'z'; 8192];
-            let mut remaining = tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES + 1;
+            let mut remaining = tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES + 1;
             while remaining > 0 {
                 let n = remaining.min(chunk.len());
                 client
@@ -335,7 +335,7 @@ mod wire_bound_tests {
                 .expect("exact accepted")
                 .expect("exact line")
                 .len(),
-            tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES
+            tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES
         );
         let error = server_transport
             .read_line()
@@ -368,7 +368,7 @@ mod wire_bound_tests {
                 br#"{"jsonrpc":"2.0","id":"daemon-7","method":"tools/call","params":{"payload":""#;
             client.write_all(prefix).await.expect("prefix");
             let chunk = vec![b'q'; 4096];
-            let mut remaining = tracedecay_daemon_protocol::wire::MAX_MCP_JSONRPC_FRAME_BYTES
+            let mut remaining = tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES
                 + 32 * 1024
                 - prefix.len();
             while remaining > 0 {

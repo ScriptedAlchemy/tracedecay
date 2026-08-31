@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod graph_replay_pool_lock_tests;
 mod graph_replay_release_tests;
 
 const TEST_ROLLBACK_FLOOR: usize = 3;

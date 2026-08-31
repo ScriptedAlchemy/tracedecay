@@ -83,6 +83,7 @@ pub struct KiroSource {
     project_matchers: ProjectRootMatcherCache,
 }
 
+#[hotpath::measure_all]
 impl KiroSource {
     /// Source rooted at the real Kiro IDE storage. Returns `None` when home
     /// cannot be resolved.

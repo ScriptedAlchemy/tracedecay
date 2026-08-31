@@ -14,17 +14,17 @@ use tracedecay_application::{
     ApplicationOutcome, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
 };
 use tracedecay_domain::{HydrationStateV1, RetrievalGrainV1, SessionId, TemporalModeV1};
-use tracedecay_sessions::runtime::git_correlation::{GitScopeFilter, git_scope_filter_from_args};
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeTarget, LcmExpandQueryPagination, LcmExpandQueryResponse,
     LcmExpandTarget, LcmSourceRef,
 };
+use tracedecay_session_memory::session::{SessionRetrievalScope, SessionTemporalQuery};
+use tracedecay_sessions::runtime::git_correlation::{GitScopeFilter, git_scope_filter_from_args};
 use tracedecay_sessions::runtime::{
     SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
 };
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_session_memory::session::{SessionRetrievalScope, SessionTemporalQuery};
 
 use super::super::receipts::evidence_outcome;
 use super::super::session_retrieval_unavailable_detail;
@@ -33,13 +33,13 @@ use super::{
     cursor, message_type, optional_provider, optional_usize, relationship_scope, required,
     role_name, session_id, specific_provider, temporal_mode, time_filter, trimmed, unsigned_i64,
 };
+use tracedecay_runtime_core::timeutil::SearchTimeBound;
 use tracedecay_session_runtime::session_retrieval::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, LcmExpandServiceCommand,
     LcmExpandServiceOutcome, SessionApplicationRetrievalPortV1, SessionRetrievalCommand,
     SessionRetrievalFilters, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
     SessionTemporalMetadataView,
 };
-use tracedecay_runtime_core::timeutil::SearchTimeBound;
 
 const MAX_RESULTS: usize = 100;
 const EXPAND_QUERY_CONCURRENCY: usize = 8;
@@ -587,9 +587,9 @@ fn retrieval_query(
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
     .with_retrieval_scope(retrieval_scope)
-    .with_execution_limits(tracedecay_session_runtime::session_retrieval::admitted_execution_limits(
-        limit,
-    ));
+    .with_execution_limits(
+        tracedecay_session_runtime::session_retrieval::admitted_execution_limits(limit),
+    );
     Ok(SessionRetrievalCommand::new(
         query,
         SessionRetrievalFilters {

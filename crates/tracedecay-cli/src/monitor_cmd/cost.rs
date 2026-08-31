@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_session_memory::provider_usage::{ProviderUsageCostSummaryV1, ProviderUsageCoverageV1};
+use tracedecay_session_memory::provider_usage::{
+    ProviderUsageCostSummaryV1, ProviderUsageCoverageV1,
+};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);

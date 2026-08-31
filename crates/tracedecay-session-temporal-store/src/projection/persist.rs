@@ -8,8 +8,8 @@ use tracedecay_domain::{
     SessionId, TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalValidityV1, UtcMicros,
     derive_exact_observation_anchor_id,
 };
-use tracedecay_runtime_core::db::engine::params;
 use tracedecay_lcm::retrieval_content::projected_content_hash;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     SessionMessageProjection, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,

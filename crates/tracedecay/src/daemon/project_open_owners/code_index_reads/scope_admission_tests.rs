@@ -216,17 +216,17 @@ async fn a_seated_generation_keeps_serving_its_exact_scope_while_the_scheduler_r
         b"pub fn scope_anchor() -> u32 { 8 }\n",
     );
     git(fixture.root(), &["add", "."]);
-    git(fixture.root(), &["commit", "-qm", "tip commit during rebuild"]);
+    git(
+        fixture.root(),
+        &["commit", "-qm", "tip commit during rebuild"],
+    );
 
     // The defect preconditions, asserted: the ready gate abstains for the
     // whole window while the seat still holds the complete generation.
     assert!(
         fixture
             .registry
-            .latest_complete_ready_decoded_for_root_scope(
-                fixture.root(),
-                &fixture.retained_scope
-            )
+            .latest_complete_ready_decoded_for_root_scope(fixture.root(), &fixture.retained_scope)
             .await
             .is_none(),
         "a drifted checkout under a held scheduler must not be admitted as current"

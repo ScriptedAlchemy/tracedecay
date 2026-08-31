@@ -2934,7 +2934,7 @@ mod tests {
                     cardinality INTEGER NOT NULL,
                     PRIMARY KEY(page_ordinal, kind, ngram)
                 ) WITHOUT ROWID;
-                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);
+                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal, cardinality);
                 CREATE TABLE ngram_statistics (
                     kind INTEGER NOT NULL,
                     ngram INTEGER NOT NULL,
@@ -2991,7 +2991,7 @@ mod tests {
                     cardinality INTEGER NOT NULL,
                     PRIMARY KEY(page_ordinal, kind, ngram)
                 ) WITHOUT ROWID;
-                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);
+                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal, cardinality);
                 CREATE TABLE ngram_statistics (
                     kind INTEGER NOT NULL,
                     ngram INTEGER NOT NULL,
