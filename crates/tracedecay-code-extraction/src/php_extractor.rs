@@ -96,6 +96,7 @@ impl PhpExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.php.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -148,6 +149,7 @@ impl PhpExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
+    #[hotpath::measure(label = "code_extraction.php.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("php", "PHP", source)
     }
@@ -1296,10 +1298,12 @@ impl crate::LanguageExtractor for PhpExtractor {
         "PHP"
     }
 
+    #[hotpath::measure(label = "code_extraction.php.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_php(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.php.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

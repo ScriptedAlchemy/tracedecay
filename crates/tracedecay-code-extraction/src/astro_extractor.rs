@@ -86,6 +86,7 @@ impl LanguageExtractor for AstroExtractor {
         crate::hotpath_observe::measure_language(|| Cow::Owned(Self::mask_non_frontmatter(source)))
     }
 
+    #[hotpath::measure(label = "code_extraction.astro.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_astro(file_path, source)
     }
@@ -102,6 +103,7 @@ impl LanguageExtractor for AstroExtractor {
         )
     }
 
+    #[hotpath::measure(label = "code_extraction.astro.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

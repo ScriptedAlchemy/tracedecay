@@ -106,6 +106,7 @@ impl PascalExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.pascal.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -158,6 +159,7 @@ impl PascalExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
+    #[hotpath::measure(label = "code_extraction.pascal.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("pascal", "Pascal", source)
     }
@@ -1369,10 +1371,12 @@ impl crate::LanguageExtractor for PascalExtractor {
         "Pascal"
     }
 
+    #[hotpath::measure(label = "code_extraction.pascal.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         PascalExtractor::extract_pascal(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.pascal.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

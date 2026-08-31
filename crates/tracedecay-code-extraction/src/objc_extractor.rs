@@ -107,6 +107,7 @@ impl ObjcExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.objc.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -159,6 +160,7 @@ impl ObjcExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
+    #[hotpath::measure(label = "code_extraction.objc.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("objc", "Objective-C", source)
     }
@@ -1324,10 +1326,12 @@ impl crate::LanguageExtractor for ObjcExtractor {
         "Objective-C"
     }
 
+    #[hotpath::measure(label = "code_extraction.objc.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         ObjcExtractor::extract_objc(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.objc.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,
