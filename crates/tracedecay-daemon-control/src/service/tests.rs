@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -246,12 +246,16 @@ fn unavailable_socket_advice_names_stopped_disabled_enable_now() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn unavailable_socket_advice_without_state_uses_unit_file_presence() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
     let socket = PathBuf::from("/tmp/tracedecay.sock");
 
     let missing = super::unavailable_daemon_socket_advice(&socket, None);
@@ -264,7 +268,7 @@ fn unavailable_socket_advice_without_state_uses_unit_file_presence() {
         "absent unit keeps generic ensure-running text, got: {missing}"
     );
 
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = super::service_unit_path().expect("service unit path");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
         &service_path,
