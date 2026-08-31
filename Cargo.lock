@@ -6368,9 +6368,9 @@ dependencies = [
  "tracedecay-hooks",
  "tracedecay-lsp",
  "tracedecay-policy",
+ "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
- "tracedecay-search-eval",
  "tracedecay-semantic",
  "tracedecay-semantic-contracts",
  "tracedecay-session-memory",
@@ -6695,7 +6695,9 @@ name = "tracedecay-query"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "flate2",
  "fst",
+ "gix",
  "hex",
  "hmac 0.13.0",
  "hotpath",
@@ -6800,8 +6802,6 @@ name = "tracedecay-search-eval"
 version = "0.1.0"
 dependencies = [
  "clap",
- "flate2",
- "gix",
  "hex",
  "hotpath",
  "serde",
@@ -7098,7 +7098,6 @@ dependencies = [
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
- "tracedecay-search-eval",
  "tracedecay-semantic",
  "tracedecay-semantic-contracts",
  "tracedecay-session-memory",
