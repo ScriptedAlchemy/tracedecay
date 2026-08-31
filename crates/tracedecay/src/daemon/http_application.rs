@@ -433,10 +433,7 @@ const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// registry; this is the daemon's live mounted operational state.
 pub fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1> {
     let connection = tracedecay_daemon_identity::current_daemon_connection()?;
-    let Some(record) = connection.authority_record.as_ref() else {
-        return Err(missing_daemon_authority());
-    };
-    let Some(endpoint) = record.http_application_endpoint else {
+    let Some(endpoint) = connection.http_application_endpoint() else {
         return Err(TraceDecayError::Config {
             message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),
         });
