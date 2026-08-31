@@ -8,7 +8,7 @@ fn absent_canonical_fact_id(existing: &FactId) -> String {
 }
 
 #[test]
-fn retired_dashboard_routes_cannot_serve_placeholder_bundles() {
+fn retired_dashboard_routes_fall_through_to_the_canonical_spa_index() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -16,6 +16,14 @@ fn retired_dashboard_routes_cannot_serve_placeholder_bundles() {
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
         let agent = http_agent();
+        // The suite serves the fixture bundle; production placeholder-proofing
+        // lives in the CLI build script's manifest validation and the
+        // registered product-runtime provider's bundle validation.
+        let fixture_index = tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS
+            .assets
+            .iter()
+            .find(|asset| asset.path == "index.html")
+            .unwrap_or_else(|| panic!("fixture bundle must carry index.html"));
 
         for path in [
             "/legacy",
@@ -36,8 +44,11 @@ fn retired_dashboard_routes_cannot_serve_placeholder_bundles() {
                 "retired path must fall through to the canonical SPA, never a legacy asset"
             );
             let body = response.body_mut().read_to_string().unwrap();
-            assert!(body.contains("<title>TraceDecay</title>"));
-            assert!(!body.contains("rewrite in progress"));
+            assert_eq!(
+                body.as_bytes(),
+                fixture_index.contents,
+                "retired path {path} must serve the mounted SPA index byte-exact"
+            );
         }
     });
 }

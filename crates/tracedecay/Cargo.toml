@@ -11,17 +11,15 @@ readme = "../../README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "semantic-search"]
 categories = ["development-tools", "command-line-utilities"]
 # Explicit source-archive whitelist retained for local distribution validation.
-# Frontend sources are deliberately excluded: build.rs embeds the canonical
-# prebuilt dashboard/app-dist. Keep that packaged-asset check in build.rs in
-# sync if the dashboard entries below change.
+# Frontend sources and the prebuilt dashboard/app-dist are deliberately
+# excluded: the CLI package stages and embeds the dashboard bundle and
+# registers it into this library at process start.
 include = [
     "/CHANGELOG.md",
     "/LICENSE",
     "/README.md",
     "/rust-toolchain.toml",
     "/.cargo/config.toml",
-    "/build.rs",
-    "/build-support/dashboard_manifest.rs",
     "/src/**",
     "/benches/**",
     "/examples/**",
@@ -57,7 +55,6 @@ include = [
     "/plugin/cursor-native-extension/LICENSE",
     "/plugin/cursor-native-extension/embedded/extension.js",
     "/vendor/**",
-    "/dashboard/app-dist/**",
     "/dashboard/hermes-wrapper/manifest.json",
     "/dashboard/hermes-wrapper/plugin_api.py",
     "/dashboard/hermes-wrapper/src/**",
@@ -428,6 +425,7 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
@@ -488,8 +486,19 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 [target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
 libc = "0.2"
 
+<<<<<<< HEAD
 [build-dependencies]
 serde_json = "1"
+=======
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Variant",
+] }
+>>>>>>> origin/codex/tracedecay-total-redesign-plan-reopened
 
 [dev-dependencies]
 sha2 = "0.11"

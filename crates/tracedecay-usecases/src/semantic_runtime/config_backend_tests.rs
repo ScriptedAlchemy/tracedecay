@@ -10,6 +10,7 @@ use tracedecay_domain::{
     EmbeddingTruncationSideV1, PrivacyDomainId,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, VectorGenerationIdV1};
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
 use crate::semantic_runtime::SemanticCurrentLinkedActivationV1;
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;

@@ -132,8 +132,6 @@ mod storage_findings_api;
 mod storage_telemetry_api;
 mod token_count;
 mod util;
-mod version;
-pub use version::install_build_version;
 mod work_api;
 
 use request_deadline::dashboard_http_request_deadline_micros;
@@ -159,12 +157,12 @@ use tracedecay_api::{WorkOperation, WorkflowOperation};
 use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadConnection, DatabaseStorageTelemetryHandle,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{StorageMode, StoreLayout};
 
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
@@ -257,6 +255,11 @@ pub type RemoteOperationalStatusReader = Arc<
 /// choose every optional authority and the automation writer for each state.
 #[derive(Clone)]
 pub struct DashboardStateCompositionV1 {
+    /// The owning binary's composed build version. The dashboard crate's own
+    /// package version is an implementation detail; the composition root
+    /// passes this from its registered product runtime so every version
+    /// surface reports the shipped product build.
+    pub build_version: &'static str,
     pub project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
     /// Exact-project admission for generation-pinned code-graph reads. This
     /// stays separate from the projection port so the HTTP boundary must
@@ -337,6 +340,8 @@ impl AdmittedDoctorReportV1 {
 /// project or user profile.
 #[derive(Clone)]
 pub struct DashboardState {
+    /// The owning binary's composed build version, from the composition.
+    pub build_version: &'static str,
     /// Registered project id for profile-backed stores, when known.
     pub project_id: Option<String>,
     /// Exact application scope resolved ONCE when this state was constructed.
@@ -707,6 +712,7 @@ async fn build_state_inner(
     composition: DashboardStateCompositionV1,
 ) -> Result<DashboardState> {
     let DashboardStateCompositionV1 {
+        build_version,
         project_graph_resolver,
         code_graph_read_admission,
         code_graph_projection_read_port,
@@ -764,6 +770,7 @@ async fn build_state_inner(
         &delivery_settlements,
     );
     let mut state = DashboardState {
+        build_version,
         project_id: cg.store_layout().identity.project_id.clone(),
         resolved_scope: scope::resolve_dashboard_scope(
             cg.project_root(),
@@ -845,6 +852,7 @@ pub async fn build_selected_project_state(
         Some(Arc::clone(&cg)),
         false,
         DashboardStateCompositionV1 {
+            build_version: active.build_version,
             project_graph_resolver: active.project_graph_resolver.clone(),
             // Both verified code-graph ports are exact-project authorities;
             // the active project's admission must never be reused for a
@@ -980,6 +988,7 @@ where
         // token counts through its own composition.
         false,
         DashboardStateCompositionV1 {
+            build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             project_graph_resolver: test_project_graph_resolver,
             code_graph_read_admission: test_authority
                 .and_then(|authority| authority.code_graph_read_admission.clone()),
@@ -1962,7 +1971,7 @@ async fn capabilities(
     .await;
     Json(json!({
         "name": "tracedecay-dashboard",
-        "version": crate::version::build_version(),
+        "version": state.build_version,
         "mode": "standalone",
         "project_id": state.project_id,
         "project_root": state.project_root.display().to_string(),
@@ -2277,6 +2286,7 @@ mod authority_tests {
             let memory_owner =
                 project_memory_owner_for_layout(&layout).expect("dashboard project memory owner");
             let state = DashboardState {
+                build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 project_id: layout.identity.project_id.clone(),
                 resolved_scope: scope::resolve_dashboard_scope(
                     &project_root,

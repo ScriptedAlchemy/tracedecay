@@ -8,8 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
-
-use crate::DEFAULT_FASTEMBED_MODEL_ID;
+use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
 
 const CATALOG_SCHEMA_V1: &str = "tracedecay.fastembed.model-catalog.v1";
 

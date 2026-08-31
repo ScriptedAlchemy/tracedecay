@@ -1,8 +1,7 @@
 // This file is compiled both as a module of this crate and, through a
-// `#[path]` module in build.rs, as part of the build script — the same
-// arrangement `src/version/build_identity.rs` uses in the root crate. It
-// therefore carries no inner doc comments and no `use` statements, so the one
-// parser bakes the value and the one parser verifies it.
+// `#[path]` module in build.rs, as part of the build script. It therefore
+// carries no inner doc comments and no `use` statements, so the one parser
+// bakes the value and the one parser verifies it.
 
 /// File name of the workspace-root manifest that owns the product version.
 pub const ROOT_MANIFEST_FILE: &str = "Cargo.toml";

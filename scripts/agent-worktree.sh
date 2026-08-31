@@ -13,7 +13,8 @@ Create a linked Git worktree, lock it as an active agent lane, and seed
 dashboard/app-dist from the primary checkout. Symlink root and
 dashboard/node_modules when the primary has them. Prints the unlock+remove
 one-liner for the owning lane and the recommended env
-(CARGO_TARGET_DIR under /fast/tmp, TRACEDECAY_SKIP_DASHBOARD_BUILD=1).
+(CARGO_TARGET_DIR under /fast/tmp, TRACEDECAY_SKIP_DASHBOARD_BUILD=1 plus
+the seeded bundle's TRACEDECAY_DASHBOARD_BUNDLE_SHA256 digest).
 EOF
 }
 
@@ -142,7 +143,13 @@ fi
 echo
 echo "When this lane is finished, unlock and remove the exact path:"
 echo "  git worktree unlock $worktree && git worktree remove $worktree"
+# Skip-mode builds of tracedecay-cli require the expected digest of the
+# prebuilt bundle alongside the skip flag; compute it for the seeded copy so
+# the recommendation stays honest under the digest contract.
+bundle_digest="$(python3 "$worktree/scripts/check-dashboard-bundle.py" "$worktree/dashboard/app-dist" --print-digest)"
+
 echo
 echo "Recommended env:"
 echo "  export TRACEDECAY_SKIP_DASHBOARD_BUILD=1"
+echo "  export TRACEDECAY_DASHBOARD_BUNDLE_SHA256=$bundle_digest"
 echo "  export CARGO_TARGET_DIR=$target_dir"

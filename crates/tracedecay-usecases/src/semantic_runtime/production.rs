@@ -23,8 +23,14 @@ use tracedecay_domain::{
 use tracedecay_policy::retrieval_selection::{
     RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
 };
+#[cfg(test)]
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
+use tracedecay_semantic_contracts::{
+    SemanticGenerationPointerV1, SemanticLifecycleVerifiedReadyEventV1,
+    SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1, SemanticResourceCeilings,
+    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
+};
 
-use crate::config::SemanticResourceCeilings;
 use crate::store::vector_generations::{
     GraphVectorGenerationStoreV1, IsolatedSemanticEvaluationGraphV1, PublishedVectorGenerationV1,
     SemanticAnnServingIndexV1, SemanticVectorStageDescriptorV1, VectorGenerationBeginOutcomeV1,
@@ -78,12 +84,10 @@ use tracedecay_semantic::{
     PreparedSemanticRuntimeObservationV1, PreparedSemanticRuntimeRestoreV1,
     SemanticEvaluationCancellationV1, SemanticEvaluationProjectionBatchCachePolicyV1,
     SemanticEvaluationProjectionBatchCacheV1, SemanticEvaluationProjectionResourcesV1,
-    SemanticEvaluationQueryFactoryV1, SemanticGenerationPointerV1,
-    SemanticModelLifecycleEvaluationPublicationLeaseV1, SemanticModelLifecycleOwnerV1,
-    SemanticModelLifecyclePublicationIdentityV1, SemanticModelLifecycleStateV1,
-    SemanticModelLifecycleStatusV1, SemanticProjectionResumeOutcomeV1,
-    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
-    measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
+    SemanticEvaluationQueryFactoryV1, SemanticModelLifecycleEvaluationPublicationLeaseV1,
+    SemanticModelLifecycleOwnerV1, SemanticModelLifecyclePublicationIdentityV1,
+    SemanticProjectionResumeOutcomeV1, measure_semantic_evaluation_projection_cancellation,
+    prepare_semantic_evaluation_projection,
 };
 use vector_projection_support::{
     BatchCommitStateV1, commit_evaluation_prepared_generation, projection_input_bytes,
@@ -95,6 +99,8 @@ use super::acceptance_calibration::{
 use super::graph_provider::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphProviderV1,
 };
+#[cfg(test)]
+use super::ports::SemanticActivationRequestV1;
 use super::ports::{
     SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticConfigurationPinV1,
     SemanticExecutableGenerationLeaseV1, SemanticExecutableGenerationV1, SemanticRollbackCommandV1,
@@ -102,8 +108,6 @@ use super::ports::{
     SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStateV1,
     SemanticRuntimeStatusV1,
 };
-#[cfg(test)]
-use super::ports::{SemanticActivationRequestV1, SemanticFallbackReasonV1};
 use super::{
     DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
     SemanticProjectionLeaseV1, SemanticProjectionScheduleErrorV1,
@@ -414,8 +418,7 @@ impl ProductionSemanticRuntimeV1 {
 
     pub fn verified_ready_events(
         &self,
-    ) -> tokio::sync::watch::Receiver<tracedecay_semantic::SemanticLifecycleVerifiedReadyEventV1>
-    {
+    ) -> tokio::sync::watch::Receiver<SemanticLifecycleVerifiedReadyEventV1> {
         self.lifecycle.verified_ready_events()
     }
 
@@ -844,7 +847,7 @@ impl ProductionSemanticRuntimeV1 {
         commit_evaluation_prepared_generation(
             &replay_store,
             &replay_build,
-            clean_prepared.clone(),
+            clean_prepared,
             clean.code.chunks().chunks(),
             Arc::clone(&cancellation),
         )
@@ -928,7 +931,7 @@ impl ProductionSemanticRuntimeV1 {
             &one_symbol_store,
             &cancellation,
             sources.one_symbol,
-            one_symbol.clone(),
+            &one_symbol,
             Some(clean_publication.generation_id.clone()),
         )
         .await?;
@@ -961,7 +964,7 @@ impl ProductionSemanticRuntimeV1 {
             &no_op_store,
             &cancellation,
             sources.no_op,
-            no_op.clone(),
+            &no_op,
             Some(one_symbol_publication.generation_id.clone()),
         )
         .await?;
@@ -994,7 +997,7 @@ impl ProductionSemanticRuntimeV1 {
             &deletion_store,
             &cancellation,
             sources.deletion,
-            deletion.clone(),
+            &deletion,
             Some(no_op_publication.generation_id.clone()),
         )
         .await?;
@@ -1160,7 +1163,7 @@ impl ProductionSemanticRuntimeV1 {
         commit_evaluation_prepared_generation(
             &incompatible_store,
             &incompatible_build,
-            incompatible.clone(),
+            &incompatible,
             sources.one_symbol.chunks().chunks(),
             Arc::clone(&cancellation),
         )
@@ -3422,13 +3425,13 @@ async fn publish_evaluation_projection_case_isolated(
     store: &GraphVectorGenerationStoreV1,
     cancellation: &Arc<dyn GraphCancellation>,
     generation: &CodeIndexPublishedGenerationV1,
-    prepared: PreparedVectorGenerationV1,
+    prepared: &PreparedVectorGenerationV1,
     base_generation: Option<VectorGenerationIdV1>,
 ) -> Result<
     crate::store::vector_generations::VectorGenerationPublicationV1,
     SemanticRuntimeScheduleFailureV1,
 > {
-    let plan = evaluation_projection_plan(generation, &prepared, base_generation)?;
+    let plan = evaluation_projection_plan(generation, prepared, base_generation)?;
     let build = store
         .rebuild_generation(plan, Arc::clone(cancellation))
         .await
@@ -4117,8 +4120,11 @@ mod tests {
 
     use tracedecay_semantic::{
         DaemonSemanticRuntimeHandleV1, FastEmbedSemanticGenerationRequestV1,
-        PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,
-        SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1, SemanticRuntimeWorkV1,
+        PreparedSemanticRuntimeCommitV1, SemanticRuntimeWorkV1,
+    };
+    use tracedecay_semantic_contracts::{
+        SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1,
+        SemanticRuntimeScheduleStatusV1,
     };
 
     use super::*;

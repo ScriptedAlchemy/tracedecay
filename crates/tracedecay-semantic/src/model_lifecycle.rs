@@ -18,6 +18,15 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::watch;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_semantic_contracts::{
+    ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
+    DEFAULT_FASTEMBED_MODEL_ID, MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1,
+    ModelArtifactManifestV1, PlatformTargetV1, RerankCompatibilityPinsV1,
+    RerankerArtifactLifecycleStatusV1, ResourceCeilingV1, RuntimeCompatibilityV1,
+    SemanticLifecycleVerifiedReadyEventV1, SemanticModelLifecycleStateV1,
+    SemanticModelLifecycleStatusV1, SemanticModelRemediationV1, SemanticResourceCeilings,
+    Sha256DigestHex, TruncationPolicyV1, UpstreamSourceV1,
+};
 
 #[cfg(feature = "semantic-fastembed")]
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
@@ -28,11 +37,9 @@ use super::artifact_store::{
     FASTEMBED_RUNTIME_BUILD_REVISION_V1, FASTEMBED_RUNTIME_FAMILY_V1, GcReceiptV1,
     ModelArtifactStore, RetentionPolicyV1, RuntimeEnvironmentV1,
 };
-use super::manifest::{ArtifactMemberRoleV1, ModelArtifactManifestV1};
 use super::model_catalog::{
     CatalogErrorV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, catalog_package_digest,
 };
-use crate::{DEFAULT_FASTEMBED_MODEL_ID, RerankCompatibilityPinsV1, SemanticResourceCeilings};
 
 const LIFECYCLE_SCHEMA_V1: &str = "tracedecay.fastembed.model-lifecycle.v1";
 const INSTALL_META_SCHEMA_V1: &str = "tracedecay.fastembed.model-install.v1";
@@ -44,176 +51,6 @@ const EMBEDDING_ACTIVE_LEASE_ID_V1: &str = "embedding:active:v1";
 const EMBEDDING_ROLLBACK_LEASE_ID_V1: &str = "embedding:rollback:v1";
 static SHARED_LIFECYCLE_OWNER: std::sync::OnceLock<Option<Arc<SemanticModelLifecycleOwnerV1>>> =
     std::sync::OnceLock::new();
-
-/// Doctor/status lifecycle states for the selected `FastEmbed` model.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum SemanticModelLifecycleStateV1 {
-    SelectedNotDownloaded {
-        model_id: String,
-        revision: String,
-        artifact_digest: String,
-    },
-    Downloading {
-        model_id: String,
-        revision: String,
-        artifact_digest: String,
-        bytes_received: u64,
-        bytes_total: u64,
-    },
-    Verifying {
-        model_id: String,
-        revision: String,
-        artifact_digest: String,
-    },
-    Installed {
-        model_id: String,
-        revision: String,
-        artifact_digest: String,
-        install_path: PathBuf,
-    },
-    Loading {
-        model_id: String,
-        revision: String,
-        artifact_digest: String,
-        install_path: PathBuf,
-    },
-    Indexing {
-        model_id: String,
-        revision: String,
-        artifact_digest: String,
-        install_path: PathBuf,
-        completed_units: u64,
-        total_units: u64,
-    },
-    Ready {
-        model_id: String,
-        revision: String,
-        artifact_digest: String,
-        install_path: PathBuf,
-    },
-    Failed {
-        model_id: String,
-        revision: String,
-        artifact_digest: String,
-        detail: String,
-        retryable: bool,
-    },
-}
-
-/// Monotone daemon wake emitted only after verified local model bytes become
-/// installed or ready again. The artifact identity lets consumers coalesce
-/// duplicate wakes without inferring readiness from a mutable path.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SemanticLifecycleVerifiedReadyEventV1 {
-    pub epoch: u64,
-    pub artifact_digest: Option<String>,
-}
-
-impl SemanticModelLifecycleStateV1 {
-    pub fn model_id(&self) -> &str {
-        match self {
-            Self::SelectedNotDownloaded { model_id, .. }
-            | Self::Downloading { model_id, .. }
-            | Self::Verifying { model_id, .. }
-            | Self::Installed { model_id, .. }
-            | Self::Loading { model_id, .. }
-            | Self::Indexing { model_id, .. }
-            | Self::Ready { model_id, .. }
-            | Self::Failed { model_id, .. } => model_id,
-        }
-    }
-
-    pub fn artifact_digest(&self) -> &str {
-        match self {
-            Self::SelectedNotDownloaded {
-                artifact_digest, ..
-            }
-            | Self::Downloading {
-                artifact_digest, ..
-            }
-            | Self::Verifying {
-                artifact_digest, ..
-            }
-            | Self::Installed {
-                artifact_digest, ..
-            }
-            | Self::Loading {
-                artifact_digest, ..
-            }
-            | Self::Indexing {
-                artifact_digest, ..
-            }
-            | Self::Ready {
-                artifact_digest, ..
-            }
-            | Self::Failed {
-                artifact_digest, ..
-            } => artifact_digest,
-        }
-    }
-
-    /// Semantics are omitted while acquisition/load/index is incomplete.
-    pub fn omits_semantics(&self) -> bool {
-        !matches!(self, Self::Ready { .. })
-    }
-
-    pub fn remediation(&self) -> SemanticModelRemediationV1 {
-        match self {
-            Self::Failed {
-                retryable: true, ..
-            }
-            | Self::SelectedNotDownloaded { .. } => SemanticModelRemediationV1 {
-                retry: true,
-                remove: matches!(self, Self::Failed { .. }),
-                rollback: false,
-            },
-            Self::Installed { .. }
-            | Self::Loading { .. }
-            | Self::Indexing { .. }
-            | Self::Ready { .. }
-            | Self::Failed {
-                retryable: false, ..
-            } => SemanticModelRemediationV1 {
-                retry: matches!(self, Self::Failed { .. }),
-                remove: true,
-                rollback: true,
-            },
-            Self::Downloading { .. } | Self::Verifying { .. } => SemanticModelRemediationV1 {
-                retry: false,
-                remove: false,
-                rollback: false,
-            },
-        }
-    }
-}
-
-/// Read-only lifecycle guidance exposed by status surfaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticModelRemediationV1 {
-    pub retry: bool,
-    pub remove: bool,
-    pub rollback: bool,
-}
-
-/// Public status envelope for Doctor and daemon runtime status.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticModelLifecycleStatusV1 {
-    pub selected_model: Option<String>,
-    pub auto_download: bool,
-    pub catalog_model_ids: Vec<String>,
-    pub state: Option<SemanticModelLifecycleStateV1>,
-    pub remediation: SemanticModelRemediationV1,
-    pub semantics_omitted: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RerankerArtifactLifecycleStatusV1 {
-    pub active_artifact_digest: Option<super::manifest::Sha256DigestHex>,
-    pub rollback_artifact_digest: Option<super::manifest::Sha256DigestHex>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

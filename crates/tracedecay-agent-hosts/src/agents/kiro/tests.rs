@@ -451,6 +451,7 @@ fn kiro_component_set() -> crate::agents::host_bundle_registry::VerifiedEmbedded
         &[crate::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp],
         0,
         "/bin/tracedecay",
+        crate::agents::TEST_GENERATOR_COMMIT,
     )
     .expect("the embedded Kiro component set must verify")
 }

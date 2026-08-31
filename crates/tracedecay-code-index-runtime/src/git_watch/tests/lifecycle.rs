@@ -743,7 +743,8 @@ async fn explicit_metadata_watch_plan_fails_closed_at_its_directory_cap() {
         worktree_git_dir(repo.path()).expect("worktree git directory"),
         MaintenanceCoordinator::default(),
     ));
-    let cancellation = state.cancellation(&tracedecay_session_memory::context::CancellationToken::new());
+    let cancellation =
+        state.cancellation(&tracedecay_session_memory::context::CancellationToken::new());
 
     assert_eq!(
         observe_watch_plan(state, cancellation).await,
@@ -778,7 +779,8 @@ async fn a_new_nested_ref_directory_requests_a_watch_plan_rebuild() {
     tokio::time::timeout(Duration::from_millis(50), state.reconfigure.notified())
         .await
         .expect("a nested metadata directory must rebuild the explicit watch plan");
-    let cancellation = state.cancellation(&tracedecay_session_memory::context::CancellationToken::new());
+    let cancellation =
+        state.cancellation(&tracedecay_session_memory::context::CancellationToken::new());
     let plan = observe_watch_plan(state, cancellation)
         .await
         .expect("rebuilt watch plan");

@@ -1,13 +1,15 @@
 use tracedecay_domain::VectorGenerationIdV1;
-use tracedecay_semantic::{
-    SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
+#[cfg(test)]
+use tracedecay_semantic_contracts::SemanticModelRemediationV1;
+use tracedecay_semantic_contracts::{
+    SemanticFallbackReasonV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
     SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
     SemanticRuntimeStatusProjectionV1,
 };
 
 use super::super::ports::{
-    SemanticActivationReceiptV1, SemanticConfigurationPinV1, SemanticFallbackReasonV1,
-    SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
+    SemanticActivationReceiptV1, SemanticConfigurationPinV1, SemanticRuntimeStateV1,
+    SemanticRuntimeStatusV1,
 };
 
 /// Map daemon schedule projection into the application/Doctor status shape.
@@ -291,7 +293,6 @@ mod tests {
     use std::path::PathBuf;
 
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
-    use tracedecay_semantic::SemanticModelRemediationV1;
 
     use super::*;
     use crate::configuration::ConfigurationCurrentStateV1;

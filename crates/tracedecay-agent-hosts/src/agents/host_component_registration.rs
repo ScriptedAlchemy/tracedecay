@@ -1869,6 +1869,7 @@ mod tests {
             crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
                 crate::agents::host_bundle_v2::HostKindV1::Gemini,
                 0,
+                crate::agents::TEST_GENERATOR_COMMIT,
             )
             .expect("Gemini has a compiled default set");
 
@@ -1891,6 +1892,7 @@ mod tests {
             crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
                 crate::agents::host_bundle_v2::HostKindV1::CursorDesktop,
                 0,
+                crate::agents::TEST_GENERATOR_COMMIT,
             )
             .expect("Cursor has a compiled default set");
         assert!(cursor.supports_artifact_only_backup_restore(&cursor_set.component_set));
@@ -1916,6 +1918,7 @@ mod tests {
             crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
                 crate::agents::host_bundle_v2::HostKindV1::Copilot,
                 0,
+                crate::agents::TEST_GENERATOR_COMMIT,
             )
             .expect("Copilot has a compiled default set");
 
@@ -1957,6 +1960,7 @@ mod tests {
             crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
                 HostKindV1::Codex,
                 0,
+                crate::agents::TEST_GENERATOR_COMMIT,
             )
             .expect("Codex has a compiled default set");
         let mut authority = CatalogHostComponentRegistrationAuthority::new(
@@ -2026,6 +2030,7 @@ mod tests {
             crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
                 HostKindV1::Codex,
                 0,
+                crate::agents::TEST_GENERATOR_COMMIT,
             )
             .expect("Codex has a compiled default set");
         let authority = CatalogHostComponentRegistrationAuthority::new(

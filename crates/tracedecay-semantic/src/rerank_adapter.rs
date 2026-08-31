@@ -18,15 +18,17 @@ use tracedecay_domain::{
     RetrievalRequest, SanitizedStageFailure, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_query::retrieval::rerank::{
-    BoundedRerankOutcomeV1, BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1,
-    EphemeralRerankViewSourceV1, LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1,
-    RerankExecutionControlV1, RerankViewOutcomeV1, RerankViewPermitV1,
+    AdmittedNativeRerankExecutorV1, BoundedRerankOutcomeV1, BoundedRerankRuntimeV1,
+    DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1, LocalRerankFailureV1,
+    LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1, RerankViewOutcomeV1,
+    RerankViewPermitV1,
+};
+use tracedecay_semantic_contracts::{
+    ArtifactMemberRoleV1, ArtifactProfileKindV1, ModelArtifactManifestV1,
+    RerankCompatibilityPinsV1, ResourceCeilingV1,
 };
 
 use super::artifact_store::AdmittedArtifactV1;
-use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1};
-use crate::RerankCompatibilityPinsV1;
-use tracedecay_query::retrieval::rerank::AdmittedNativeRerankExecutorV1;
 
 pub const RERANK_IMPLEMENTATION_REVISION_V1: &str = "rerank.fastembed.production.v1";
 pub const RERANK_RUNTIME_DIGEST_DOMAIN_V1: &str = "tracedecay.rerank-runtime-compatibility.v1";
@@ -82,9 +84,9 @@ impl AdmittedRerankArtifactV1 {
 }
 
 pub fn validate_reranker_manifest_pins(
-    manifest: &super::manifest::ModelArtifactManifestV1,
+    manifest: &ModelArtifactManifestV1,
     pins: &RerankCompatibilityPinsV1,
-) -> Result<super::manifest::ResourceCeilingV1, RerankArtifactAdmissionErrorV1> {
+) -> Result<ResourceCeilingV1, RerankArtifactAdmissionErrorV1> {
     let payload = &manifest.payload;
     manifest
         .validate()

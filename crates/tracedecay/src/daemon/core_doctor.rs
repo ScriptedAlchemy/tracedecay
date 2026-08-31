@@ -7,8 +7,8 @@ use tokio::time::{Duration, timeout};
 
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
-use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_domain::errors::Result;
+use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 #[path = "core_doctor_schema.rs"]
@@ -90,11 +90,12 @@ fn doctor_runtime_temporal_report(
 }
 
 fn doctor_runtime_unavailable(
+    build_version: &str,
     project_path: Option<&Path>,
     reason: &'static str,
 ) -> serde_json::Value {
     json!({
-        "tracedecay_version": crate::version::build_version(),
+        "tracedecay_version": build_version,
         "database": {
             "project_root": project_path,
             "quick_check_ok": null,
@@ -189,11 +190,13 @@ async fn doctor_runtime_value(
     store_administration: &super::StoreAdministration,
     startup_health_only: bool,
     git_watcher_health: Option<serde_json::Value>,
+    build_version: &str,
 ) -> serde_json::Value {
     let mut value = Box::pin(doctor_runtime_value_inner(
         handshake,
         Some(store_administration),
         startup_health_only,
+        build_version,
     ))
     .await;
     value["git_watcher"] = git_watcher_health.unwrap_or_else(|| {
@@ -211,14 +214,17 @@ async fn doctor_runtime_value_inner(
     handshake: &DaemonHandshake,
     store_administration: Option<&super::StoreAdministration>,
     startup_health_only: bool,
+    build_version: &str,
 ) -> serde_json::Value {
     let Some(project_path) = handshake.project_path.as_deref() else {
-        return doctor_runtime_unavailable(None, "project_path_missing");
+        return doctor_runtime_unavailable(build_version, None, "project_path_missing");
     };
     let (expected_graph_path, session_path) =
         match doctor_runtime_store_layout(project_path, &handshake.client_identity.profile_root) {
             Ok(paths) => paths,
-            Err(reason) => return doctor_runtime_unavailable(Some(project_path), reason),
+            Err(reason) => {
+                return doctor_runtime_unavailable(build_version, Some(project_path), reason);
+            }
         };
     let Some(store_administration) = store_administration else {
         let reason = if expected_graph_path.is_file() {
@@ -226,7 +232,7 @@ async fn doctor_runtime_value_inner(
         } else {
             "project_store_missing"
         };
-        return doctor_runtime_unavailable(Some(project_path), reason);
+        return doctor_runtime_unavailable(build_version, Some(project_path), reason);
     };
     let canonical_project_path = project_path
         .canonicalize()
@@ -247,7 +253,7 @@ async fn doctor_runtime_value_inner(
         } else {
             "project_store_missing"
         };
-        return doctor_runtime_unavailable(Some(project_path), reason);
+        return doctor_runtime_unavailable(build_version, Some(project_path), reason);
     };
     let graph_path = graph.db_path();
     let canonical_graph_path = graph_path
@@ -271,7 +277,11 @@ async fn doctor_runtime_value_inner(
             Ok(None) => (Some(true), None),
             Ok(Some(problem)) => (Some(false), Some(problem)),
             Err(_) => {
-                return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
+                return doctor_runtime_unavailable(
+                    build_version,
+                    Some(project_path),
+                    "project_store_unavailable",
+                );
             }
         }
     };
@@ -304,6 +314,7 @@ async fn doctor_runtime_value_inner(
             Ok(version) => Some(version),
             Err(_) => {
                 return doctor_runtime_unavailable(
+                    build_version,
                     Some(project_path),
                     "project_schema_unavailable",
                 );
@@ -313,7 +324,7 @@ async fn doctor_runtime_value_inner(
     let schema_state = schema_version.map(doctor_graph_schema_state);
     let schema_drift = schema_state.map(|state| state != DoctorGraphSchemaState::Current);
     let mut value = json!({
-        "tracedecay_version": crate::version::build_version(),
+        "tracedecay_version": build_version,
         "process": {
             "pid": std::process::id(),
         },
@@ -467,7 +478,10 @@ fn doctor_semantic_runtime_status(
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> serde_json::Value {
     serde_json::to_value(
-        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(project_path, configuration),
+        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
+            project_path,
+            configuration,
+        ),
     )
     .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
@@ -476,7 +490,8 @@ fn doctor_semantic_runtime_status(
 pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
     // Owned stores are never path-opened as a fallback. Without the daemon's
     // retained runtime authority Doctor reports explicit unavailability.
-    doctor_runtime_value_inner(handshake, None, false).await
+    let build_version = crate::product_runtime::register_fixture_product_runtime().build_version();
+    doctor_runtime_value_inner(handshake, None, false, build_version).await
 }
 
 #[hotpath::measure(label = "daemon.engine.doctor.runtime_write", future = true)]
@@ -487,11 +502,13 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     request: DoctorRuntimeRequest,
     git_watcher_health: Option<serde_json::Value>,
 ) -> Result<()> {
+    let build_version = crate::version::build_version()?;
     let mut value = Box::pin(doctor_runtime_value(
         handshake,
         store_administration,
         request.startup_health_only,
         git_watcher_health,
+        build_version,
     ))
     .await;
     if request.doctor_report_requested() && value.get("doctor_report").is_none() {
@@ -572,9 +589,12 @@ mod doctor_runtime_route_tests {
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
     use tracedecay_daemon_protocol::DaemonClientIdentity;
     use tracedecay_mcp::McpTransport;
+    use tracedecay_semantic_contracts::{
+        SemanticFallbackReasonV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
+        SemanticModelRemediationV1,
+    };
     use tracedecay_usecases::semantic_runtime::{
-        SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
-        SemanticRuntimeStatusV1,
+        SemanticConfigurationPinV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
     };
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -905,7 +925,7 @@ mod doctor_runtime_route_tests {
         assert!(matches!(
             status.state,
             tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
-                reason: tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::ConfigurationUnavailable,
+                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
             }
         ));
     }
@@ -929,14 +949,14 @@ mod doctor_runtime_route_tests {
 
     fn lifecycle_status(
         selected_model: Option<&str>,
-        state: Option<tracedecay_semantic::SemanticModelLifecycleStateV1>,
-    ) -> tracedecay_semantic::SemanticModelLifecycleStatusV1 {
-        tracedecay_semantic::SemanticModelLifecycleStatusV1 {
+        state: Option<SemanticModelLifecycleStateV1>,
+    ) -> SemanticModelLifecycleStatusV1 {
+        SemanticModelLifecycleStatusV1 {
             selected_model: selected_model.map(str::to_owned),
             auto_download: false,
             catalog_model_ids: Vec::new(),
             state,
-            remediation: tracedecay_semantic::SemanticModelRemediationV1 {
+            remediation: SemanticModelRemediationV1 {
                 retry: false,
                 remove: false,
                 rollback: false,
@@ -959,15 +979,13 @@ mod doctor_runtime_route_tests {
         let digest = "b".repeat(64);
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
-            Some(
-                tracedecay_semantic::SemanticModelLifecycleStateV1::Downloading {
-                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                    revision: "rev".to_owned(),
-                    artifact_digest: digest,
-                    bytes_received: 4,
-                    bytes_total: 16,
-                },
-            ),
+            Some(SemanticModelLifecycleStateV1::Downloading {
+                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                revision: "rev".to_owned(),
+                artifact_digest: digest,
+                bytes_received: 4,
+                bytes_total: 16,
+            }),
         );
         let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
             Some(seated_generic_unavailable()),
@@ -994,15 +1012,13 @@ mod doctor_runtime_route_tests {
         let digest = "c".repeat(64);
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
-            Some(
-                tracedecay_semantic::SemanticModelLifecycleStateV1::Failed {
-                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                    revision: "rev".to_owned(),
-                    artifact_digest: digest,
-                    detail: "artifact verify failed".to_owned(),
-                    retryable: false,
-                },
-            ),
+            Some(SemanticModelLifecycleStateV1::Failed {
+                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                revision: "rev".to_owned(),
+                artifact_digest: digest,
+                detail: "artifact verify failed".to_owned(),
+                retryable: false,
+            }),
         );
         let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
             Some(seated_generic_unavailable()),
@@ -1033,15 +1049,13 @@ mod doctor_runtime_route_tests {
         );
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
-            Some(
-                tracedecay_semantic::SemanticModelLifecycleStateV1::Downloading {
-                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                    revision: "rev".to_owned(),
-                    artifact_digest: "d".repeat(64),
-                    bytes_received: 1,
-                    bytes_total: 2,
-                },
-            ),
+            Some(SemanticModelLifecycleStateV1::Downloading {
+                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                revision: "rev".to_owned(),
+                artifact_digest: "d".repeat(64),
+                bytes_received: 1,
+                bytes_total: 2,
+            }),
         );
         let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
             Some(broken.clone()),
@@ -1114,8 +1128,16 @@ mod doctor_runtime_route_tests {
             .lock()
             .await
             .insert(key, server);
-        let value =
-            super::doctor_runtime_value(&handshake, &store_administration, false, None).await;
+        let build_version =
+            crate::product_runtime::register_fixture_product_runtime().build_version();
+        let value = super::doctor_runtime_value(
+            &handshake,
+            &store_administration,
+            false,
+            None,
+            build_version,
+        )
+        .await;
 
         assert_eq!(
             value.pointer("/doctor_runtime/status"),

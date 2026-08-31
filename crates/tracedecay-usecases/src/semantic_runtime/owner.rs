@@ -1,10 +1,11 @@
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
+
 use super::ports::{
     SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticActivationRequestV1,
-    SemanticConfigurationPinV1, SemanticConfigurationSnapshotSourceV1, SemanticFallbackReasonV1,
-    SemanticRollbackCommandV1, SemanticRollbackReceiptV1, SemanticRollbackRequestV1,
-    SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1, SemanticRuntimeControlErrorV1,
-    SemanticRuntimeFuture, SemanticRuntimeIntegrationPortV1, SemanticRuntimeStateV1,
-    SemanticRuntimeStatusV1,
+    SemanticConfigurationPinV1, SemanticConfigurationSnapshotSourceV1, SemanticRollbackCommandV1,
+    SemanticRollbackReceiptV1, SemanticRollbackRequestV1, SemanticRuntimeBackendErrorV1,
+    SemanticRuntimeBackendV1, SemanticRuntimeControlErrorV1, SemanticRuntimeFuture,
+    SemanticRuntimeIntegrationPortV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
 
 /// Application owner for semantic activation, status, and rollback.

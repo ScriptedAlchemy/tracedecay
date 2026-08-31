@@ -33,6 +33,10 @@ use tracedecay_hooks::{
     decode_opencode_plugin_event,
 };
 
+/// Generator commit passed to both bundle staging and doctor inspection so
+/// staleness comparison sees one consistent provenance.
+const GENERATOR_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 fn parse_fixture(value: &str) -> Value {
     serde_json::from_str(value).expect("checked-in fixture parses")
 }
@@ -78,7 +82,13 @@ fn embedded_component_backup_restore_runs_through_the_real_lifecycle_writer() {
     let artifacts = tempfile::tempdir().unwrap();
     let lifecycle = tempfile::tempdir().unwrap();
     let bundle =
-        verified_embedded_host_bundle(HostKindV1::Codex, HostBundleComponentV1::Core, 0).unwrap();
+        verified_embedded_host_bundle(
+        HostKindV1::Codex,
+        HostBundleComponentV1::Core,
+        0,
+        GENERATOR_COMMIT,
+    )
+    .unwrap();
     let verifier = bundle.verifier();
     let mut writer =
         HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path()).unwrap();
@@ -131,7 +141,12 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
     let lifecycle_root = tempfile::tempdir().unwrap();
 
     let bundle =
-        verified_embedded_host_bundle(HostKindV1::KimiCode, HostBundleComponentV1::Core, 0)
+        verified_embedded_host_bundle(
+        HostKindV1::KimiCode,
+        HostBundleComponentV1::Core,
+        0,
+        GENERATOR_COMMIT,
+    )
             .unwrap();
     for content in &bundle.contents {
         let path = artifact_root.path().join(&content.relative_path);
@@ -193,6 +208,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         artifact_root.path(),
         lifecycle_root.path(),
         &CurrentRegistration,
+        GENERATOR_COMMIT,
     )
     .unwrap();
     assert_eq!(direct.components.len(), 1);
@@ -216,6 +232,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
             project_path: artifact_root.path().to_path_buf(),
         },
         lifecycle_root.path(),
+        GENERATOR_COMMIT,
     )
     .unwrap();
     assert_eq!(owner.components.len(), 1);
@@ -234,6 +251,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         artifact_root.path(),
         lifecycle_root.path(),
         &CurrentRegistration,
+        GENERATOR_COMMIT,
     )
     .unwrap();
     assert_eq!(
@@ -248,7 +266,12 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
     let artifact_root = tempfile::tempdir().unwrap();
     let lifecycle_root = tempfile::tempdir().unwrap();
     let bundle =
-        verified_embedded_host_bundle(HostKindV1::CursorDesktop, HostBundleComponentV1::Agent, 0)
+        verified_embedded_host_bundle(
+        HostKindV1::CursorDesktop,
+        HostBundleComponentV1::Agent,
+        0,
+        GENERATOR_COMMIT,
+    )
             .unwrap();
     for content in &bundle.contents {
         let path = artifact_root.path().join(&content.relative_path);
@@ -296,6 +319,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
         artifact_root.path(),
         lifecycle_root.path(),
         &CurrentRegistration,
+        GENERATOR_COMMIT,
     )
     .unwrap();
     assert_eq!(report.components.len(), 1);
@@ -316,7 +340,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
     let home = tempfile::tempdir().unwrap();
     let lifecycle = tempfile::tempdir().unwrap();
     let component_set =
-        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0).unwrap();
+        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0, GENERATOR_COMMIT).unwrap();
     let request = HostComponentSetExecutionRequestV1 {
         lifecycle: HostComponentSetLifecycleRequestV1 {
             operation: HostBundleLifecycleOpV1::Repair,
@@ -424,12 +448,12 @@ fn unsupported_host_components_are_not_advertised_or_constructible() {
         let reason = unsupported_host_component_set_reason(host)
             .unwrap_or_else(|| panic!("{host:?} must carry an exact unavailable reason"));
         assert_eq!(
-            verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
+            verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0, GENERATOR_COMMIT),
             Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason }),
             "{host:?} must refuse an explicit component request with its exact reason"
         );
         assert_eq!(
-            verified_embedded_default_host_component_set(host, 0),
+            verified_embedded_default_host_component_set(host, 0, GENERATOR_COMMIT),
             Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason }),
             "{host:?} must report a typed unavailable default set, never an empty one"
         );
@@ -441,11 +465,11 @@ fn unsupported_host_components_are_not_advertised_or_constructible() {
         );
         assert_eq!(unsupported_host_component_set_reason(host), None);
         assert!(
-            verified_embedded_default_host_component_set(host, 0).is_ok(),
+            verified_embedded_default_host_component_set(host, 0, GENERATOR_COMMIT).is_ok(),
             "{host:?} must package its documented MCP-only lifecycle"
         );
         assert_eq!(
-            verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
+            verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0, GENERATOR_COMMIT),
             Err(HostBundleRegistryError::Incompatible),
             "{host:?} Core must remain gated by missing native hook evidence"
         );
@@ -613,7 +637,7 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
     let home = tempfile::tempdir().unwrap();
     let lifecycle = tempfile::tempdir().unwrap();
     let component_set =
-        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0).unwrap();
+        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0, GENERATOR_COMMIT).unwrap();
     let request = HostComponentSetExecutionRequestV1 {
         lifecycle: HostComponentSetLifecycleRequestV1 {
             operation: HostBundleLifecycleOpV1::Repair,
@@ -739,7 +763,7 @@ fn unreadable_host_registration_refuses_instead_of_reporting_no_conflict() {
     fs::write(&config_path, b"{ this is not json").unwrap();
 
     let component_set =
-        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0).unwrap();
+        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0, GENERATOR_COMMIT).unwrap();
     let request = HostComponentSetExecutionRequestV1 {
         lifecycle: HostComponentSetLifecycleRequestV1 {
             operation: HostBundleLifecycleOpV1::Repair,
@@ -830,6 +854,7 @@ fn doctor_reports_native_edit_stop_conformance_without_any_install() {
         lifecycle.path(),
         &lifecycle.path().join("absent"),
         &CurrentRegistration,
+        GENERATOR_COMMIT,
     )
     .expect("an absent lifecycle root still reports host evidence");
 
@@ -863,7 +888,7 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
         covered_hosts.push(host);
         let artifacts = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
-        let component_set = verified_embedded_default_host_component_set(host, 0).unwrap();
+        let component_set = verified_embedded_default_host_component_set(host, 0, GENERATOR_COMMIT).unwrap();
         assert_eq!(
             component_set
                 .component_set
@@ -953,6 +978,7 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 artifacts.path(),
                 lifecycle.path(),
                 &CurrentRegistration,
+                GENERATOR_COMMIT,
             )
             .unwrap()
             .components
@@ -1018,6 +1044,7 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 artifacts.path(),
                 lifecycle.path(),
                 &CurrentRegistration,
+                GENERATOR_COMMIT,
             )
             .unwrap()
             .components
@@ -1051,6 +1078,7 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 artifacts.path(),
                 lifecycle.path(),
                 &MissingRegistration,
+                GENERATOR_COMMIT,
             )
             .unwrap()
             .components
@@ -1063,6 +1091,7 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 artifacts.path(),
                 lifecycle.path(),
                 &CurrentRegistration,
+                GENERATOR_COMMIT,
             )
             .unwrap()
             .components
@@ -1094,6 +1123,7 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
         HostKindV1::CursorDesktop,
         &[HostBundleComponentV1::Core],
         0,
+        GENERATOR_COMMIT,
     )
     .unwrap();
     let request = |operation, operation_id| HostComponentSetExecutionRequestV1 {
@@ -1156,6 +1186,7 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
         artifacts.path(),
         lifecycle.path(),
         &CurrentRegistration,
+        GENERATOR_COMMIT,
     )
     .unwrap();
     assert_eq!(
@@ -1213,6 +1244,7 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
             artifacts.path(),
             lifecycle.path(),
             &CurrentRegistration,
+            GENERATOR_COMMIT,
         )
         .unwrap()
         .components[0]

@@ -157,7 +157,7 @@ fn refresh_daemon_service_with_spec(
         daemon_control::refresh_installed_service_under_lease_with_state(
             spec,
             previous_state,
-            tracedecay::version::build_version(),
+            crate::product_runtime::PRODUCT_BUILD_VERSION,
         )?
         .map(|service_path| (service_path, socket_path)),
     )
@@ -240,7 +240,7 @@ pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> 
     let guard = daemon_control::QuiescedDaemonLifecycle::acquire_with_timeout(
         "daemon restart",
         DAEMON_RESTART_LEASE_TIMEOUT,
-        tracedecay::version::build_version(),
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
     )?;
     let (stopped_state, desired_state) = match guard.previous_state() {
         daemon_control::DaemonServiceState::RunningEnabled
@@ -407,7 +407,7 @@ fn run_update_flow(
 ) -> tracedecay_domain::errors::Result<()> {
     daemon_control::with_exclusive_maintenance_window(
         operation,
-        tracedecay::version::build_version(),
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
         |lease_token| {
             let installed_version =
                 run_install_then_refresh(refresh_policy, crate::upgrade::run_upgrade, |binary| {
@@ -459,7 +459,7 @@ pub(crate) async fn run_post_update_command(
 
     let guard = daemon_control::QuiescedDaemonLifecycle::acquire(
         "post-update",
-        tracedecay::version::build_version(),
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
     )?;
     let operation_result = match guard.lifecycle_lease() {
         Ok(lifecycle_lease) => run_post_update_tasks(no_reinstall, lifecycle_lease).await,

@@ -59,7 +59,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 std::collections::BTreeMap::new(),
             )),
             background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
-                super::bounded_daemon_admission_permits(),
+                super::host_cpu_target(super::MAX_CONCURRENT_RECONCILE_WORKTREES),
             )),
             serving_generation_installation_tokens: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             generation_publications,

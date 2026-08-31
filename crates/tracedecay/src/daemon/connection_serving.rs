@@ -186,10 +186,11 @@ fn is_mcp_initialize_request(line: &str) -> bool {
 async fn refuse_unparseable_handshake(
     transport: &mut (impl tracedecay_mcp::McpTransport + Send),
     handshake_line: &str,
+    daemon_version: &str,
 ) {
     let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_unparseable_handshake(
         handshake_line,
-        binary_version(),
+        daemon_version,
     );
     write_refusal_and_drain(transport, &refusal).await;
 }
@@ -201,9 +202,12 @@ async fn refuse_unparseable_handshake(
 /// at EOF, which every client surface reported as "connection closed, the
 /// outcome is unknown" — a transport mystery for what is a definitive daemon
 /// answer. The frame never echoes the supplied token.
-async fn refuse_unauthenticated_client(transport: &mut (impl tracedecay_mcp::McpTransport + Send)) {
+async fn refuse_unauthenticated_client(
+    transport: &mut (impl tracedecay_mcp::McpTransport + Send),
+    daemon_version: &str,
+) {
     let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_rejected_authentication(
-        binary_version(),
+        daemon_version,
     );
     write_refusal_and_drain(transport, &refusal).await;
 }
@@ -706,7 +710,7 @@ fn serve_broker_socket_client_inner(
             let authenticated = DaemonAuthPreface::from_line(&preface_line)
                 .is_ok_and(|preface| preface.authenticate(expected_token));
             if !authenticated {
-                refuse_unauthenticated_client(&mut transport).await;
+                refuse_unauthenticated_client(&mut transport, binary_version()?).await;
                 return Ok(None);
             }
         }
@@ -724,7 +728,7 @@ fn serve_broker_socket_client_inner(
             Ok(handshake) => handshake,
             Err(_) => {
                 drop(setup_activity);
-                refuse_unparseable_handshake(&mut transport, &line).await;
+                refuse_unparseable_handshake(&mut transport, &line, binary_version()?).await;
                 return Ok(None);
             }
         };
@@ -833,7 +837,7 @@ cancel(cancellation.target_request_id());
         else {
             return Ok(None);
         };
-        Box::pin(engine.log_client_version_skew(&handshake)).await;
+        Box::pin(engine.log_client_version_skew(&handshake)).await?;
         report_profile_host_admission_bootstrap_status(
             Box::pin(schedule_user_profile_host_admission_replay_for_identity(
                 &engine.store_administration,
@@ -1408,7 +1412,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let authenticated = DaemonAuthPreface::from_line(&preface_line)
         .is_ok_and(|preface| preface.authenticate(auth_token));
     if !authenticated {
-        refuse_unauthenticated_client(&mut transport).await;
+        refuse_unauthenticated_client(&mut transport, binary_version()?).await;
         return Ok(());
     }
     let Some(handshake_line) = read_line_handling_wire_oversized(&mut transport).await? else {
@@ -1421,7 +1425,8 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         Ok(handshake) => handshake,
         Err(_) => {
             drop(setup_activity);
-            refuse_unparseable_handshake(&mut transport, &handshake_line).await;
+            refuse_unparseable_handshake(&mut transport, &handshake_line, binary_version()?)
+                .await;
             return Ok(());
         }
     };

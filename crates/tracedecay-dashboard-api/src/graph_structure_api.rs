@@ -394,6 +394,7 @@ async fn call_chain(
                 2,
                 "endpoint nodes",
                 Some(graph.reader.generation().as_str().to_owned()),
+                graph.freshness,
             )
         },
         label = "dashboard_api.graph.call_chain"
@@ -540,6 +541,7 @@ async fn strata(
                 snapshot.files_examined as u64,
                 "files",
                 Some(snapshot.graph_generation.clone()),
+                graph.freshness,
             )
         },
         label = "dashboard_api.graph.strata"
@@ -651,6 +653,7 @@ async fn node_facts(
                 1,
                 "canonical fact-match arms",
                 Some(graph.reader.generation().as_str().to_owned()),
+                graph.freshness,
             )
         },
         label = "dashboard_api.graph.node_facts"
@@ -717,6 +720,7 @@ async fn node_tests(
                     1,
                     "source symbols",
                     graph_version,
+                    graph.freshness,
                 );
             }
 
@@ -831,6 +835,7 @@ async fn node_tests(
                 1,
                 "source symbols",
                 graph_version,
+                graph.freshness,
             )
         },
         label = "dashboard_api.graph.node_tests"
@@ -924,6 +929,7 @@ async fn node_sessions(
             eligible,
             "sessions with provider-native edited-file metadata",
             Some(graph.reader.generation().as_str().to_owned()),
+            graph.freshness,
         )
 
         },
@@ -935,6 +941,7 @@ async fn node_sessions(
 struct AdmittedGraphReadV1 {
     reader: CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
+    freshness: crate::graph::CodeGraphReadFreshnessV1,
 }
 
 fn graph_control<T: Serialize>(
@@ -951,6 +958,7 @@ fn graph_control<T: Serialize>(
     })
 }
 
+#[hotpath::measure(label = "dashboard_api.graph_structure.admitted_read", future = true)]
 async fn admitted_graph<T: Serialize>(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,
@@ -1001,12 +1009,14 @@ async fn admitted_graph<T: Serialize>(
     )
     .await
     .map_err(|error| graph_error_response::<T>(state, error))?;
+    let freshness = verified.freshness();
     let reader = verified
         .reader_with_cancellation(&context, control.observed_at(), Arc::clone(&cancellation))
         .map_err(|error| graph_error_response::<T>(state, error))?;
     Ok(AdmittedGraphReadV1 {
         reader,
         cancellation,
+        freshness,
     })
 }
 
@@ -1283,12 +1293,16 @@ fn measured_response<T: Serialize>(
     eligible: u64,
     unit: &'static str,
     graph_version: Option<String>,
+    freshness: crate::graph::CodeGraphReadFreshnessV1,
 ) -> Response {
     let mut envelope = DashboardEnvelopeV1::ready(
         scope_from_state(state),
         DashboardCoverageV1::complete(eligible, unit),
         StructureReadV1::Measured { measurement },
     );
+    // A last-complete stale serve stays complete for the served generation
+    // but must carry the staleness marker instead of presenting as fresh.
+    envelope.freshness = super::graph_service::graph_envelope_freshness(freshness);
     if let Some(graph_version) = graph_version {
         envelope = envelope.with_version(DashboardVersionV1 {
             entity_version: None,

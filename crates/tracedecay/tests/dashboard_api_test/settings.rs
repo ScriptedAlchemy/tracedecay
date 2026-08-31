@@ -127,9 +127,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 .is_empty()
         );
 
+        tracedecay::product_runtime::register_fixture_product_runtime();
         assert_eq!(
             settings["version"]["version"],
-            tracedecay::version::build_version()
+            tracedecay::version::build_version().expect("fixture product runtime registered")
         );
         let channel = settings["version"]["channel"].as_str().unwrap_or_default();
         assert!(

@@ -1294,7 +1294,7 @@ pub fn start_service(expected_version: &str) -> Result<()> {
         // there is no post-start shape to verify beyond the runner's success.
         DaemonServiceState::Missing | DaemonServiceState::Masked => return Ok(()),
     };
-    wait_for_installed_service_state(expected, expected_version)
+    wait_for_installed_service_state_with_runner(&runner, expected, expected_version)
 }
 
 #[hotpath::measure(label = "daemon.service.stop")]
@@ -1317,16 +1317,29 @@ pub fn wait_for_installed_service_state(
     expected: DaemonServiceState,
     expected_version: &str,
 ) -> Result<()> {
+    wait_for_installed_service_state_with_runner(
+        &ServiceRunner::current()?,
+        expected,
+        expected_version,
+    )
+}
+
+pub(super) fn wait_for_installed_service_state_with_runner(
+    runner: &ServiceRunner,
+    expected: DaemonServiceState,
+    expected_version: &str,
+) -> Result<()> {
     // A freshly restored daemon may legitimately spend a while on startup
     // recovery (schema migrations, projection rebuilds, transcript catch-up)
     // before it answers its first initialize, so the restoration window is
     // generous — bounded, with progress visibility — rather than a snap
     // judgement that fails a healthy, still-converging service.
     const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(3);
-    wait_for_installed_service_state_with(expected, expected_version, TOTAL_TIMEOUT)
+    wait_for_installed_service_state_with(runner, expected, expected_version, TOTAL_TIMEOUT)
 }
 
 fn wait_for_installed_service_state_with(
+    runner: &ServiceRunner,
     expected: DaemonServiceState,
     expected_version: &str,
     total_timeout: std::time::Duration,
@@ -1343,7 +1356,7 @@ fn wait_for_installed_service_state_with(
     const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
     let deadline = std::time::Instant::now() + total_timeout;
-    let mut last = installed_service_status_snapshot(expected_version)?;
+    let mut last = installed_service_status_snapshot(runner, expected_version)?;
     let mut last_progress = std::time::Instant::now();
     loop {
         let (actual, _, socket_state, protocol_state) = &last;
@@ -1361,7 +1374,7 @@ fn wait_for_installed_service_state_with(
             last_progress = now;
         }
         std::thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
-        last = installed_service_status_snapshot(expected_version)?;
+        last = installed_service_status_snapshot(runner, expected_version)?;
     }
 
     let (actual, socket_path, socket_state, protocol_state) = last;
@@ -1374,6 +1387,7 @@ fn wait_for_installed_service_state_with(
 }
 
 fn installed_service_status_snapshot(
+    runner: &ServiceRunner,
     expected_version: &str,
 ) -> Result<(
     DaemonServiceState,
@@ -1394,7 +1408,7 @@ fn installed_service_status_snapshot(
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
-    let actual = ServiceRunner::current()?.service_state(&socket_path)?;
+    let actual = runner.service_state(&socket_path)?;
     let socket_state = daemon_socket_state(&socket_path);
     let protocol_state = if actual.is_running() {
         daemon_protocol_state(&socket_path, expected_version)

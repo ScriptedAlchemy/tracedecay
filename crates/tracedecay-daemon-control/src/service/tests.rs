@@ -1672,10 +1672,10 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
@@ -1691,6 +1691,7 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
     let _served = serve_identity_probes(listener, vec!["0.0.0-stale"]);
 
     let error = super::wait_for_installed_service_state_with(
+        &runner,
         DaemonServiceState::RunningEnabled,
         TEST_BUILD_VERSION,
         std::time::Duration::from_millis(700),
@@ -1725,10 +1726,10 @@ fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline(
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
@@ -1746,6 +1747,7 @@ fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline(
     drop(UnixListener::bind(&socket_path).expect("bind managed daemon socket"));
 
     let error = super::wait_for_installed_service_state_with(
+        &runner,
         DaemonServiceState::RunningEnabled,
         TEST_BUILD_VERSION,
         std::time::Duration::from_millis(600),

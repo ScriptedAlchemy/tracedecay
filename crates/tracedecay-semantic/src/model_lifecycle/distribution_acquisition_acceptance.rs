@@ -3,17 +3,19 @@ use std::path::Path;
 use std::sync::PoisonError;
 
 use super::{
-    SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1, catalog_package_digest,
+    SemanticModelLifecycleOwnerV1, catalog_package_digest,
     open_local_semantic_evaluation_lifecycle, verify_member_file,
 };
-use crate::SemanticResourceCeilings;
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticModelLifecycleStateV1, SemanticResourceCeilings,
+};
 
 const HF_HUB_CACHE_DIRECTORY_V1: &str = "hf-hub-cache";
 
 fn seed_product_cache(root: &Path, fixture: &Path, owner: &SemanticModelLifecycleOwnerV1) {
     let model = owner
         .catalog()
-        .get(crate::DEFAULT_FASTEMBED_MODEL_ID)
+        .get(DEFAULT_FASTEMBED_MODEL_ID)
         .expect("packaged production catalog must contain the default Jina model");
     let repository = format!("models--{}", model.model_code.replace('/', "--"));
     let repository_root = root.join(HF_HUB_CACHE_DIRECTORY_V1).join(repository);
@@ -69,7 +71,7 @@ fn distribution_background_acquisition_installs_verified_jina_model() {
     }
 
     let initial = owner
-        .select_model(Some(crate::DEFAULT_FASTEMBED_MODEL_ID), true)
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select default Jina model for background acquisition");
     assert!(matches!(
         initial.state,
@@ -144,7 +146,7 @@ fn distribution_local_evaluation_import_admits_verified_jina_without_network_or_
     // default serving budget.
     let catalog = super::FastEmbedModelCatalogV1::production();
     let model = catalog
-        .get(crate::DEFAULT_FASTEMBED_MODEL_ID)
+        .get(DEFAULT_FASTEMBED_MODEL_ID)
         .expect("production catalog must contain the default Jina model");
     let resources = SemanticResourceCeilings {
         max_sequence_length: model.max_length,
@@ -165,7 +167,7 @@ fn distribution_local_evaluation_import_admits_verified_jina_without_network_or_
     let reopened = SemanticModelLifecycleOwnerV1::open_default(root.path())
         .expect("reopen the evaluator lifecycle root");
     let readmitted = reopened
-        .select_model(Some(crate::DEFAULT_FASTEMBED_MODEL_ID), false)
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), false)
         .expect("re-admit the imported artifact under exact runtime evidence");
     assert!(matches!(
         readmitted.state,

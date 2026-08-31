@@ -105,6 +105,25 @@ enum FakeDaemonResponse {
     HoldOpen,
 }
 
+/// The self-identifying version of the compiled CLI under test, as its
+/// `--version` flag reports it. The fake daemon echoes this so the readiness
+/// probe sees a daemon that matches the client instead of a version skew.
+fn cli_build_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+            .arg("--version")
+            .output()
+            .expect("the built tracedecay binary should run");
+        assert!(output.status.success(), "`tracedecay --version` failed");
+        let printed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        printed
+            .strip_prefix("tracedecay ")
+            .unwrap_or_else(|| panic!("unexpected `--version` output: {printed:?}"))
+            .to_string()
+    })
+}
+
 fn spawn_scripted_daemon(
     socket_path: PathBuf,
     expected_tool_name: &'static str,
@@ -174,7 +193,7 @@ fn spawn_scripted_daemon(
                     "result": {
                         "serverInfo": {
                             "name": "tracedecay",
-                            "version": tracedecay::version::build_version(),
+                            "version": cli_build_version(),
                         }
                     }
                 });

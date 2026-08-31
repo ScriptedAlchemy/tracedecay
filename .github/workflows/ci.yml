@@ -583,12 +583,18 @@ jobs:
           curl --proto '=https' --tlsv1.2 -LsSf \
             "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
 
-      - name: Seed dashboard app-dist for the root build script
+      # Hawk compiles every workspace member, so the tracedecay-cli build
+      # script runs here. Skip mode requires a validatable bundle plus its
+      # digest, so the seed must pass scripts/check-dashboard-bundle.py.
+      - name: Seed dashboard app-dist for the CLI build script
         run: |
           set -euo pipefail
-          mkdir -p dashboard/app-dist
-          printf '%s\n' '{"allFiles":["index.html"]}' > dashboard/app-dist/asset-manifest.json
-          printf '%s\n' '<!doctype html><title>hawk</title>' > dashboard/app-dist/index.html
+          mkdir -p dashboard/app-dist/static/js
+          printf '%s\n' '{"allFiles":["index.html","static/js/index.js"]}' > dashboard/app-dist/asset-manifest.json
+          printf '%s\n' '<!doctype html><title>hawk</title><script src="/static/js/index.js"></script>' > dashboard/app-dist/index.html
+          head -c 1024 /dev/zero | tr '\0' ';' > dashboard/app-dist/static/js/index.js
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
 
       - name: Hawk
         # Reports, does not gate. The job header above states Hawk is not a

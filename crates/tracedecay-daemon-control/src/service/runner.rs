@@ -269,7 +269,11 @@ impl ServiceRunner {
                 // `systemctl start` reports the fork, not a serving daemon.
                 // Restore success must mean an authenticated daemon at the
                 // expected version answering from the installed unit's socket.
-                super::wait_for_installed_service_state(previous_state, expected_version)
+                super::wait_for_installed_service_state_with_runner(
+                    self,
+                    previous_state,
+                    expected_version,
+                )
             }
             Self::Launchd { launchctl, id } => {
                 launchd_refresh(launchctl, id, service_path, socket_path)?;
@@ -279,7 +283,11 @@ impl ServiceRunner {
                 // `launchd_refresh` proves only that the socket accepts a
                 // connection; hold launchd restores to the same authenticated
                 // identity bar as systemd.
-                super::wait_for_installed_service_state(previous_state, expected_version)
+                super::wait_for_installed_service_state_with_runner(
+                    self,
+                    previous_state,
+                    expected_version,
+                )
             }
             // `windows_task::apply_state` already polls authenticated
             // readiness internally; a second wait would double the restore.

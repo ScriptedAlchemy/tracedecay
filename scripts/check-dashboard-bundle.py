@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
@@ -84,6 +86,61 @@ def validate_bundle(bundle: Path) -> None:
         )
 
 
+# Version prefix of the skip-mode bundle digest contract shared with the
+# tracedecay-cli build script: TRACEDECAY_SKIP_DASHBOARD_BUILD requires
+# TRACEDECAY_DASHBOARD_BUNDLE_SHA256 to carry this digest of the prebuilt
+# bundle. Both implementations must hash exactly the same byte stream.
+BUNDLE_DIGEST_PREFIX = b"tracedecay-dashboard-bundle-v1\0"
+
+
+def manifest_relative_paths(bundle: Path) -> list[PurePosixPath]:
+    manifest_path = bundle / "asset-manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(
+            f"dashboard bundle: asset-manifest.json is missing: {manifest_path}"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"dashboard bundle: asset-manifest.json is invalid JSON: {error}"
+        ) from error
+    all_files = manifest.get("allFiles")
+    if not isinstance(all_files, list) or not all(
+        isinstance(entry, str) for entry in all_files
+    ):
+        raise ValueError(
+            "dashboard bundle: asset-manifest.json allFiles must be a string array"
+        )
+
+    normalized: set[PurePosixPath] = set()
+    for entry in all_files:
+        relative = local_asset_path(entry)
+        if relative is None:
+            raise ValueError(
+                f"dashboard bundle: allFiles entry is not a local path: {entry}"
+            )
+        normalized.add(relative)
+    return sorted(normalized)
+
+
+def bundle_digest(bundle: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(BUNDLE_DIGEST_PREFIX)
+    for relative in manifest_relative_paths(bundle):
+        asset = bundle.joinpath(*relative.parts)
+        if not asset.is_file():
+            raise ValueError(
+                f"dashboard bundle: manifest-listed file is missing: {asset}"
+            )
+        contents = asset.read_bytes()
+        digest.update(str(relative).encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(len(contents).to_bytes(8, "little"))
+        digest.update(contents)
+    return digest.hexdigest()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -92,10 +149,20 @@ def main() -> None:
         type=Path,
         default=Path("dashboard/app-dist"),
     )
+    parser.add_argument(
+        "--print-digest",
+        action="store_true",
+        help=(
+            "after validating, print the skip-mode bundle digest expected in "
+            "TRACEDECAY_DASHBOARD_BUNDLE_SHA256"
+        ),
+    )
     args = parser.parse_args()
 
     try:
         validate_bundle(args.bundle)
+        if args.print_digest:
+            print(bundle_digest(args.bundle))
     except (OSError, UnicodeError, ValueError) as error:
         raise SystemExit(str(error)) from error
 

@@ -13,6 +13,44 @@ pub const LCM_SCHEMA_VERSION: i64 = 8;
 
 const MIGRATION_NAME: &str = "lcm";
 
+/// Indexes that keep the LCM status probe off the message-body table pages.
+///
+/// `lcm_status` aggregates whole-store counts on every probe. Without these
+/// indexes four of its components scan the full `lcm_raw_messages` /
+/// `lcm_summary_nodes` / `lcm_external_payloads` records — multi-gigabyte
+/// body reads on a long-lived profile store for a one-row answer (issue #767
+/// measured 10.65 s daemon-side). Each entry is one independently committed
+/// idempotent batch: fresh stores install them with the schema, and the
+/// registered-schema admission ensures them on already-current stores, where
+/// the one-time build cost is a bounded scan per index instead of that same
+/// scan on every status call.
+///
+/// The partial-index predicates must stay byte-identical to the WHERE terms
+/// in the status count queries ([`super::query`] status counts): SQLite only
+/// substitutes a partial index when the query's terms structurally imply the
+/// index's WHERE clause.
+pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_lcm_raw_legacy_truncated
+         ON lcm_raw_messages(provider, session_id)
+         WHERE legacy_truncated != 0;",
+    "CREATE INDEX IF NOT EXISTS idx_lcm_raw_lossy_ingest
+         ON lcm_raw_messages(provider, session_id)
+         WHERE metadata_json IS NOT NULL
+           AND json_valid(metadata_json)
+           AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true';",
+    "CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_depth_tokens
+         ON lcm_summary_nodes(
+             provider, session_id, depth, summary_token_count, source_token_count
+         );",
+    // The byte-count variant covers the status COUNT+SUM without touching
+    // payload metadata rows and fully supersedes the plain owner index
+    // (same leading columns), so the replacement and the drop commit as one
+    // batch and no scope is ever left without an owner index.
+    "CREATE INDEX IF NOT EXISTS idx_lcm_external_payloads_owner_bytes
+         ON lcm_external_payloads(provider, session_id, byte_count);
+     DROP INDEX IF EXISTS idx_lcm_external_payloads_owner;",
+];
+
 /// Raw-message FTS structure (schema v3): index only `index_text`, matching
 /// hermes-lcm `build_message_fts_spec` (store.py:173-204), which indexes
 /// nothing but the message content column. Earlier schemas also indexed
@@ -255,8 +293,6 @@ pub async fn ensure_lcm_schema_in_transaction(
             FOREIGN KEY(provider, session_id)
                 REFERENCES sessions(provider, session_id) ON DELETE CASCADE
         );
-        CREATE INDEX IF NOT EXISTS idx_lcm_external_payloads_owner
-            ON lcm_external_payloads(provider, session_id);
         CREATE TABLE IF NOT EXISTS lcm_gc_marks (
             payload_ref TEXT PRIMARY KEY,
             state TEXT NOT NULL CHECK(state IN ('unreferenced', 'missing')),
@@ -391,6 +427,9 @@ pub async fn ensure_lcm_schema_in_transaction(
     )
     .await?;
     conn.execute_batch(RAW_FTS_DDL).await?;
+    for sql in LCM_STATUS_PERFORMANCE_INDEX_SQL {
+        conn.execute_batch(sql).await?;
+    }
 
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version) VALUES (?1, ?2)",
@@ -817,6 +856,50 @@ mod tests {
             .await
             .map_err(|err| err.to_string())?,
             2
+        );
+        Ok(())
+    }
+
+    /// A fresh install carries every status performance index, and the
+    /// superseded plain payload owner index is gone — its replacement covers
+    /// the same leading columns.
+    #[tokio::test]
+    async fn fresh_schema_installs_status_performance_indexes() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+            );",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        for index in [
+            "idx_lcm_raw_legacy_truncated",
+            "idx_lcm_raw_lossy_ingest",
+            "idx_lcm_summary_nodes_depth_tokens",
+            "idx_lcm_external_payloads_owner_bytes",
+        ] {
+            assert!(
+                schema_object_exists(&*conn, index)
+                    .await
+                    .map_err(|error| error.to_string())?,
+                "fresh LCM schema is missing status performance index {index}"
+            );
+        }
+        assert!(
+            !schema_object_exists(&*conn, "idx_lcm_external_payloads_owner")
+                .await
+                .map_err(|error| error.to_string())?,
+            "the superseded plain payload owner index must not be reinstalled"
         );
         Ok(())
     }

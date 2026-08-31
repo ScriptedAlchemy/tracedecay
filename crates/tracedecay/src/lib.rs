@@ -71,6 +71,11 @@ mod hooks;
 #[cfg(test)]
 mod host_admission_test;
 pub mod mcp;
+pub mod product_runtime;
+pub use product_runtime::{
+    ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance, product_runtime,
+    register_product_runtime,
+};
 pub mod profile_registry_maintenance;
 mod project_store_runtime;
 mod runtime_ports;

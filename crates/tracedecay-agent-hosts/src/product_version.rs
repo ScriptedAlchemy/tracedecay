@@ -10,8 +10,10 @@
 //! [`PRODUCT_VERSION`] is that product version. `build.rs` reads
 //! `[workspace.package].version` out of the workspace-root `Cargo.toml` — the single
 //! authoring point Release Please owns — and bakes it into
-//! `TRACEDECAY_PRODUCT_VERSION`, exactly the way it bakes `TRACEDECAY_GIT_SHA`
-//! for the same reason. There is no literal version in this crate's source.
+//! `TRACEDECAY_PRODUCT_VERSION`. There is no literal version in this crate's
+//! source. (Commit provenance, by contrast, is never baked here: rendering
+//! that stamps a generator commit takes it as a function argument from the
+//! owning binary's registered product runtime.)
 
 /// Reads the product version out of the workspace-root manifest.
 ///
