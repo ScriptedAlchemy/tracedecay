@@ -18,8 +18,8 @@ use tracedecay_domain::configuration::{
 
 use tracedecay_application::{ProjectSettingsPatchInputV1, validate_project_settings_patch};
 
-use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 use tracedecay_configuration::DirectConfigurationMutation;
+use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 
 pub use tracedecay_application::SettingsValidationIssueV1;
 

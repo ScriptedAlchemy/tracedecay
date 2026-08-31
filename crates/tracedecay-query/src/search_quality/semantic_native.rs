@@ -1241,8 +1241,8 @@ impl SemanticNativeResourceEvidenceV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search_quality::packaged::load_workload;
     use crate::search_quality::CandidateWorkloadV1;
+    use crate::search_quality::packaged::load_workload;
     use tracedecay_domain::canonical_sha256;
 
     fn checked_in_workload() -> CandidateWorkloadV1 {

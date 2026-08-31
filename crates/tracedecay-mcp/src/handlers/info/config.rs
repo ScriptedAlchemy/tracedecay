@@ -97,7 +97,12 @@ pub async fn handle_config(project_root: &Path, args: &Value) -> Result<ToolResu
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("tracedecay_config scan failed to join: {join_error}"),
     })??;
-    Ok(generic_tool_result(Some(project_root), args, &payload, touched))
+    Ok(generic_tool_result(
+        Some(project_root),
+        args,
+        &payload,
+        touched,
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]

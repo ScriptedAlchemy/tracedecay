@@ -158,12 +158,7 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
         hotpath::measure_block!("query.artifact.open.head_schema_verify", {
-            configure_reader_window(
-                &connection,
-                cache_budget_bytes,
-                0,
-                expected_file_size_bytes,
-            )?;
+            configure_reader_window(&connection, cache_budget_bytes, 0, expected_file_size_bytes)?;
             connection
                 .pragma_update(None, "query_only", true)
                 .map_err(sqlite_error)?;
@@ -1901,8 +1896,8 @@ impl<'a> ArtifactQueryV1<'a> {
             add_score(&mut field_scores, field, score);
             matched_phrases.insert((*phrase).to_owned());
         }
-        let echo_penalty_applied = !prepared.echo_query.is_empty()
-            && prepared.echo_query == row.normalized_text.trim();
+        let echo_penalty_applied =
+            !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text.trim();
         if echo_penalty_applied {
             for score in field_scores.values_mut() {
                 *score = score.saturating_mul(ECHO_SCORE_MILLIS) / 1_000;
@@ -2254,8 +2249,7 @@ impl EditDistanceScratchV1 {
                 let value = (self.previous[right_index + 1] + 1)
                     .min(self.current[right_index] + 1)
                     .min(
-                        self.previous[right_index]
-                            + usize::from(left_character != right_character),
+                        self.previous[right_index] + usize::from(left_character != right_character),
                     );
                 self.current[right_index + 1] = value;
                 row_minimum = row_minimum.min(value);
@@ -2605,8 +2599,8 @@ mod tests {
         CodeLexicalArtifactReaderV1, DocumentQueryV1, NGRAM_NORMALIZED,
         charge_ngram_encoded_shard_bytes, configure_reader_window, encode_ngram_candidate_json,
         ensure_ngram_candidate_cardinality, map_query_artifact_error, ngram_bitmap_candidates,
-        ngram_document_query, query_ngrams, retain_bounded, term_frequency,
-        union_document_queries, visit_document_ids, visit_lexical_rows,
+        ngram_document_query, query_ngrams, retain_bounded, term_frequency, union_document_queries,
+        visit_document_ids, visit_lexical_rows,
     };
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
@@ -2630,9 +2624,7 @@ mod tests {
         seed.execute_batch("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES (1);")
             .expect("seed sealed fixture");
         drop(seed);
-        let file_size = std::fs::metadata(&path)
-            .expect("stat sealed fixture")
-            .len();
+        let file_size = std::fs::metadata(&path).expect("stat sealed fixture").len();
         let connection = Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,

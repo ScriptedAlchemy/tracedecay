@@ -129,9 +129,7 @@ pub fn evidence_outcome(
     Ok(outcome)
 }
 
-pub fn effective_memory_deadline(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-) -> Deadline {
+pub fn effective_memory_deadline(context: &RetainedSurfaceExecutionContextV1<'_>) -> Deadline {
     Deadline {
         expires_at: context
             .request_context
@@ -477,9 +475,7 @@ impl PreparedRetainedEffect {
     }
 }
 
-pub fn memory_expiry_partial(
-    settled_after_expiry: bool,
-) -> Option<(&'static str, &'static str)> {
+pub fn memory_expiry_partial(settled_after_expiry: bool) -> Option<(&'static str, &'static str)> {
     settled_after_expiry.then_some(memory_expiry_detail())
 }
 

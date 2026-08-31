@@ -1661,15 +1661,16 @@ async fn resolve_github_stack_observability(
             "GitHub stack observability lane is not mounted"
         );
     };
-    let topology_policy = match tracedecay_configuration::config::topology::resolved_work_topology_policy(
-        &state.scout_configuration.snapshot,
-    ) {
-        Ok(policy) => policy.clone(),
-        Err(error) => {
-            unavailable("work_topology_policy", format!("{error:?}"));
-            return None;
-        }
-    };
+    let topology_policy =
+        match tracedecay_configuration::config::topology::resolved_work_topology_policy(
+            &state.scout_configuration.snapshot,
+        ) {
+            Ok(policy) => policy.clone(),
+            Err(error) => {
+                unavailable("work_topology_policy", format!("{error:?}"));
+                return None;
+            }
+        };
     // Mirrors the native-integration mount condition at project open: the
     // standard pull-request fallback exists exactly when this project is an
     // admitted Git worktree (project open fails earlier otherwise).

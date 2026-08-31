@@ -90,9 +90,6 @@ use tracedecay_code_index_runtime::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
     capture_exact_snapshot,
 };
-use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
-use tracedecay_usecases::CallableCodeAuthorizationSourcePort;
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,
     ConfigurationMutationGrantAuthority, ConfigurationMutationGrantAuthorityError,
@@ -102,6 +99,9 @@ use tracedecay_configuration::{
     ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
     configuration_layer_scope_digest,
 };
+use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
+use tracedecay_usecases::CallableCodeAuthorizationSourcePort;
+use tracedecay_usecases::ProjectSourceAccessSnapshot;
 
 use tracedecay_application::feedback::observations::{
     FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,

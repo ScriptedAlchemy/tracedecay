@@ -1847,8 +1847,7 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
     )
     .expect("LCM Doctor unavailable payload");
     assert_eq!(
-        payload["problem"]["kind"],
-        "unavailable",
+        payload["problem"]["kind"], "unavailable",
         "missing-store LCM Doctor renders the application problem kind, got {payload}"
     );
     assert!(

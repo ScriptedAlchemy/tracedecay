@@ -77,9 +77,7 @@ fn effective_expiry(
     effective_memory_deadline(context).expires_at
 }
 
-pub fn fact_write_control(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-) -> FactWriteControl {
+pub fn fact_write_control(context: &RetainedSurfaceExecutionContextV1<'_>) -> FactWriteControl {
     let interrupted_signal = context.cancellation_signal.clone();
     let commit_signal = context.cancellation_signal.clone();
     let expires_at = effective_expiry(context);

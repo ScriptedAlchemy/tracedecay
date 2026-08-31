@@ -374,7 +374,10 @@ fn semantic_qualification_key(
     candidate: &tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
     snapshot: &tracedecay_usecases::semantic_runtime::SemanticEvaluationPublicationSnapshotV1,
     report: &tracedecay_query::search_quality::DirectEvaluationReportV1,
-) -> Result<tracedecay_query::search_quality::NativeQualificationKeyV1, SemanticActivationCoordinationErrorV1> {
+) -> Result<
+    tracedecay_query::search_quality::NativeQualificationKeyV1,
+    SemanticActivationCoordinationErrorV1,
+> {
     let candidate_semantic = candidate
         .compatibility
         .semantic
@@ -403,27 +406,30 @@ fn semantic_qualification_key(
     {
         return Err(SemanticActivationCoordinationErrorV1::Rejected);
     }
-    Ok(tracedecay_query::search_quality::NativeQualificationKeyV1::new(
-        report,
-        candidate.evaluated_profile_id.clone(),
-        tracedecay_query::search_quality::NativeQualificationRuntimeKeyV1 {
-            implementation_revision: current_semantic.implementation_revision.clone(),
-            fusion_revision: current_semantic.fusion_revision.clone(),
-            runtime_compatibility_digest: current_semantic.runtime_compatibility_digest.clone(),
-            model: current_model,
-            search_index_key: current_semantic.search_index_key.clone(),
-            execution_resources: tracedecay_query::search_quality::NativeQualificationExecutionResourceKeyV1 {
-                model_bytes: current_semantic.resources.model_bytes,
-                tokenizer_bytes: current_semantic.resources.tokenizer_bytes,
-                threads: current_semantic.resources.threads,
-                max_concurrent_sessions: current_semantic.resources.max_concurrent_sessions,
-                batch_size: current_semantic.resources.batch_size,
-                sequence_length: current_semantic.resources.sequence_length,
-                load_deadline_ms: current_semantic.resources.load_deadline_ms,
+    Ok(
+        tracedecay_query::search_quality::NativeQualificationKeyV1::new(
+            report,
+            candidate.evaluated_profile_id.clone(),
+            tracedecay_query::search_quality::NativeQualificationRuntimeKeyV1 {
+                implementation_revision: current_semantic.implementation_revision.clone(),
+                fusion_revision: current_semantic.fusion_revision.clone(),
+                runtime_compatibility_digest: current_semantic.runtime_compatibility_digest.clone(),
+                model: current_model,
+                search_index_key: current_semantic.search_index_key.clone(),
+                execution_resources:
+                    tracedecay_query::search_quality::NativeQualificationExecutionResourceKeyV1 {
+                        model_bytes: current_semantic.resources.model_bytes,
+                        tokenizer_bytes: current_semantic.resources.tokenizer_bytes,
+                        threads: current_semantic.resources.threads,
+                        max_concurrent_sessions: current_semantic.resources.max_concurrent_sessions,
+                        batch_size: current_semantic.resources.batch_size,
+                        sequence_length: current_semantic.resources.sequence_length,
+                        load_deadline_ms: current_semantic.resources.load_deadline_ms,
+                    },
             },
-        },
-        tracedecay_query::search_quality::NativeQualificationPlatformV1::current(),
-    ))
+            tracedecay_query::search_quality::NativeQualificationPlatformV1::current(),
+        ),
+    )
 }
 
 fn semantic_execution_response(

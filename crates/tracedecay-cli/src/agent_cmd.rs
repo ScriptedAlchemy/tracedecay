@@ -4811,8 +4811,8 @@ esac
         // One bin for stage + component-set render + registration activate so
         // Codex hook-trust's safety valve sees matching commands (not
         // `which_tracedecay` vs `current_exe` drift under cargo-test).
-        let tracedecay_bin = tracedecay::agents::which_tracedecay()
-            .unwrap_or_else(|| "tracedecay".to_string());
+        let tracedecay_bin =
+            tracedecay::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let agents_dir = home.path().join(".codex/agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
         let stale_path = agents_dir.join("tracedecay-legacy.toml");
