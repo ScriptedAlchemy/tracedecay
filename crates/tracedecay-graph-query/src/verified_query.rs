@@ -45,6 +45,7 @@ pub struct VerifiedGraphQueryRequest<'a> {
     pub cancellation: &'a CancellationSignal,
 }
 
+#[hotpath::measure_all]
 impl<'a> VerifiedGraphQueryRequest<'a> {
     pub fn new(
         operation: &'a ApplicationOperation,
@@ -91,6 +92,7 @@ pub struct VerifiedGraphQuery {
     freshness: super::CodeGraphReadFreshnessV1,
 }
 
+#[hotpath::measure_all]
 impl VerifiedGraphQuery {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn from_fixture_reader(
@@ -713,6 +715,7 @@ pub async fn open_verified_graph_query(
     ))
 }
 
+#[hotpath::measure]
 async fn await_graph_port_wait<T>(
     deadline: &Deadline,
     cancellation: &CancellationSignal,
@@ -729,6 +732,7 @@ async fn await_graph_port_wait<T>(
     }
 }
 
+#[hotpath::measure]
 fn refuse_if_query_closed(
     context: &RequestContext,
     deadline: &Deadline,
@@ -756,20 +760,24 @@ fn refuse_if_query_closed(
     }
 }
 
+#[hotpath::measure]
 fn graph_projection_error(
     error: tracedecay_code_index::graph_projection::CodeGraphProjectionError,
 ) -> TraceDecayError {
     map_code_graph_read_runtime_error(map_projection_error(error))
 }
 
+#[hotpath::measure]
 fn graph_invalid_request(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("code-graph-invalid-request", false, detail)
 }
 
+#[hotpath::measure]
 fn graph_budget_exhausted(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("code-graph-budget-exhausted", false, detail)
 }
 
+#[hotpath::measure]
 fn graph_corrupt(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("code-graph-corrupt", false, detail)
 }

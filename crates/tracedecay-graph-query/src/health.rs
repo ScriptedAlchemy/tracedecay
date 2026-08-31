@@ -150,6 +150,7 @@ pub fn gini_coefficient(values: &[f64]) -> f64 {
 /// - <0.40  → "moderate inequality"
 /// - <0.60  → "high inequality"
 /// - >=0.60 → "extreme inequality (god files likely)"
+#[hotpath::measure]
 pub fn gini_label(gini: f64) -> &'static str {
     if gini < 0.20 {
         "low inequality (healthy)"
@@ -377,8 +378,10 @@ pub struct DsmCluster {
     pub incoming_edges: usize,
 }
 
+#[hotpath::measure_all]
 impl DsmCluster {
     #[must_use]
+    #[hotpath::skip]
     pub const fn boundary_edges(&self) -> usize {
         self.outgoing_edges + self.incoming_edges
     }
@@ -451,6 +454,7 @@ where
 
 /// Score = min(1.0, ideal\_depth / max\_depth). Shallower is better.
 /// Returns 1.0 when `max_depth == 0`.
+#[hotpath::measure]
 pub fn depth_score(max_depth: usize, ideal_depth: usize) -> f64 {
     if max_depth == 0 {
         return 1.0;
@@ -596,6 +600,7 @@ pub struct HealthDimensions {
 /// Zero in any dimension → 0.
 /// A low-weight multiplicative penalty for `coverage_discipline` reduces
 /// the score by up to 10% when skip-test-coverage is overused.
+#[hotpath::measure]
 pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {
     let product = dims.acyclicity * dims.depth * dims.equality * dims.redundancy * dims.modularity;
 

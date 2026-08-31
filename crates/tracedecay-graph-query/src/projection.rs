@@ -49,6 +49,7 @@ pub struct CodeGraphReadRequest<'a> {
     pub live_cancellation: Option<&'a CancellationSignal>,
 }
 
+#[hotpath::measure_all]
 impl<'a> CodeGraphReadRequest<'a> {
     pub fn new(
         context: &'a RequestContext,
@@ -95,6 +96,7 @@ pub struct CodeGraphReadAdmissionRequest<'a> {
     pub observed_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl<'a> CodeGraphReadAdmissionRequest<'a> {
     pub fn new(
         operation: &'a ApplicationOperation,
@@ -174,6 +176,7 @@ pub enum CodeGraphReadFreshnessV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl CodeGraphReadFreshnessV1 {
     pub fn is_stale(self) -> bool {
         match self {
@@ -190,6 +193,7 @@ pub struct VerifiedCodeGraphRead {
     freshness: CodeGraphReadFreshnessV1,
 }
 
+#[hotpath::measure_all]
 impl VerifiedCodeGraphRead {
     pub fn new(
         scope: ResolvedScope,
@@ -270,6 +274,7 @@ impl GraphCancellation for LiveApplicationGraphCancellation {
     }
 }
 
+#[hotpath::measure]
 pub fn application_graph_cancellation(
     cancellation: &CancellationSignal,
 ) -> Arc<dyn GraphCancellation> {
@@ -282,12 +287,14 @@ impl GraphCancellation for RequestGraphCancellation {
     }
 }
 
+#[hotpath::measure]
 pub fn request_graph_cancellation(context: &RequestContext) -> Arc<dyn GraphCancellation> {
     Arc::new(RequestGraphCancellation {
         cancelled: context.cancellation().is_cancelled(),
     })
 }
 
+#[hotpath::measure]
 pub fn map_projection_error(error: CodeGraphProjectionError) -> CodeGraphReadError {
     match error {
         CodeGraphProjectionError::Cancelled => CodeGraphReadError::Cancelled,
@@ -320,6 +327,7 @@ pub fn map_projection_error(error: CodeGraphProjectionError) -> CodeGraphReadErr
     }
 }
 
+#[hotpath::measure]
 pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDecayError {
     match error {
         CodeGraphReadError::ResetRequired { detail } => TraceDecayError::ResetRequired {

@@ -71,6 +71,7 @@ pub(crate) struct AdmittedSourceAuthority {
     project_id: ProjectId,
 }
 
+#[hotpath::measure_all]
 impl AdmittedSourceAuthority {
     /// Freezes the runtime's answers after validating its claimed identity
     /// against the admitted scope. Identity is denied before any other
@@ -107,6 +108,7 @@ impl AdmittedSourceAuthority {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn graph_source_unbound() -> TraceDecayError {
     TraceDecayError::project_route(
         "code-graph-denied",
@@ -115,6 +117,7 @@ pub(crate) fn graph_source_unbound() -> TraceDecayError {
     )
 }
 
+#[hotpath::measure]
 pub(crate) fn graph_source_scope_mismatch() -> TraceDecayError {
     TraceDecayError::project_route(
         "code-graph-denied",
