@@ -2,11 +2,7 @@
 
 use tracedecay_application::{RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1};
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProvenanceId};
-<<<<<<< HEAD:crates/tracedecay-session-memory/src/memory_tracking.rs
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
-=======
-use tracedecay_session_memory::memory::MemoryApplication;
->>>>>>> origin/codex/tracedecay-total-redesign-plan-reopened:crates/tracedecay/src/daemon/retained_owner/memory_tracking.rs
 use tracedecay_store::{
     ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRetrievalCommandV1,
     ProjectMemoryFactRetrievalReceiptV1, ProjectMemoryFactSearchPageV1,
