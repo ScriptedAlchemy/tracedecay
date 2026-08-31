@@ -593,9 +593,14 @@ where
             end_offset: covered_through,
         };
     }
-    let retained = context
-        .source_adapter
-        .retain_scoped_frames(&mut scan, context.project_root);
+    let retained = hotpath::measure_block!(
+        "sessions.hosts.claude.scope_blocking",
+        run_blocking_transcript_section(|| {
+            context
+                .source_adapter
+                .retain_scoped_frames(&mut scan, context.project_root)
+        })
+    );
     scan.coverage = coverage;
     if retained.is_none() {
         return Ok(SourcePreparation::Finished(deferred_source_stats(

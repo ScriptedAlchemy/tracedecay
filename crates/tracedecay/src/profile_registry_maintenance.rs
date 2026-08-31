@@ -53,7 +53,7 @@ impl ProfileRegistryMaintenanceRuntime {
     pub async fn open(profile_root: &Path) -> tracedecay_domain::errors::Result<Self> {
         let identity = tracedecay_daemon_identity::profile_identity::load_existing(profile_root)?;
         let registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                 identity,
             )
             .await?;

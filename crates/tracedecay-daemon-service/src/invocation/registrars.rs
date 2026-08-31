@@ -223,16 +223,14 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         change: &'a tracedecay_domain::configuration::ProtectedChange,
-    ) -> tracedecay_usecases::configuration::ConfigurationOperationFuture<
-        'a,
-        ScopeRevalidationEvidenceV1,
-    > {
+    ) -> tracedecay_configuration::ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
+    {
         let allowed = actor.actor_id == self.actor && change.validate().is_ok();
         let evidence = self.evidence.clone();
         Box::pin(async move {
             allowed
                 .then_some(evidence)
-                .ok_or(tracedecay_usecases::configuration::ConfigurationError::TargetUnavailable)
+                .ok_or(tracedecay_configuration::ConfigurationError::TargetUnavailable)
         })
     }
 
@@ -240,16 +238,14 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         plan: &'a tracedecay_domain::configuration::ProtectedChangePlan,
-    ) -> tracedecay_usecases::configuration::ConfigurationOperationFuture<
-        'a,
-        ScopeRevalidationEvidenceV1,
-    > {
+    ) -> tracedecay_configuration::ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
+    {
         let allowed = actor.actor_id == self.actor && plan.validate().is_ok();
         let evidence = self.evidence.clone();
         Box::pin(async move {
             allowed
                 .then_some(evidence)
-                .ok_or(tracedecay_usecases::configuration::ConfigurationError::TargetUnavailable)
+                .ok_or(tracedecay_configuration::ConfigurationError::TargetUnavailable)
         })
     }
 }
@@ -732,12 +728,12 @@ impl DaemonConfigurationRuntimeRegistrar {
                         .to_owned(),
             });
         }
-        let mutation = tracedecay_usecases::configuration::profile_code_index_worker_mutation(
+        let mutation = tracedecay_configuration::profile_code_index_worker_mutation(
             database.as_ref(),
             profile_id,
             selection,
         )
-        .map_err(tracedecay_usecases::configuration::map_profile_worker_configuration_error)?;
+        .map_err(tracedecay_configuration::map_profile_worker_configuration_error)?;
         let observed_at = current_micros();
         let authority = registered
             .grants
@@ -752,7 +748,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             .map_err(|_| TraceDecayError::Config {
                 message: "profile worker configuration grant was refused".to_owned(),
             })?;
-        tracedecay_usecases::configuration::commit_profile_code_index_worker_selection(
+        tracedecay_configuration::commit_profile_code_index_worker_selection(
             database.as_ref(),
             profile_id,
             &authority,
@@ -760,7 +756,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             &expected_revision,
         )
         .await
-        .map_err(tracedecay_usecases::configuration::map_profile_worker_configuration_error)
+        .map_err(tracedecay_configuration::map_profile_worker_configuration_error)
     }
 
     #[allow(clippy::too_many_arguments)]

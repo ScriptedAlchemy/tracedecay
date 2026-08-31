@@ -15,7 +15,7 @@ use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_usecases::tracedecay::ProjectStoreRuntimeV1;
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 /// One standalone session runtime registry per profile, process-wide.
 ///
@@ -58,6 +58,7 @@ impl From<Arc<DaemonSessionRuntimeRegistryV1>> for ProjectStoreRuntimeHandle {
 pub(crate) async fn join_standalone_session_registry(
     identity: LocalProfileIdentityAuthorityV1,
 ) -> Result<ProjectStoreRuntimeHandle> {
+    crate::register_runtime_ports()?;
     let profile_key =
         tracedecay_runtime_core::lifecycle_lease::canonical_or_original(identity.profile_root());
     let registries = STANDALONE_SESSION_REGISTRIES.lock().await;
@@ -73,6 +74,7 @@ pub(crate) async fn join_standalone_session_registry(
 pub(crate) async fn open_project_store_runtime(
     identity: LocalProfileIdentityAuthorityV1,
 ) -> Result<ProjectStoreRuntimeHandle> {
+    crate::register_runtime_ports()?;
     Ok(ProjectStoreRuntimeHandle::from_registry(Arc::new(
         DaemonSessionRuntimeRegistryV1::open(identity).await?,
     )))

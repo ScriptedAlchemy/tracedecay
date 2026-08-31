@@ -110,12 +110,12 @@ impl KiroSource {
     }
 }
 
+#[hotpath::measure_all]
 impl TranscriptSource for KiroSource {
     fn provider(&self) -> &'static str {
         PROVIDER
     }
 
-    #[hotpath::measure(label = "sessions.hosts.kiro.transcript_paths")]
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
         if let Some(registered_roots) = &self.user_registered_roots {
             let mut out = collect_user_workspace_session_files(
@@ -173,8 +173,8 @@ impl TranscriptSource for KiroSource {
     }
 }
 
+#[hotpath::measure_all]
 impl KiroSource {
-    #[hotpath::measure(label = "sessions.hosts.kiro.parse_snapshot")]
     fn parse_snapshot(
         &self,
         path: &Path,
@@ -349,8 +349,8 @@ fn ensure_bounded_snapshot(path: &Path, byte_cap: u64) -> TranscriptIngestResult
         .map_err(|_| non_durable(path, "snapshot exceeds provider byte bound"))
 }
 
+#[hotpath::measure_all]
 impl KiroSource {
-    #[hotpath::measure(label = "sessions.hosts.kiro.snapshot_input_bytes")]
     fn snapshot_input_bytes(&self, path: &Path) -> TranscriptIngestResult<u64> {
         let transcript_bytes = bounded_snapshot_input_len(PROVIDER, path, MAX_SNAPSHOT_FILE_BYTES)?;
         let metadata_bytes = workspace_hash_from_path(path).map_or(Ok(0), |hash| {

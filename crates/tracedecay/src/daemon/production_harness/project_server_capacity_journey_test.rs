@@ -112,7 +112,7 @@ async fn seed_project_sessions_pending_convergence(
     .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
     std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
         .expect("session database directory");
-    crate::daemon::store_runtime::register_registered_schema_installer();
+    tracedecay_store_runtime::register_registered_schema_installer();
     let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &sessions_path,
         "seed production project-open convergence fixture",
