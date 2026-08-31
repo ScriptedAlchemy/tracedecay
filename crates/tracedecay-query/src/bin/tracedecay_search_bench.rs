@@ -419,6 +419,9 @@ fn replicate(corpus: &[CorpusFile], replicas: usize) -> Vec<AdmittedFile> {
             });
         }
     }
+    // The snapshot contract requires canonical file order over the whole
+    // admitted set, not per replica.
+    admitted.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
     admitted
 }
 
@@ -604,12 +607,15 @@ fn run(options: &Options) -> Result<String, String> {
     let ingest_wall = ingest_started.elapsed();
 
     // Reopen content-addressed: the byte-identical reader shape the daemon
-    // serves durable heads from after a restart.
+    // serves durable heads from after a restart. The daemon's publication
+    // step content-addresses the finalized file at rest, so hash the same
+    // bytes here rather than reusing the receipt's section identity.
     let open_started = Instant::now();
+    let (file_digest, file_size_bytes) = hash_file(&artifact_path)?;
     let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
         &artifact_path,
-        receipt.artifact_digest(),
-        receipt.file_size_bytes(),
+        &file_digest,
+        file_size_bytes,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
@@ -859,9 +865,12 @@ fn outcome_facts<E>(outcome: &RetrieverOutcome<RetrieverBatch<E>>) -> serde_json
         }),
         RetrieverOutcome::Stale(_) => serde_json::json!({ "outcome": "stale" }),
         RetrieverOutcome::Cancelled => serde_json::json!({ "outcome": "cancelled" }),
+        RetrieverOutcome::Denied => serde_json::json!({ "outcome": "denied" }),
+        RetrieverOutcome::BudgetExceeded(_) => serde_json::json!({ "outcome": "budget_exceeded" }),
+        RetrieverOutcome::TimedOut(_) => serde_json::json!({ "outcome": "timed_out" }),
         RetrieverOutcome::Unavailable(failure) => serde_json::json!({
             "outcome": "unavailable",
-            "detail": failure.to_string(),
+            "detail": format!("{failure:?}"),
         }),
     }
 }
@@ -1092,6 +1101,16 @@ impl Scratch {
         std::fs::remove_dir_all(&self.path)
             .map_err(|error| format!("remove scratch {}: {error}", self.path.display()))
     }
+}
+
+fn hash_file(path: &Path) -> Result<(ManifestDigest, u64), String> {
+    use sha2::Digest as _;
+
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let digest = ManifestDigest::from_sha256_bytes(&sha2::Sha256::digest(&bytes))
+        .map_err(|error| format!("artifact digest: {error}"))?;
+    Ok((digest, bytes.len() as u64))
 }
 
 fn peak_rss_bytes() -> Option<u64> {
