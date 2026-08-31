@@ -211,11 +211,12 @@ fn run_exact_value(fixture: &Fixture, tool: &str, args: Value) -> Value {
     let envelope: Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("{tool} output was not retained-surface JSON: {error}"));
     // The CLI prints the versioned retained envelope; the evals assert the
-    // owner's payload. A problem envelope is a refusal, not an empty answer.
-    assert_eq!(
-        envelope.pointer("/outcome/outcome").and_then(Value::as_str),
-        Some("evidence"),
-        "{tool} must answer with retained evidence, not a refusal: {envelope}"
+    // owner's payload. Reads answer with evidence and writes with an effect;
+    // a problem envelope is a refusal, not an empty answer.
+    let outcome = envelope.pointer("/outcome/outcome").and_then(Value::as_str);
+    assert!(
+        matches!(outcome, Some("evidence" | "effect")),
+        "{tool} must answer with retained evidence or an effect, not a refusal: {envelope}"
     );
     envelope
         .pointer("/outcome/value/payload")

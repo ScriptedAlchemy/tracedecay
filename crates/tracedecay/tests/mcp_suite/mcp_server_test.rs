@@ -12,4 +12,4 @@ mod protocol_test;
 pub(crate) mod support;
 
 // Backwards-compatible path for `crate::mcp_server_test::…` consumers.
-pub(crate) use support::run_server_with_messages;
+pub(crate) use support::run_client_connection_with_messages;
