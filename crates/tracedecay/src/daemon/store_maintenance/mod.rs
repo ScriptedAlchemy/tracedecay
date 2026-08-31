@@ -23,7 +23,7 @@ use super::log_daemon_event;
 mod graph_replay;
 #[cfg(test)]
 mod vector_retention_tests;
-use graph_replay::log_code_generation_retention_degraded;
+use graph_replay::{defer_graph_replay_pool_busy, log_code_generation_retention_degraded};
 
 const MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY: usize = 256;
 
@@ -475,8 +475,14 @@ pub(in crate::daemon) async fn run_code_generation_retention(
     }
     let vector_inventory =
         resolve_vector_retention_inventory(graph, schedulers, observations).await;
-    apply_code_generation_retention(graph, schedulers, observations, vector_inventory, cancellation)
-        .await
+    apply_code_generation_retention(
+        graph,
+        schedulers,
+        observations,
+        vector_inventory,
+        cancellation,
+    )
+    .await
 }
 
 /// The offline protection pin: the generation the mounted scheduler is
@@ -555,20 +561,19 @@ async fn apply_code_generation_retention(
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
     };
-    // A held replay pool makes every later phase of this pass either fail or
-    // block: the release reconcile's pool acquisition would burn its whole
+    // A held replay pool makes every later phase of this pass fail closed:
+    // the release reconcile's pool acquisition would burn its whole
     // graph-operation deadline discovering the holder (the live wedge logged
     // that as `graph_replay_release_failed error=DeadlineExceeded` on every
-    // tick), and the collection executor would then park on the same lock's
-    // deadline-free blocking flock while holding the daemon writer gate. One
-    // non-blocking probe defers the pass for this tick instead — before the
-    // multi-GiB full-digest planning below is paid — and arms the bounded
-    // release backoff so a long-held pool is re-probed, not polled.
+    // tick), and the collection executor would then contend for the same
+    // lock while holding the daemon writer gate. One non-blocking probe
+    // defers the pass for this tick instead — before the multi-GiB
+    // full-digest planning below is paid — and the executor's own checked
+    // acquire returns `GraphReplayPoolBusy` if a publisher wins the
+    // probe-to-execute window, so the writer gate is never pinned on a
+    // blocking flock. Both paths arm the same bounded release backoff.
     if graph_replay::replay_pool_is_held(&graph_replay_pool_root) {
-        observations.record_graph_replay_release_unhealthy(graph.project_root());
-        hotpath::gauge!("daemon.git.maintenance.replay_pool_busy_total").inc(1_u64);
-        log_code_generation_retention_degraded("graph_replay_pool_busy");
-        return CodeGenerationRetentionOutcomeV1::Failed;
+        return defer_graph_replay_pool_busy(observations, graph.project_root());
     }
     // Full digest verification routinely reads several GiB. Run it before
     // entering the graph transaction and preserve the daemon shutdown token
@@ -595,6 +600,11 @@ async fn apply_code_generation_retention(
         )) => {
             log_code_generation_retention_degraded("retention_cancelled");
             return CodeGenerationRetentionOutcomeV1::Failed;
+        }
+        Ok(Err(
+            tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionErrorV1::GraphReplayPoolBusy,
+        )) => {
+            return defer_graph_replay_pool_busy(observations, graph.project_root());
         }
         Ok(Err(error)) => {
             // The bare label proved undiagnosable on a live profile: without
@@ -906,6 +916,9 @@ async fn apply_code_generation_retention(
         Ok(Err(CodeGenerationRetentionErrorV1::Cancelled)) => {
             log_code_generation_retention_degraded("retention_cancelled");
             CodeGenerationRetentionOutcomeV1::Failed
+        }
+        Ok(Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy)) => {
+            defer_graph_replay_pool_busy(observations, graph.project_root())
         }
         Ok(Err(error)) => {
             // Same diagnosability contract as the plan failure above: the
