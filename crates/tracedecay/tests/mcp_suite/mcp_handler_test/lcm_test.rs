@@ -2338,7 +2338,9 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     assert_eq!(payload["status"], "ok");
     let lcm = &payload["lcm"];
     assert_eq!(lcm["store"]["messages"], 1);
-    assert_eq!(lcm["store"]["estimated_tokens"], 4);
+    assert_eq!(lcm["store"]["estimated_tokens"], 0);
+    assert_eq!(lcm["store"]["token_estimate"]["complete"], false);
+    assert_eq!(lcm["store"]["token_estimate"]["scanned_messages"], 0);
     assert_eq!(lcm["dag"]["total_nodes"], 1);
     assert_eq!(lcm["dag"]["total_tokens"], 6);
     assert_eq!(lcm["dag"]["total_source_tokens"], 24);
@@ -2389,7 +2391,11 @@ async fn lcm_status_all_provider_aggregates_provider_counts() {
     assert_eq!(payload["provider"], "all");
     assert_eq!(payload["lcm"]["raw_message_count"], 2);
     assert_eq!(payload["lcm"]["store"]["messages"], 2);
-    assert_eq!(payload["lcm"]["store"]["estimated_tokens"], 5);
+    assert_eq!(payload["lcm"]["store"]["estimated_tokens"], 0);
+    assert_eq!(
+        payload["lcm"]["store"]["token_estimate"]["complete"],
+        false
+    );
 }
 
 #[cfg(feature = "test-transport")]

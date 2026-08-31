@@ -398,6 +398,16 @@ impl LcmStoreTokenCoverage {
             next_after_store_id: None,
         }
     }
+
+    /// Shallow status did not read message bodies. Resume from the start of
+    /// the scope if a caller wants a budgeted estimate.
+    pub const fn unscanned() -> Self {
+        Self {
+            complete: false,
+            scanned_messages: 0,
+            next_after_store_id: Some(0),
+        }
+    }
 }
 
 /// Per-depth summary counters mirroring the hermes-lcm `lcm_status`
