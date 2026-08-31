@@ -2863,6 +2863,14 @@ impl CodeIndexSchedulerRegistryV1 {
             // artifact build. Releasing that capacity emits no wake, so this
             // worker must schedule its own.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
+            // The last arrival this worker restored for a nothing-seated
+            // warming outcome. A quiet remount's seat pass restores its
+            // arrival exactly once so the next pass can restore and warm the
+            // retained text owner; a worktree with nothing restorable (for
+            // example no extractable sources and no publication) reproduces
+            // the identical warming Noop on every pass, and restoring the
+            // same arrival again would spin this worker forever.
+            let mut warming_restore_arrival: Option<i64> = None;
             loop {
                 hotpath::future!(
                     worker_wake.notified(),
@@ -3191,8 +3199,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 // A retained-generation Noop on an empty serving slot consumed
                 // the mount wake, so the dirty-checkout successor rebuild never
-                // started. Follow-up notify starts that pass.
+                // started. Follow-up notify starts that pass. Re-arm only for
+                // a consumed external arrival: a self-woken pass with no
+                // arrival reproduces the identical Noop, and re-notifying it
+                // spins a generation-less worktree forever.
                 if serving_empty
+                    && arrival.wake_micros().is_some()
                     && matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_))))
                 {
                     worker_wake.notify_one();
@@ -3377,11 +3389,19 @@ impl CodeIndexSchedulerRegistryV1 {
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .is_none();
-                    if text_empty && serving_empty {
+                    if text_empty
+                        && serving_empty
+                        && arrival.wake_micros().is_some()
+                        && warming_restore_arrival != arrival.wake_micros()
+                    {
                         // Restore the arrival so warming is not terminal, then
                         // fall through to record this Noop. `continue` skipped
                         // the receipt and left latest_generation_id observers
-                        // without event-to-ready evidence.
+                        // without event-to-ready evidence. One restore per
+                        // arrival: a second identical warming pass proves
+                        // nothing became restorable, so the arrival drains
+                        // instead of respinning this worker.
+                        warming_restore_arrival = arrival.wake_micros();
                         Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                         worker_wake.notify_one();
                     }
@@ -3407,8 +3427,17 @@ impl CodeIndexSchedulerRegistryV1 {
                     // not done: restore the arrival so the next pass can finish
                     // text instead of sleeping until an unrelated hint. Failed
                     // source outcomes already restore in the error arm; waking
-                    // those here would spin while Git is unavailable.
-                    if serving_empty && text_empty && matches!(&source_result, Ok(Ok(_))) {
+                    // those here would spin while Git is unavailable. The same
+                    // one-restore-per-arrival bound applies: when the follow-up
+                    // pass restored nothing and reconciled to the identical
+                    // outcome, the arrival drains rather than respinning.
+                    if serving_empty
+                        && text_empty
+                        && arrival.wake_micros().is_some()
+                        && warming_restore_arrival != arrival.wake_micros()
+                        && matches!(&source_result, Ok(Ok(_)))
+                    {
+                        warming_restore_arrival = arrival.wake_micros();
                         Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                         worker_wake.notify_one();
                     }
