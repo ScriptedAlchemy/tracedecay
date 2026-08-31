@@ -5202,10 +5202,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 let witness = serving_source_witness
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                let Some(witness) = witness else {
-                    return None;
-                };
+                    .clone()?;
                 if witness.generation_id != serving.generation().manifest().generation_id
                     || !witness.proves_current(&project_root)
                 {
