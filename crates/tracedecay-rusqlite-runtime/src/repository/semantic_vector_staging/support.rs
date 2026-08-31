@@ -829,12 +829,44 @@ pub(super) fn corrupt(message: impl Into<String>) -> SemanticVectorStagingStoreE
 }
 
 pub(super) fn map_exact(error: ExactSqlError) -> SemanticVectorStagingStoreError {
+    match &error {
+        ExactSqlError::Sqlite {
+            operation,
+            code,
+            extended_code,
+            ..
+        } => eprintln!(
+            "[tracedecay] event=semantic_vector_staging_exact_sql_failure kind=sqlite operation={operation} code={code:?} extended_code={extended_code:?}"
+        ),
+        error => eprintln!(
+            "[tracedecay] event=semantic_vector_staging_exact_sql_failure kind={}",
+            exact_sql_error_kind(error)
+        ),
+    }
     match error {
         ExactSqlError::AuthorityDenied(_) | ExactSqlError::AuthorityMismatch => {
             SemanticVectorStagingStoreError::AuthorityLost
         }
         ExactSqlError::Busy => SemanticVectorStagingStoreError::Busy,
         _ => SemanticVectorStagingStoreError::Infrastructure,
+    }
+}
+
+fn exact_sql_error_kind(error: &ExactSqlError) -> &'static str {
+    match error {
+        ExactSqlError::AuthorityMismatch => "authority_mismatch",
+        ExactSqlError::AuthorityDenied(_) => "authority_denied",
+        ExactSqlError::InvalidAttachment => "invalid_attachment",
+        ExactSqlError::InvalidStatement => "invalid_statement",
+        ExactSqlError::RequestLimitExceeded => "request_limit_exceeded",
+        ExactSqlError::TransactionControlDenied => "transaction_control_denied",
+        ExactSqlError::QueryLimitExceeded => "query_limit_exceeded",
+        ExactSqlError::Busy => "busy",
+        ExactSqlError::WriterUnavailable => "writer_unavailable",
+        ExactSqlError::ReaderUnavailable(_) => "reader_unavailable",
+        ExactSqlError::TransactionClosed => "transaction_closed",
+        ExactSqlError::TransactionExpired => "transaction_expired",
+        ExactSqlError::Sqlite { .. } => "sqlite",
     }
 }
 
