@@ -131,6 +131,7 @@ impl AuthorizedTemporalExecutionRequest {
         }
     }
 
+    #[hotpath::measure(label = "session_temporal.execution.validate_report")]
     pub fn validates_report(&self, report: &SessionTemporalExecutionReport) -> bool {
         let snapshot = &report.result().snapshot;
         let actual = snapshot.request();
@@ -319,6 +320,7 @@ pub struct AuthorizedTaskSessionExecutionRequestV1 {
 
 impl AuthorizedTaskSessionExecutionRequestV1 {
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "session_temporal.execution.authorize_task_session")]
     pub fn new(
         temporal: AuthorizedTemporalExecutionRequest,
         retrieval: RetrievalRequest,
