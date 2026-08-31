@@ -118,6 +118,7 @@ pub(super) struct PreparedTermPostingV1 {
     pub(super) frequency: i64,
 }
 
+#[hotpath::measure(label = "query.artifact.prepare_page")]
 pub(super) fn prepare_page(
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
@@ -274,6 +275,7 @@ pub(super) fn prepare_page(
     Ok(prepared)
 }
 
+#[hotpath::measure(label = "query.artifact.prepare_receipt")]
 fn prepare_base_sections_receipt(
     page_ordinal: u64,
     imports: &[PreparedImportV1],
@@ -357,6 +359,18 @@ fn prepare_base_sections_receipt(
 }
 
 fn prepare_document(
+    metadata: &CodeLexicalProjectionMetadataV1,
+    document_id: i64,
+    chunk: &tracedecay_domain::CodeSearchChunkV1,
+    display: Option<&tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1>,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(PreparedDocumentV1, Vec<(i64, i64)>), CodeLexicalArtifactErrorV1> {
+    crate::hotpath_metrics::measure_frequent("query.artifact.prepare_document", || {
+        prepare_document_inner(metadata, document_id, chunk, display, control)
+    })
+}
+
+fn prepare_document_inner(
     metadata: &CodeLexicalProjectionMetadataV1,
     document_id: i64,
     chunk: &tracedecay_domain::CodeSearchChunkV1,

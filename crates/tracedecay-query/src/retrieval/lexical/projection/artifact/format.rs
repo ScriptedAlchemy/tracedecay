@@ -227,6 +227,7 @@ pub(super) fn initial_base_section_receipt_fold()
     Ok((row_counts, accumulators))
 }
 
+#[hotpath::measure(label = "query.artifact.finalization.receipt_absorb")]
 pub(super) fn absorb_page_base_sections_receipt(
     page_ordinal: u64,
     bytes: &[u8],
@@ -321,6 +322,7 @@ fn validate_page_base_sections(
     Ok(())
 }
 
+#[hotpath::measure(label = "query.artifact.index_verify")]
 pub(super) fn verify_required_artifact_indexes(
     connection: &Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -541,6 +543,7 @@ pub(super) fn verify_artifact_table_layout(
     Ok(())
 }
 
+#[hotpath::measure(label = "query.artifact.ngram.page_digest")]
 pub(super) fn ngram_page_digest<'a>(
     page_ordinal: u64,
     rows: impl IntoIterator<Item = (i64, i64, &'a [u8], u64)>,
@@ -573,6 +576,14 @@ pub(super) fn ngram_page_digest<'a>(
 }
 
 pub(super) fn encode_ngram_bitmap(
+    bitmap: &RoaringBitmap,
+) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+    crate::hotpath_metrics::measure_frequent("query.artifact.ngram.encode_shard", || {
+        encode_ngram_bitmap_inner(bitmap)
+    })
+}
+
+fn encode_ngram_bitmap_inner(
     bitmap: &RoaringBitmap,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
     let cardinality = bitmap.len();
@@ -649,6 +660,14 @@ pub(super) fn encode_ngram_bitmap(
 }
 
 pub(super) fn decode_ngram_bitmap(
+    encoded: &[u8],
+) -> Result<RoaringBitmap, CodeLexicalArtifactErrorV1> {
+    crate::hotpath_metrics::measure_frequent("query.artifact.ngram.decode_shard", || {
+        decode_ngram_bitmap_inner(encoded)
+    })
+}
+
+fn decode_ngram_bitmap_inner(
     encoded: &[u8],
 ) -> Result<RoaringBitmap, CodeLexicalArtifactErrorV1> {
     let header = encoded.get(..16).ok_or_else(|| {
@@ -982,6 +1001,7 @@ pub(super) fn decode_padded_receipt(
 /// Decode a fixed-size receipt while honoring the caller's canonical work
 /// control. Reopen paths use this version so a corrupt or cold artifact never
 /// turns an expired epoch into an unbounded padding scan.
+#[hotpath::measure(label = "query.artifact.open.receipt_decode")]
 pub(super) fn decode_padded_receipt_with_control(
     bytes: &[u8],
     control: &dyn CodeIndexExecutionControlV1,
