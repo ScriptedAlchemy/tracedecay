@@ -201,6 +201,7 @@ impl DaemonNativeIntegrationStore {
     }
 
     /// Persists one issued approval commitment (approval issuance operation).
+    #[hotpath::measure(label = "agent_hosts.native_store.save_approval")]
     pub(crate) fn save_approval(
         &self,
         approval: NativeIntegrationApprovalV1,
@@ -211,6 +212,7 @@ impl DaemonNativeIntegrationStore {
     }
 
     /// Reads one issued approval commitment for apply resolution.
+    #[hotpath::measure(label = "agent_hosts.native_store.read_approval")]
     pub(crate) fn read_approval(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -247,6 +249,7 @@ impl Drop for DaemonNativeIntegrationStore {
 }
 
 impl NativeIntegrationStore for DaemonNativeIntegrationStore {
+    #[hotpath::measure(label = "agent_hosts.native_store.save_preview")]
     fn save_preview(
         &self,
         preview: NativeIntegrationPreviewV1,
@@ -256,6 +259,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.read_preview")]
     fn read_preview(
         &self,
         preview_id: &NativeIntegrationPreviewId,
@@ -265,6 +269,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.begin_or_replay")]
     fn begin_or_replay(
         &self,
         record: NativeIntegrationRecordV1,
@@ -274,6 +279,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.read_status")]
     fn read_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -283,6 +289,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.read_record")]
     fn read_record(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -292,6 +299,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.read_receipt")]
     fn read_receipt(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -301,6 +309,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.compare_and_swap_status")]
     fn compare_and_swap_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -317,6 +326,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.write_terminal")]
     fn write_terminal(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -333,6 +343,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.pending_transactions")]
     fn pending_transactions(
         &self,
         repository_id: Option<&RepositoryId>,
@@ -345,6 +356,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.approval_consumed")]
     fn approval_consumed(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -354,6 +366,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.quarantine_repository")]
     fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,
@@ -368,6 +381,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.begin_worktree_cleanup")]
     fn begin_worktree_cleanup(
         &self,
         transaction: NativeWorktreeCleanupTransactionV1,
@@ -380,6 +394,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.read_worktree_cleanup")]
     fn read_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,
@@ -392,6 +407,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.pending_worktree_cleanups")]
     fn pending_worktree_cleanups(
         &self,
         repository_id: &RepositoryId,
@@ -406,6 +422,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.compare_and_swap_worktree_cleanup")]
     fn compare_and_swap_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,
@@ -422,6 +439,7 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    #[hotpath::measure(label = "agent_hosts.native_store.write_worktree_cleanup_terminal")]
     fn write_worktree_cleanup_terminal(
         &self,
         confirmation_digest: &ManifestDigest,

@@ -35,6 +35,7 @@ pub fn context_scout_backend_from_automation_config(
     }
 }
 
+#[hotpath::measure(label = "agent_hosts.context_scout.model_route")]
 pub fn context_scout_model_assistant_from_automation_config(
     config: &AutomationConfig,
 ) -> Arc<dyn ContextScoutModelAssistantV1> {
@@ -166,6 +167,7 @@ fn scout_model_error_from_agent_task(error: AgentTaskError) -> ContextScoutModel
     }
 }
 
+#[hotpath::measure(label = "agent_hosts.context_scout.model_request")]
 fn backend_request(
     request: ContextScoutModelRequestV1,
     max_output_tokens: usize,
@@ -213,6 +215,7 @@ fn response_schema() -> Value {
     })
 }
 
+#[hotpath::measure(label = "agent_hosts.context_scout.model_proposal")]
 fn response_to_proposal(
     response: AgentTaskResponse,
     requested_backend: ContextScoutModelBackendV1,
