@@ -147,27 +147,64 @@ where
     }
 }
 
+/// Freshness of the generation a verified graph read serves.
+///
+/// Mirrors the search lane's `served_stale` contract: the serving arm of
+/// query admission answers from the last complete seated generation while a
+/// rebuild is in flight, and the answer must say so rather than present
+/// itself as current.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodeGraphReadFreshnessV1 {
+    /// The ready gate proved the served generation current against the live
+    /// checkout when the read opened.
+    Current,
+    /// The last complete seated generation answered because no proven-current
+    /// generation was admissible (the scheduler owns a rebuild pass or the
+    /// checkout drifted past the currency witness). Recall is sound for the
+    /// served generation; freshness is not.
+    LastCompleteStale,
+}
+
+impl CodeGraphReadFreshnessV1 {
+    pub fn is_stale(self) -> bool {
+        match self {
+            Self::Current => false,
+            Self::LastCompleteStale => true,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VerifiedCodeGraphRead {
     scope: ResolvedScope,
     store: Arc<CodeGraphProjectionStore>,
+    freshness: CodeGraphReadFreshnessV1,
 }
 
 impl VerifiedCodeGraphRead {
     pub fn new(
         scope: ResolvedScope,
         store: Arc<CodeGraphProjectionStore>,
+        freshness: CodeGraphReadFreshnessV1,
     ) -> Result<Self, CodeGraphReadError> {
         scope
             .validate()
             .map_err(|error| CodeGraphReadError::InvalidRequest {
                 detail: error.to_string(),
             })?;
-        Ok(Self { scope, store })
+        Ok(Self {
+            scope,
+            store,
+            freshness,
+        })
     }
 
     pub fn scope(&self) -> &ResolvedScope {
         &self.scope
+    }
+
+    pub fn freshness(&self) -> CodeGraphReadFreshnessV1 {
+        self.freshness
     }
 
     pub fn generation(&self) -> &CodeGenerationId {

@@ -44,6 +44,7 @@ use tracedecay_application::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationProblem, LegalAction, RequestId, RetryDirective,
     SafeDiagnostic,
 };
+use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_domain::{EnrollmentGrantV1, ProjectId};
 
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -433,10 +434,7 @@ const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// registry; this is the daemon's live mounted operational state.
 pub fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1> {
     let connection = tracedecay_daemon_identity::current_daemon_connection()?;
-    let Some(record) = connection.authority_record.as_ref() else {
-        return Err(missing_daemon_authority());
-    };
-    let Some(endpoint) = record.http_application_endpoint else {
+    let Some(endpoint) = connection.http_application_endpoint() else {
         return Err(TraceDecayError::Config {
             message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),
         });
@@ -489,7 +487,7 @@ fn missing_daemon_authority() -> TraceDecayError {
 }
 
 fn remote_status_daemon_unavailable() -> TraceDecayError {
-    match super::default_socket_path() {
+    match tracedecay_daemon_control::default_socket_path() {
         Ok(socket_path) => super::unavailable_error(&socket_path),
         Err(error) => error,
     }
@@ -778,7 +776,7 @@ impl DaemonHttpApplicationService {
     pub(super) async fn bind_with_remote_tls(
         registry: DaemonHttpApplicationRegistry,
         auth_token: &str,
-        remote_tls: Option<&super::bootstrap::RemoteBrainTlsConfig>,
+        remote_tls: Option<&RemoteBrainTlsConfig>,
     ) -> Result<Self> {
         let remote_tls_server = match remote_tls {
             Some(config) => {
@@ -992,7 +990,7 @@ struct RemoteBrainTlsListener {
 }
 
 impl RemoteBrainTlsListener {
-    async fn bind(config: &super::bootstrap::RemoteBrainTlsConfig) -> Result<Self> {
+    async fn bind(config: &RemoteBrainTlsConfig) -> Result<Self> {
         let certificates = CertificateDer::pem_file_iter(config.certificate_chain())
             .map_err(|error| tls_configuration_error("open Remote Brain TLS certificate", error))?
             .collect::<std::result::Result<Vec<_>, _>>()

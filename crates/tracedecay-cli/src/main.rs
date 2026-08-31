@@ -1224,8 +1224,8 @@ async fn dispatch_daemon_command(
         } => {
             // Long-lived host: allowed to run the structured-row sweep.
             tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
-            let socket_path = tracedecay::daemon::socket_path_or_default(socket)?;
-            let remote_tls = tracedecay::daemon::RemoteBrainTlsConfig::from_optional_parts(
+            let socket_path = tracedecay_daemon_control::socket_path_or_default(socket)?;
+            let remote_tls = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
                 remote_listen,
                 remote_tls_cert.map(PathBuf::from),
                 remote_tls_key.map(PathBuf::from),
@@ -1253,26 +1253,30 @@ async fn dispatch_daemon_command(
                     message: "tracedecay not found on PATH".to_string(),
                 }
             })?;
-            let remote_tls = tracedecay::daemon::RemoteBrainTlsConfig::from_optional_parts(
+            let remote_tls = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
                 remote_listen,
                 remote_tls_cert.map(PathBuf::from),
                 remote_tls_key.map(PathBuf::from),
             )?;
-            let spec = tracedecay::daemon::service_spec_with_remote_tls(
+            let spec = tracedecay_daemon_control::service_spec_with_remote_tls(
                 tracedecay_bin,
                 socket,
                 remote_tls,
             )?;
             let service_path = hotpath::measure_block!(
                 "cli.daemon.install_service",
-                tracedecay::daemon::install_service(&spec, !no_start)
+                tracedecay_daemon_control::install_service(
+                    &spec,
+                    !no_start,
+                    tracedecay::version::build_version(),
+                )
             )?;
             eprintln!(
                 "Installed TraceDecay daemon service at {}",
                 service_path.display()
             );
             if cfg!(windows) {
-                let profile_root = tracedecay::daemon::installed_service_socket_path()?
+                let profile_root = tracedecay_daemon_control::installed_service_socket_path()?
                     .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
                     .ok_or_else(
                         || tracedecay_domain::errors::TraceDecayError::Config {
@@ -1289,7 +1293,10 @@ async fn dispatch_daemon_command(
         DaemonAction::UninstallService { no_stop } => {
             let service_path = hotpath::measure_block!(
                 "cli.daemon.uninstall_service",
-                tracedecay::daemon::uninstall_service(!no_stop)
+                tracedecay_daemon_control::uninstall_service(
+                    !no_stop,
+                    tracedecay::version::build_version(),
+                )
             )?;
             eprintln!(
                 "Removed TraceDecay daemon service at {}",
@@ -1297,21 +1304,30 @@ async fn dispatch_daemon_command(
             );
         }
         DaemonAction::Start => {
-            hotpath::measure_block!("cli.daemon.start", tracedecay::daemon::start_service())?;
+            hotpath::measure_block!(
+                "cli.daemon.start",
+                tracedecay_daemon_control::start_service(tracedecay::version::build_version())
+            )?;
             eprintln!("Started TraceDecay daemon service");
         }
         DaemonAction::Stop => {
-            hotpath::measure_block!("cli.daemon.stop", tracedecay::daemon::stop_service())?;
+            hotpath::measure_block!(
+                "cli.daemon.stop",
+                tracedecay_daemon_control::stop_service(tracedecay::version::build_version())
+            )?;
             eprintln!("Stopped TraceDecay daemon service");
         }
         DaemonAction::Restart => {
             hotpath::measure_block!("cli.daemon.restart", update_cmd::restart_daemon_service())?;
         }
         DaemonAction::Status => {
-            let socket_path = tracedecay::daemon::socket_path_or_default(None)?;
+            let socket_path = tracedecay_daemon_control::socket_path_or_default(None)?;
             hotpath::measure_block!(
                 "cli.daemon.status",
-                print!("{}", tracedecay::daemon::service_status(&socket_path))
+                print!(
+                    "{}",
+                    tracedecay_daemon_control::service_status(&socket_path)
+                )
             );
         }
     }
@@ -1557,7 +1573,11 @@ async fn dispatch_update_command(command: Commands) -> tracedecay_domain::errors
             } => {
                 hotpath::measure_block!(
                     "cli.package_hook.prepare",
-                    tracedecay::daemon::prepare_scoop_package_service(&package_id, &state_file)
+                    tracedecay_daemon_control::prepare_scoop_package_service(
+                        &package_id,
+                        &state_file,
+                        tracedecay::version::build_version(),
+                    )
                 )?;
             }
             ScoopPackageHookAction::Restore {
@@ -1566,7 +1586,11 @@ async fn dispatch_update_command(command: Commands) -> tracedecay_domain::errors
             } => {
                 hotpath::measure_block!(
                     "cli.package_hook.restore",
-                    tracedecay::daemon::restore_scoop_package_service(&package_id, &state_file)
+                    tracedecay_daemon_control::restore_scoop_package_service(
+                        &package_id,
+                        &state_file,
+                        tracedecay::version::build_version(),
+                    )
                 )?;
             }
         },

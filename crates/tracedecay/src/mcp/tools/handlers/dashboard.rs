@@ -607,7 +607,7 @@ pub(crate) async fn shutdown_dashboard_for_until(
 pub(crate) async fn shutdown_dashboard_for(project_root: &Path) -> Result<()> {
     shutdown_dashboard_for_until(
         project_root,
-        tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE,
+        tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
     )
     .await
 }
@@ -637,8 +637,10 @@ pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> 
 }
 
 pub(crate) async fn shutdown_dashboard() -> Result<()> {
-    shutdown_dashboard_until(tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE)
-        .await
+    shutdown_dashboard_until(
+        tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+    )
+    .await
 }
 
 fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {

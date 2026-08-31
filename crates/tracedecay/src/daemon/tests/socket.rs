@@ -51,12 +51,7 @@ fn lsp_test_invocation(
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_identity::DaemonConnection {
-            endpoint,
-            auth_token: None,
-            authority_record: None,
-        }
-        .into_protocol(),
+        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),
         handshake,
     )
 }
@@ -568,12 +563,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     let invocation = tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_identity::DaemonConnection {
-            endpoint,
-            auth_token: None,
-            authority_record: None,
-        }
-        .into_protocol(),
+        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),
         handshake,
     );
     let (deadline, cancellation) = active_lsp_control("cancel.lsp.reconnect-open");

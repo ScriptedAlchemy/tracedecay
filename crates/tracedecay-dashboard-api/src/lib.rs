@@ -15,7 +15,7 @@
 pub use tracedecay_application::request_identity;
 pub use tracedecay_session_memory::user_config;
 pub use tracedecay_usecases as application;
-pub use tracedecay_graph_query as graph;
+pub(crate) use tracedecay_graph_query as graph;
 pub use tracedecay_usecases::git_query;
 pub mod tracedecay;
 // Crate-root re-exports the composition root reaches through its

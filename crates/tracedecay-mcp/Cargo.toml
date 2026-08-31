@@ -18,6 +18,8 @@ hotpath = [
     "hotpath/tokio",
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-code-index?/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-domain/hotpath",
     "tracedecay-graph-query/hotpath",
@@ -32,6 +34,8 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-code-index?/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
     "tracedecay-graph-query/hotpath-alloc",
@@ -46,6 +50,8 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-code-index?/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
     "tracedecay-graph-query/hotpath-cpu",
@@ -58,18 +64,32 @@ hotpath-cpu = [
 # Gates in-memory ChannelTransport. ReplayTransport stays on the default
 # graph because production initialize-root replay uses it.
 test-transport = []
+# Filesystem-wide reachability needs the canonical Rust and TypeScript grammar
+# tier. The composition root mounts this production feature where that tier is
+# already part of the shipped code-index closure.
+source-analysis = [
+    "dep:ignore",
+    "dep:toml",
+    "dep:tree-sitter",
+    "dep:tracedecay-code-index",
+    "tracedecay-code-extraction/lite",
+]
 
 [dependencies]
 glob = "0.3"
 hotpath.workspace = true
+ignore = { version = "0.4", optional = true }
 libc = "0.2"
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "sync"] }
+toml = { version = "1", optional = true }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, optional = true }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
@@ -79,6 +99,7 @@ tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracing = "0.1"
+tree-sitter = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

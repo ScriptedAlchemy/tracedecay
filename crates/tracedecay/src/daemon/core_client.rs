@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
+use tracedecay_daemon_control::default_socket_path;
+#[cfg(not(unix))]
+use tracedecay_daemon_identity::current_daemon_connection;
 use tracedecay_daemon_identity::{DaemonConnection, client_connection};
 use tracedecay_daemon_protocol::wire::{
     WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
@@ -25,7 +28,7 @@ use super::unavailable_error;
 use super::{
     BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonHandshake, JsonRpcRequest,
     JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
-    TraceDecayError, default_socket_path, error_message_is_project_open_retryable,
+    TraceDecayError, error_message_is_project_open_retryable,
 };
 
 pub(crate) const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);

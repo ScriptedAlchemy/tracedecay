@@ -6,8 +6,12 @@ mod constructors;
 mod dead_code;
 mod field_sites;
 mod hotspots;
+mod imports;
 mod metrics;
 mod recursion;
+#[cfg(feature = "source-analysis")]
+mod unmounted_files;
+mod unsafe_patterns;
 
 pub use circular::handle_circular;
 pub use complexity::{handle_complexity, handle_doc_coverage, handle_god_class};
@@ -15,10 +19,14 @@ pub use constructors::handle_constructors;
 pub use dead_code::handle_dead_code;
 pub use field_sites::handle_field_sites;
 pub use hotspots::handle_hotspots;
+pub use imports::handle_unused_imports;
 pub use metrics::{
     handle_coupling, handle_distribution, handle_inheritance_depth, handle_largest, handle_rank,
 };
 pub use recursion::handle_recursion;
+#[cfg(feature = "source-analysis")]
+pub use unmounted_files::handle_unmounted_files;
+pub use unsafe_patterns::handle_unsafe_patterns;
 
 use crate::{ToolResult, is_ident_byte, line_number_at, skip_ascii_whitespace};
 use crate::{
@@ -27,14 +35,19 @@ use crate::{
 };
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
-use tracedecay_graph_query::{
-    CodeGraphSemanticEdgeV1, LineageSymbolRecordV1, VerifiedGraphQuery,
-};
+use tracedecay_graph_query::{CodeGraphSemanticEdgeV1, LineageSymbolRecordV1, VerifiedGraphQuery};
+
+fn path_is_rust(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+}
 
 fn path_matches_optional_scope(path: &str, scope_prefix: Option<&str>) -> bool {
     tracedecay_runtime_core::path_scope::path_matches_scope(path, scope_prefix)

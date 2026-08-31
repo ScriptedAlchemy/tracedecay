@@ -105,11 +105,39 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort
                         latest = wait => latest,
                     }
                 }
-            }
-            .ok_or_else(|| CodeGraphReadError::Unavailable {
-                detail: "the verified code graph is not ready for the exact project root"
-                    .to_owned(),
-            })?;
+            };
+            // Serve the last complete generation while the scheduler
+            // rebuilds: when the ready gate abstains (a background pass owns
+            // the scheduler, or a new tip commit disproved the currency
+            // witness), the seat still holds the last complete generation.
+            // Refusing it withdrew exact-scope retrieval for entire
+            // regeneration windows; instead it serves with typed staleness,
+            // exactly as the search lane's `served_stale` arm does. Only a
+            // route with no seated complete generation at all stays a typed
+            // unavailable refusal.
+            let (latest, freshness) = match latest {
+                Some(latest) => (
+                    latest,
+                    tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+                ),
+                None => match self
+                    .schedulers
+                    .latest_complete_serving_for_root_scope(&self.project_root, &self.scope)
+                    .await
+                {
+                    Some(seated) => (
+                        seated,
+                        tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale,
+                    ),
+                    None => {
+                        return Err(CodeGraphReadError::Unavailable {
+                            detail:
+                                "the verified code graph is not ready for the exact project root"
+                                    .to_owned(),
+                        });
+                    }
+                },
+            };
             refuse_projection_wait(&request)?;
             let store = latest.interactive_graph_store().map_err(|error| {
                 CodeGraphReadError::Unavailable {
@@ -117,7 +145,7 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort
                 }
             })?;
             refuse_projection_wait(&request)?;
-            VerifiedCodeGraphRead::new(self.scope.clone(), store)
+            VerifiedCodeGraphRead::new(self.scope.clone(), store, freshness)
         })
     }
 }

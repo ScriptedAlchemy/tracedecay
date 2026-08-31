@@ -103,6 +103,7 @@ hotpath = [
     "tracedecay-code-index-retention/hotpath",
     "tracedecay-code-index-runtime/hotpath",
     "tracedecay-dashboard-api/hotpath",
+    "tracedecay-daemon-control/hotpath",
     "tracedecay-daemon-identity/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-daemon-service/hotpath",
@@ -146,6 +147,7 @@ hotpath-alloc = [
     "tracedecay-code-index-retention/hotpath-alloc",
     "tracedecay-code-index-runtime/hotpath-alloc",
     "tracedecay-dashboard-api/hotpath-alloc",
+    "tracedecay-daemon-control/hotpath-alloc",
     "tracedecay-daemon-identity/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-daemon-service/hotpath-alloc",
@@ -189,6 +191,7 @@ hotpath-cpu = [
     "tracedecay-code-index-retention/hotpath-cpu",
     "tracedecay-code-index-runtime/hotpath-cpu",
     "tracedecay-dashboard-api/hotpath-cpu",
+    "tracedecay-daemon-control/hotpath-cpu",
     "tracedecay-daemon-identity/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-daemon-service/hotpath-cpu",
@@ -406,13 +409,14 @@ tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", 
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
+tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
-tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0" }
+tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["source-analysis"] }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
