@@ -8298,6 +8298,46 @@ async fn background_reconciles_respect_a_single_admission_permit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_publication_lock_serializes_source_reconcile() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn source() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+    let build_lock = registry
+        .build_publication_lock_handle(fixture.path())
+        .await
+        .expect("build/publication lock");
+    let held = build_lock.lock_owned().await;
+
+    fixture.edit("src/lib.rs", "pub fn source() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(initial.clone()),
+        "the source reconcile cannot publish while another same-store build owns exclusivity"
+    );
+
+    drop(held);
+    let advanced = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+    assert_ne!(advanced, initial);
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn distinct_stores_reconcile_in_parallel_under_bounded_admission() {
     // With two permits, hold the FIRST worktree's scheduler lock so its worker
     // takes one permit and blocks mid-reconcile (an in-flight reconcile analog).

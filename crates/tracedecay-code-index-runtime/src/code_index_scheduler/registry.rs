@@ -513,6 +513,11 @@ pub struct MountedCodeIndexWorktreeV1 {
     pub semantic_vector_graph_provider:
         Option<Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    /// Explicit same-store build/publication invariant shared by source
+    /// reconcile, ignored-dependency publication, and historical generation
+    /// minting. Async owners acquire this before entering blocking scheduler
+    /// work so competing builds wait without occupying a blocking-pool thread.
+    pub(super) build_publication_lock: Arc<tokio::sync::Mutex<()>>,
     pub historical_generation_owner: super::HistoricalCodeIndexGenerationOwnerV1,
     pub serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
     /// Lock-free last-reconcile timestamp. `0` means none. Dashboard freshness
@@ -2735,6 +2740,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let epoch = Arc::clone(&opened.epoch);
         let shutting_down = Arc::clone(&opened.shutting_down);
         let scheduler = Arc::new(Mutex::new(opened));
+        let build_publication_lock = Arc::new(tokio::sync::Mutex::new(()));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
         let pending_wake = Arc::new(PendingWakeV1::default());
@@ -2758,6 +2764,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_pending_wake = Arc::clone(&pending_wake);
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
+        let worker_build_publication_lock = Arc::clone(&build_publication_lock);
         let worker_semantic_evaluation_publication_gate =
             Arc::clone(&semantic_evaluation_publication_gate);
         let worker_background_reconcile_admission =
@@ -2928,6 +2935,18 @@ impl CodeIndexSchedulerRegistryV1 {
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;
                 }
+                let mut build_publication =
+                    std::pin::pin!(Arc::clone(&worker_build_publication_lock).lock_owned());
+                let _build_publication = loop {
+                    tokio::select! {
+                        guard = &mut build_publication => break guard,
+                        () = tokio::time::sleep(Duration::from_millis(5)) => {
+                            if worker_shutting_down.load(Ordering::Acquire) {
+                                return;
+                            }
+                        }
+                    }
+                };
                 let scheduler = Arc::clone(&worker_scheduler);
                 let graph_activation_enabled = worker_graph_activation.policy().is_enabled();
                 // A coalesced text-slice wake can outlive the graph-off pass
@@ -3977,6 +3996,7 @@ impl CodeIndexSchedulerRegistryV1 {
             query_activation_redundancy: None,
             semantic_vector_graph_provider: None,
             scheduler,
+            build_publication_lock,
             historical_generation_owner,
             serving_generation,
             last_reconciled_at_micros,
@@ -5895,6 +5915,21 @@ impl CodeIndexSchedulerRegistryV1 {
         mounted
             .get(&project_root)
             .map(|worktree| Arc::clone(&worktree.scheduler))
+    }
+
+    /// Test support for proving the explicit same-store build/publication
+    /// invariant independently of the scheduler metadata mutex.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn build_publication_lock_handle(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.build_publication_lock))
     }
 
     pub async fn shutdown(&self) {
