@@ -1106,6 +1106,7 @@ impl McpServer {
             version_cache: std::sync::Mutex::new(VersionCheckState {
                 latest: None,
                 checked_at: None,
+                refreshing: false,
             }),
             pending_notifications: std::sync::Mutex::new(Vec::new()),
             scope_prefix,
