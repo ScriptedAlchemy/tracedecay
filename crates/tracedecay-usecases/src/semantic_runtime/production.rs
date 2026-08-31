@@ -1791,7 +1791,17 @@ impl ProductionSemanticRuntimeV1 {
             &request.changes,
         ) {
             Ok(descriptor) => descriptor,
-            Err(_) => return false,
+            Err(error) => {
+                crate::hotpath_observe::semantic_stage_descriptor_failed();
+                tracing::warn!(
+                    event = "semantic_projection_schedule",
+                    outcome = "stage_descriptor_failed",
+                    expected_chunks = expected_chunk_ids.len(),
+                    error = %error,
+                    "semantic projection stage descriptor could not be prepared"
+                );
+                return false;
+            }
         };
         let plan = VectorGenerationPlanV1 {
             target_projection_key: published_projection_key.clone(),

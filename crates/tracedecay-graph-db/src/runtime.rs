@@ -596,6 +596,40 @@ impl GraphDb {
         Ok(batches)
     }
 
+    #[hotpath::measure(
+        label = "graph_db.traversal.outgoing_targets.visit",
+        impl_type = "GraphDb"
+    )]
+    pub fn visit_outgoing_relation_targets(
+        &self,
+        namespace: &GraphNamespace,
+        start: &GraphEntityId,
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        cancellation: Arc<dyn GraphCancellation>,
+        visitor: &mut dyn FnMut(GraphRelationTarget),
+    ) -> Result<usize, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, std::slice::from_ref(start))?;
+        let edges = traversal::visit_outgoing_relation_targets(
+            database,
+            namespace,
+            start,
+            relation_kinds,
+            cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            visitor,
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            crate::hotpath_observe::record_counts(1, edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(edges)
+    }
+
     /// Bulk kind-filtered incoming fan-out with the same shape, cancellation,
     /// and aggregate relation budget as [`Self::outgoing_relations`].
     #[hotpath::measure(label = "graph_db.traversal.incoming", impl_type = "GraphDb")]

@@ -55,17 +55,17 @@ impl SemanticVectorVerifiedRead {
             .and_then(|relation| relation.map(storage_relation).transpose())
     }
 
-    pub(super) fn outgoing_relation_targets(
+    pub(super) fn visit_outgoing_relation_targets(
         &self,
         namespace: &GraphNamespace,
-        starts: &[GraphEntityId],
+        start: &GraphEntityId,
         relation_kinds: &BTreeSet<GraphRelationKind>,
-        max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Vec<Vec<GraphRelationTarget>>, GraphDbError> {
+        visitor: &mut dyn FnMut(GraphRelationTarget),
+    ) -> Result<usize, GraphDbError> {
         self.require_projection(namespace, &self.inner.projection().projection)?;
         self.inner
-            .outgoing_relation_targets(starts, relation_kinds, max_relations, cancellation)
+            .visit_outgoing_relation_targets(start, relation_kinds, cancellation, visitor)
     }
 
     pub(super) fn projection_telemetry(

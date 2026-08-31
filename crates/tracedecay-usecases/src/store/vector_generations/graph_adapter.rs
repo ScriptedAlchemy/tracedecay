@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
-    CodeSearchChunkId, ManifestDigest, VectorGenerationIdV1,
+    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId,
+    ManifestDigest, VectorGenerationIdV1,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntityId, GraphNamespace, GraphProjectionId, GraphPropertyName,
@@ -14,9 +14,10 @@ use tracedecay_graph_db::{
 };
 use tracedecay_store::{
     GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, SemanticVectorChunkDigest,
-    SemanticVectorChunkId, SemanticVectorChunkManifestMember, SemanticVectorPublishedGenerationKey,
-    SemanticVectorPublishedGenerationLookup, SemanticVectorStageChunkOperation,
-    SemanticVectorStageRecord,
+    SemanticVectorChunkId, SemanticVectorChunkManifestAccumulator,
+    SemanticVectorChunkManifestDigest, SemanticVectorChunkManifestMember,
+    SemanticVectorPublishedGenerationKey, SemanticVectorPublishedGenerationLookup,
+    SemanticVectorStageChunkOperation, SemanticVectorStageRecord,
 };
 
 use crate::semantic_runtime::{
@@ -58,7 +59,6 @@ pub use evaluation_runtime::{
 
 pub const SEMANTIC_VECTOR_GRAPH_PROJECTION: &str = "tracedecay.semantic-vector.graph";
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
-pub(super) const MAX_RESIDENT_VECTOR_ROWS: usize = 100_000;
 
 pub struct GraphVectorGenerationStoreV1 {
     runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
@@ -89,10 +89,11 @@ impl VectorGenerationBeginOutcomeV1 {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticVectorStageDescriptorV1 {
     projection: AdmittedEmbeddingProjectionKeyV1,
-    members: Vec<SemanticVectorChunkManifestMember>,
+    expected_chunk_count: u64,
+    expected_chunk_manifest_digest: SemanticVectorChunkManifestDigest,
 }
 
 struct PendingSemanticVectorBuildV1 {
@@ -107,52 +108,170 @@ impl SemanticVectorStageDescriptorV1 {
         projection: AdmittedEmbeddingProjectionKeyV1,
         changes: &ChangedCodeChunkSetV1,
     ) -> Result<Self, VectorGenerationStoreErrorV1> {
-        let live_member = |change: &ChangedCodeChunkV1,
-                           operation: SemanticVectorStageChunkOperation| {
-            let digest = change.current_digest.as_ref().ok_or_else(|| {
-                VectorGenerationStoreErrorV1::InvalidPlan(
-                    "semantic vector live member has no current digest".to_owned(),
-                )
-            })?;
-            Ok(SemanticVectorChunkManifestMember {
+        let (expected_chunk_count, expected_chunk_manifest_digest) =
+            semantic_vector_stage_manifest(changes)?;
+        Ok(Self {
+            projection,
+            expected_chunk_count,
+            expected_chunk_manifest_digest,
+        })
+    }
+}
+
+/// Folds the three already-canonical change partitions into one canonical
+/// manifest without retaining another corpus-sized collection. The durable
+/// writer remains bounded by its batch/page limits; project size is not an
+/// admission limit.
+fn semantic_vector_stage_manifest(
+    changes: &ChangedCodeChunkSetV1,
+) -> Result<(u64, SemanticVectorChunkManifestDigest), VectorGenerationStoreErrorV1> {
+    let mut added = changes.added_or_changed.iter().peekable();
+    let mut reused = changes.reused.iter().peekable();
+    let mut deleted = changes.deleted.iter().peekable();
+    let mut accumulator = SemanticVectorChunkManifestAccumulator::new();
+    let mut expected_chunk_count = 0_u64;
+
+    loop {
+        let source = [
+            added.peek().map(|change| (&change.chunk_id, 0_u8)),
+            reused.peek().map(|change| (&change.chunk_id, 1_u8)),
+            deleted.peek().map(|change| (&change.chunk_id, 2_u8)),
+        ]
+        .into_iter()
+        .flatten()
+        .min_by(|left, right| left.0.cmp(right.0))
+        .map(|(_, source)| source);
+        let Some(source) = source else {
+            break;
+        };
+        let (change, operation) = match source {
+            0 => (
+                added.next().ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::InvalidPlan(
+                        "semantic vector added partition changed during manifest fold".to_owned(),
+                    )
+                })?,
+                SemanticVectorStageChunkOperation::Embed,
+            ),
+            1 => (
+                reused.next().ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::InvalidPlan(
+                        "semantic vector reused partition changed during manifest fold".to_owned(),
+                    )
+                })?,
+                SemanticVectorStageChunkOperation::Reuse,
+            ),
+            _ => (
+                deleted.next().ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::InvalidPlan(
+                        "semantic vector deleted partition changed during manifest fold".to_owned(),
+                    )
+                })?,
+                SemanticVectorStageChunkOperation::Tombstone,
+            ),
+        };
+        let digest = match operation {
+            SemanticVectorStageChunkOperation::Embed | SemanticVectorStageChunkOperation::Reuse => {
+                change.current_digest.as_ref().ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::InvalidPlan(
+                        "semantic vector live member has no current digest".to_owned(),
+                    )
+                })?
+            }
+            SemanticVectorStageChunkOperation::Tombstone => {
+                change.prior_digest.as_ref().ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::InvalidPlan(
+                        "semantic vector tombstone has no prior digest".to_owned(),
+                    )
+                })?
+            }
+        };
+        accumulator
+            .push(&SemanticVectorChunkManifestMember {
                 chunk_id: SemanticVectorChunkId::new(change.chunk_id.to_string())
                     .map_err(storage_error)?,
                 chunk_digest: SemanticVectorChunkDigest::new(digest.as_str())
                     .map_err(storage_error)?,
                 operation,
             })
-        };
-        let mut members = changes
-            .added_or_changed
-            .iter()
-            .map(|change| live_member(change, SemanticVectorStageChunkOperation::Embed))
-            .chain(
-                changes
-                    .reused
-                    .iter()
-                    .map(|change| live_member(change, SemanticVectorStageChunkOperation::Reuse)),
+            .map_err(storage_error)?;
+        expected_chunk_count = expected_chunk_count.checked_add(1).ok_or_else(|| {
+            VectorGenerationStoreErrorV1::InvalidPlan(
+                "semantic vector chunk count exceeds u64".to_owned(),
             )
-            .chain(changes.deleted.iter().map(|change| {
-                let digest = change.prior_digest.as_ref().ok_or_else(|| {
-                    VectorGenerationStoreErrorV1::InvalidPlan(
-                        "semantic vector tombstone has no prior digest".to_owned(),
-                    )
-                })?;
-                Ok(SemanticVectorChunkManifestMember {
-                    chunk_id: SemanticVectorChunkId::new(change.chunk_id.to_string())
-                        .map_err(storage_error)?,
-                    chunk_digest: SemanticVectorChunkDigest::new(digest.as_str())
-                        .map_err(storage_error)?,
-                    operation: SemanticVectorStageChunkOperation::Tombstone,
-                })
-            }))
-            .collect::<Result<Vec<_>, VectorGenerationStoreErrorV1>>()?;
-        members.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
-        tracedecay_store::semantic_vector_chunk_manifest_digest(&members).map_err(storage_error)?;
-        Ok(Self {
-            projection,
-            members,
-        })
+        })?;
+    }
+
+    Ok((
+        expected_chunk_count,
+        accumulator.finish().map_err(storage_error)?,
+    ))
+}
+
+#[cfg(test)]
+mod stage_descriptor_tests {
+    use super::*;
+    use tracedecay_domain::{ChangedCodeChunkV1, ContentDigest};
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("canonical test identity")
+    }
+
+    fn digest(byte: char) -> ContentDigest {
+        id(&format!("sha256:{}", byte.to_string().repeat(64)))
+    }
+
+    fn change(
+        chunk_id: &str,
+        prior_digest: Option<char>,
+        current_digest: Option<char>,
+    ) -> ChangedCodeChunkV1 {
+        ChangedCodeChunkV1 {
+            chunk_id: id(chunk_id),
+            prior_digest: prior_digest.map(digest),
+            current_digest: current_digest.map(digest),
+        }
+    }
+
+    #[test]
+    fn stage_manifest_stream_merge_preserves_canonical_cross_partition_order() {
+        let changes = ChangedCodeChunkSetV1 {
+            from_generation: Some(id("generation.base")),
+            to_generation: id("generation.target"),
+            manifest_digest: id(&format!("sha256:{}", "d".repeat(64))),
+            added_or_changed: vec![change("chunk.b", None, Some('b'))],
+            deleted: vec![change("chunk.a", Some('a'), None)],
+            reused: vec![change("chunk.c", Some('c'), Some('c'))],
+        };
+        let (count, actual) = semantic_vector_stage_manifest(&changes).expect("stream manifest");
+        let expected = tracedecay_store::semantic_vector_chunk_manifest_digest(&[
+            SemanticVectorChunkManifestMember {
+                chunk_id: SemanticVectorChunkId::new("chunk.a").expect("chunk id"),
+                chunk_digest: SemanticVectorChunkDigest::new(digest('a').as_str())
+                    .expect("chunk digest"),
+                operation: SemanticVectorStageChunkOperation::Tombstone,
+            },
+            SemanticVectorChunkManifestMember {
+                chunk_id: SemanticVectorChunkId::new("chunk.b").expect("chunk id"),
+                chunk_digest: SemanticVectorChunkDigest::new(digest('b').as_str())
+                    .expect("chunk digest"),
+                operation: SemanticVectorStageChunkOperation::Embed,
+            },
+            SemanticVectorChunkManifestMember {
+                chunk_id: SemanticVectorChunkId::new("chunk.c").expect("chunk id"),
+                chunk_digest: SemanticVectorChunkDigest::new(digest('c').as_str())
+                    .expect("chunk digest"),
+                operation: SemanticVectorStageChunkOperation::Reuse,
+            },
+        ])
+        .expect("reference manifest digest");
+
+        assert_eq!(count, 3);
+        assert_eq!(actual, expected);
     }
 }
 
@@ -353,10 +472,7 @@ impl GraphVectorGenerationStoreV1 {
             )
         })?;
         match current.as_ref() {
-            Some(existing)
-                if existing.projection != descriptor.projection
-                    || existing.members != descriptor.members =>
-            {
+            Some(existing) if existing != &descriptor => {
                 Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
             }
             Some(_) => Ok(()),

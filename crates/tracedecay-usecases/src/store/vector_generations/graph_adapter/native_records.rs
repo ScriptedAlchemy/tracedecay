@@ -65,23 +65,10 @@ pub(super) fn read_cataloged_generation_records(
         (None, None) => Ok(None),
         (Some(records), Some(catalog)) => {
             let rows = u64::try_from(records.generation.vectors().len()).map_err(storage_error)?;
-            let local_vector_entities = u64::try_from(
-                records
-                    .entities
-                    .values()
-                    .filter(|entity| {
-                        entity
-                            .labels
-                            .iter()
-                            .any(|label| label.as_str() == GENERATION_VECTOR_LABEL)
-                    })
-                    .count(),
-            )
-            .map_err(storage_error)?;
             if catalog.base_generation.as_ref() != records.generation.base_generation()
                 || catalog.rows != rows
                 || catalog.vector_bytes != records.vector_bytes
-                || local_vector_entities > catalog.rows
+                || records.local_vector_entities > catalog.rows
             {
                 return Err(corrupt(
                     "semantic vector generation catalog record is inconsistent",
