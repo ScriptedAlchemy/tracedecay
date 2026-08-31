@@ -16,8 +16,8 @@ use super::{DashboardState, build_selected_project_state, config_error};
 use crate::project_registry::{
     PublicCodeProject, build_project_registry_view, public_code_project_from_record,
 };
-use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::ProjectRegistryContext;
 
 #[derive(Clone)]
 pub struct DashboardRuntime {

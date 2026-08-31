@@ -5484,7 +5484,10 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
     })
     .await
     .expect("the quiet probe re-proves the unchanged seat");
-    assert_eq!(reproved.generation().manifest().generation_id, generation_id);
+    assert_eq!(
+        reproved.generation().manifest().generation_id,
+        generation_id
+    );
 
     registry.shutdown().await;
 }

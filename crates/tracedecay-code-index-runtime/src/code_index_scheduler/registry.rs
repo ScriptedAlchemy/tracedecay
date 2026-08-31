@@ -5233,10 +5233,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Return the exact ready generation without blocking the async executor
     /// on the bounded synchronous freshness probe.
-    #[hotpath::measure(
-        label = "daemon.code_index.query.latest_ready_decoded",
-        future = true
-    )]
+    #[hotpath::measure(label = "daemon.code_index.query.latest_ready_decoded", future = true)]
     pub async fn latest_complete_ready_decoded_for_root_scope(
         &self,
         project_root: &Path,

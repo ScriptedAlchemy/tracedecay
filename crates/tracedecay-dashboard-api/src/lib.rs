@@ -13,9 +13,9 @@
 //! mounted for the selected project.
 
 pub use tracedecay_application::request_identity;
+pub use tracedecay_graph_query as graph;
 pub use tracedecay_session_memory::user_config;
 pub use tracedecay_usecases as application;
-pub use tracedecay_graph_query as graph;
 pub use tracedecay_usecases::git_query;
 pub mod tracedecay;
 // Crate-root re-exports the composition root reaches through its
@@ -159,12 +159,12 @@ use tracedecay_api::{WorkOperation, WorkflowOperation};
 use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadConnection, DatabaseStorageTelemetryHandle,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{StorageMode, StoreLayout};
 
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server

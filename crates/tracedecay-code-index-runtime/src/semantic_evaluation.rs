@@ -1528,9 +1528,10 @@ impl LinuxProcessResourceWindowV1 {
     #[cfg(target_os = "linux")]
     fn begin() -> Option<Self> {
         Some(Self {
-            cpu_ticks: tracedecay_session_memory::runtime_telemetry::read_linux_process_cpu_ticks()?,
-            ticks_per_second: tracedecay_session_memory::runtime_telemetry::linux_clock_ticks_per_second(
+            cpu_ticks: tracedecay_session_memory::runtime_telemetry::read_linux_process_cpu_ticks(
             )?,
+            ticks_per_second:
+                tracedecay_session_memory::runtime_telemetry::linux_clock_ticks_per_second()?,
         })
     }
 
@@ -1540,8 +1541,9 @@ impl LinuxProcessResourceWindowV1 {
     }
 
     fn finish(self) -> Option<(u64, u64)> {
-        let elapsed_ticks = tracedecay_session_memory::runtime_telemetry::read_linux_process_cpu_ticks()?
-            .saturating_sub(self.cpu_ticks);
+        let elapsed_ticks =
+            tracedecay_session_memory::runtime_telemetry::read_linux_process_cpu_ticks()?
+                .saturating_sub(self.cpu_ticks);
         let cpu_time_us = u64::try_from(
             u128::from(elapsed_ticks)
                 .checked_mul(1_000_000)?
