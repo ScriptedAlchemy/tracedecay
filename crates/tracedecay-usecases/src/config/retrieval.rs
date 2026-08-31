@@ -26,6 +26,7 @@ use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_search_eval::{
     DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
 };
+use tracedecay_semantic_contracts::RerankCompatibilityPinsV1;
 
 const EVALUATION_ID_DOMAIN: &str = "tracedecay.retrieval.evaluation-pass.v1";
 const PROFILE_ID_DOMAIN: &str = "tracedecay.retrieval.accepted-profile.v1";
@@ -237,10 +238,6 @@ impl SemanticCompatibilityPinsV1 {
             && self.calibration.vector_generation == self.vector_generation_id
     }
 }
-
-/// Exact artifact and runtime pins for the optional bounded reranker. The
-/// shape is owned by the semantic runtime crate, which mounts against it.
-pub use tracedecay_semantic::RerankCompatibilityPinsV1;
 
 /// All optional-stage compatibility selected by one evaluated profile.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

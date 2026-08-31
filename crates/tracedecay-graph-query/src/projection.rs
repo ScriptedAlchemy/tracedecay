@@ -12,9 +12,9 @@ use tracedecay_application::{
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphProjectionStore,
 };
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{CodeGenerationId, UtcMicros};
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_domain::errors::TraceDecayError;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum CodeGraphReadError {
@@ -161,15 +161,24 @@ pub enum CodeGraphReadFreshnessV1 {
     /// The last complete seated generation answered because no proven-current
     /// generation was admissible (the scheduler owns a rebuild pass or the
     /// checkout drifted past the currency witness). Recall is sound for the
-    /// served generation; freshness is not.
-    LastCompleteStale,
+    /// served generation; freshness is not. The payload carries the evidence
+    /// a caller needs to say how stale and whether a remedy is in motion: a
+    /// seat sealed days ago with no rebuild pass in flight is a wedged route,
+    /// not a routine rebuild window.
+    LastCompleteStale {
+        /// When the served generation was durably sealed.
+        sealed_at: UtcMicros,
+        /// Whether a reconcile pass or pending scheduler wake existed for the
+        /// route when the read opened.
+        rebuild_in_flight: bool,
+    },
 }
 
 impl CodeGraphReadFreshnessV1 {
     pub fn is_stale(self) -> bool {
         match self {
             Self::Current => false,
-            Self::LastCompleteStale => true,
+            Self::LastCompleteStale { .. } => true,
         }
     }
 }
@@ -303,7 +312,7 @@ pub fn map_projection_error(error: CodeGraphProjectionError) -> CodeGraphReadErr
                 detail: budget.to_string(),
             }
         }
-        unavailable @ (CodeGraphProjectionError::Conflict
+        unavailable @ (CodeGraphProjectionError::Conflict { .. }
         | CodeGraphProjectionError::DurabilityUncertain(_)
         | CodeGraphProjectionError::Closed) => CodeGraphReadError::Unavailable {
             detail: unavailable.to_string(),

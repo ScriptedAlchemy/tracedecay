@@ -36,6 +36,8 @@ mod replay;
 pub use identity::{
     GraphEntityRef, GraphGenerationDependency, GraphProjectionIdentity, GraphRelationRef,
 };
+#[cfg(test)]
+pub(crate) use recovered::recovered_generation_digest_chunked;
 pub(crate) use recovered::recovered_generation_digest_from_database;
 pub(crate) use replay::InlineOnlyGraphGenerationManifestProvider;
 use replay::validate_sealed_replay;
@@ -429,14 +431,14 @@ impl GraphGenerationManifest {
         if publication.direct_dependency_generations
             != manifest.relational_dependency_generations(&projection.shard_id)?
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("generation.from_replay"));
         }
         if publication.dependency_generation_closure_digest.as_str()
             != manifest.dependency_closure_digest(check)?.as_str()
             || publication.expected_recovered_digest.as_str()
                 != manifest.expected_recovered_digest(check)?.as_str()
         {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("generation.from_replay"));
         }
         check()?;
         crate::hotpath_observe::record_counts(
@@ -1264,19 +1266,31 @@ fn write_generation_identity_frames(
     )
 }
 
+/// Big-endian `(tag length, payload length)` headers of one digest frame.
+///
+/// The streaming writer ([`write_frame`]) and the parallel proof's chunk
+/// encoder (`generation::recovered`) emit the identical frame layout —
+/// `tag_len | tag | byte_len | bytes` — so the length encoding lives here
+/// once and the two emitters cannot drift.
+#[hotpath::measure]
+fn frame_length_headers(tag: &str, bytes: &[u8]) -> Result<([u8; 8], [u8; 8]), GraphDbError> {
+    let tag_len =
+        u64::try_from(tag.len()).map_err(|_| GraphDbError::invalid("digest tag is too large"))?;
+    let byte_len = u64::try_from(bytes.len())
+        .map_err(|_| GraphDbError::invalid("digest frame is too large"))?;
+    Ok((tag_len.to_be_bytes(), byte_len.to_be_bytes()))
+}
+
 #[hotpath::measure]
 fn write_frame(
     writer: &mut CheckedDigestWriter<'_>,
     tag: &str,
     bytes: &[u8],
 ) -> Result<(), GraphDbError> {
-    let tag_len =
-        u64::try_from(tag.len()).map_err(|_| GraphDbError::invalid("digest tag is too large"))?;
-    let byte_len = u64::try_from(bytes.len())
-        .map_err(|_| GraphDbError::invalid("digest frame is too large"))?;
-    write_digest_bytes(writer, &tag_len.to_be_bytes())?;
+    let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
+    write_digest_bytes(writer, &tag_len)?;
     write_digest_bytes(writer, tag.as_bytes())?;
-    write_digest_bytes(writer, &byte_len.to_be_bytes())?;
+    write_digest_bytes(writer, &byte_len)?;
     write_digest_bytes(writer, bytes)
 }
 

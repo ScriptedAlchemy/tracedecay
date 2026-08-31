@@ -9,6 +9,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 #[cfg(target_os = "linux")]
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 
 #[cfg(target_os = "linux")]
@@ -357,6 +361,54 @@ fn serve_probe_response(
     })
 }
 
+/// Serves the managed-daemon identity probe for every connection accepted on
+/// `listener`, answering `versions[n]` on the n-th completed identity
+/// exchange (the last entry repeats once the list is exhausted). Connections
+/// that close without a request — `daemon_socket_state` connectability
+/// probes — are tolerated. Returns the count of identity responses served,
+/// which lets tests prove the readiness wait actually consulted the daemon.
+#[cfg(target_os = "linux")]
+fn serve_identity_probes(listener: UnixListener, versions: Vec<&'static str>) -> Arc<AtomicUsize> {
+    let served = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&served);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                break;
+            };
+            let Ok(clone) = stream.try_clone() else {
+                continue;
+            };
+            let mut reader = std::io::BufReader::new(clone);
+            let mut line = String::new();
+            // Handshake line, then the initialize request; a bare
+            // connectability probe disconnects before sending either.
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                continue;
+            }
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let Ok(request) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                continue;
+            };
+            let index = count.load(Ordering::SeqCst).min(versions.len() - 1);
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "serverInfo": {"name": "tracedecay", "version": versions[index]}
+                }
+            });
+            if writeln!(stream, "{response}").is_ok() {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    served
+}
+
 #[cfg(unix)]
 #[test]
 fn daemon_protocol_probe_requires_current_tracedecay_identity() {
@@ -455,6 +507,73 @@ fn user_service_runs_daemon_with_socket_path() {
     assert!(unit.contains("StartLimitIntervalSec=0"));
     assert!(!unit.contains("Restart=on-failure"));
     assert!(unit.contains("LimitNOFILE=8192"));
+}
+
+#[test]
+fn systemd_unit_quotes_exec_start_paths_that_systemd_would_misparse() {
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/opt/trace decay/bin/tracedecay"),
+        socket_path: PathBuf::from("/run/user/1000/trace decay%50.sock"),
+        data_dir_override: None,
+        remote_tls: None,
+    };
+
+    let unit = spec.render_systemd_user_unit().expect("systemd unit");
+
+    assert!(
+        unit.contains(
+            "ExecStart=\"/opt/trace decay/bin/tracedecay\" daemon run --socket \"/run/user/1000/trace decay%%50.sock\""
+        ),
+        "paths with whitespace or specifier characters must be quoted and escaped, got:\n{unit}"
+    );
+}
+
+#[test]
+fn systemd_socket_read_back_round_trips_quoted_and_bare_exec_start_paths() {
+    let quoted_socket = PathBuf::from("/run/user/1000/trace decay%50.sock");
+    let quoted_spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/opt/trace decay/bin/tracedecay"),
+        socket_path: quoted_socket.clone(),
+        data_dir_override: None,
+        remote_tls: None,
+    };
+    let quoted_unit = quoted_spec
+        .render_systemd_user_unit()
+        .expect("systemd unit");
+    assert_eq!(
+        super::unit_file::socket_path_from_service_unit(&quoted_unit),
+        Some(quoted_socket),
+        "socket read-back must round-trip exactly the path the renderer quoted and escaped"
+    );
+
+    let bare_socket = PathBuf::from("/run/user/1000/tracedecay.sock");
+    let bare_spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
+        socket_path: bare_socket.clone(),
+        data_dir_override: None,
+        remote_tls: None,
+    };
+    let bare_unit = bare_spec.render_systemd_user_unit().expect("systemd unit");
+    assert!(
+        bare_unit.contains("--socket /run/user/1000/tracedecay.sock"),
+        "ordinary paths must stay bare for byte-identity with previously installed units"
+    );
+    assert_eq!(
+        super::unit_file::socket_path_from_service_unit(&bare_unit),
+        Some(bare_socket),
+        "socket read-back must round-trip bare unquoted paths unchanged"
+    );
+}
+
+#[test]
+fn systemd_socket_read_back_returns_none_for_unterminated_exec_start_quote() {
+    let unit = "[Service]\nExecStart=/usr/bin/tracedecay daemon run --socket \"/run/unterminated\n";
+
+    assert_eq!(
+        super::unit_file::socket_path_from_service_unit(unit),
+        None,
+        "an ExecStart line the tokenizer rejects must fall back to None, not garbage"
+    );
 }
 
 fn remote_tls_config(
@@ -752,6 +871,27 @@ fn launchd_plist_env_value_ignores_plist_without_override() {
     assert_eq!(
         super::unit_file::launchd_plist_env_value(&plist, USER_DATA_DIR_ENV),
         None
+    );
+}
+
+#[test]
+fn systemd_install_and_start_plans_reload_written_units() {
+    assert_eq!(
+        super::runner::systemd_install_command_plan(false),
+        vec![vec!["daemon-reload"]],
+        "install --no-start must still make systemd re-read the freshly written unit"
+    );
+    assert_eq!(
+        super::runner::systemd_install_command_plan(true),
+        vec![
+            vec!["daemon-reload"],
+            vec!["enable", "--now", crate::SERVICE_NAME],
+        ]
+    );
+    assert_eq!(
+        super::runner::systemd_start_command_plan(),
+        vec![vec!["daemon-reload"], vec!["start", crate::SERVICE_NAME]],
+        "start must reload first so a unit rewritten since the last reload starts fresh"
     );
 }
 
@@ -1140,13 +1280,17 @@ fn refresh_installed_service_preserves_existing_socket_path() {
 
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let custom_socket = dir.path().join("custom-tracedecay.sock");
     std::fs::write(
         &service_path,
-        "[Unit]\n\
+        format!(
+            "[Unit]\n\
              Description=TraceDecay daemon\n\
              \n\
              [Service]\n\
-             ExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock --remote-listen 192.0.2.10:7443 --remote-tls-cert \"/etc/trace decay/server.pem\" --remote-tls-key \"/etc/trace decay/server-key.pem\"\n",
+             ExecStart=/old/tracedecay daemon run --socket {} --remote-listen 192.0.2.10:7443 --remote-tls-cert \"/etc/trace decay/server.pem\" --remote-tls-key \"/etc/trace decay/server-key.pem\"\n",
+            custom_socket.display()
+        ),
     )
     .expect("existing service unit");
 
@@ -1167,6 +1311,8 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         TEST_BUILD_VERSION,
     )
     .expect("refresh service");
+    let listener = UnixListener::bind(&custom_socket).expect("bind managed daemon socket");
+    let _served = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
     super::restore_installed_service_after_update_with_runner(
         &runner,
         previous_state,
@@ -1176,9 +1322,10 @@ fn refresh_installed_service_preserves_existing_socket_path() {
 
     assert_eq!(outcome, Some(service_path.clone()));
     let unit = std::fs::read_to_string(service_path).expect("service unit");
-    assert!(unit.contains(
-        "ExecStart=/opt/tracedecay/bin/tracedecay daemon run --socket /custom/tracedecay.sock"
-    ));
+    assert!(unit.contains(&format!(
+        "ExecStart=/opt/tracedecay/bin/tracedecay daemon run --socket {}",
+        custom_socket.display()
+    )));
     assert!(!unit.contains("/run/user/1000/tracedecay.sock"));
     assert!(unit.contains("--remote-listen \"192.0.2.10:7443\""));
     assert!(unit.contains("--remote-tls-cert \"/etc/trace decay/server.pem\""));
@@ -1278,7 +1425,7 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1291,9 +1438,14 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
-    let original_unit =
-        "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n";
-    std::fs::write(&service_path, original_unit).expect("existing service unit");
+    let custom_socket = dir.path().join("custom-tracedecay.sock");
+    let original_unit = format!(
+        "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+        custom_socket.display()
+    );
+    std::fs::write(&service_path, &original_unit).expect("existing service unit");
+    let listener = UnixListener::bind(&custom_socket).expect("bind managed daemon socket");
+    let served = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
 
     super::restore_installed_service_after_update_with_runner(
         &runner,
@@ -1305,6 +1457,10 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     assert_eq!(
         std::fs::read_to_string(service_path).expect("service unit"),
         original_unit
+    );
+    assert!(
+        served.load(Ordering::SeqCst) >= 1,
+        "restore success must be backed by an authenticated identity answer"
     );
     let commands = std::fs::read_to_string(log).expect("systemctl log");
     assert!(
@@ -1335,7 +1491,7 @@ fn restore_after_update_starts_a_dead_installed_unit() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1348,9 +1504,14 @@ fn restore_after_update_starts_a_dead_installed_unit() {
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
-    let original_unit =
-        "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n";
-    std::fs::write(&service_path, original_unit).expect("existing service unit");
+    let custom_socket = dir.path().join("custom-tracedecay.sock");
+    let original_unit = format!(
+        "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+        custom_socket.display()
+    );
+    std::fs::write(&service_path, &original_unit).expect("existing service unit");
+    let listener = UnixListener::bind(&custom_socket).expect("bind managed daemon socket");
+    let served = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
 
     super::restore_installed_service_after_update_with_runner(
         &runner,
@@ -1364,6 +1525,10 @@ fn restore_after_update_starts_a_dead_installed_unit() {
         original_unit,
         "heal must start the existing unit without rewriting it"
     );
+    assert!(
+        served.load(Ordering::SeqCst) >= 1,
+        "heal success must be backed by an authenticated identity answer"
+    );
     let commands = std::fs::read_to_string(log).expect("systemctl log");
     assert!(
         systemctl_log_contains_sequence(
@@ -1375,6 +1540,223 @@ fn restore_after_update_starts_a_dead_installed_unit() {
             ]
         ),
         "heal of a dead installed unit must enable and start, got:\n{commands}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_after_update_waits_for_authenticated_daemon_identity() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let fake_bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let systemctl = fake_bin.join("systemctl");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let socket_path = dir.path().join("daemon.sock");
+    std::fs::write(
+        &service_path,
+        format!(
+            "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+            socket_path.display()
+        ),
+    )
+    .expect("existing service unit");
+    let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
+    // The first identity answer is a stale daemon; restore must keep polling
+    // until the expected version answers instead of trusting the systemctl
+    // exit status.
+    let served = serve_identity_probes(listener, vec!["0.0.0-stale", TEST_BUILD_VERSION]);
+
+    super::restore_installed_service_after_update(
+        DaemonServiceState::RunningEnabled,
+        TEST_BUILD_VERSION,
+    )
+    .expect("restore must succeed once the daemon answers the expected identity");
+
+    assert_eq!(
+        served.load(Ordering::SeqCst),
+        2,
+        "restore must consume the stale identity answer and re-poll until the expected version"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn start_service_reloads_units_and_requires_authenticated_identity() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let fake_bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let systemctl = fake_bin.join("systemctl");
+    let log = dir.path().join("systemctl.log");
+    // The started marker begins absent (unit stopped) and `start` creates it
+    // with shell redirection: PATH holds only the fake bin dir, so external
+    // commands like `rm`/`touch` are unavailable inside the script.
+    let started = dir.path().join("systemctl.started");
+    std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ ! -f \"$TRACEDECAY_SYSTEMCTL_STARTED\" ] && exit 3\n[ \"$2\" = start ] && : > \"$TRACEDECAY_SYSTEMCTL_STARTED\"\nexit 0\n",
+        )
+        .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+    let _started_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_STARTED", &started);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let socket_path = dir.path().join("daemon.sock");
+    std::fs::write(
+        &service_path,
+        format!(
+            "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+            socket_path.display()
+        ),
+    )
+    .expect("existing service unit");
+    let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
+    let served = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
+
+    super::start_service(TEST_BUILD_VERSION).expect("start service");
+
+    let commands = std::fs::read_to_string(log).expect("systemctl log");
+    assert!(
+        systemctl_log_contains_sequence(
+            &commands,
+            &["--user daemon-reload", "--user start tracedecay.service"]
+        ),
+        "start must reload the unit definition before starting it, got:\n{commands}"
+    );
+    assert!(
+        served.load(Ordering::SeqCst) >= 1,
+        "start success must be backed by an authenticated identity answer"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let fake_bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let systemctl = fake_bin.join("systemctl");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let socket_path = dir.path().join("daemon.sock");
+    std::fs::write(
+        &service_path,
+        format!(
+            "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+            socket_path.display()
+        ),
+    )
+    .expect("existing service unit");
+    let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
+    let _served = serve_identity_probes(listener, vec!["0.0.0-stale"]);
+
+    let error = super::wait_for_installed_service_state_with(
+        &runner,
+        DaemonServiceState::RunningEnabled,
+        TEST_BUILD_VERSION,
+        std::time::Duration::from_millis(700),
+    )
+    .expect_err("a daemon that never answers the expected version must fail the wait");
+
+    assert!(
+        error.to_string().contains("did not return to"),
+        "failure must name the state the daemon never reached, got: {error}"
+    );
+    assert!(
+        error.to_string().contains("identity mismatch"),
+        "failure must surface the mismatched identity, got: {error}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let fake_bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let systemctl = fake_bin.join("systemctl");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let socket_path = dir.path().join("daemon.sock");
+    std::fs::write(
+        &service_path,
+        format!(
+            "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+            socket_path.display()
+        ),
+    )
+    .expect("existing service unit");
+    // Leave a socket file behind with nothing listening: the reported-running
+    // unit never serves it, so the wait must fail instead of trusting the
+    // service manager's state alone.
+    drop(UnixListener::bind(&socket_path).expect("bind managed daemon socket"));
+
+    let error = super::wait_for_installed_service_state_with(
+        &runner,
+        DaemonServiceState::RunningEnabled,
+        TEST_BUILD_VERSION,
+        std::time::Duration::from_millis(600),
+    )
+    .expect_err("a daemon that never serves its socket must fail the wait");
+
+    assert!(
+        error.to_string().contains("did not return to"),
+        "failure must name the state the daemon never reached, got: {error}"
     );
 }
 

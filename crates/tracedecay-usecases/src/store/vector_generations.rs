@@ -962,6 +962,7 @@ pub struct PublishedVectorGenerationV1 {
     manifest_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl PublishedVectorGenerationV1 {
     pub fn generation_id(&self) -> &VectorGenerationIdV1 {
         &self.generation_id
@@ -1046,6 +1047,52 @@ impl PublishedVectorGenerationV1 {
             && self.tombstones.iter().eq(staged.tombstones.keys())
             && *self.tombstone_digests == *staged.tombstones
             && &self.manifest_digest == manifest_digest
+    }
+
+    /// A copy of this generation with every float payload elided.
+    ///
+    /// The graph adapter installs hydrated base generations into its
+    /// elided-retention machine solely for lineage checks, which consume
+    /// identity fields (projection key, chunk digest, output digest) and
+    /// never the floats — reused rows are receipt-only in the native
+    /// encoding and are served by the base generation's own durable rows at
+    /// read time. Eliding here keeps an incremental build's retained base
+    /// state at O(ids + digests) instead of the base float corpus. The copy
+    /// is unusable for retrieval reads or sealed persistence, whose paths
+    /// hydrate payload-carrying records instead.
+    pub(crate) fn cloned_with_elided_payloads(&self) -> Self {
+        let vectors = self
+            .vectors
+            .iter()
+            .map(|(chunk_id, vector)| {
+                (
+                    chunk_id.clone(),
+                    ProjectedChunkVectorV1 {
+                        projection_key: vector.projection_key.clone(),
+                        source_generation: vector.source_generation.clone(),
+                        source_manifest_digest: vector.source_manifest_digest.clone(),
+                        chunk_id: vector.chunk_id.clone(),
+                        chunk_digest: vector.chunk_digest.clone(),
+                        values: Vec::new(),
+                        output_digest: vector.output_digest.clone(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        Self {
+            generation_id: self.generation_id.clone(),
+            projection_key: self.projection_key.clone(),
+            source_generation: self.source_generation.clone(),
+            source_manifest_digest: self.source_manifest_digest.clone(),
+            base_generation: self.base_generation.clone(),
+            embedding_key: self.embedding_key.clone(),
+            vectors: vectors.into(),
+            tombstones: self.tombstones.clone(),
+            tombstone_digests: self.tombstone_digests.clone(),
+            receipts: self.receipts.clone(),
+            checkpoint: self.checkpoint.clone(),
+            manifest_digest: self.manifest_digest.clone(),
+        }
     }
 
     fn canonicalize_tombstones(&mut self) {
@@ -1189,6 +1236,7 @@ struct PublishedStateV1 {
         BTreeMap<VectorGenerationIdV1, ExternalV1<BTreeMap<CodeSearchChunkId, ManifestDigest>>>,
 }
 
+#[hotpath::measure_all]
 impl PublishedStateV1 {
     fn immutable_graph_generation(
         generations: BTreeMap<VectorGenerationIdV1, PublishedVectorGenerationV1>,
@@ -1214,6 +1262,7 @@ pub struct VectorGenerationStateMachineV1 {
     staged_values: StagedVectorValueRetentionV1,
 }
 
+#[hotpath::measure_all]
 impl VectorGenerationStateMachineV1 {
     pub fn new() -> Self {
         Self::default()
@@ -1803,6 +1852,7 @@ impl VectorGenerationStateMachineV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl VectorGenerationStateMachineV1 {
     /// Rebuild the derived physical-byte index for every published generation.
     ///
@@ -1907,6 +1957,7 @@ fn seal_test_state(
 type ExternalSlotVisitV1<'visit> =
     dyn FnMut(&mut dyn ExternalSlotV1) -> Result<(), VectorGenerationStoreErrorV1> + 'visit;
 
+#[hotpath::measure_all]
 impl PublishedVectorGenerationV1 {
     fn visit_external_slots(
         &mut self,
@@ -2065,6 +2116,7 @@ fn validate_receipt_parts(
     Ok(())
 }
 
+#[hotpath::measure_all]
 impl VectorGenerationStateMachineV1 {
     /// Every externalized collection in the state document, in a stable order.
     fn visit_external_slots(
@@ -2656,6 +2708,123 @@ mod tests {
                 .source_manifest_digest,
             plan_manifest,
             "committed rows are rebound to the plan's manifest digest"
+        );
+    }
+
+    /// The graph adapter installs hydrated base generations with their float
+    /// payloads elided (`transition_state`): lineage checks must keep their
+    /// full power over identity fields alone, and a mismatched reuse must
+    /// still fail typed.
+    #[test]
+    fn elided_base_payloads_preserve_reused_lineage_checks() {
+        let embedding = admitted_embedding();
+        let base = logical_generation(
+            'a',
+            embedding.clone(),
+            "code-generation.base",
+            'b',
+            "chunk.v1.base",
+            'c',
+            vec![0.25],
+        );
+        let chunk_id = base.vectors.keys().next().expect("base chunk").clone();
+        let chunk_digest = base
+            .vectors
+            .get(&chunk_id)
+            .expect("base vector")
+            .chunk_digest
+            .clone();
+        let base_source = base.source_generation().clone();
+        let base_id = base.generation_id().clone();
+
+        let elided = base.cloned_with_elided_payloads();
+        assert!(
+            elided.vectors().values().all(|row| row.values.is_empty()),
+            "every float payload is elided"
+        );
+        assert!(
+            base.vectors().values().all(|row| !row.values.is_empty()),
+            "the hydrated source is untouched"
+        );
+        assert_eq!(elided.generation_id(), base.generation_id());
+        assert_eq!(elided.manifest_digest(), base.manifest_digest());
+        assert_eq!(
+            elided
+                .vectors()
+                .values()
+                .map(|row| (&row.chunk_digest, &row.output_digest))
+                .collect::<Vec<_>>(),
+            base.vectors()
+                .values()
+                .map(|row| (&row.chunk_digest, &row.output_digest))
+                .collect::<Vec<_>>(),
+            "identity fields survive elision"
+        );
+
+        // Mirror the graph adapter's machine installation exactly.
+        let mut store = VectorGenerationStateMachineV1::with_staged_value_retention(
+            StagedVectorValueRetentionV1::Elided,
+        );
+        store.published = PublishedStateV1::immutable_graph_generation(BTreeMap::from([(
+            base_id.clone(),
+            elided,
+        )]));
+
+        let target_source = id("code-generation.target");
+        let prepared = reused_prepared(
+            &embedding,
+            &base_source,
+            &target_source,
+            &chunk_id,
+            &chunk_digest,
+        );
+        let build = store
+            .begin_generation(VectorGenerationPlanV1 {
+                target_projection_key: embedding.projection_key().clone(),
+                source_generation: target_source,
+                source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
+                expected_chunk_ids: vec![chunk_id.clone()].into(),
+                base_generation: Some(base_id.clone()),
+            })
+            .expect("staged build over the elided base");
+        store
+            .commit_batch(&build, None, prepared)
+            .expect("reused lineage validates against the elided base");
+        let publication = store
+            .publish_generation(&build)
+            .expect("elided-base build publishes");
+        let published = store
+            .generation(&publication.generation_id)
+            .expect("published generation");
+        assert!(
+            published
+                .vectors()
+                .values()
+                .all(|row| row.values.is_empty()),
+            "the elided machine never fabricates payloads"
+        );
+
+        // Falsifiability: a reuse naming a foreign chunk digest still fails
+        // against the elided base.
+        let mismatched = reused_prepared(
+            &embedding,
+            &base_source,
+            &id("code-generation.mismatch"),
+            &chunk_id,
+            &content_digest('9'),
+        );
+        let mismatched_build = store
+            .begin_generation(VectorGenerationPlanV1 {
+                target_projection_key: embedding.projection_key().clone(),
+                source_generation: id("code-generation.mismatch"),
+                source_manifest_digest: mismatched.request.changes.manifest_digest.clone(),
+                expected_chunk_ids: vec![chunk_id.clone()].into(),
+                base_generation: Some(base_id),
+            })
+            .expect("mismatch probe build");
+        assert_eq!(
+            store.commit_batch(&mismatched_build, None, mismatched),
+            Err(VectorGenerationStoreErrorV1::MissingBaseVector(chunk_id))
         );
     }
 

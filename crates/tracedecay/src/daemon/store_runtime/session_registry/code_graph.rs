@@ -16,17 +16,18 @@ use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey,
 };
 use tracedecay_store::{
-    CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphProjectionIdV1,
-    GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1,
-    GraphPublicationKeyV1, GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1,
-    GraphPublicationStoreErrorV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
-    GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeRequestControlV1, RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt,
-    SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
-    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
-    SemanticVectorStagePublishSettlement, SemanticVectorStageRecord,
-    SemanticVectorStageResumeOutcome, SemanticVectorStagingStore, StoreShardIdV1,
+    CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphPendingReplayDiscardOutcomeV1,
+    GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
+    GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphPublicationReplayLookupV1, GraphPublicationReplayRecordV1, GraphPublicationStoreErrorV1,
+    GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, GraphVerifiedHeadV1, ProjectId,
+    RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome,
+    SemanticVectorStageKey, SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
+    SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
+    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStagingStore,
+    StoreShardIdV1,
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
@@ -92,7 +93,7 @@ fn observe_code_graph_publication<T>(
     result: std::result::Result<T, GraphDbError>,
 ) -> std::result::Result<T, GraphDbError> {
     result.map_err(|error| {
-        if matches!(error, GraphDbError::Conflict) {
+        if matches!(error, GraphDbError::Conflict { .. }) {
             let reason = stage.as_str();
             tracing::warn!(
                 event = "code_graph_publication_conflict",
@@ -468,7 +469,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 GraphDbError::unavailable("memory graph retirement target lock is poisoned")
             })?
             .take()
-            .ok_or(GraphDbError::Conflict)
+            .ok_or(GraphDbError::conflict(
+                "code_graph.take_store_graph_retirement_target",
+            ))
     }
 
     pub(crate) fn restore_store_graph_retirement_target(
@@ -479,7 +482,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
             GraphDbError::unavailable("memory graph retirement target lock is poisoned")
         })?;
         if retained.is_some() {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph.restore_store_graph_retirement_target",
+            ));
         }
         *retained = Some(target);
         Ok(())
@@ -507,7 +512,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
             GraphDbError::unavailable("memory graph operation admission lock is poisoned")
         })? {
             MemoryGraphOperationAdmissionV1::Ready => Ok(()),
-            MemoryGraphOperationAdmissionV1::Retiring => Err(GraphDbError::Conflict),
+            MemoryGraphOperationAdmissionV1::Retiring => Err(GraphDbError::conflict(
+                "code_graph.require_operation_admission",
+            )),
         }
     }
 
@@ -518,7 +525,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
             GraphDbError::unavailable("memory graph operation admission lock is poisoned")
         })?;
         if matches!(*admission, MemoryGraphOperationAdmissionV1::Retiring) {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph.reserve_operation_retirement.retiring",
+            ));
         }
         *admission = MemoryGraphOperationAdmissionV1::Retiring;
         Ok(MemoryGraphOperationRetirementReservationV1 {
@@ -685,7 +694,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 if requested_replay(journaled.publication.expected_prior_head.clone())?
                     != journaled.publication
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "code_graph.publish_verified_manifest",
+                    ));
                 }
                 let head = storage
                     .verified_head(&relational_projection, &context)
@@ -708,7 +719,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                     .as_ref()
                     .is_some_and(|head| head.sequence > journaled.sequence)
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "code_graph.publish_verified_manifest",
+                    ));
                 }
                 // The replay is journaled but the verified head never advanced
                 // to it: an earlier publish was interrupted between the journal
@@ -721,7 +734,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 return Ok(publication.snapshot);
             }
             GraphPublicationReplayLookupV1::Retired(_) => {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict(
+                    "code_graph.publish_verified_manifest",
+                ));
             }
             GraphPublicationReplayLookupV1::Missing => {}
         }
@@ -744,7 +759,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => break,
                 GraphReplayAppendOutcomeV1::PendingReplayConflict { pending } => {
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
-                        return Err(GraphDbError::Conflict);
+                        return Err(GraphDbError::conflict(
+                            "code_graph.publish_verified_manifest",
+                        ));
                     }
                     completed_predecessors += 1;
                     publish_journaled(&mut storage, &pending.publication.key)?;
@@ -755,14 +772,18 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 }
                 GraphReplayAppendOutcomeV1::VerifiedHeadConflict { actual } => {
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
-                        return Err(GraphDbError::Conflict);
+                        return Err(GraphDbError::conflict(
+                            "code_graph.publish_verified_manifest",
+                        ));
                     }
                     completed_predecessors += 1;
                     replay = requested_replay(actual)?;
                 }
                 GraphReplayAppendOutcomeV1::Conflict { .. }
                 | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. } => {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "code_graph.publish_verified_manifest",
+                    ));
                 }
             }
         }
@@ -973,7 +994,9 @@ impl RetainedCodeGraphRuntimeV1 {
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         if generation.manifest().generation_id != self.generation_id {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph.publish_verified_snapshot_with_stage_boundary",
+            ));
         }
         self.sweep_aborted_read_bundle_temporaries()?;
         // Everything up to `prepared` below is a pure function of the
@@ -1086,6 +1109,56 @@ impl RetainedCodeGraphRuntimeV1 {
             request_cancelled,
         };
         self.publish_prepared_sealed_generation(&prepared, &probe, &context)
+    }
+
+    /// Discard one interrupted publication whose completion just refused with
+    /// a deterministic conflict verdict: the journaled pending replay row and
+    /// the partial store contents its dead publisher left behind. Every
+    /// refusal from the compare-and-swap-shaped discard means the journal
+    /// moved since the diagnosis — the caller re-reads and proceeds, so a
+    /// completed or re-journaled publication is never swept (issue #765).
+    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.discard_interrupted")]
+    fn discard_interrupted_publication_row(
+        &self,
+        storage: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        registration: GraphDbRegistration,
+        pending: &GraphPublicationReplayRecordV1,
+        conflict: &GraphDbError,
+    ) -> std::result::Result<(), GraphDbError> {
+        let outcome = self.graph_registry.discard_interrupted_publication(
+            registration,
+            storage,
+            context,
+            pending,
+        )?;
+        match outcome {
+            GraphPendingReplayDiscardOutcomeV1::Discarded(discarded) => {
+                tracing::warn!(
+                    event = "code_graph_interrupted_publication_discarded",
+                    generation = %discarded.publication.key.generation,
+                    sequence = discarded.sequence.get(),
+                    error = %conflict,
+                    "discarded an interrupted graph publication whose completion \
+                     conflicts deterministically; the journal position is open for \
+                     a fresh publication"
+                );
+            }
+            GraphPendingReplayDiscardOutcomeV1::Missing
+            | GraphPendingReplayDiscardOutcomeV1::CurrentVerifiedHead { .. }
+            | GraphPendingReplayDiscardOutcomeV1::Superseded { .. }
+            | GraphPendingReplayDiscardOutcomeV1::SequenceMismatch { .. } => {
+                tracing::warn!(
+                    event = "code_graph_interrupted_publication_discard_refused",
+                    generation = %pending.publication.key.generation,
+                    sequence = pending.sequence.get(),
+                    error = %conflict,
+                    "the interrupted graph publication moved before its discard; \
+                     continuing against the refreshed journal"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Acquires the per-shard serving gate for one short storage-ordered
@@ -1369,7 +1442,9 @@ impl RetainedCodeGraphRuntimeV1 {
             SealedPublicationClassificationV1::RetiredConflict => {
                 return observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::RetiredReplay,
-                    Err(GraphDbError::Conflict),
+                    Err(GraphDbError::conflict(
+                        "code_graph.publish_prepared_sealed_generation",
+                    )),
                 );
             }
             SealedPublicationClassificationV1::ResumeJournaled => {
@@ -1379,16 +1454,48 @@ impl RetainedCodeGraphRuntimeV1 {
                 let bundle_identity = prepared.manifest.identity();
                 let staged_bundle =
                     self.stage_sealed_read_bundle(&prepared.manifest, &prepared.request_cancelled);
-                let publication = observe_code_graph_publication(
+                match observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::ActiveReplayPublish,
                     publish(
                         &mut storage,
                         &prepared.publication_key,
                         Some(Arc::clone(&prepared.manifest)),
                     ),
-                )?;
-                self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
-                return Ok(publication.snapshot);
+                ) {
+                    Ok(publication) => {
+                        self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
+                        return Ok(publication.snapshot);
+                    }
+                    // Resuming this publication's own journaled replay
+                    // refused deterministically: the interrupted publisher
+                    // left journal or store state that this exact resume can
+                    // never complete (issue #765). Discard the poisoned row
+                    // and its partial contents, then republish fresh through
+                    // the append path below — that is what restores service.
+                    Err(conflict @ GraphDbError::Conflict { .. }) => {
+                        drop(staged_bundle);
+                        let pending = match storage
+                            .replay(&prepared.publication_key, context)
+                            .map_err(map_publication_error)?
+                        {
+                            GraphPublicationReplayLookupV1::Active(pending) => pending,
+                            // The row moved while the resume ran; the append
+                            // path below re-reads and answers truthfully.
+                            GraphPublicationReplayLookupV1::Retired(_)
+                            | GraphPublicationReplayLookupV1::Missing => {
+                                return Err(conflict);
+                            }
+                        };
+                        self.discard_interrupted_publication_row(
+                            &mut storage,
+                            context,
+                            registration(),
+                            &pending,
+                            &conflict,
+                        )?;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             SealedPublicationClassificationV1::AppendAndPublish => {}
         }
@@ -1462,14 +1569,34 @@ impl RetainedCodeGraphRuntimeV1 {
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
                         return observe_code_graph_publication(
                             CodeGraphPublicationConflictStageV1::PendingCompletionLimit,
-                            Err(GraphDbError::Conflict),
+                            Err(GraphDbError::conflict(
+                                "code_graph.publish_prepared_sealed_generation",
+                            )),
                         );
                     }
                     completed_predecessors += 1;
-                    observe_code_graph_publication(
+                    match observe_code_graph_publication(
                         CodeGraphPublicationConflictStageV1::PendingPredecessorPublish,
                         publish(&mut storage, &pending.publication.key, None),
-                    )?;
+                    ) {
+                        Ok(_) => {}
+                        // The orphan predecessor refused deterministically:
+                        // its interrupted publisher left journal or store
+                        // state that completion can never satisfy (issue
+                        // #765). Discarding it reopens the journal position
+                        // this append is blocked on; answering Conflict here
+                        // wedged the projection forever.
+                        Err(conflict @ GraphDbError::Conflict { .. }) => {
+                            self.discard_interrupted_publication_row(
+                                &mut storage,
+                                context,
+                                registration(),
+                                &pending,
+                                &conflict,
+                            )?;
+                        }
+                        Err(error) => return Err(error),
+                    }
                     let prior = storage
                         .verified_head(&prepared.relational_projection, context)
                         .map_err(map_publication_error)?;
@@ -1482,7 +1609,9 @@ impl RetainedCodeGraphRuntimeV1 {
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
                         return observe_code_graph_publication(
                             CodeGraphPublicationConflictStageV1::VerifiedHeadRefreshLimit,
-                            Err(GraphDbError::Conflict),
+                            Err(GraphDbError::conflict(
+                                "code_graph.publish_prepared_sealed_generation",
+                            )),
                         );
                     }
                     completed_predecessors += 1;
@@ -1492,7 +1621,9 @@ impl RetainedCodeGraphRuntimeV1 {
                 | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. } => {
                     return observe_code_graph_publication(
                         CodeGraphPublicationConflictStageV1::ReplayAppend,
-                        Err(GraphDbError::Conflict),
+                        Err(GraphDbError::conflict(
+                            "code_graph.publish_prepared_sealed_generation",
+                        )),
                     );
                 }
             }
@@ -2043,175 +2174,193 @@ impl DaemonSessionRuntimeRegistryV1 {
             );
             self.ensure_code_graph_shard_attached(&bound_shard).await;
         }
-        let pool_deadline = Instant::now() + GRAPH_OPERATION_DEADLINE;
-        let pool_check = || {
-            if cancellation.is_cancelled() {
-                Err(GraphDbError::Cancelled)
-            } else if Instant::now() >= pool_deadline {
-                Err(GraphDbError::DeadlineExceeded)
-            } else {
-                Ok(())
-            }
-        };
-        let replay_pool_lock = lock_project_graph_replay_pool(&replay_root, &pool_check)?;
         let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = authority;
         let mut storage = project_database
             .graph_publication_storage()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        // Everything below is synchronous journal access: a blocking pool
+        // file lock, then retirement and cleanup sweeps whose store calls
+        // block on writer-actor and reader-worker round trips (with
+        // millisecond busy-retry sleeps inside `begin`/`begin_read`). Run
+        // the whole sweep on the blocking pool so a retention tick cannot
+        // stall the daemon's async runtime workers for its duration.
+        let graph_registry = self.graph_registry.clone();
+        let graph_lifecycle_cancelled = Arc::clone(&self.graph_lifecycle_cancelled);
+        let cancellation = cancellation.clone();
+        let generation = generation.clone();
+        tokio::task::spawn_blocking(move || {
+            let pool_deadline = Instant::now() + GRAPH_OPERATION_DEADLINE;
+            let pool_check = || {
+                if cancellation.is_cancelled() {
+                    Err(GraphDbError::Cancelled)
+                } else if Instant::now() >= pool_deadline {
+                    Err(GraphDbError::DeadlineExceeded)
+                } else {
+                    Ok(())
+                }
+            };
+            let replay_pool_lock = lock_project_graph_replay_pool(&replay_root, &pool_check)?;
 
-        let staged_unlink;
-        loop {
-            if cancellation.is_cancelled() {
-                return Err(GraphDbError::Cancelled);
-            }
-            let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
-            let cancellation_identity = RuntimeCancellationIdentityV1 {
-                cancellation_id: RuntimeCancellationIdV1::new(format!(
-                    "graph-retire:{}",
-                    generation.as_str()
-                ))
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-                generation: 1,
-            };
-            let deadline_identity = RuntimeDeadlineV1 {
-                deadline_id: RuntimeDeadlineIdV1::new(format!(
-                    "graph-retire-deadline:{}",
-                    generation.as_str()
-                ))
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            };
-            let request_cancellation: Arc<dyn GraphCancellation> =
-                Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
-            let probe = GraphPublicationProbeV1 {
-                request_cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancellation: graph_lifecycle_cancellation(
-                    &self.graph_lifecycle_cancelled,
-                    None,
-                ),
-                deadline_at,
-                cancellation: cancellation_identity.clone(),
-                deadline: deadline_identity.clone(),
-                commit_started: AtomicBool::new(false),
-                deadline_warned: AtomicBool::new(false),
-            };
-            let control = RuntimeRequestControlV1 {
-                requested_at: tracedecay_application::clock::now_micros(),
-                deadline: deadline_identity,
-                cancellation: cancellation_identity,
-            };
-            let context = GraphPublicationOperationContextV1::new(&control, &probe)
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-            let registration = GraphDbRegistration {
-                authority_lease: Arc::clone(&authority_lease),
-                cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                    &self.graph_lifecycle_cancelled,
-                ))),
-                deadline: deadline_at,
-            };
-            match self.graph_registry.retire_one_code_generation_replay(
-                registration,
-                &mut storage,
-                &context,
-                generation,
-                &sealed_digest,
-            )? {
-                GraphReplayCollectionOutcome::Retired(source) => {
-                    let tracedecay_graph_db::GraphGenerationReplaySource::SealedCodeGeneration(
-                        source,
-                    ) = *source
-                    else {
-                        return Err(GraphDbError::Corrupt {
-                            message: "code generation retirement selected an inline graph replay"
-                                .to_owned(),
-                        });
-                    };
-                    if source.generation != *generation
-                        || source.sealed_state_digest != sealed_digest
-                    {
-                        return Err(GraphDbError::Conflict);
-                    }
+            let staged_unlink;
+            loop {
+                if cancellation.is_cancelled() {
+                    return Err(GraphDbError::Cancelled);
                 }
-                GraphReplayCollectionOutcome::Retained => return Ok(false),
-                GraphReplayCollectionOutcome::Absent => {
-                    staged_unlink =
-                        stage_project_graph_replay_unlink(&replay_root, &sealed_digest)?;
-                    break;
-                }
-            }
-        }
-        drop(replay_pool_lock);
-        if let Some(staged_unlink) = staged_unlink {
-            finalize_project_graph_replay_unlink(
-                staged_unlink,
-                &replay_root,
-                &sealed_digest,
-                &pool_check,
-            )?;
-        }
-        let mut cleanup_sequence = 0_u64;
-        loop {
-            cleanup_sequence = cleanup_sequence.checked_add(1).ok_or_else(|| {
-                GraphDbError::budget_exhausted(GraphBudgetKind::Capacity, u64::MAX)
-            })?;
-            let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
-            let cancellation_identity = RuntimeCancellationIdentityV1 {
-                cancellation_id: RuntimeCancellationIdV1::new(format!(
-                    "graph-cleanup:{}:{cleanup_sequence}",
-                    generation.as_str()
-                ))
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-                generation: cleanup_sequence,
-            };
-            let deadline_identity = RuntimeDeadlineV1 {
-                deadline_id: RuntimeDeadlineIdV1::new(format!(
-                    "graph-cleanup-deadline:{}:{cleanup_sequence}",
-                    generation.as_str()
-                ))
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            };
-            let request_cancellation: Arc<dyn GraphCancellation> =
-                Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
-            let probe = GraphPublicationProbeV1 {
-                request_cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancellation: graph_lifecycle_cancellation(
-                    &self.graph_lifecycle_cancelled,
-                    None,
-                ),
-                deadline_at,
-                cancellation: cancellation_identity.clone(),
-                deadline: deadline_identity.clone(),
-                commit_started: AtomicBool::new(false),
-                deadline_warned: AtomicBool::new(false),
-            };
-            let control = RuntimeRequestControlV1 {
-                requested_at: tracedecay_application::clock::now_micros(),
-                deadline: deadline_identity,
-                cancellation: cancellation_identity,
-            };
-            let context = GraphPublicationOperationContextV1::new(&control, &probe)
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-            let registration = GraphDbRegistration {
-                authority_lease: Arc::clone(&authority_lease),
-                cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                    &self.graph_lifecycle_cancelled,
-                ))),
-                deadline: deadline_at,
-            };
-            if !self
-                .graph_registry
-                .finalize_one_code_generation_replay_cleanup(
+                let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+                let cancellation_identity = RuntimeCancellationIdentityV1 {
+                    cancellation_id: RuntimeCancellationIdV1::new(format!(
+                        "graph-retire:{}",
+                        generation.as_str()
+                    ))
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                    generation: 1,
+                };
+                let deadline_identity = RuntimeDeadlineV1 {
+                    deadline_id: RuntimeDeadlineIdV1::new(format!(
+                        "graph-retire-deadline:{}",
+                        generation.as_str()
+                    ))
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                };
+                let request_cancellation: Arc<dyn GraphCancellation> =
+                    Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
+                let probe = GraphPublicationProbeV1 {
+                    request_cancellation: Arc::clone(&request_cancellation),
+                    lifecycle_cancellation: graph_lifecycle_cancellation(
+                        &graph_lifecycle_cancelled,
+                        None,
+                    ),
+                    deadline_at,
+                    cancellation: cancellation_identity.clone(),
+                    deadline: deadline_identity.clone(),
+                    commit_started: AtomicBool::new(false),
+                    deadline_warned: AtomicBool::new(false),
+                };
+                let control = RuntimeRequestControlV1 {
+                    requested_at: tracedecay_application::clock::now_micros(),
+                    deadline: deadline_identity,
+                    cancellation: cancellation_identity,
+                };
+                let context = GraphPublicationOperationContextV1::new(&control, &probe)
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                let registration = GraphDbRegistration {
+                    authority_lease: Arc::clone(&authority_lease),
+                    cancellation: Arc::clone(&request_cancellation),
+                    lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                        &graph_lifecycle_cancelled,
+                    ))),
+                    deadline: deadline_at,
+                };
+                match graph_registry.retire_one_code_generation_replay(
                     registration,
                     &mut storage,
                     &context,
-                    generation,
+                    &generation,
                     &sealed_digest,
-                )?
-            {
-                return Ok(true);
+                )? {
+                    GraphReplayCollectionOutcome::Retired(source) => {
+                        let tracedecay_graph_db::GraphGenerationReplaySource::SealedCodeGeneration(
+                            source,
+                        ) = *source
+                        else {
+                            return Err(GraphDbError::Corrupt {
+                                message:
+                                    "code generation retirement selected an inline graph replay"
+                                        .to_owned(),
+                            });
+                        };
+                        if source.generation != generation
+                            || source.sealed_state_digest != sealed_digest
+                        {
+                            return Err(GraphDbError::conflict(
+                                "code_graph.reconcile_deleted_code_generation_graph_replays",
+                            ));
+                        }
+                    }
+                    GraphReplayCollectionOutcome::Retained => return Ok(false),
+                    GraphReplayCollectionOutcome::Absent => {
+                        staged_unlink =
+                            stage_project_graph_replay_unlink(&replay_root, &sealed_digest)?;
+                        break;
+                    }
+                }
             }
-        }
+            drop(replay_pool_lock);
+            if let Some(staged_unlink) = staged_unlink {
+                finalize_project_graph_replay_unlink(
+                    staged_unlink,
+                    &replay_root,
+                    &sealed_digest,
+                    &pool_check,
+                )?;
+            }
+            let mut cleanup_sequence = 0_u64;
+            loop {
+                cleanup_sequence = cleanup_sequence.checked_add(1).ok_or_else(|| {
+                    GraphDbError::budget_exhausted(GraphBudgetKind::Capacity, u64::MAX)
+                })?;
+                let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+                let cancellation_identity = RuntimeCancellationIdentityV1 {
+                    cancellation_id: RuntimeCancellationIdV1::new(format!(
+                        "graph-cleanup:{}:{cleanup_sequence}",
+                        generation.as_str()
+                    ))
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                    generation: cleanup_sequence,
+                };
+                let deadline_identity = RuntimeDeadlineV1 {
+                    deadline_id: RuntimeDeadlineIdV1::new(format!(
+                        "graph-cleanup-deadline:{}:{cleanup_sequence}",
+                        generation.as_str()
+                    ))
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                };
+                let request_cancellation: Arc<dyn GraphCancellation> =
+                    Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
+                let probe = GraphPublicationProbeV1 {
+                    request_cancellation: Arc::clone(&request_cancellation),
+                    lifecycle_cancellation: graph_lifecycle_cancellation(
+                        &graph_lifecycle_cancelled,
+                        None,
+                    ),
+                    deadline_at,
+                    cancellation: cancellation_identity.clone(),
+                    deadline: deadline_identity.clone(),
+                    commit_started: AtomicBool::new(false),
+                    deadline_warned: AtomicBool::new(false),
+                };
+                let control = RuntimeRequestControlV1 {
+                    requested_at: tracedecay_application::clock::now_micros(),
+                    deadline: deadline_identity,
+                    cancellation: cancellation_identity,
+                };
+                let context = GraphPublicationOperationContextV1::new(&control, &probe)
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                let registration = GraphDbRegistration {
+                    authority_lease: Arc::clone(&authority_lease),
+                    cancellation: Arc::clone(&request_cancellation),
+                    lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                        &graph_lifecycle_cancelled,
+                    ))),
+                    deadline: deadline_at,
+                };
+                if !graph_registry.finalize_one_code_generation_replay_cleanup(
+                    registration,
+                    &mut storage,
+                    &context,
+                    &generation,
+                    &sealed_digest,
+                )? {
+                    return Ok(true);
+                }
+            }
+        })
+        .await
+        .map_err(|error| {
+            GraphDbError::unavailable(format!(
+                "graph replay reconcile blocking task failed: {error}"
+            ))
+        })?
     }
 }
 
@@ -2371,7 +2520,7 @@ fn map_code_graph_error(
             GraphDbError::budget_exhausted(kind, limit)
         }
         CodeGraphProjectionError::DeadlineExceeded => GraphDbError::DeadlineExceeded,
-        CodeGraphProjectionError::Conflict => GraphDbError::Conflict,
+        CodeGraphProjectionError::Conflict { context } => GraphDbError::Conflict { context },
         CodeGraphProjectionError::ProjectionMismatch {
             namespace,
             projection,

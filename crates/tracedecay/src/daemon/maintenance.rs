@@ -1588,7 +1588,9 @@ impl MaintenanceCoordinator {
 /// here — the gauge and the admission cell consume the same sample.
 #[cfg(target_os = "linux")]
 fn record_process_resident_memory_gauge() {
-    if let Some(bytes) = read_linux_process_resident_bytes() {
+    if let Some(bytes) =
+        tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
+    {
         hotpath::gauge!("daemon.process.resident_bytes").set(bytes);
         let state = tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1()
             .publish_observed_resident_bytes(bytes);
@@ -1612,19 +1614,6 @@ fn record_process_resident_memory_gauge() {
 
 #[cfg(not(target_os = "linux"))]
 fn record_process_resident_memory_gauge() {}
-
-#[cfg(target_os = "linux")]
-fn read_linux_process_resident_bytes() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let kib = status
-        .lines()
-        .find_map(|line| line.strip_prefix("VmRSS:"))?
-        .split_whitespace()
-        .next()?
-        .parse::<u64>()
-        .ok()?;
-    kib.checked_mul(1_024)
-}
 
 #[derive(Debug)]
 struct ColdStorePageMetrics {
@@ -1702,10 +1691,8 @@ async fn run_cold_store_page(
     if let Some(days) = retention.orphan_store_gc_days {
         let findings = tracedecay_maintenance::retention::orphan_stores::classify_stores(
             &page.entries,
-            retention_now.ok_or_else(|| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "maintenance retention clock unavailable".to_owned(),
-                }
+            retention_now.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "maintenance retention clock unavailable".to_owned(),
             })?,
         );
         let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
@@ -1734,10 +1721,8 @@ async fn run_cold_store_page(
             &page.entries,
             profile_root,
             retention_window_secs(days),
-            retention_now.ok_or_else(|| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "maintenance retention clock unavailable".to_owned(),
-                }
+            retention_now.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "maintenance retention clock unavailable".to_owned(),
             })?,
         );
         metrics.reclaimed_bytes = metrics
@@ -2041,7 +2026,7 @@ mod tests {
         registry.record_graph_replay_release_unhealthy(retired);
 
         registry.retain_project_maintenance_state(&std::collections::BTreeSet::from([
-            retained.to_path_buf(),
+            retained.to_path_buf()
         ]));
 
         assert!(

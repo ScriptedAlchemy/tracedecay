@@ -20,9 +20,9 @@ use crate::config::{
 use crate::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticConfigurationSnapshotSourceV1,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 use super::ports::{
@@ -821,8 +821,9 @@ impl ConfigurationClock for SystemConfigurationClock {
 mod tests {
     use super::*;
     use tracedecay_domain::configuration::ConfigurationValueKindV1;
+    use tracedecay_semantic_contracts::SemanticConfig;
 
-    use crate::config::{SEMANTIC_RUNTIME_SETTING_KEY, SemanticConfig};
+    use crate::config::SEMANTIC_RUNTIME_SETTING_KEY;
 
     struct TestScopeResolution;
 

@@ -52,9 +52,7 @@ struct ProjectCodeGraphProjectionReadPortV1 {
     scope: ResolvedScope,
 }
 
-impl tracedecay_graph_query::CodeGraphProjectionReadPort
-    for ProjectCodeGraphProjectionReadPortV1
-{
+impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphProjectionReadPortV1 {
     fn open<'a>(
         &'a self,
         request: tracedecay_graph_query::CodeGraphReadRequest<'a>,
@@ -125,10 +123,24 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort
                     .latest_complete_serving_for_root_scope(&self.project_root, &self.scope)
                     .await
                 {
-                    Some(seated) => (
-                        seated,
-                        tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale,
-                    ),
+                    Some(seated) => {
+                        // Capture the wedge-distinguishing evidence at open
+                        // time: a seat sealed days ago with no reconcile pass
+                        // or pending wake is a stalled route, not a routine
+                        // rebuild window, and the caveat must say which.
+                        let rebuild_in_flight = self
+                            .schedulers
+                            .rebuild_pass_in_flight_for_root_scope(&self.project_root, &self.scope)
+                            .await;
+                        let sealed_at = seated.generation().manifest().seal.sealed_at;
+                        (
+                            seated,
+                            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+                                sealed_at,
+                                rebuild_in_flight,
+                            },
+                        )
+                    }
                     None => {
                         return Err(CodeGraphReadError::Unavailable {
                             detail:

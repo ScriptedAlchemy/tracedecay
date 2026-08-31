@@ -211,8 +211,7 @@ where
     Refresh: FnOnce(
         daemon_control::DaemonServiceState,
     ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>>,
-    Restore:
-        FnOnce(daemon_control::DaemonServiceState) -> tracedecay_domain::errors::Result<()>,
+    Restore: FnOnce(daemon_control::DaemonServiceState) -> tracedecay_domain::errors::Result<()>,
 {
     let previous_state = quiesce()?;
     let _lifecycle_lease = match acquire() {
@@ -331,11 +330,17 @@ pub(crate) enum RefreshPolicy {
 /// binary path, when known — so the plugin refresh, daemon refresh, and
 /// health pass run on the new version. `policy` decides whether the refresh
 /// runs on a no-op upgrade and whether a refresh failure is fatal.
+///
+/// Returns the installed binary's version when an install happened and its
+/// version is known, so the surrounding maintenance window restores the
+/// daemon validating the binary that actually starts. A tolerated
+/// ([`RefreshPolicy::AfterInstall`]) refresh failure does not erase that
+/// version: the new binary is installed regardless.
 pub(crate) fn run_install_then_refresh<U, P>(
     policy: RefreshPolicy,
     upgrade: U,
     post_update: P,
-) -> tracedecay_domain::errors::Result<()>
+) -> tracedecay_domain::errors::Result<Option<String>>
 where
     U: FnOnce() -> tracedecay_domain::errors::Result<UpgradeOutcome>,
     P: FnOnce(Option<&Path>) -> tracedecay_domain::errors::Result<()>,
@@ -343,14 +348,17 @@ where
     let outcome = upgrade()?;
     match policy {
         RefreshPolicy::Always => {
-            let binary = match &outcome {
-                UpgradeOutcome::Installed { binary } => binary.as_deref(),
-                UpgradeOutcome::AlreadyCurrent => None,
+            let (binary, installed_version) = match &outcome {
+                UpgradeOutcome::Installed { binary, version } => {
+                    (binary.as_deref(), version.clone())
+                }
+                UpgradeOutcome::AlreadyCurrent => (None, None),
             };
-            post_update(binary)
+            post_update(binary)?;
+            Ok(installed_version)
         }
         RefreshPolicy::AfterInstall => match outcome {
-            UpgradeOutcome::Installed { binary } => {
+            UpgradeOutcome::Installed { binary, version } => {
                 if let Err(error) = post_update(binary.as_deref()) {
                     // Point the retry at the installed binary when we know
                     // where it lives — a bare `tracedecay` may not be on PATH.
@@ -364,30 +372,26 @@ where
                          plugin and agent-integration refresh."
                     );
                 }
-                Ok(())
+                Ok(version)
             }
             UpgradeOutcome::AlreadyCurrent => {
                 eprintln!(
                     "Nothing was installed, so plugins were left untouched — \
                      run `tracedecay update` to refresh generated plugins anyway."
                 );
-                Ok(())
+                Ok(None)
             }
         },
     }
 }
 
 #[hotpath::measure(label = "cli.update.run")]
-pub(crate) fn run_update_command(
-    no_reinstall: bool,
-) -> tracedecay_domain::errors::Result<()> {
+pub(crate) fn run_update_command(no_reinstall: bool) -> tracedecay_domain::errors::Result<()> {
     run_update_flow("update", RefreshPolicy::Always, no_reinstall)
 }
 
 #[hotpath::measure(label = "cli.upgrade.run")]
-pub(crate) fn run_upgrade_command(
-    no_reinstall: bool,
-) -> tracedecay_domain::errors::Result<()> {
+pub(crate) fn run_upgrade_command(no_reinstall: bool) -> tracedecay_domain::errors::Result<()> {
     run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
 }
 
@@ -400,8 +404,16 @@ fn run_update_flow(
         operation,
         crate::product_runtime::PRODUCT_BUILD_VERSION,
         |lease_token| {
-            run_install_then_refresh(refresh_policy, crate::upgrade::run_upgrade, |binary| {
-                run_post_update_subcommand(no_reinstall, binary, lease_token)
+            let installed_version =
+                run_install_then_refresh(refresh_policy, crate::upgrade::run_upgrade, |binary| {
+                    run_post_update_subcommand(no_reinstall, binary, lease_token)
+                })?;
+            // Report the installed version so the window's daemon restore
+            // validates the binary it actually starts, not the one that was
+            // running before the upgrade.
+            Ok(daemon_control::MaintenanceWindowOutcome {
+                value: (),
+                installed_version,
             })
         },
     )
@@ -499,11 +511,11 @@ fn run_post_update_subcommand(
         command.arg("--no-reinstall");
     }
     let status =
-        command.status().map_err(
-            |e| tracedecay_domain::errors::TraceDecayError::Config {
+        command
+            .status()
+            .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to run post-update with '{tracedecay_bin}': {e}"),
-            },
-        )?;
+            })?;
     if status.success() {
         return Ok(());
     }
@@ -562,11 +574,11 @@ pub(crate) fn record_completed_reinstall_pass(
     config: &mut UserConfig,
 ) -> tracedecay_domain::errors::Result<()> {
     if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
-        config.save().map_err(
-            |err| tracedecay_domain::errors::TraceDecayError::Config {
+        config
+            .save()
+            .map_err(|err| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("could not save tracedecay config: {err}"),
-            },
-        )?;
+            })?;
     }
     Ok(())
 }
@@ -628,8 +640,7 @@ pub(crate) async fn run_post_update_tasks(
 ) -> tracedecay_domain::errors::Result<()> {
     eprintln!("\nPreparing safe post-update maintenance.");
     eprintln!("  Waiting for TraceDecay writers to shut down cleanly — do not interrupt.");
-    let previous_daemon_state =
-        daemon_control::verify_installed_service_quiesced_under_lease()?;
+    let previous_daemon_state = daemon_control::verify_installed_service_quiesced_under_lease()?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
     let mutation_result = run_post_update_mutations(no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
@@ -756,10 +767,7 @@ mod tests {
                 Ok(())
             },
             |state| {
-                assert_eq!(
-                    state,
-                    daemon_control::DaemonServiceState::RunningEnabled
-                );
+                assert_eq!(state, daemon_control::DaemonServiceState::RunningEnabled);
                 order.borrow_mut().push("refresh");
                 Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
             },
@@ -780,10 +788,7 @@ mod tests {
             || Ok(daemon_control::DaemonServiceState::StoppedEnabled),
             || Ok(()),
             |state| {
-                assert_eq!(
-                    state,
-                    daemon_control::DaemonServiceState::RunningEnabled
-                );
+                assert_eq!(state, daemon_control::DaemonServiceState::RunningEnabled);
                 Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
             },
             |_| panic!("successful lease acquisition must not restore the old service"),
@@ -810,10 +815,7 @@ mod tests {
                 Ok(None)
             },
             |state| {
-                assert_eq!(
-                    state,
-                    daemon_control::DaemonServiceState::RunningEnabled
-                );
+                assert_eq!(state, daemon_control::DaemonServiceState::RunningEnabled);
                 order.borrow_mut().push("restore");
                 Ok(())
             },
@@ -1160,7 +1162,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        run_install_then_refresh(
+        let installed_version = run_install_then_refresh(
             RefreshPolicy::Always,
             record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
             record_post_update(&calls, "post-update", &seen_binary, Ok(())),
@@ -1169,6 +1171,10 @@ mod tests {
 
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
         assert_eq!(seen_binary.into_inner(), Some(None));
+        assert_eq!(
+            installed_version, None,
+            "no install must leave daemon restore validating the running version"
+        );
     }
 
     #[test]
@@ -1219,6 +1225,7 @@ mod tests {
                 "upgrade",
                 Ok(UpgradeOutcome::Installed {
                     binary: Some(installed.clone()),
+                    version: None,
                 }),
             ),
             record_post_update(&calls, "post-update", &seen_binary, Ok(())),
@@ -1229,12 +1236,62 @@ mod tests {
         assert_eq!(seen_binary.into_inner(), Some(Some(installed)));
     }
 
+    /// An upgrade that replaced the binary (old ≠ new) must hand the NEW
+    /// version to the surrounding maintenance window, so the daemon restore
+    /// validates the binary it actually starts rather than the pre-upgrade
+    /// one it quiesced.
+    #[test]
+    fn upgrade_policy_reports_installed_version_for_restore_validation() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        let installed_version = run_install_then_refresh(
+            RefreshPolicy::AfterInstall,
+            record_upgrade(
+                &calls,
+                "upgrade",
+                Ok(UpgradeOutcome::Installed {
+                    binary: Some(PathBuf::from("/usr/local/bin/tracedecay")),
+                    version: Some("9.9.9".to_string()),
+                }),
+            ),
+            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+        )
+        .expect("upgrade steps should succeed");
+
+        assert_eq!(installed_version.as_deref(), Some("9.9.9"));
+    }
+
+    /// `update` (fatal-refresh policy) threads the installed version the same
+    /// way once its refresh succeeds.
+    #[test]
+    fn update_policy_reports_installed_version_for_restore_validation() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        let installed_version = run_install_then_refresh(
+            RefreshPolicy::Always,
+            record_upgrade(
+                &calls,
+                "upgrade",
+                Ok(UpgradeOutcome::Installed {
+                    binary: None,
+                    version: Some("9.9.9".to_string()),
+                }),
+            ),
+            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+        )
+        .expect("update steps should succeed");
+
+        assert_eq!(installed_version.as_deref(), Some("9.9.9"));
+    }
+
     #[test]
     fn upgrade_policy_skips_post_update_when_already_current() {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        run_install_then_refresh(
+        let installed_version = run_install_then_refresh(
             RefreshPolicy::AfterInstall,
             record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
             record_post_update(&calls, "post-update", &seen_binary, Ok(())),
@@ -1243,6 +1300,10 @@ mod tests {
 
         assert_eq!(calls.into_inner(), vec!["upgrade"]);
         assert_eq!(seen_binary.into_inner(), None);
+        assert_eq!(
+            installed_version, None,
+            "no install must leave daemon restore validating the running version"
+        );
     }
 
     #[test]
@@ -1255,7 +1316,10 @@ mod tests {
             record_upgrade(
                 &calls,
                 "upgrade",
-                Ok(UpgradeOutcome::Installed { binary: None }),
+                Ok(UpgradeOutcome::Installed {
+                    binary: None,
+                    version: Some("9.9.9".to_string()),
+                }),
             ),
             record_post_update(
                 &calls,
@@ -1265,7 +1329,13 @@ mod tests {
             ),
         );
 
-        assert!(result.is_ok());
+        // The warn-only refresh failure neither fails the upgrade nor erases
+        // the installed version: the new binary is on disk, so the daemon
+        // restore must still validate it.
+        assert_eq!(
+            result.expect("tolerated refresh failure").as_deref(),
+            Some("9.9.9")
+        );
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
     }
 

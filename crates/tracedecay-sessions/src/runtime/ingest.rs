@@ -34,8 +34,13 @@ pub use user::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
 #[doc(hidden)]
 pub mod test_support {
     pub use super::failure::{IngestPassBounds, IngestPassOutcome};
-    pub use super::project::ingest_project_sources_for_provider_without_registered_authority;
-    pub use super::scheduler::USER_INGEST_PROVIDER_FRONTIER_KEY;
+    pub use super::project::{
+        ingest_project_sources_for_provider_bounded,
+        ingest_project_sources_for_provider_without_registered_authority,
+    };
+    pub use super::scheduler::{
+        PROJECT_INGEST_PROVIDER_FRONTIER_KEY, USER_INGEST_PROVIDER_FRONTIER_KEY,
+    };
     pub use super::startup::ingest_user_global_sources_for_startup_with_db_without_registered_authority;
     pub use super::user::{
         ingest_user_global_sources_for_provider_with_roots_bounded,

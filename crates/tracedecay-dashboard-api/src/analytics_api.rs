@@ -39,7 +39,6 @@ pub use tracedecay_usecases::analytics_bridge::{
     sort_hook_analytics_rows,
 };
 
-
 const HINT_CATEGORIES: &[&str] = &[
     "search",
     "semantic_search",
@@ -1039,7 +1038,6 @@ async fn durable_analytics_rows(
     None
 }
 
-
 pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHintsPayloadV1 {
     let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
         .iter()
@@ -1112,7 +1110,6 @@ pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
         }).collect::<Vec<_>>(),
     })
 }
-
 
 #[cfg(test)]
 fn decode_analytics_contract<T: serde::de::DeserializeOwned>(

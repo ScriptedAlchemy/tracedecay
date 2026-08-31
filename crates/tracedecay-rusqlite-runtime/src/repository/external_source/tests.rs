@@ -1,5 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
+use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
 };
@@ -19,7 +24,8 @@ use tracedecay_domain::{
 use tracedecay_store::{
     SourceAcquisitionQueueCasV1, SourceAcquisitionQueueStateV1, SourceAcquisitionRequestV1,
     SourceAuthorityPublicationV1, SourceObjectMutationV1, SourceObjectTransitionV1,
-    SourceObservationEvidenceV1, SourceScheduledRefetchV1, build_source_projection,
+    SourceObservationEvidenceV1, SourceScheduledRefetchV1, apply_source_projection,
+    build_source_projection,
 };
 
 use super::*;
@@ -131,6 +137,144 @@ fn fixture() -> (SourceCommitV1, SourceBindingIdentityV1) {
     (commit, identity)
 }
 
+fn large_fixture(object_count: usize) -> (SourceCommitV1, SourceBindingIdentityV1) {
+    let definition = SourceDefinitionV1::new(
+        SourceInstanceId::new("source.runtime-large-fixture").unwrap(),
+        1,
+        SourceAcquisitionContractV1::new(
+            ProviderId::new("cursor").unwrap(),
+            SourceAcquisitionCapabilitiesV1::new(
+                BTreeSet::from([SourceCaptureModeV1::Poll]),
+                BTreeSet::from([SourceRefetchStrategyV1::WholeRoot]),
+                BTreeSet::from([SourceDeletionSemanticsV1::CompleteSnapshotAbsence]),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+        SourceCaptureModeV1::Poll,
+        SourceRefetchStrategyV1::WholeRoot,
+        SourceDeletionSemanticsV1::CompleteSnapshotAbsence,
+        1,
+    )
+    .unwrap();
+    let binding = SourceBindingV1::new(
+        &definition,
+        SourceBindingOwnerV1::Project(ProjectId::new("project.runtime-large-fixture").unwrap()),
+        PrivacyDomainId::new("privacy.runtime-large-fixture").unwrap(),
+        LocatorDigest::new(digest('a').as_str()).unwrap(),
+        1,
+    )
+    .unwrap();
+    let identity = binding.immutable_identity().unwrap();
+    let partition = SourcePartitionIdV1::new(digest('b'));
+    let snapshot = SourceSnapshotIdV1::new(digest('c'));
+    let mut mutations = Vec::with_capacity(object_count);
+    let mut present_objects = BTreeSet::new();
+    for index in 0..object_count {
+        let digest_for = |purpose: &str| {
+            canonical_sha256(&(
+                "tracedecay.external-source.large-fixture.v1",
+                purpose,
+                index,
+            ))
+            .unwrap()
+        };
+        let observation = SourceObjectObservationV1::new(
+            SourceNativeObjectIdV1::new(digest_for("object")),
+            SourceObjectRevisionV1::new(digest_for("revision")),
+            digest_for("sanitized"),
+            SourceContentStateV1::Live,
+        )
+        .unwrap();
+        present_objects.insert(observation.native_object().clone());
+        let evidence = SourceObservationEvidenceV1::new(
+            identity.clone(),
+            partition.clone(),
+            &observation,
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(format!(
+                    "receipt.external-source.runtime-large-fixture.{index}"
+                ))
+                .unwrap(),
+                ComponentVersion::new("sanitizer.external-source.v1").unwrap(),
+            )
+            .unwrap(),
+            RetrievalAnchorId::new(format!(
+                "retrieval.external-source.runtime-large-fixture.{index}"
+            ))
+            .unwrap(),
+            ResolutionAuthorizationV1 {
+                resolved_scope_id: ScopeResolutionId::new(format!(
+                    "scope.external-source.runtime-large-fixture.{index}"
+                ))
+                .unwrap(),
+                privacy_domain_id: identity.privacy_domain.clone(),
+                access_policy_digest: AccessPolicyDigest::new(digest('4').as_str()).unwrap(),
+                capability_id: CapabilityId::new("capability.external-source.runtime-fixture")
+                    .unwrap(),
+                canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(
+                    digest('5').as_str(),
+                )
+                .unwrap(),
+            },
+            digest_for("authorization"),
+        )
+        .unwrap();
+        mutations.push(
+            SourceObjectMutationV1::new(
+                observation,
+                None,
+                SourceObjectTransitionV1::Initial,
+                evidence,
+            )
+            .unwrap(),
+        );
+    }
+    let frontier = SourcePartitionFrontierV1::new(
+        identity.clone(),
+        partition.clone(),
+        None,
+        Some(snapshot.clone()),
+        None,
+        SourceCoverageV1::Complete,
+        1,
+        None,
+        digest('1'),
+    )
+    .unwrap();
+    let aggregate =
+        SourceAggregateFrontierV1::with_updated_partition(identity.clone(), None, frontier)
+            .unwrap();
+    let completion =
+        SourceSnapshotCompletionV1::new(partition.clone(), snapshot, present_objects).unwrap();
+    let commit = SourceCommitV1::new(
+        definition,
+        binding,
+        partition,
+        digest('2'),
+        digest('3'),
+        None,
+        aggregate,
+        mutations,
+        Some(completion),
+    )
+    .unwrap();
+    (commit, identity)
+}
+
+thread_local! {
+    static OBSERVED_CURRENT_OBJECT_SELECTS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn count_full_state_reads(event: TraceEvent<'_>) {
+    if let TraceEvent::Stmt(_, sql) = event
+        && sql.contains("SELECT mutation_json FROM external_source_objects_v1 WHERE binding_id")
+    {
+        OBSERVED_CURRENT_OBJECT_SELECTS
+            .set(OBSERVED_CURRENT_OBJECT_SELECTS.get().saturating_add(1));
+    }
+}
+
 fn acquisition_state() -> (SourceAcquisitionQueueStateV1, SourceBindingIdentityV1) {
     let definition = SourceDefinitionV1::new(
         SourceInstanceId::new("source.runtime-acquisition-fixture").unwrap(),
@@ -222,7 +366,7 @@ fn acquisition_queue_cas_survives_restart_and_rejects_stale_writers() {
         connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_acquisition_state_cas(
                 &savepoint,
                 &SourceAcquisitionQueueCasV1::new(binding.clone(), None, state.clone()).unwrap(),
@@ -234,7 +378,7 @@ fn acquisition_queue_cas_survives_restart_and_rejects_stale_writers() {
     let mut connection = rusqlite::Connection::open(&database_path).unwrap();
     let transaction = connection.transaction().unwrap();
     assert_eq!(
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_read(
                 &transaction,
                 &ExternalSourceReadOperationV1::AcquisitionState {
@@ -245,7 +389,7 @@ fn acquisition_queue_cas_survives_restart_and_rejects_stale_writers() {
         ExternalSourceReadResultV1::AcquisitionState(Some(Box::new(state.clone())))
     );
     assert_eq!(
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_read(
                 &transaction,
                 &ExternalSourceReadOperationV1::NextReadyAcquisition { now: UtcMicros(10) },
@@ -258,7 +402,7 @@ fn acquisition_queue_cas_survives_restart_and_rejects_stale_writers() {
     let mut transaction = connection.transaction().unwrap();
     let savepoint = transaction.savepoint().unwrap();
     assert!(
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_acquisition_state_cas(
                 &savepoint,
                 &SourceAcquisitionQueueCasV1::new(binding, None, state).unwrap(),
@@ -421,7 +565,7 @@ fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
     let (first, binding) = fixture();
     let mut transaction = connection.transaction().unwrap();
     let savepoint = transaction.savepoint().unwrap();
-    ExternalSourceExecutor
+    ExternalSourceExecutor::default()
         .execute_write(&savepoint, &first)
         .unwrap();
     savepoint.commit().unwrap();
@@ -431,7 +575,7 @@ fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
         let commit = empty_successor(&prior, sequence, seed);
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &commit)
             .unwrap();
         savepoint.commit().unwrap();
@@ -464,7 +608,7 @@ fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
 
     let mut connection = rusqlite::Connection::open(&path).unwrap();
     let state = load_state(&connection, &binding).unwrap().unwrap();
-    let first_pending = load_next_pending_projection(&connection, &state)
+    let first_pending = load_next_pending_projection(&connection, &binding)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -496,7 +640,7 @@ fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
         assert!(
-            ExternalSourceExecutor
+            ExternalSourceExecutor::default()
                 .execute_projection_write(&savepoint, &second_projection)
                 .is_err(),
             "a reordered successor must not skip the oldest pending receipt"
@@ -504,8 +648,7 @@ fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
     }
 
     for expected_sequence in 1..=3 {
-        let state = load_state(&connection, &binding).unwrap().unwrap();
-        let pending = load_next_pending_projection(&connection, &state)
+        let pending = load_next_pending_projection(&connection, &binding)
             .unwrap()
             .unwrap();
         let projection = build_source_projection(&pending, projector.clone()).unwrap();
@@ -527,7 +670,7 @@ fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
         for _ in 0..2 {
             let mut transaction = connection.transaction().unwrap();
             let savepoint = transaction.savepoint().unwrap();
-            ExternalSourceExecutor
+            ExternalSourceExecutor::default()
                 .execute_projection_write(&savepoint, &projection)
                 .unwrap();
             savepoint.commit().unwrap();
@@ -555,7 +698,7 @@ fn ten_thousand_receipts_do_not_make_current_read_or_write_scan_history() {
     let mut transaction = connection.transaction().unwrap();
     {
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &first)
             .unwrap();
         savepoint.commit().unwrap();
@@ -564,7 +707,7 @@ fn ten_thousand_receipts_do_not_make_current_read_or_write_scan_history() {
         let state = load_state(&transaction, &binding).unwrap().unwrap();
         let commit = numbered_empty_successor(&state, sequence);
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &commit)
             .unwrap();
         savepoint.commit().unwrap();
@@ -611,7 +754,7 @@ fn ten_thousand_receipts_do_not_make_current_read_or_write_scan_history() {
     let commit = numbered_empty_successor(&current, 10_001);
     let mut transaction = connection.transaction().unwrap();
     let savepoint = transaction.savepoint().unwrap();
-    ExternalSourceExecutor
+    ExternalSourceExecutor::default()
         .execute_write(&savepoint, &commit)
         .unwrap();
     savepoint.commit().unwrap();
@@ -635,7 +778,7 @@ fn empty_complete_is_noop_and_partial_never_derives_absence() {
     {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &first)
             .unwrap();
         savepoint.commit().unwrap();
@@ -651,14 +794,13 @@ fn empty_complete_is_noop_and_partial_never_derives_absence() {
         ),
         (4, SourceCoverageV1::Complete, Some(BTreeSet::new()), 1),
     ] {
-        let state = load_state(&connection, &binding).unwrap().unwrap();
-        let pending = load_next_pending_projection(&connection, &state)
+        let pending = load_next_pending_projection(&connection, &binding)
             .unwrap()
             .unwrap();
         let projection = build_source_projection(&pending, projector.clone()).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_projection_write(&savepoint, &projection)
             .unwrap();
         savepoint.commit().unwrap();
@@ -668,13 +810,12 @@ fn empty_complete_is_noop_and_partial_never_derives_absence() {
         let commit = empty_successor_with_coverage(&state, sequence, coverage, present);
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &commit)
             .unwrap();
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
-        let state = load_state(&connection, &binding).unwrap().unwrap();
-        let pending = load_next_pending_projection(&connection, &state)
+        let pending = load_next_pending_projection(&connection, &binding)
             .unwrap()
             .unwrap();
         let projection = build_source_projection(&pending, projector.clone()).unwrap();
@@ -690,7 +831,7 @@ fn stale_source_fork_rejection_preserves_the_committed_pending_chain() {
     {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &first)
             .unwrap();
         savepoint.commit().unwrap();
@@ -702,7 +843,7 @@ fn stale_source_fork_rejection_preserves_the_committed_pending_chain() {
     {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &accepted)
             .unwrap();
         savepoint.commit().unwrap();
@@ -712,7 +853,7 @@ fn stale_source_fork_rejection_preserves_the_committed_pending_chain() {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
         assert!(
-            ExternalSourceExecutor
+            ExternalSourceExecutor::default()
                 .execute_write(&savepoint, &fork)
                 .is_err()
         );
@@ -747,7 +888,7 @@ fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
     {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &commit)
             .unwrap();
         savepoint.commit().unwrap();
@@ -755,7 +896,7 @@ fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
     }
     let source_state = load_state(&connection, &binding).unwrap().unwrap();
     assert!(source_state.projection().is_none());
-    let pending = load_next_pending_projection(&connection, &source_state)
+    let pending = load_next_pending_projection(&connection, &binding)
         .unwrap()
         .unwrap();
     let projection = build_source_projection(
@@ -777,7 +918,7 @@ fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
         assert!(
-            ExternalSourceExecutor
+            ExternalSourceExecutor::default()
                 .execute_projection_write(&savepoint, &projection)
                 .is_err()
         );
@@ -806,7 +947,7 @@ fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
     for _ in 0..2 {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_projection_write(&savepoint, &projection)
             .unwrap();
         savepoint.commit().unwrap();
@@ -836,7 +977,7 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
         connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
         let mut interrupted = connection.transaction().unwrap();
         let savepoint = interrupted.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &commit)
             .unwrap();
         savepoint.commit().unwrap();
@@ -846,7 +987,7 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
         let mut connection = rusqlite::Connection::open(&database_path).unwrap();
         let transaction = connection.transaction().unwrap();
         assert!(matches!(
-            ExternalSourceExecutor
+            ExternalSourceExecutor::default()
                 .execute_read(
                     &transaction,
                     &ExternalSourceReadOperationV1::State {
@@ -861,7 +1002,7 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
         let mut connection = rusqlite::Connection::open(&database_path).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &commit)
             .unwrap();
         savepoint.commit().unwrap();
@@ -870,13 +1011,13 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
     let mut connection = rusqlite::Connection::open(&database_path).unwrap();
     let mut replay = connection.transaction().unwrap();
     let savepoint = replay.savepoint().unwrap();
-    ExternalSourceExecutor
+    ExternalSourceExecutor::default()
         .execute_write(&savepoint, &commit)
         .unwrap();
     savepoint.commit().unwrap();
     replay.commit().unwrap();
     let transaction = connection.transaction().unwrap();
-    let state = match ExternalSourceExecutor
+    let state = match ExternalSourceExecutor::default()
         .execute_read(
             &transaction,
             &ExternalSourceReadOperationV1::State {
@@ -927,7 +1068,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
         connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_write(&savepoint, &commit)
             .unwrap();
         savepoint.commit().unwrap();
@@ -968,7 +1109,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
         let mut connection = rusqlite::Connection::open(&database_path).unwrap();
         let mut interrupted = connection.transaction().unwrap();
         let savepoint = interrupted.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_authority_publication(&savepoint, &publication)
             .unwrap();
         savepoint.commit().unwrap();
@@ -991,7 +1132,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
         let mut connection = rusqlite::Connection::open(&database_path).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_authority_publication(&savepoint, &publication)
             .unwrap();
         savepoint.commit().unwrap();
@@ -1001,7 +1142,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
         let mut connection = rusqlite::Connection::open(&database_path).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
+        ExternalSourceExecutor::default()
             .execute_authority_publication(&savepoint, &publication)
             .unwrap();
         savepoint.commit().unwrap();
@@ -1057,5 +1198,473 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
             )
             .unwrap(),
         0
+    );
+}
+
+#[test]
+fn projection_drain_after_warmup_does_not_reload_current_objects() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+    let (first, binding) = fixture();
+    let mut source_writer = ExternalSourceExecutor::default();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        source_writer.execute_write(&savepoint, &first).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    for sequence in 2..=8 {
+        let state = load_state(&connection, &binding).unwrap().unwrap();
+        let commit = numbered_empty_successor(&state, sequence);
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        source_writer.execute_write(&savepoint, &commit).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+
+    let projector = ComponentVersion::new("external-source-projector-v1").unwrap();
+    let mut reader = ExternalSourceExecutor::default();
+    let mut projection_writer = ExternalSourceExecutor::default();
+    OBSERVED_CURRENT_OBJECT_SELECTS.set(0);
+    connection.trace_v2(
+        TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(count_full_state_reads),
+    );
+    for _ in 0..8 {
+        let transaction = connection.transaction().unwrap();
+        let pending = match reader
+            .execute_read(
+                &transaction,
+                &ExternalSourceReadOperationV1::NextPendingProjection {
+                    binding: Some(binding.clone()),
+                },
+            )
+            .unwrap()
+        {
+            ExternalSourceReadResultV1::PendingProjection(Some(pending)) => pending,
+            other => panic!("expected pending projection, got {other:?}"),
+        };
+        drop(transaction);
+        let projection = build_source_projection(&pending, projector.clone()).unwrap();
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        projection_writer
+            .execute_projection_write(&savepoint, &projection)
+            .unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    connection.trace_v2(TraceEventCodes::empty(), None);
+    assert_eq!(
+        OBSERVED_CURRENT_OBJECT_SELECTS.get(),
+        1,
+        "one cold writer restore is allowed; narrow reads and warm writes must not reload objects"
+    );
+}
+
+#[test]
+fn narrow_pending_read_skips_unrelated_corrupt_current_object_but_writer_does_not() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+    let (commit, binding) = fixture();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        ExternalSourceExecutor::default()
+            .execute_write(&savepoint, &commit)
+            .unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    connection
+        .execute(
+            "UPDATE external_source_objects_v1
+             SET mutation_json = '{'
+             WHERE binding_id = ?1",
+            [binding.binding_id.as_str()],
+        )
+        .unwrap();
+
+    let transaction = connection.transaction().unwrap();
+    let pending = match ExternalSourceExecutor::default()
+        .execute_read(
+            &transaction,
+            &ExternalSourceReadOperationV1::NextPendingProjection {
+                binding: Some(binding.clone()),
+            },
+        )
+        .unwrap()
+    {
+        ExternalSourceReadResultV1::PendingProjection(Some(pending)) => pending,
+        other => panic!("expected pending projection, got {other:?}"),
+    };
+    drop(transaction);
+    let projection = build_source_projection(
+        &pending,
+        ComponentVersion::new("external-source-projector-v1").unwrap(),
+    )
+    .unwrap();
+    let mut transaction = connection.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    assert!(
+        ExternalSourceExecutor::default()
+            .execute_projection_write(&savepoint, &projection)
+            .is_err(),
+        "a cold writer must still fully validate durable current state"
+    );
+}
+
+#[test]
+fn narrow_pending_projection_matches_full_restore_semantics() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+    let (first, binding) = fixture();
+    let mut writer = ExternalSourceExecutor::default();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer.execute_write(&savepoint, &first).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let first_pending = load_next_pending_projection(&connection, &binding)
+        .unwrap()
+        .unwrap();
+    let first_projection = build_source_projection(
+        &first_pending,
+        ComponentVersion::new("external-source-projector-v1").unwrap(),
+    )
+    .unwrap();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer
+            .execute_projection_write(&savepoint, &first_projection)
+            .unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let projected = load_state(&connection, &binding).unwrap().unwrap();
+    let second = numbered_empty_successor(&projected, 2);
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer.execute_write(&savepoint, &second).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let full_state = load_state(&connection, &binding).unwrap().unwrap();
+    let pending_receipt_digest = connection
+        .query_row(
+            "SELECT pending.source_receipt_digest
+             FROM external_source_pending_projections_v1 AS pending
+             JOIN external_source_states_v1 AS states
+               ON states.binding_id = pending.binding_id
+              AND pending.predecessor_frontier_digest =
+                  COALESCE(states.projection_frontier_digest, 'root')
+             WHERE pending.binding_id = ?1",
+            [binding.binding_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    let pending_receipt =
+        load_commit_receipt_by_digest(&connection, &binding, &pending_receipt_digest)
+            .unwrap()
+            .unwrap();
+    let full_pending = SourcePendingProjectionV1::from_state(
+        &full_state,
+        full_state.definition().clone(),
+        full_state.binding().clone(),
+        pending_receipt,
+    )
+    .unwrap();
+    let expected = build_source_projection(
+        &full_pending,
+        ComponentVersion::new("external-source-projector-v1").unwrap(),
+    )
+    .unwrap();
+
+    let transaction = connection.transaction().unwrap();
+    let narrow_pending = match ExternalSourceExecutor::default()
+        .execute_read(
+            &transaction,
+            &ExternalSourceReadOperationV1::NextPendingProjection {
+                binding: Some(binding),
+            },
+        )
+        .unwrap()
+    {
+        ExternalSourceReadResultV1::PendingProjection(Some(pending)) => pending,
+        other => panic!("expected pending projection, got {other:?}"),
+    };
+    let actual = build_source_projection(
+        &narrow_pending,
+        ComponentVersion::new("external-source-projector-v1").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn rolled_back_cached_projection_reloads_durable_predecessor() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+    let (commit, binding) = fixture();
+    let mut writer = ExternalSourceExecutor::default();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer.execute_write(&savepoint, &commit).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let pending = load_next_pending_projection(&connection, &binding)
+        .unwrap()
+        .unwrap();
+    let projection = build_source_projection(
+        &pending,
+        ComponentVersion::new("external-source-projector-v1").unwrap(),
+    )
+    .unwrap();
+    {
+        let mut rolled_back = connection.transaction().unwrap();
+        let savepoint = rolled_back.savepoint().unwrap();
+        writer
+            .execute_projection_write(&savepoint, &projection)
+            .unwrap();
+        savepoint.commit().unwrap();
+    }
+    OBSERVED_CURRENT_OBJECT_SELECTS.set(0);
+    connection.trace_v2(
+        TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(count_full_state_reads),
+    );
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer
+            .execute_projection_write(&savepoint, &projection)
+            .unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    connection.trace_v2(TraceEventCodes::empty(), None);
+    assert_eq!(
+        OBSERVED_CURRENT_OBJECT_SELECTS.get(),
+        1,
+        "a rolled-back cached successor must force one durable validated reload"
+    );
+    assert_eq!(
+        load_state(&connection, &binding)
+            .unwrap()
+            .unwrap()
+            .projection()
+            .unwrap()
+            .receipt_digest(),
+        projection.receipt_digest()
+    );
+}
+
+#[test]
+fn failed_source_cas_discards_verified_cache() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+    let (first, binding) = fixture();
+    let mut writer = ExternalSourceExecutor::default();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer.execute_write(&savepoint, &first).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let first_state = load_state(&connection, &binding).unwrap().unwrap();
+    let accepted = empty_successor(&first_state, 2, '7');
+    let stale = empty_successor(&first_state, 2, '9');
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer.execute_write(&savepoint, &accepted).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let accepted_state = load_state(&connection, &binding).unwrap().unwrap();
+    let successor = empty_successor(&accepted_state, 3, '8');
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        assert!(writer.execute_write(&savepoint, &stale).is_err());
+    }
+    connection
+        .execute(
+            "UPDATE external_source_objects_v1
+             SET mutation_json = '{'
+             WHERE binding_id = ?1",
+            [binding.binding_id.as_str()],
+        )
+        .unwrap();
+    let mut transaction = connection.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    assert!(
+        writer.execute_write(&savepoint, &successor).is_err(),
+        "failed CAS must discard the cache so the next write validates durable rows"
+    );
+}
+
+#[test]
+fn external_commit_invalidates_verified_cache() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary
+        .path()
+        .join("external-source-external-change.sqlite");
+    let mut writer_connection = rusqlite::Connection::open(&path).unwrap();
+    writer_connection
+        .execute_batch(EXTERNAL_SOURCE_SCHEMA_V1)
+        .unwrap();
+    let (first, binding) = fixture();
+    let mut writer = ExternalSourceExecutor::default();
+    {
+        let mut transaction = writer_connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer.execute_write(&savepoint, &first).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let current = load_state(&writer_connection, &binding).unwrap().unwrap();
+    let successor = empty_successor(&current, 2, '7');
+    let external = rusqlite::Connection::open(&path).unwrap();
+    external
+        .execute(
+            "UPDATE external_source_objects_v1
+             SET mutation_json = '{'
+             WHERE binding_id = ?1",
+            [binding.binding_id.as_str()],
+        )
+        .unwrap();
+
+    let mut transaction = writer_connection.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    assert!(
+        writer.execute_write(&savepoint, &successor).is_err(),
+        "SQLite data_version changes must invalidate connection-local verified state"
+    );
+}
+
+#[test]
+fn reopened_executor_fully_validates_historical_current_rows() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary
+        .path()
+        .join("external-source-reopen-validation.sqlite");
+    let (first, binding) = fixture();
+    let successor = {
+        let mut connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+        let mut writer = ExternalSourceExecutor::default();
+        {
+            let mut transaction = connection.transaction().unwrap();
+            let savepoint = transaction.savepoint().unwrap();
+            writer.execute_write(&savepoint, &first).unwrap();
+            savepoint.commit().unwrap();
+            transaction.commit().unwrap();
+        }
+        let state = load_state(&connection, &binding).unwrap().unwrap();
+        let successor = empty_successor(&state, 2, '7');
+        connection
+            .execute(
+                "UPDATE external_source_objects_v1
+                 SET mutation_json = '{'
+                 WHERE binding_id = ?1",
+                [binding.binding_id.as_str()],
+            )
+            .unwrap();
+        successor
+    };
+
+    let mut reopened = rusqlite::Connection::open(&path).unwrap();
+    let mut transaction = reopened.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    assert!(
+        ExternalSourceExecutor::default()
+            .execute_write(&savepoint, &successor)
+            .is_err(),
+        "a reopened writer must not inherit any prior process verification"
+    );
+}
+
+#[test]
+#[ignore = "manual synthetic large-binding efficiency benchmark"]
+fn benchmark_large_binding_projection_drain() {
+    let object_count = std::env::var("TRACEDECAY_EXTERNAL_SOURCE_BENCH_OBJECTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2_000);
+    let projection_count = std::env::var("TRACEDECAY_EXTERNAL_SOURCE_BENCH_PROJECTIONS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(32_u64);
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+    let (first, binding) = large_fixture(object_count);
+    let mut source_writer = ExternalSourceExecutor::default();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        source_writer.execute_write(&savepoint, &first).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    for sequence in 2..=projection_count {
+        let state = load_state(&connection, &binding).unwrap().unwrap();
+        let commit = numbered_empty_successor(&state, sequence);
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        source_writer.execute_write(&savepoint, &commit).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+
+    let projector = ComponentVersion::new("external-source-projector-v1").unwrap();
+    let mut reader = ExternalSourceExecutor::default();
+    let mut projection_writer = ExternalSourceExecutor::default();
+    let started = Instant::now();
+    let mut cold_micros = 0_u128;
+    for index in 0..projection_count {
+        let operation_started = Instant::now();
+        let transaction = connection.transaction().unwrap();
+        let pending = match reader
+            .execute_read(
+                &transaction,
+                &ExternalSourceReadOperationV1::NextPendingProjection {
+                    binding: Some(binding.clone()),
+                },
+            )
+            .unwrap()
+        {
+            ExternalSourceReadResultV1::PendingProjection(Some(pending)) => pending,
+            other => panic!("expected pending projection, got {other:?}"),
+        };
+        drop(transaction);
+        let projection = build_source_projection(&pending, projector.clone()).unwrap();
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        projection_writer
+            .execute_projection_write(&savepoint, &projection)
+            .unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+        if index == 0 {
+            cold_micros = operation_started.elapsed().as_micros();
+        }
+    }
+    let elapsed = started.elapsed();
+    let warm_micros = elapsed.as_micros().saturating_sub(cold_micros);
+    let warm_operations = u128::from(projection_count.saturating_sub(1)).max(1);
+    eprintln!(
+        "external_source_projection_benchmark objects={object_count} projections={projection_count} \
+         cold_us={cold_micros} warm_total_us={warm_micros} warm_per_op_us={}",
+        warm_micros / warm_operations
     );
 }

@@ -48,6 +48,7 @@ use super::{
 };
 use crate::semantic_runtime::SemanticGraphExecutionAuthorityV1;
 
+#[hotpath::measure_all]
 impl GraphVectorGenerationStoreV1 {
     pub(super) fn semantic_stage_plan(
         &self,
@@ -913,15 +914,21 @@ pub(super) fn transition_state<'a>(
         .map(|records| {
             (
                 records.generation.generation_id().clone(),
-                records.generation.clone(),
+                // Base lineage checks consume identity fields only (chunk
+                // digest, output digest, projection key); the hydrated float
+                // payloads are elided before installation so an incremental
+                // build retains O(ids + digests) of base state, not the base
+                // float corpus, for its whole multi-batch duration.
+                records.generation.cloned_with_elided_payloads(),
             )
         })
         .collect();
     // The graph adapter's machine never serves float payloads and never
     // seals state documents: the durable rows are the graph's native
-    // entities, so staged retention is elided and no physical reuse index is
-    // derived. Hydrated base generations keep their payloads — reused-row
-    // lineage checks read them.
+    // entities, so staged retention is elided, base-generation payloads are
+    // elided above, and no physical reuse index is derived. Reused rows are
+    // receipt-only in the native encoding and are served by the base
+    // generation's own durable rows at read time.
     let mut state = VectorGenerationStateMachineV1::with_staged_value_retention(
         StagedVectorValueRetentionV1::Elided,
     );
@@ -930,6 +937,7 @@ pub(super) fn transition_state<'a>(
     Ok(state)
 }
 
+#[hotpath::measure_all]
 impl GraphVectorGenerationStoreV1 {
     fn push_required_generation(
         &self,

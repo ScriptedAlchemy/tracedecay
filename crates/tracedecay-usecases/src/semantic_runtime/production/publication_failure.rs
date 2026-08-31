@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
+use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
 use crate::store::vector_generations::VectorGenerationStoreErrorV1;
 
@@ -348,7 +348,7 @@ impl SemanticPublicationFailureRecorderV1 {
 mod tests {
     use std::collections::BTreeSet;
 
-    use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
+    use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
     use crate::semantic_runtime::SemanticVectorGraphErrorV1;
     use crate::store::vector_generations::VectorGenerationStoreErrorV1;

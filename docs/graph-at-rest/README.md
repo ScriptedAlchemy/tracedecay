@@ -23,6 +23,25 @@ This investigation measured what calling it would buy.
 > blocked on two things this investigation did not reach. See
 > [Follow-up: the schema change, measured](#follow-up-the-schema-change-measured)
 > at the end — its table supersedes the `compact` rows below.
+>
+> **Superseded for phase 2:** the per-generation sealed-store lane
+> (`src/sealed_store.rs`) shipped the "different design" the follow-up asked
+> for — at seal time each verified generation's rows stream into their own
+> single-generation database, which is compacted, digest-proven after reopen,
+> and served read-only. That dissolves blocker 2 (nothing ever writes to a
+> sealed artifact), the pinned fork's compact-store property hash index
+> dissolves blocker 1 (sealed reopens register `INDEXED_PROPERTIES` exactly
+> like staging opens), and vector search deliberately never routes to sealed
+> stores. Bytes round-trip the pinned dictionary codec losslessly now, but
+> `COMPACT_ROUND_TRIPS_BYTES` stays **off**: a real 431-file code generation
+> (~45k entities carrying serialized-record Bytes payloads) fails its
+> post-reopen recovered-digest proof in compact form with "relation scalar
+> endpoints do not match native topology" and stays permanently unseated
+> behind activation retries, while the same corpus seals and serves in replay
+> form; the toy-scale sealed-store contract compacts and reads exactly, so
+> the defect only shows at generation scale. This document remains the
+> measurement record for the whole-database compaction that was measured and
+> rejected.
 
 ## Verdict
 
@@ -531,11 +550,19 @@ the heap-copy path and are a floor, not a ceiling.
   every reopened store ran without them. That was invisible while identity
   resolved through the intrinsic label index, and cost 23.7s for 64 point reads
   at 500k once it did not.
-- **Phase 2 — seal implies compact. Blocked** on blockers 1 and 2. Blocker 2 is
-  a correctness stop and cannot be contained inside TraceDecay, because
-  `compact()` freezes the whole database while only a generation is immutable.
-  Blocker 1 is an economics question that should be settled before anyone pays
-  for a fork fix.
-- **Phase 3 — vector planning.** Specified above, blocked behind phase 2.
+- **Phase 2 — seal implies compact. Landed as per-generation stores; compact
+  form still gated.** The whole-database `compact()` this plan scoped stays
+  rejected; the sealed-store lane (`src/sealed_store.rs`) seals each
+  generation into its own single-generation database — exactly the
+  "per-generation stores" design blocker 2 demanded — and compacts it when
+  the rows carry no Bytes or Vector properties. The fork's compact property
+  index settles blocker 1's economics and the pinned dictionary codec
+  round-trips Bytes losslessly, but Bytes-carrying generations stay in replay
+  form behind `COMPACT_ROUND_TRIPS_BYTES` until a generation-scale compact
+  seal passes its post-reopen proof (see the constant's doc for the measured
+  scale failure).
+- **Phase 3 — vector planning. Not applicable to sealed stores:** vector
+  search never routes to a sealed artifact; HNSW indexes are rebuilt against
+  the staging database (`apply_sealed_copy_batch` doc).
 - **Phase 4 — streaming section writer, mmap container open.** Unchanged, and
   now clearly behind a property index for the columnar base in priority.

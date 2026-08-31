@@ -8,6 +8,7 @@ use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::DaemonSemanticRuntimeRegistrationError;
+use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
     ProfileSessionHistoricalIngestor, ProjectSessionHistoricalIngestor,
@@ -1275,7 +1276,7 @@ fn cached_project_composition(
 struct SemanticProjectRuntime {
     handle: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
     lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-    resources: crate::config::SemanticResourceCeilings,
+    resources: SemanticResourceCeilings,
     auto_download_enabled: bool,
     startup_selection: Option<String>,
 }
@@ -1346,8 +1347,9 @@ fn project_code_index_authorities(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project search identity is invalid: {error}"),
         })?;
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
-        .map_err(|error| TraceDecayError::Config {
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+            .map_err(|error| TraceDecayError::Config {
             message: format!("project search scope is invalid: {error:?}"),
         })?;
     let graph_projection_read_port = project_open_owners::project_code_graph_projection_read_port(

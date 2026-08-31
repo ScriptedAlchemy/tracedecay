@@ -271,7 +271,7 @@ fn request_daemon_shutdown_stream(
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": REQUEST_ID,
-        "method": crate::DAEMON_SHUTDOWN_METHOD,
+        "method": tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD,
     });
     let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(auth_token).to_line()?;
     let handshake = handshake.to_line()?;

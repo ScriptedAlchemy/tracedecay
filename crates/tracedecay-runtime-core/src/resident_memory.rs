@@ -104,6 +104,34 @@ pub fn resident_memory_watermark_bytes_v1(limit_bytes: NonZeroU64, permille: u64
     u64::try_from(scaled).unwrap_or(u64::MAX)
 }
 
+/// Sample this process's resident set size directly from the kernel.
+///
+/// The one `/proc/self/status` `VmRSS` parser in the workspace: the daemon
+/// retention tick publishes its samples into
+/// [`process_resident_memory_pressure_v1`], and load-scoped watchdogs (the
+/// semantic session pool's cold-load resident bound) sample it directly.
+/// Returns `None` where the kernel surface is unavailable (non-Linux hosts),
+/// which callers must treat as unobserved, never as zero.
+#[must_use]
+pub fn sampled_process_resident_bytes_v1() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let kib = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?;
+        kib.checked_mul(1_024)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// What the last measured RSS sample says about this process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidentMemoryPressureStateV1 {

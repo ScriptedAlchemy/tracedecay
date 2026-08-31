@@ -356,8 +356,12 @@ const LIFECYCLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_m
 const CONTROL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 #[cfg(any(windows, test))]
 const START_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(3);
+/// The graceful-stop window is the daemon's own shutdown persistence budget:
+/// the supervisor waits exactly as long as the daemon may legitimately take
+/// to drain before force-stopping.
 #[cfg(any(windows, test))]
-const GRACEFUL_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+const GRACEFUL_STOP_TIMEOUT: std::time::Duration =
+    tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 #[cfg(any(windows, test))]
 const HARD_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 

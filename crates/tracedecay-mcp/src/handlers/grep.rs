@@ -6,6 +6,7 @@
 //! `tracedecay_search` only matches symbol *names*, not file *content*.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_application::{
@@ -16,13 +17,12 @@ use tracedecay_code_index::grep_search::{
     GrepScanOmissionsV1, GrepSearchHit, GrepSearchQuery, MAX_INTERACTIVE_SOURCE_BYTES,
     MAX_LINE_BYTES, search_tree_with_cancel,
 };
-
-use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::support::{filter_by_scope, run_bounded_search, unique_file_paths};
-use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::tools::render::{self, Md};
+use crate::ToolResult;
+use crate::handlers::run_bounded_search;
+use crate::tools::render::{self, Md};
+use crate::unique_file_paths;
 
 /// Hard cap on `max_results` regardless of what the caller requests.
 const MAX_RESULTS_CAP: usize = 200;
@@ -52,8 +52,8 @@ impl From<GrepSearchHit> for GrepHit {
 }
 
 #[hotpath::measure(future = true, label = "mcp.search.grep.total")]
-pub(super) async fn handle_grep(
-    cg: &TraceDecay,
+pub async fn handle_grep(
+    project_root: &Path,
     args: Value,
     scope_prefix: Option<&str>,
     deadline: Option<tracedecay_application::Deadline>,
@@ -93,7 +93,7 @@ pub(super) async fn handle_grep(
         .and_then(Value::as_u64)
         .map_or(0, |v| (v as usize).min(MAX_CONTEXT_LINES));
 
-    let project_root = cg.project_root().to_path_buf();
+    let project_root_buf = project_root.to_path_buf();
     let query = GrepSearchQuery {
         pattern: pattern.to_owned(),
         fixed_strings,
@@ -109,7 +109,7 @@ pub(super) async fn handle_grep(
             deadline,
             cancellation,
             move |cancelled, transport_cancellation| {
-                search_tree_with_cancel(&project_root, &query, || {
+                search_tree_with_cancel(&project_root_buf, &query, || {
                     cancelled.load(std::sync::atomic::Ordering::Acquire)
                         || transport_cancellation
                             .as_ref()
@@ -123,11 +123,14 @@ pub(super) async fn handle_grep(
 
     // Scope filtering mirrors `tracedecay_search`: when the client pins a
     // subtree, only hits under it are returned.
-    let mut hits = filter_by_scope(
-        scan.hits.into_iter().map(GrepHit::from).collect(),
-        scope_prefix,
-        |hit| hit.file.as_str(),
-    );
+    let mut hits = scan
+        .hits
+        .into_iter()
+        .map(GrepHit::from)
+        .filter(|hit| {
+            tracedecay_runtime_core::path_scope::path_matches_scope(hit.file.as_str(), scope_prefix)
+        })
+        .collect::<Vec<_>>();
     let truncated = scan.truncated || hits.len() > max_results;
     hits.truncate(max_results);
 
@@ -142,7 +145,7 @@ pub(super) async fn handle_grep(
 
     let text = hotpath::measure_block!(
         "mcp.search.grep.render",
-        render::finalize(Some(cg.project_root()), &args, &output_value, || {
+        render::finalize(Some(project_root), &args, &output_value, || {
             render_grep_md(&hits, truncated, scan.files_scanned, scan.omissions)
         })
     );

@@ -17,7 +17,7 @@
 //!   exactly what production observes when a commit outlives its budget —
 //!   commit started, deadline elapsed — and reports `PartialEffect` with a real
 //!   committed receipt and a `Reconcile`-only legal action
-//!   (`src/daemon/retained_owner/receipts.rs::complete_at`,
+//!   (`crates/tracedecay-application/src/retained_receipts.rs::complete_at`,
 //!   `src/daemon/retained_owner/memory.rs::execute_add_on_db`).
 //!
 //!   The barrier exists because that window is otherwise one fsync wide: a

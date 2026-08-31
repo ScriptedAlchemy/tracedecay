@@ -1,6 +1,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
+use tracedecay_semantic_contracts::{
+    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
+};
 
 /// Any component exercises the registry the same way, so this test-only marker
 /// keeps generic registry checks independent of a production capability slot.
@@ -963,7 +966,7 @@ async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
                 }
                 cancelled.send(()).expect("worker-cancel receiver");
                 worker_release.await.expect("worker-release sender");
-                Err(tracedecay_semantic::SemanticRuntimeScheduleFailureV1::Cancelled)
+                Err(SemanticRuntimeScheduleFailureV1::Cancelled)
             },
         ))
     );
@@ -986,8 +989,8 @@ async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
     assert!(retirement.await.expect("retirement task"));
     assert!(matches!(
         semantic.status(),
-        tracedecay_semantic::SemanticRuntimeScheduleStatusV1::Failed {
-            reason: tracedecay_semantic::SemanticRuntimeScheduleFailureV1::Cancelled,
+        SemanticRuntimeScheduleStatusV1::Failed {
+            reason: SemanticRuntimeScheduleFailureV1::Cancelled,
             ..
         }
     ));

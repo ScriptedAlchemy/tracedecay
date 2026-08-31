@@ -2,8 +2,9 @@
 //!
 //! This crate sits below the composition root. It owns request/response
 //! envelopes, binding resolution, cancellation/ack frames, handshake identity,
-//! and the socket framing used to carry those envelopes. It does not open
-//! stores, mint authority, or assemble the daemon service.
+//! and the socket transport used to carry those envelopes. Bounded frame
+//! limits, readers, and oversized-frame errors live in `tracedecay-framing`.
+//! It does not open stores, mint authority, or assemble the daemon service.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -54,7 +55,6 @@ pub mod lsp_wire;
 pub mod output_format;
 pub mod surface;
 pub mod transport;
-pub mod wire;
 
 pub use client::{
     AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,
@@ -78,8 +78,8 @@ pub use connection::{
 };
 pub use contract::{
     CanonicalQualificationBlob, CanonicalQualificationBlobError, DAEMON_INVOCATION_PROTOCOL,
-    DAEMON_INVOCATION_REVISION, DaemonFeedbackResult, DaemonGitEffectResult,
-    DaemonGitPreviewResult, DaemonInvocationCancellationRequest,
+    DAEMON_INVOCATION_REVISION, DAEMON_SHUTDOWN_METHOD, DaemonFeedbackResult,
+    DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationCancellationRequest,
     DaemonInvocationDeliveryAckRejectReason, DaemonInvocationDeliveryAckRequest,
     DaemonInvocationDeliveryAckResponse, DaemonInvocationDeliveryAckResponseOutcome,
     DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationPayload,

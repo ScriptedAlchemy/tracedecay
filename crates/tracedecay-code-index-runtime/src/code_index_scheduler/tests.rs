@@ -20,15 +20,15 @@ use tracedecay_application::{
     SourceMetadataRequest, callable_code_operation,
 };
 use tracedecay_domain::{
-    ActorId, AuthorizationRevision, CalibrationProfileId, CodeGenerationId, CommitId,
-    ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
-    ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile, LogicalEvidenceId,
-    ManifestDigest, OptionalStagePublicStatus, PrincipalId, PrivacyDomainId, ProjectId,
-    PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1,
-    RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
-    SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId, SensitivityLevelV1,
-    SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
+    ActorId, AuthorizationRevision, CalibrationProfileId, ChunkerRevision, CodeGenerationId,
+    CommitId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
+    ExactAdmissionRuleRevision, ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile,
+    LogicalEvidenceId, ManifestDigest, OptionalStagePublicStatus, PolicyRevisionId, PrincipalId,
+    PrivacyDomainId, ProjectId, PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate,
+    RefId, RelationEdgeKindV1, RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
+    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
+    RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
+    SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -38,11 +38,12 @@ use crate::semantic_code::{
     production_fastembed_catalog,
 };
 #[cfg(feature = "semantic-fastembed")]
-use tracedecay_global_db::configuration::semantic::SemanticResourceCeilings;
-#[cfg(feature = "semantic-fastembed")]
 use tracedecay_graph_db::NeverCancelled;
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticFallbackReasonV1, SemanticResourceCeilings,
+};
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
@@ -209,6 +210,35 @@ fn scheduler(
 ) -> CodeIndexWorktreeSchedulerV1 {
     CodeIndexWorktreeSchedulerV1::open(test_project_id(), fixture.path(), store_root, bytes)
         .expect("open worktree scheduler")
+}
+
+fn replace_scheduler_policy_revision(scheduler: &mut CodeIndexWorktreeSchedulerV1, revision: &str) {
+    let mut config = scheduler.production_config.clone();
+    config.policy_revision = PolicyRevisionId::new(revision).expect("policy revision");
+    scheduler.owner = super::open_production_code_index_owner_v1(
+        config.clone(),
+        scheduler.publication.clone(),
+        super::DaemonProjectionSinkV1,
+    )
+    .expect("open reconfigured production owner")
+    .with_physical_artifact_pool(scheduler.byte_pool.physical_artifacts.clone());
+    scheduler.production_config = config;
+}
+
+fn replace_scheduler_chunker_revision(
+    scheduler: &mut CodeIndexWorktreeSchedulerV1,
+    revision: &str,
+) {
+    let mut config = scheduler.production_config.clone();
+    config.chunker_revision = ChunkerRevision::new(revision).expect("chunker revision");
+    scheduler.owner = super::open_production_code_index_owner_v1(
+        config.clone(),
+        scheduler.publication.clone(),
+        super::DaemonProjectionSinkV1,
+    )
+    .expect("open reconfigured production owner")
+    .with_physical_artifact_pool(scheduler.byte_pool.physical_artifacts.clone());
+    scheduler.production_config = config;
 }
 
 fn build_progress_snapshot(
@@ -1281,8 +1311,7 @@ fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
         (
             tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Degraded {
                 active_generation: None,
-                reason:
-                    tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::RuntimeFailure,
+                reason: SemanticFallbackReasonV1::RuntimeFailure,
             },
             "semantic_degraded",
         ),
@@ -1739,6 +1768,263 @@ fn saved_edit_incremental_publish() {
     let _ = latest
         .production_graph_serving()
         .expect("graph owner is activated");
+}
+
+/// Committing content the index already serves re-seals for provenance (see
+/// `same_content_head_move_publishes_new_source_identity`), and that re-seal
+/// must be delta-empty at the parse boundary: zero capture-declared changed
+/// files and zero changed chunks, with every chunk reused. This pins the
+/// evidence the downstream phases receive — graph activation, text-artifact
+/// projection, and semantic staging currently rebuild generation-scoped
+/// state from scratch even when these counters say the corpus is
+/// byte-identical, which is what makes a small drift cost a full pass.
+#[test]
+fn provenance_only_reseal_carries_the_full_parse_forward() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n"),
+        ("src/other.rs", "pub fn gamma() -> u32 { 3 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    published(scheduler.reconcile_now().expect("initial publish"));
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    scheduler.notify_path(fixture.path().join("src/lib.rs"));
+    let dirty = published(
+        scheduler
+            .reconcile_now()
+            .expect("dirty incremental publish"),
+    );
+    assert!(
+        scheduler
+            .latest_complete()
+            .expect("dirty generation serves")
+            .generation()
+            .snapshot()
+            .source_revision
+            .is_none(),
+        "a dirty capture seals without an exact source revision"
+    );
+
+    git(fixture.path(), &["add", "."]);
+    git(fixture.path(), &["commit", "-qm", "commit indexed content"]);
+    let resealed = published(
+        scheduler
+            .reconcile_now()
+            .expect("provenance-only reseal publishes"),
+    );
+    assert_ne!(dirty.generation_id, resealed.generation_id);
+    assert_eq!(
+        resealed.snapshot_content_identity, dirty.snapshot_content_identity,
+        "committing indexed content must not change the content identity"
+    );
+    assert_eq!(
+        resealed.reextracted_files, 0,
+        "a provenance-only reseal declares no changed files to re-extract"
+    );
+    assert_eq!(
+        resealed.changed_chunks, 0,
+        "a provenance-only reseal produces no added, changed, or deleted chunks"
+    );
+    assert!(
+        resealed.reused_chunks > 0,
+        "a provenance-only reseal reuses every sealed chunk"
+    );
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("resealed generation serves")
+            .generation()
+            .snapshot()
+            .source_revision
+            .clone()
+            .expect("the reseal carries the committed revision")
+            .as_str(),
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        "the reseal records the moved tip as its exact source revision"
+    );
+}
+
+#[test]
+fn policy_transition_rebuilds_incompatible_active_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut config_a = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+    let generation_a = published(
+        config_a
+            .reconcile_now()
+            .expect("publish configuration A generation"),
+    )
+    .generation_id;
+    drop(config_a);
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    let mut config_b = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    replace_scheduler_policy_revision(&mut config_b, "policy.daemon.v2");
+
+    let generation_b = published(
+        config_b
+            .reconcile_now()
+            .expect("configuration B must rebuild instead of rejecting A"),
+    )
+    .generation_id;
+    assert_ne!(generation_b, generation_a);
+    assert!(
+        config_b
+            .latest_complete()
+            .expect("configuration B generation")
+            .generation()
+            .chunks()
+            .chunks()
+            .iter()
+            .all(|chunk| chunk.sensitivity.policy_revision.as_str() == "policy.daemon.v2")
+    );
+}
+
+#[test]
+fn unchanged_policy_transition_refuses_unsafe_serving_and_rebuilds_once() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut config_a = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+    let generation_a = published(
+        config_a
+            .reconcile_now()
+            .expect("publish configuration A generation"),
+    )
+    .generation_id;
+    drop(config_a);
+
+    let mut config_b = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+    replace_scheduler_policy_revision(&mut config_b, "policy.daemon.v2");
+    assert!(
+        config_b.latest_complete().is_none(),
+        "a generation sealed under a foreign policy must not serve while B rebuilds"
+    );
+    let recovery = config_b
+        .generation_recovery()
+        .read()
+        .expect("generation recovery status")
+        .clone()
+        .expect("policy recovery status");
+    assert_eq!(recovery.incompatible_generation_id, generation_a.as_str());
+    assert_eq!(recovery.incompatibilities, ["policy_revision"]);
+    assert_eq!(
+        recovery.serving,
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryServingV1::Refused
+    );
+    let generation_b = published(
+        config_b
+            .reconcile_now()
+            .expect("unchanged source still requires a configuration B generation"),
+    )
+    .generation_id;
+    assert_ne!(generation_b, generation_a);
+    let pointer = config_b
+        .publication
+        .read_publication_pointer()
+        .expect("read configuration B publication")
+        .expect("configuration B publication pointer");
+    assert_eq!(pointer.generation_id, generation_b.as_str());
+    assert_eq!(
+        pointer
+            .generation_index
+            .iter()
+            .filter(|entry| entry.generation_id == generation_a.as_str())
+            .count(),
+        0,
+        "the replacement is the sole durable candidate for this exact Git evidence"
+    );
+    assert!(
+        config_b
+            .generation_recovery()
+            .read()
+            .expect("generation recovery status")
+            .is_none(),
+        "the replacement publication clears recovery status"
+    );
+    assert!(matches!(
+        config_b
+            .reconcile_now()
+            .expect("configuration B must settle after one rebuild"),
+        CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    drop(config_b);
+
+    let mut restarted = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    replace_scheduler_policy_revision(&mut restarted, "policy.daemon.v2");
+    assert!(matches!(
+        restarted
+            .reconcile_now()
+            .expect("restart must adopt the persisted configuration B generation"),
+        CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    assert_eq!(
+        restarted
+            .latest_complete()
+            .expect("configuration B survives restart")
+            .generation()
+            .manifest()
+            .generation_id,
+        generation_b
+    );
+}
+
+#[test]
+fn chunker_transition_preserves_safe_serving_until_replacement() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut config_a = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+    let generation_a = published(
+        config_a
+            .reconcile_now()
+            .expect("publish configuration A generation"),
+    )
+    .generation_id;
+    drop(config_a);
+
+    let mut config_b = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    replace_scheduler_chunker_revision(&mut config_b, "chunker.daemon.v4");
+    assert_eq!(
+        config_b
+            .latest_complete()
+            .expect("chunker-only incompatibility may preserve serving")
+            .generation()
+            .manifest()
+            .generation_id,
+        generation_a
+    );
+    let recovery = config_b
+        .generation_recovery()
+        .read()
+        .expect("generation recovery status")
+        .clone()
+        .expect("chunker recovery status");
+    assert_eq!(recovery.incompatibilities, ["chunker_revision"]);
+    assert_eq!(
+        recovery.serving,
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryServingV1::Preserved
+    );
+    let generation_b = published(
+        config_b
+            .reconcile_now()
+            .expect("chunker transition must publish a replacement"),
+    )
+    .generation_id;
+    assert_ne!(generation_b, generation_a);
+    assert_eq!(
+        config_b
+            .latest_complete()
+            .expect("replacement generation")
+            .generation()
+            .manifest()
+            .chunker_revision
+            .as_str(),
+        "chunker.daemon.v4"
+    );
 }
 
 #[test]
@@ -5332,7 +5618,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
 /// mutex for its whole pass — sealing a production-scale corpus holds it for
 /// minutes per generation — while the seated serving generation stays fully
 /// decoded, activated, and proven current from before the pass began.
-/// Verified graph reads (redundancy, diagnose, dead_code, callers, impact)
+/// Verified graph reads (redundancy, diagnose, `dead_code`, callers, impact)
 /// resolve through `latest_complete_ready_decoded_for_root_scope`; refusing
 /// them "not ready" for the whole pass turned bounded background work into a
 /// tool outage that outlived exact/lexical retrieval by 25+ minutes.
@@ -5857,8 +6143,10 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
     use crate::code_index::graph_projection::CodeGraphProjectionError;
 
     assert!(
-        super::CodeIndexSchedulerErrorV1::GraphProjection(CodeGraphProjectionError::Conflict)
-            .is_retryable_activation(),
+        super::CodeIndexSchedulerErrorV1::GraphProjection(
+            tracedecay_graph_db::GraphDbError::conflict("test.publication_conflict").into()
+        )
+        .is_retryable_activation(),
         "a publication conflict leaves the sealed artifact intact and must retry with backoff"
     );
     assert!(
@@ -5867,6 +6155,85 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
         ))
         .is_retryable_activation(),
         "payload corruption stays terminal so reconcile can rebuild"
+    );
+}
+
+/// A conflict verdict identical to the previous seat attempt's — same guard
+/// site, same compared evidence, same sealed generation — is deterministic:
+/// the sealed inputs are immutable, so replaying activation reproduces the
+/// exact refusal forever. The seat loop must recognize the repeat and take
+/// the terminal typed-refusal arm instead of looping at the backoff ceiling
+/// (issue #765). Anything short of an exact repeat stays a retry: a first
+/// conflict, a different guard site, different compared evidence, another
+/// generation, or a non-conflict failure in between.
+#[test]
+fn repeated_identical_conflict_verdict_is_terminal_not_retryable() {
+    use tracedecay_graph_db::GraphDbError;
+
+    let generation = CodeGenerationId::new("gen.sealed-1").expect("generation id");
+    let other_generation = CodeGenerationId::new("gen.sealed-2").expect("generation id");
+    let conflict_error = |site: &'static str| {
+        super::CodeIndexSchedulerErrorV1::GraphProjection(GraphDbError::conflict(site).into())
+    };
+    let context_of = |site: &'static str| {
+        let error = conflict_error(site);
+        error
+            .activation_conflict_context()
+            .expect("conflict error carries its context")
+            .clone()
+    };
+
+    let error = conflict_error("publication.prepare.expected_prior_head");
+    let prior = (
+        generation.clone(),
+        context_of("publication.prepare.expected_prior_head"),
+    );
+
+    assert!(
+        super::registry::is_repeated_conflict_verdict(&error, &generation, Some(&prior)),
+        "an identical verdict for the same generation is deterministic and terminal"
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(&error, &generation, None),
+        "the first conflict retries; it may be a concurrent-publisher race"
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(&error, &other_generation, Some(&prior)),
+        "a different sealed generation is a fresh attempt, not a repeat"
+    );
+    let different_site = (
+        generation.clone(),
+        context_of("publication.complete.cas_prior_head"),
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(&error, &generation, Some(&different_site)),
+        "a different guard site is a different verdict"
+    );
+    let different_evidence = (
+        generation.clone(),
+        match GraphDbError::conflict_observed(
+            "publication.prepare.expected_prior_head",
+            "head seq 1",
+            "head seq 2",
+        ) {
+            GraphDbError::Conflict { context } => context,
+            _ => unreachable!("conflict constructor produces the conflict variant"),
+        },
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(
+            &error,
+            &generation,
+            Some(&different_evidence)
+        ),
+        "different compared evidence is a different verdict"
+    );
+    let non_conflict = super::CodeIndexSchedulerErrorV1::GraphProjection(
+        crate::code_index::graph_projection::CodeGraphProjectionError::DeadlineExceeded,
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(&non_conflict, &generation, Some(&prior)),
+        "only a conflict verdict can repeat a conflict verdict"
     );
 }
 
@@ -6502,6 +6869,47 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
         .expect("dashboard freshness");
     assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
     assert_eq!(projected.coverage, "complete");
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn dashboard_freshness_reports_active_reconcile_liveness() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let canonical = fixture.path().canonicalize().expect("canonical fixture");
+    let reconcile_in_progress = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical)
+                .expect("mounted worktree")
+                .reconcile_in_progress,
+        )
+    };
+
+    reconcile_in_progress.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness");
+    reconcile_in_progress.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+
+    assert!(
+        projected.rebuild_in_flight,
+        "an active scheduler pass must keep stale serving typed as rebuilding"
+    );
     registry.shutdown().await;
 }
 
@@ -8085,10 +8493,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         .expect("Jina lifecycle"),
     );
     lifecycle
-        .select_model(
-            Some(tracedecay_global_db::configuration::semantic::DEFAULT_FASTEMBED_MODEL_ID),
-            true,
-        )
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select configured Jina model");
     lifecycle
         .acquire_blocking_for_tests()
@@ -12507,10 +12912,9 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
                 ref reason,
             },
         ) = freshness.code_graph_serving
+            && reason != "generation_unavailable"
         {
-            if reason != "generation_unavailable" {
-                break reason.clone();
-            }
+            break reason.clone();
         }
         assert!(
             Instant::now() <= deadline,

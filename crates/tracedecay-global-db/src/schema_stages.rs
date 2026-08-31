@@ -449,10 +449,7 @@ async fn classify_registered_schema_admission(
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    "configuration",
-                    reason,
-                )
+                tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
             }
             configuration::ConfigurationSchemaError::Storage(error) => {
                 global_db_operation_error("inspect configuration schema freshness", error)
@@ -468,10 +465,7 @@ async fn classify_registered_schema_admission(
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    "configuration",
-                    reason,
-                )
+                tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
             }
             configuration::ConfigurationSchemaError::Storage(error) => {
                 global_db_operation_error("admit configuration schema", error)
@@ -484,12 +478,10 @@ async fn classify_registered_schema_admission(
     if configuration_fresh.is_none()
         && let Err(error) = validate_remote_deletion_schema_contract(connection).await
     {
-        return Err(
-            tracedecay_domain::errors::TraceDecayError::reset_required(
-                "remote deletion tombstones",
-                error.to_string(),
-            ),
-        );
+        return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+            "remote deletion tombstones",
+            error.to_string(),
+        ));
     }
     Ok(RegisteredSchemaAdmissionClassification {
         configuration_fresh,
@@ -548,6 +540,20 @@ pub async fn ensure_registered_schema_for_admission(
         .map_err(|error| {
             global_db_operation_error("initialize observation projection indexes", error)
         })?;
+    // Stores installed before the LCM status indexes existed are already at
+    // the current LCM schema version, so the in-transaction LCM stage above
+    // returned without touching them. Each build is one idempotent
+    // authority-revalidated batch outside the shared schema transaction: a
+    // real-scale index build over the raw-message store gets the long lease
+    // instead of holding every other admission stage open.
+    for sql in tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL {
+        installation
+            .execute_authority_revalidated_batch(sql)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize LCM status performance indexes", error)
+            })?;
+    }
     validate_authority_schema_contract(installation).await?;
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
@@ -572,10 +578,7 @@ async fn install_registered_schema_stages(
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    "configuration",
-                    reason,
-                )
+                tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
             }
             configuration::ConfigurationSchemaError::Storage(error) => {
                 global_db_operation_error("initialize configuration schema", error)
@@ -619,12 +622,10 @@ async fn install_registered_schema_stages(
         if is_fresh {
             return Err(error);
         }
-        return Err(
-            tracedecay_domain::errors::TraceDecayError::reset_required(
-                project_registry::PROJECT_REGISTRY_AUTHORITY,
-                error.to_string(),
-            ),
-        );
+        return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+            project_registry::PROJECT_REGISTRY_AUTHORITY,
+            error.to_string(),
+        ));
     }
     project_registry::validate_project_rows_have_canonical_keys(transaction).await?;
 
@@ -871,6 +872,15 @@ pub async fn ensure_attached_registered_schema(
         })?;
         transaction.commit().await?;
     }
+    for sql in tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL {
+        let transaction = database
+            .begin_bulk_write_transaction("install LCM status performance index")
+            .await?;
+        transaction.execute_batch(sql).await.map_err(|error| {
+            global_db_operation_error("initialize LCM status performance indexes", error)
+        })?;
+        transaction.commit().await?;
+    }
     validate_authority_schema_contract(&read_connection).await?;
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
@@ -1025,9 +1035,7 @@ async fn inspect_workflow_schema_for_admission(
     Ok(WorkflowSchemaAdmission::Complete)
 }
 
-fn workflow_schema_reset_required(
-    reason: &str,
-) -> tracedecay_domain::errors::TraceDecayError {
+fn workflow_schema_reset_required(reason: &str) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::reset_required("workflow", reason)
 }
 

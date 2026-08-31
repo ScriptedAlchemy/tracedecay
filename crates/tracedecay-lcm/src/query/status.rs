@@ -1,5 +1,8 @@
 use std::path::Path;
 
+use tracedecay_runtime_core::db::engine::{Value, params_from_iter};
+
+use super::scope::LcmScopeSql;
 use super::*;
 
 const STORE_STATUS_PAGE_SIZE: i64 = 512;
@@ -19,6 +22,7 @@ struct StatusQueryWork {
     payload_health_scans: usize,
 }
 
+#[hotpath::measure_all]
 impl StatusQueryWork {
     fn record_query(&mut self) {
         self.status_query_calls += 1;
@@ -61,6 +65,7 @@ pub(super) async fn status_for_provider(
     .await
 }
 
+#[hotpath::measure(label = "sessions.lcm.status.provider", future = true)]
 async fn status_for_provider_with_work(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -94,7 +99,13 @@ async fn status_for_provider_with_work(
     work.record_query();
     let lifecycle_metadata = load_lifecycle_metadata(conn, provider, session_id).await?;
     work.record_query();
-    let store = store_status(conn, provider, session_id).await?;
+    // The counts statement above already produced this scope's exact message
+    // count from the covering index; re-counting here would repeat that whole
+    // index scan once more per status call. Shallow status keeps that count
+    // and reports tokens as a typed unscanned partial instead of reading up
+    // to 20_000 message bodies on every health probe (#767).
+    let store = store_status_for_depth(deep, counts.raw_message_count, conn, provider, session_id)
+        .await?;
     work.record_query();
     let dag = dag_status(conn, provider, session_id).await?;
 
@@ -122,6 +133,7 @@ pub(super) async fn aggregate_provider_status(
     )
 }
 
+#[hotpath::measure(label = "sessions.lcm.status.aggregate", future = true)]
 async fn aggregate_provider_status_with_work(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -147,7 +159,8 @@ async fn aggregate_provider_status_with_work(
         payload_health_summary(conn, storage_root, "all", session_id, gc_config).await?
     };
     work.record_query();
-    let store = store_status(conn, "all", session_id).await?;
+    let store =
+        store_status_for_depth(deep, counts.raw_message_count, conn, "all", session_id).await?;
     work.record_query();
     let dag = dag_status(conn, "all", session_id).await?;
     let status = status_from_parts(
@@ -161,78 +174,83 @@ async fn aggregate_provider_status_with_work(
     Ok((status, work))
 }
 
+/// One-statement status count rollup.
+///
+/// Every `lcm_raw_messages` term here must be answerable from an index —
+/// never the body-bearing table records. The plain counts cover through
+/// `idx_lcm_raw_session_order` when scoped, and through SQLite's bare
+/// `COUNT(*)` b-tree count when unbounded. The redaction counts' predicates
+/// must stay byte-identical to the partial-index WHERE clauses in
+/// [`schema::LCM_STATUS_PERFORMANCE_INDEX_SQL`], because SQLite substitutes a
+/// partial index only when the query terms structurally imply its clause.
+/// `status_query_plans_never_scan_body_bearing_tables` holds this contract.
+fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec<Value>) {
+    let content = LcmScopeSql::new("provider", "session_id", provider, session_id);
+    let lifecycle = LcmScopeSql::new("provider", "current_session_id", provider, session_id);
+    let debt = LcmScopeSql::new("d.provider", "s.current_session_id", provider, session_id);
+    let content_where = content.where_clause();
+    let content_and = content.and_clause();
+    let lifecycle_where = lifecycle.where_clause();
+    let lifecycle_and = lifecycle.and_clause();
+    let debt_where = debt.where_clause();
+    let sql = format!(
+        "SELECT
+             CASE WHEN
+                 EXISTS (SELECT 1 FROM lcm_raw_messages {content_where})
+                 OR EXISTS (SELECT 1 FROM lcm_summary_nodes {content_where})
+                 OR EXISTS (SELECT 1 FROM lcm_external_payloads {content_where})
+                 OR EXISTS (SELECT 1 FROM lcm_lifecycle_state {lifecycle_where})
+             THEN 1 ELSE 0 END,
+             (SELECT COUNT(*)
+                FROM lcm_raw_messages
+                {content_where}),
+             (SELECT COUNT(*)
+                FROM lcm_summary_nodes
+                {content_where}),
+             (SELECT COUNT(*)
+                FROM lcm_maintenance_debt d
+                JOIN lcm_lifecycle_state s
+                  ON s.provider = d.provider
+                 AND s.conversation_id = d.conversation_id
+                {debt_where}),
+             (SELECT COUNT(*)
+                FROM lcm_lifecycle_state
+                {lifecycle_where}),
+             (SELECT COUNT(*)
+                FROM lcm_lifecycle_state
+               WHERE current_frontier_store_id IS NOT NULL{lifecycle_and}),
+             (SELECT COUNT(*)
+                FROM lcm_raw_messages
+               WHERE legacy_truncated != 0{content_and}),
+             (SELECT COUNT(*)
+                FROM lcm_raw_messages
+               WHERE metadata_json IS NOT NULL
+                 AND json_valid(metadata_json)
+                 AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true'\
+                 {content_and})"
+    );
+    // Bound in the placeholders' textual order: the four EXISTS probes, the
+    // raw/summary counts, the debt join, both lifecycle counts, and the two
+    // redaction counts.
+    let scopes_in_sql_order: [&LcmScopeSql; 11] = [
+        &content, &content, &content, &lifecycle, &content, &content, &debt, &lifecycle,
+        &lifecycle, &content, &content,
+    ];
+    let mut values = Vec::new();
+    for scope in scopes_in_sql_order {
+        values.extend_from_slice(scope.values());
+    }
+    (sql, values)
+}
+
+#[hotpath::measure(label = "sessions.lcm.status.counts", future = true)]
 async fn status_counts(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<StatusCounts, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT
-                 CASE WHEN
-                     EXISTS (
-                         SELECT 1 FROM lcm_raw_messages
-                          WHERE (?1 = 'all' OR provider = ?1)
-                            AND (?2 IS NULL OR session_id = ?2)
-                     )
-                     OR EXISTS (
-                         SELECT 1 FROM lcm_summary_nodes
-                          WHERE (?1 = 'all' OR provider = ?1)
-                            AND (?2 IS NULL OR session_id = ?2)
-                     )
-                     OR EXISTS (
-                         SELECT 1 FROM lcm_external_payloads
-                          WHERE (?1 = 'all' OR provider = ?1)
-                            AND (?2 IS NULL OR session_id = ?2)
-                     )
-                     OR EXISTS (
-                         SELECT 1 FROM lcm_lifecycle_state
-                          WHERE (?1 = 'all' OR provider = ?1)
-                            AND (?2 IS NULL OR current_session_id = ?2)
-                     )
-                 THEN 1 ELSE 0 END,
-                 (SELECT COUNT(*)
-                    FROM lcm_raw_messages
-                   WHERE (?1 = 'all' OR provider = ?1)
-                     AND (?2 IS NULL OR session_id = ?2)),
-                 (SELECT COUNT(*)
-                    FROM lcm_summary_nodes
-                   WHERE (?1 = 'all' OR provider = ?1)
-                     AND (?2 IS NULL OR session_id = ?2)),
-                 (SELECT COUNT(*)
-                    FROM lcm_maintenance_debt d
-                    JOIN lcm_lifecycle_state s
-                      ON s.provider = d.provider
-                     AND s.conversation_id = d.conversation_id
-                   WHERE (?1 = 'all' OR d.provider = ?1)
-                     AND (?2 IS NULL OR s.current_session_id = ?2)),
-                 (SELECT COUNT(*)
-                    FROM lcm_lifecycle_state
-                   WHERE (?1 = 'all' OR provider = ?1)
-                     AND (?2 IS NULL OR current_session_id = ?2)),
-                 (SELECT COUNT(*)
-                    FROM lcm_lifecycle_state
-                   WHERE (?1 = 'all' OR provider = ?1)
-                     AND (?2 IS NULL OR current_session_id = ?2)
-                     AND current_frontier_store_id IS NOT NULL),
-                 (SELECT COUNT(*)
-                    FROM lcm_raw_messages
-                   WHERE (?1 = 'all' OR provider = ?1)
-                     AND (?2 IS NULL OR session_id = ?2)
-                     AND legacy_truncated != 0),
-                 (SELECT COUNT(*)
-                    FROM lcm_raw_messages
-                   WHERE (?1 = 'all' OR provider = ?1)
-                     AND (?2 IS NULL OR session_id = ?2)
-                     AND metadata_json IS NOT NULL
-                     AND json_valid(metadata_json)
-                     AND json_type(
-                         metadata_json,
-                         '$.ingest_protection.lossy'
-                     ) = 'true')",
-            params![provider, session_id],
-        )
-        .await?;
+    let (sql, values) = status_counts_query(provider, session_id);
+    let mut rows = conn.query(&sql, params_from_iter(values)).await?;
     let row = rows
         .next()
         .await?
@@ -514,7 +532,63 @@ pub async fn store_status(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmStoreStatus, LcmError> {
-    store_status_within(conn, provider, session_id, STORE_STATUS_TOKEN_SCAN_BUDGET).await
+    let messages = store_message_count(conn, provider, session_id).await?;
+    store_status_within(
+        conn,
+        provider,
+        session_id,
+        messages,
+        STORE_STATUS_TOKEN_SCAN_BUDGET,
+    )
+    .await
+}
+
+/// [`store_status`] for a caller that already holds this exact scope's
+/// message count from the same snapshot (the status counts statement), so the
+/// covering-index count scan is not repeated within one status call.
+async fn store_status_with_message_count(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: Option<&str>,
+    messages: i64,
+) -> Result<LcmStoreStatus, LcmError> {
+    store_status_within(
+        conn,
+        provider,
+        session_id,
+        messages,
+        STORE_STATUS_TOKEN_SCAN_BUDGET,
+    )
+    .await
+}
+
+/// Shallow probes keep the indexed message count and refuse the body scan;
+/// deep status still pays the budgeted token estimate.
+async fn store_status_for_depth(
+    deep: bool,
+    messages: i64,
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<LcmStoreStatus, LcmError> {
+    if deep {
+        store_status_with_message_count(conn, provider, session_id, messages).await
+    } else {
+        Ok(store_status_without_token_scan(messages))
+    }
+}
+
+#[hotpath::measure(label = "sessions.lcm.status.store_count_only")]
+fn store_status_without_token_scan(messages: i64) -> LcmStoreStatus {
+    LcmStoreStatus {
+        messages,
+        estimated_tokens: 0,
+        token_estimate: if messages == 0 {
+            LcmStoreTokenCoverage::complete(0)
+        } else {
+            LcmStoreTokenCoverage::unscanned()
+        },
+    }
 }
 
 /// Exact message count plus a token estimate over at most `token_scan_budget`
@@ -524,13 +598,36 @@ pub async fn store_status(
 /// the true one. The token estimate has to read text, so it stops at the budget
 /// and reports the resume cursor instead of streaming a multi-gigabyte store
 /// past the caller's deadline.
+#[hotpath::measure(label = "sessions.lcm.status.store_scan", future = true)]
 async fn store_status_within(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
+    messages: i64,
     token_scan_budget: i64,
 ) -> Result<LcmStoreStatus, LcmError> {
-    let messages = store_message_count(conn, provider, session_id).await?;
+    let scope = LcmScopeSql::new("provider", "session_id", provider, session_id);
+    let page_sql = format!(
+        "WITH page AS (
+             SELECT store_id, COALESCE(content, snippet_text) AS replay_text
+             FROM lcm_raw_messages
+             WHERE store_id > ?{scope}
+             ORDER BY store_id
+             LIMIT ?
+         ),
+         bounded AS (
+             SELECT store_id, replay_text,
+                    ROW_NUMBER() OVER (ORDER BY store_id) AS page_row,
+                    SUM(length(CAST(replay_text AS BLOB)))
+                        OVER (ORDER BY store_id) AS cumulative_bytes
+             FROM page
+         )
+         SELECT store_id, replay_text
+         FROM bounded
+         WHERE cumulative_bytes <= ? OR page_row = 1
+         ORDER BY store_id",
+        scope = scope.and_clause()
+    );
     let mut estimated_tokens = 0_i64;
     let mut scanned_messages = 0_i64;
     let mut scanned_bytes = 0_i64;
@@ -540,37 +637,10 @@ async fn store_status_within(
     {
         let page_limit = STORE_STATUS_PAGE_SIZE.min(token_scan_budget - scanned_messages);
         let remaining_bytes = STORE_STATUS_TOKEN_SCAN_MAX_BYTES.saturating_sub(scanned_bytes);
-        let mut rows = conn
-            .query(
-                "WITH page AS (
-                     SELECT store_id, COALESCE(content, snippet_text) AS replay_text
-                     FROM lcm_raw_messages
-                     WHERE (?1 = 'all' OR provider = ?1)
-                       AND (?2 IS NULL OR session_id = ?2)
-                       AND store_id > ?3
-                     ORDER BY store_id
-                     LIMIT ?4
-                 ),
-                 bounded AS (
-                     SELECT store_id, replay_text,
-                            ROW_NUMBER() OVER (ORDER BY store_id) AS page_row,
-                            SUM(length(CAST(replay_text AS BLOB)))
-                                OVER (ORDER BY store_id) AS cumulative_bytes
-                     FROM page
-                 )
-                 SELECT store_id, replay_text
-                 FROM bounded
-                 WHERE cumulative_bytes <= ?5 OR page_row = 1
-                 ORDER BY store_id",
-                params![
-                    provider,
-                    session_id,
-                    after_store_id,
-                    page_limit,
-                    remaining_bytes
-                ],
-            )
-            .await?;
+        let mut page_params = vec![Value::Integer(after_store_id)];
+        page_params.extend_from_slice(scope.values());
+        page_params.extend([Value::Integer(page_limit), Value::Integer(remaining_bytes)]);
+        let mut rows = conn.query(&page_sql, params_from_iter(page_params)).await?;
         let mut page_count = 0i64;
         while let Some(row) = rows.next().await? {
             let store_id: i64 = row.get(0)?;
@@ -618,21 +688,26 @@ async fn store_status_within(
 }
 
 /// Exact raw-message count for the scope. The `(provider, session_id,
-/// store_id)` index serves this without touching message text.
+/// store_id)` index serves a scoped count without touching message text;
+/// the unbounded scope uses SQLite's bare `COUNT(*)` b-tree count.
+fn store_message_count_query(provider: &str, session_id: Option<&str>) -> (String, Vec<Value>) {
+    let scope = LcmScopeSql::new("provider", "session_id", provider, session_id);
+    let sql = format!(
+        "SELECT COUNT(*)
+         FROM lcm_raw_messages
+         {scope}",
+        scope = scope.where_clause()
+    );
+    (sql, scope.into_values())
+}
+
 async fn store_message_count(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_raw_messages
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, session_id],
-        )
-        .await?;
+    let (sql, values) = store_message_count_query(provider, session_id);
+    let mut rows = conn.query(&sql, params_from_iter(values)).await?;
     let row = rows
         .next()
         .await?
@@ -640,22 +715,29 @@ async fn store_message_count(
     Ok(row.get(0)?)
 }
 
+/// DAG depth rollup, covered by `idx_lcm_summary_nodes_depth_tokens` so the
+/// aggregate never reads `summary_text` records.
+fn dag_status_query(provider: &str, session_id: Option<&str>) -> (String, Vec<Value>) {
+    let scope = LcmScopeSql::new("provider", "session_id", provider, session_id);
+    let sql = format!(
+        "SELECT depth, COUNT(*), SUM(summary_token_count), SUM(source_token_count)
+         FROM lcm_summary_nodes
+         {scope}
+         GROUP BY depth
+         ORDER BY depth",
+        scope = scope.where_clause()
+    );
+    (sql, scope.into_values())
+}
+
+#[hotpath::measure(label = "sessions.lcm.status.dag", future = true)]
 async fn dag_status(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmDagStatus, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT depth, COUNT(*), SUM(summary_token_count), SUM(source_token_count)
-             FROM lcm_summary_nodes
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)
-             GROUP BY depth
-             ORDER BY depth",
-            params![provider, session_id],
-        )
-        .await?;
+    let (sql, values) = dag_status_query(provider, session_id);
+    let mut rows = conn.query(&sql, params_from_iter(values)).await?;
     let mut depths = std::collections::BTreeMap::new();
     let mut total_nodes = 0_i64;
     let mut total_tokens = 0_i64;
@@ -714,6 +796,7 @@ fn python_round_ratio_to_tenths(total_source_tokens: i64, total_tokens: i64) -> 
     format!("{whole}.{fractional}:1")
 }
 
+#[hotpath::measure(label = "sessions.lcm.status.lifecycle", future = true)]
 async fn load_lifecycle_metadata(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -757,9 +840,14 @@ struct LcmLifecycleMetadata {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
-    use tracedecay_runtime_core::db::engine::{Connection, TestConnection};
+    use std::time::{Duration, Instant};
 
+    use tempfile::TempDir;
+    use tracedecay_runtime_core::db::engine::{
+        Connection, TestConnection, Value, params, params_from_iter,
+    };
+
+    use super::super::payload_health::payload_summary_query;
     use super::*;
 
     async fn test_lcm_connection() -> (TempDir, TestConnection) {
@@ -1141,7 +1229,8 @@ mod tests {
         let (_database_dir, conn) = test_lcm_connection().await;
         seed_raw_messages(&conn, "session-budgeted-status", ROWS).await;
 
-        let status = store_status_within(&*conn, "cursor", None, BUDGET)
+        let messages = store_message_count(&*conn, "cursor", None).await.unwrap();
+        let status = store_status_within(&*conn, "cursor", None, messages, BUDGET)
             .await
             .unwrap();
 
@@ -1174,7 +1263,8 @@ mod tests {
         let (_database_dir, conn) = test_lcm_connection().await;
         seed_raw_messages(&conn, "session-complete-status", ROWS).await;
 
-        let status = store_status_within(&*conn, "cursor", None, 512)
+        let messages = store_message_count(&*conn, "cursor", None).await.unwrap();
+        let status = store_status_within(&*conn, "cursor", None, messages, 512)
             .await
             .unwrap();
 
@@ -1198,6 +1288,49 @@ mod tests {
             status.token_estimate
         );
         assert_eq!(status.messages, 600);
+    }
+
+    /// The default health probe must not read message bodies. Token coverage
+    /// is a typed unscanned partial; deep status still pays the budgeted scan.
+    #[tokio::test]
+    async fn shallow_status_reports_unscanned_tokens_instead_of_reading_bodies() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        seed_raw_messages(&conn, "session-shallow-unscanned", 600).await;
+
+        let (status, _work) = aggregate_provider_status_with_work(
+            &*conn,
+            storage.path(),
+            None,
+            false,
+            &LcmGcConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status.store.messages, 600);
+        assert_eq!(status.store.estimated_tokens, 0);
+        assert_eq!(
+            status.store.token_estimate,
+            LcmStoreTokenCoverage::unscanned()
+        );
+
+        let deep = status_for_provider(
+            &*conn,
+            storage.path(),
+            "cursor",
+            None,
+            true,
+            &LcmGcConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deep.store.messages, 600);
+        assert_eq!(deep.store.estimated_tokens, 1200);
+        assert_eq!(
+            deep.store.token_estimate,
+            LcmStoreTokenCoverage::complete(600)
+        );
     }
 
     #[tokio::test]
@@ -1270,5 +1403,412 @@ mod tests {
         assert_eq!(status.external_payload_count, ROWS);
         // Every reference is live, so nothing is reported as unreferenced.
         assert_eq!(status.unreferenced_payload_count, 0);
+    }
+
+    async fn status_plan_lines(conn: &Connection, sql: &str, values: Vec<Value>) -> Vec<String> {
+        let mut rows = conn
+            .query(
+                &format!("EXPLAIN QUERY PLAN {sql}"),
+                params_from_iter(values),
+            )
+            .await
+            .expect("explain a status component query");
+        let mut details = Vec::new();
+        while let Some(row) = rows.next().await.expect("read a plan row") {
+            // Plan rows are (id, parent, notused, detail).
+            details.push(row.get::<String>(3).expect("plan detail column"));
+        }
+        assert!(!details.is_empty(), "empty query plan for: {sql}");
+        details
+    }
+
+    fn assert_no_unindexed_record_scan(sql: &str, plan: &[String]) {
+        for line in plan {
+            for table in [
+                "lcm_raw_messages",
+                "lcm_summary_nodes",
+                "lcm_external_payloads",
+            ] {
+                if line.contains(table) && line.contains("SCAN") && !line.contains("INDEX") {
+                    // Bare `COUNT(*)` / covering aggregate with no WHERE is
+                    // SQLite's b-tree count: it walks leaf cells and never
+                    // loads overflow pages. A tautology WHERE (the old
+                    // `?1 = 'all' OR provider = ?1`) is the scan that
+                    // re-reads message bodies.
+                    assert!(
+                        !sql.contains("= 'all' OR"),
+                        "a status component scans {table} without an index\nplan: {line}\nsql: {sql}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The status probe must answer from indexes. A tautology-filtered scan
+    /// over a body-bearing LCM table re-reads the whole store's message
+    /// content per probe — issue #767 measured 10.65 s daemon-side for one
+    /// 1706-byte row on a 7.5 GB profile store. This holds the plan-shape
+    /// contract between the rendered status SQL and
+    /// [`schema::LCM_STATUS_PERFORMANCE_INDEX_SQL`].
+    #[tokio::test]
+    async fn status_query_plans_never_scan_body_bearing_tables() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        for index in 0..3 {
+            seed_provider(&conn, index).await;
+        }
+
+        let scopes = [
+            ("all", None),
+            ("cursor", None),
+            ("cursor", Some("session-0")),
+        ];
+        for (provider, session_id) in scopes {
+            let queries = [
+                status_counts_query(provider, session_id),
+                dag_status_query(provider, session_id),
+                store_message_count_query(provider, session_id),
+                payload_summary_query(provider, session_id),
+            ];
+            for (sql, values) in queries {
+                let plan = status_plan_lines(&conn, &sql, values).await;
+                assert_no_unindexed_record_scan(&sql, &plan);
+                assert!(
+                    !sql.contains("= 'all' OR"),
+                    "status SQL kept the non-sargable all-scope disjunction:\n{sql}"
+                );
+            }
+        }
+
+        // The redaction counts must resolve through their partial indexes:
+        // a covering scan of the session-order index would still walk every
+        // raw message, so name the exact substitution the planner must make.
+        for (provider, session_id) in scopes {
+            let (sql, values) = status_counts_query(provider, session_id);
+            let counts_plan = status_plan_lines(&conn, &sql, values).await;
+            for partial_index in ["idx_lcm_raw_legacy_truncated", "idx_lcm_raw_lossy_ingest"] {
+                assert!(
+                    counts_plan.iter().any(|line| line.contains(partial_index)),
+                    "status counts no longer substitute {partial_index} for {provider:?}/{session_id:?}; plan:\n{}",
+                    counts_plan.join("\n")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_scope_census_sql_is_bare_count() {
+        let (sql, values) = status_counts_query("all", None);
+        assert!(
+            values.is_empty(),
+            "unbounded census must bind no scope values"
+        );
+        let compact: String = sql.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            compact.contains("(SELECTCOUNT(*)FROMlcm_raw_messages)"),
+            "unbounded raw census must stay a bare COUNT(*):\n{sql}"
+        );
+        assert!(!sql.contains("= 'all' OR"), "{sql}");
+    }
+
+    async fn seed_status_perf_store(conn: &Connection, rows: i64) {
+        conn.execute(
+            "WITH RECURSIVE fixture(value) AS (
+                 SELECT 1 UNION ALL SELECT value + 1 FROM fixture WHERE value < 200
+             )
+             INSERT INTO sessions(provider, session_id, project_key, project_path)
+             SELECT CASE WHEN value % 4 = 0 THEN 'claude' ELSE 'cursor' END,
+                    printf('session-%04d', value), '/project', '/project'
+             FROM fixture",
+            (),
+        )
+        .await
+        .expect("seed sessions");
+        let mut seeded = 0_i64;
+        while seeded < rows {
+            let batch = 25_000.min(rows - seeded);
+            conn.execute(
+                &format!(
+                    "WITH RECURSIVE fixture(value) AS (
+                         SELECT {start} UNION ALL
+                         SELECT value + 1 FROM fixture WHERE value < {end}
+                     )
+                     INSERT INTO lcm_raw_messages (
+                         provider, message_id, session_id, role, ordinal, timestamp,
+                         content, content_hash, storage_kind, payload_ref, snippet_text,
+                         index_text, legacy_source, legacy_truncated, metadata_json
+                     )
+                     SELECT CASE WHEN (1 + (value % 200)) % 4 = 0 THEN 'claude' ELSE 'cursor' END,
+                            printf('message-%09d', value),
+                            printf('session-%04d', 1 + (value % 200)),
+                            CASE value % 3 WHEN 0 THEN 'user' ELSE 'assistant' END,
+                            value, value,
+                            hex(randomblob(1536)),
+                            printf('hash-%09d', value), 'inline', NULL,
+                            'snippet', 'index text',
+                            0,
+                            CASE WHEN value % 9000 = 0 THEN 1 ELSE 0 END,
+                            CASE
+                                WHEN value % 7 = 0 THEN NULL
+                                WHEN value % 5000 = 0 THEN
+                                    '{{\"ingest_protection\":{{\"sanitization_receipt\":\"r\",\"lossy\":true}}}}'
+                                ELSE
+                                    '{{\"ingest_protection\":{{\"sanitization_receipt\":\"r\",\"lossy\":false}}}}'
+                            END
+                     FROM fixture",
+                    start = seeded + 1,
+                    end = seeded + batch,
+                ),
+                (),
+            )
+            .await
+            .expect("seed raw message batch");
+            seeded += batch;
+        }
+        conn.execute(
+            &format!(
+                "WITH RECURSIVE fixture(value) AS (
+                     SELECT 1 UNION ALL SELECT value + 1 FROM fixture WHERE value < {summaries}
+                 )
+                 INSERT INTO lcm_summary_nodes (
+                     node_id, provider, conversation_id, session_id, depth,
+                     summary_text, summary_hash, summary_token_count, source_token_count
+                 )
+                 SELECT printf('node-%09d', value),
+                        CASE WHEN (1 + (value % 200)) % 4 = 0 THEN 'claude' ELSE 'cursor' END,
+                        printf('conversation-%04d', value % 200),
+                        printf('session-%04d', 1 + (value % 200)),
+                        value % 4,
+                        hex(randomblob(512)),
+                        printf('summary-hash-%09d', value),
+                        200 + value % 100, 1600 + value % 800
+                 FROM fixture",
+                summaries = (rows / 8).max(1),
+            ),
+            (),
+        )
+        .await
+        .expect("seed summary nodes");
+        conn.execute(
+            &format!(
+                "WITH RECURSIVE fixture(value) AS (
+                     SELECT 1 UNION ALL SELECT value + 1 FROM fixture WHERE value < {payloads}
+                 )
+                 INSERT INTO lcm_external_payloads (
+                     payload_ref, provider, session_id, message_id, kind,
+                     content_hash, byte_count, char_count
+                 )
+                 SELECT printf('payload-%09d', value),
+                        CASE WHEN (1 + (value % 200)) % 4 = 0 THEN 'claude' ELSE 'cursor' END,
+                        printf('session-%04d', 1 + (value % 200)),
+                        printf('message-%09d', value), 'tool_output',
+                        printf('payload-hash-%09d', value), 2048, 2048
+                 FROM fixture",
+                payloads = (rows / 10).max(1),
+            ),
+            (),
+        )
+        .await
+        .expect("seed external payloads");
+        conn.execute(
+            "WITH RECURSIVE fixture(value) AS (
+                 SELECT 1 UNION ALL SELECT value + 1 FROM fixture WHERE value < 200
+             )
+             INSERT INTO lcm_lifecycle_state (
+                 provider, conversation_id, current_session_id, current_frontier_store_id
+             )
+             SELECT CASE WHEN value % 4 = 0 THEN 'claude' ELSE 'cursor' END,
+                    printf('conversation-%04d', value),
+                    printf('session-%04d', value),
+                    value
+             FROM fixture",
+            (),
+        )
+        .await
+        .expect("seed lifecycle state");
+    }
+
+    fn percentile(sorted: &[Duration], quantile: f64) -> Option<Duration> {
+        if sorted.is_empty() {
+            return None;
+        }
+        let rank = ((sorted.len() as f64 - 1.0) * quantile).round() as usize;
+        Some(sorted[rank.min(sorted.len() - 1)])
+    }
+
+    /// Times `runs` shallow all-provider status calls, printing each run and
+    /// returning p50/p95 over the successful samples. A run that the engine
+    /// interrupts (read deadline) is reported as its own truthful outcome
+    /// instead of aborting the harness — that outcome is exactly the
+    /// production overrun being measured.
+    async fn timed_aggregate_status(
+        conn: &Connection,
+        storage_root: &Path,
+        phase: &str,
+        runs: usize,
+    ) -> (Option<Duration>, Option<Duration>, Option<LcmStatus>) {
+        let mut samples = Vec::new();
+        let mut last = None;
+        for run in 0..runs {
+            let started = Instant::now();
+            match aggregate_provider_status(
+                conn,
+                storage_root,
+                None,
+                false,
+                &LcmGcConfig::default(),
+            )
+            .await
+            {
+                Ok(status) => {
+                    let elapsed = started.elapsed();
+                    println!("{phase} run {run}: {elapsed:?}");
+                    samples.push(elapsed);
+                    last = Some(status);
+                }
+                Err(error) => {
+                    println!(
+                        "{phase} run {run}: failed after {:?}: {error}",
+                        started.elapsed()
+                    );
+                }
+            }
+        }
+        samples.sort();
+        (percentile(&samples, 0.50), percentile(&samples, 0.95), last)
+    }
+
+    /// Manual measurement harness for the status-probe cost on a populated
+    /// store: seeds `LCM_STATUS_PERF_ROWS` (default 50_000) multi-kilobyte
+    /// raw messages plus summaries/payloads/lifecycle rows, then times the
+    /// shallow all-provider status with the status performance indexes
+    /// present and with them dropped (the pre-index shape) on the same data.
+    ///
+    /// Run with e.g.
+    /// `LCM_STATUS_PERF_ROWS=400000 kache cargo -- test -p tracedecay-lcm \
+    ///  --profile perf -- --ignored measure_status_probe_cost --nocapture`.
+    #[tokio::test]
+    #[ignore = "manual perf harness; seeds a large store and prints timings"]
+    async fn measure_status_probe_cost_against_preindex_shape() {
+        #[cfg(feature = "hotpath")]
+        let _hotpath = hotpath::HotpathGuardBuilder::new("lcm-status-probe").build();
+        let rows = std::env::var("LCM_STATUS_PERF_ROWS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(50_000);
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        let seed_started = Instant::now();
+        seed_status_perf_store(&conn, rows).await;
+        println!("seeded {rows} raw messages in {:?}", seed_started.elapsed());
+
+        let runs = std::env::var("LCM_STATUS_PERF_RUNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(11);
+        let (indexed_p50, indexed_p95, status) =
+            timed_aggregate_status(&conn, storage.path(), "indexed", runs).await;
+        let status = status.expect("the indexed status probe must answer");
+        assert_eq!(status.raw_message_count, rows);
+
+        // Same snapshot, same indexes: the landed e8e30 tautology census vs
+        // the sargable/bare-count rewrite. This is the residual #767 cost
+        // after the performance indexes already exist.
+        let tautology_sql = "SELECT
+                 (SELECT COUNT(*) FROM lcm_raw_messages
+                   WHERE (?1 = 'all' OR provider = ?1)
+                     AND (?2 IS NULL OR session_id = ?2)),
+                 (SELECT COUNT(*) FROM lcm_summary_nodes
+                   WHERE (?1 = 'all' OR provider = ?1)
+                     AND (?2 IS NULL OR session_id = ?2)),
+                 (SELECT COUNT(*) FROM lcm_raw_messages
+                   WHERE (?1 = 'all' OR provider = ?1)
+                     AND (?2 IS NULL OR session_id = ?2)
+                     AND legacy_truncated != 0),
+                 (SELECT COUNT(*) FROM lcm_raw_messages
+                   WHERE (?1 = 'all' OR provider = ?1)
+                     AND (?2 IS NULL OR session_id = ?2)
+                     AND metadata_json IS NOT NULL
+                     AND json_valid(metadata_json)
+                     AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true')";
+        let (sargable_sql, sargable_values) = status_counts_query("all", None);
+        let mut tautology_samples = Vec::new();
+        let mut sargable_samples = Vec::new();
+        for run in 0..runs {
+            let started = Instant::now();
+            let mut rows = conn
+                .query(tautology_sql, params!["all", Option::<&str>::None])
+                .await
+                .expect("tautology census");
+            let _ = rows.next().await;
+            tautology_samples.push(started.elapsed());
+            let started = Instant::now();
+            let mut rows = conn
+                .query(&sargable_sql, params_from_iter(sargable_values.clone()))
+                .await
+                .expect("sargable census");
+            let _ = rows.next().await;
+            sargable_samples.push(started.elapsed());
+            println!(
+                "census run {run}: tautology {:?} sargable {:?}",
+                tautology_samples[run], sargable_samples[run]
+            );
+        }
+        tautology_samples.sort();
+        sargable_samples.sort();
+        println!(
+            "census-only over {rows} messages: tautology p50 {:?} p95 {:?} \
+             sargable p50 {:?} p95 {:?}",
+            percentile(&tautology_samples, 0.50),
+            percentile(&tautology_samples, 0.95),
+            percentile(&sargable_samples, 0.50),
+            percentile(&sargable_samples, 0.95)
+        );
+
+        // Profiling lanes attribute the indexed shape alone: the pre-index
+        // phase would dominate every hotpath aggregate with already-diagnosed
+        // full scans.
+        if std::env::var("LCM_STATUS_PERF_SKIP_PREINDEX").is_ok() {
+            println!(
+                "lcm_status shallow all-provider over {rows} messages: \
+                 indexed p50 {indexed_p50:?} p95 {indexed_p95:?}"
+            );
+            return;
+        }
+
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_lcm_raw_legacy_truncated;
+             DROP INDEX IF EXISTS idx_lcm_raw_lossy_ingest;
+             DROP INDEX IF EXISTS idx_lcm_summary_nodes_depth_tokens;
+             DROP INDEX IF EXISTS idx_lcm_external_payloads_owner_bytes;
+             CREATE INDEX idx_lcm_external_payloads_owner
+                 ON lcm_external_payloads(provider, session_id);",
+        )
+        .await
+        .expect("restore the pre-index schema shape");
+        let (preindex_p50, preindex_p95, preindex_status) =
+            timed_aggregate_status(&conn, storage.path(), "pre-index", runs).await;
+        if let Some(preindex_status) = preindex_status {
+            assert_eq!(preindex_status, status);
+        }
+
+        for sql in schema::LCM_STATUS_PERFORMANCE_INDEX_SQL {
+            conn.execute_batch(sql)
+                .await
+                .expect("recreate status performance indexes");
+        }
+        let (reindexed_p50, reindexed_p95, reindexed_status) =
+            timed_aggregate_status(&conn, storage.path(), "re-indexed", runs).await;
+        assert_eq!(
+            reindexed_status.expect("the re-indexed status probe must answer"),
+            status
+        );
+
+        println!(
+            "lcm_status shallow all-provider over {rows} messages: \
+             pre-index p50 {preindex_p50:?} p95 {preindex_p95:?} \
+             (None = every run exceeded the engine read deadline), \
+             indexed p50 {indexed_p50:?} p95 {indexed_p95:?} \
+             (re-check p50 {reindexed_p50:?} p95 {reindexed_p95:?})"
+        );
     }
 }

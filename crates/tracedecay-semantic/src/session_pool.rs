@@ -22,12 +22,14 @@ use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::mpsc::{RecvTimeoutError, SendError, TryRecvError, channel};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SendError, TryRecvError, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::{AdmittedEmbeddingProjectionKeyV1, PrivacyDomainId, ProjectionKeyV1};
+use tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1;
 
 use super::fastembed_adapter::{
     AdmittedProjectionArtifactV1, EmbedError, EmbeddingRuntime, EmbeddingSession,
@@ -41,6 +43,58 @@ mod cold_load_tests;
 pub use clock::{ManualClock, MonotonicClock, SystemMonotonicClock};
 
 const WAITER_WAKEUP_INTERVAL: Duration = Duration::from_millis(5);
+
+/// How often an in-flight cold model open is checked against its load
+/// deadline and the actual-resident bound. Sampling only happens while a
+/// cold open is executing; warm acquisitions never read the kernel surface.
+const COLD_LOAD_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Process-resident sampler consulted while a cold model open is in flight.
+/// Production uses the canonical kernel sampler
+/// ([`sampled_process_resident_bytes_v1`]); tests inject scripted series.
+/// `None` is a typed abstention (no measurement surface), never zero.
+pub type ResidentBytesSamplerV1 = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
+
+const LOAD_INTERRUPTION_NONE: u8 = 0;
+const LOAD_INTERRUPTION_CANCELLED: u8 = 1;
+const LOAD_INTERRUPTION_DEADLINE: u8 = 2;
+
+/// Pool-owned interruption signal handed to each cold-load `open_session`.
+/// The acquisition side fires it when the load deadline elapses or when the
+/// measured resident bound is breached; the loader thread observes it at its
+/// next stage boundary and abandons the open with a typed error instead of
+/// holding the load's memory until the runtime finishes on its own.
+#[derive(Debug, Default)]
+struct LoadInterruptionSignalV1 {
+    state: AtomicU8,
+}
+
+#[hotpath::measure_all]
+impl LoadInterruptionSignalV1 {
+    /// Record the first interruption; later signals keep the original cause.
+    fn fire(&self, interruption: SemanticExecutionInterruptionV1) {
+        let value = match interruption {
+            SemanticExecutionInterruptionV1::Cancelled => LOAD_INTERRUPTION_CANCELLED,
+            SemanticExecutionInterruptionV1::DeadlineExceeded => LOAD_INTERRUPTION_DEADLINE,
+        };
+        let _ = self.state.compare_exchange(
+            LOAD_INTERRUPTION_NONE,
+            value,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+}
+
+impl SemanticExecutionAuthority for LoadInterruptionSignalV1 {
+    fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
+        match self.state.load(Ordering::SeqCst) {
+            LOAD_INTERRUPTION_CANCELLED => Some(SemanticExecutionInterruptionV1::Cancelled),
+            LOAD_INTERRUPTION_DEADLINE => Some(SemanticExecutionInterruptionV1::DeadlineExceeded),
+            _ => None,
+        }
+    }
+}
 
 fn duration_micros(duration: Duration) -> Option<u64> {
     u64::try_from(duration.as_micros()).ok()
@@ -154,6 +208,14 @@ pub enum SessionAcquireError {
         elapsed: Duration,
         deadline: Duration,
     },
+    /// Measured process resident growth during a cold model open exceeded the
+    /// artifact's declared resident-byte ceiling. The load was signalled to
+    /// abort; its slot and byte reservation release when the runtime returns.
+    ResidentCeilingExceeded {
+        tracked_resident_bytes: u64,
+        observed_growth_bytes: u64,
+        ceiling_bytes: u64,
+    },
     /// The runtime failed to open a new session.
     Open(EmbedError),
     /// The pool has been closed.
@@ -185,6 +247,14 @@ impl fmt::Display for SessionAcquireError {
             Self::LoadDeadlineExceeded { elapsed, deadline } => write!(
                 f,
                 "cold session load deadline exceeded: elapsed {elapsed:?} exceeds {deadline:?}"
+            ),
+            Self::ResidentCeilingExceeded {
+                tracked_resident_bytes,
+                observed_growth_bytes,
+                ceiling_bytes,
+            } => write!(
+                f,
+                "cold session load resident ceiling exceeded: {tracked_resident_bytes} tracked bytes + {observed_growth_bytes} observed growth > {ceiling_bytes} byte ceiling"
             ),
             Self::Open(err) => write!(f, "failed to open session: {err}"),
             Self::Closed => write!(f, "session pool is closed"),
@@ -249,6 +319,7 @@ impl<S> Default for PoolState<S> {
     }
 }
 
+#[hotpath::measure_all]
 impl<S> PoolState<S> {
     fn idle_sessions(&self) -> usize {
         self.idle.values().map(Vec::len).sum()
@@ -280,10 +351,12 @@ struct PoolInner<R: EmbeddingRuntime, C: MonotonicClock> {
     runtime: R,
     clock: C,
     config: SessionPoolConfigV1,
+    resident_sampler: ResidentBytesSamplerV1,
     state: Mutex<PoolState<R::Session>>,
     wakeups: Condvar,
 }
 
+#[hotpath::measure_all]
 impl<R: EmbeddingRuntime, C: MonotonicClock> PoolInner<R, C> {
     fn lock_state(&self) -> MutexGuard<'_, PoolState<R::Session>> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -305,6 +378,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Clone for SessionPool<R, C> {
     }
 }
 
+#[hotpath::measure_all]
 impl<R, C> SessionPool<R, C>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
@@ -316,12 +390,30 @@ where
         clock: C,
         config: SessionPoolConfigV1,
     ) -> Result<Self, SessionPoolConfigError> {
+        Self::with_resident_sampler(
+            runtime,
+            clock,
+            config,
+            Arc::new(|| sampled_process_resident_bytes_v1()),
+        )
+    }
+
+    /// [`Self::new`] with an injected process-resident sampler, so tests can
+    /// drive the cold-load resident bound with a scripted RSS series instead
+    /// of the kernel surface.
+    pub fn with_resident_sampler(
+        runtime: R,
+        clock: C,
+        config: SessionPoolConfigV1,
+        resident_sampler: ResidentBytesSamplerV1,
+    ) -> Result<Self, SessionPoolConfigError> {
         config.validate()?;
         Ok(Self {
             inner: Arc::new(PoolInner {
                 runtime,
                 clock,
                 config,
+                resident_sampler,
                 state: Mutex::new(PoolState::default()),
                 wakeups: Condvar::new(),
             }),
@@ -411,6 +503,7 @@ where
                 max: self.inner.config.max_sessions,
             });
         }
+        let tracked_resident_before_open = state.resident_bytes;
         // Reserve both the slot and a conservative resident-byte bound before
         // opening. FastEmbed model loading is itself memory-intensive, so a
         // post-open check would allow concurrent opens to transiently exceed
@@ -445,7 +538,12 @@ where
 
         let load_started = self.inner.clock.now();
         let load_deadline = Duration::from_millis(authority.load_deadline_ms());
-        let session = self.open_session_bounded(authority, load_deadline, reserved_bytes)?;
+        let session = self.open_session_bounded(
+            authority,
+            load_deadline,
+            reserved_bytes,
+            tracked_resident_before_open,
+        )?;
         // Injected-clock recheck after a bounded open: a manual test clock can
         // report a longer load than the wall-time bound observed, and the
         // deadline verdict must follow the injected clock in that case too.
@@ -695,35 +793,48 @@ where
     }
 
     /// Run the runtime's cold `open_session` on a dedicated loader thread and
-    /// bound the wait at the artifact's load deadline, so the typed
-    /// `LoadDeadlineExceeded` fires while the load is still executing instead
-    /// of only after it returns. An abandoned loader keeps the slot and byte
-    /// reservation until the runtime actually finishes (its memory is
-    /// genuinely in use until then), then releases both and discards the
-    /// session.
+    /// observe it in bounded slices: the typed `LoadDeadlineExceeded` fires
+    /// while the load is still executing, and measured process resident
+    /// growth is enforced against the artifact's resident-byte ceiling
+    /// between slices instead of trusting the manifest estimate alone. Both
+    /// verdicts fire the load's interruption signal so the runtime abandons
+    /// the open at its next stage boundary. An abandoned loader keeps the
+    /// slot and byte reservation until the runtime actually returns (its
+    /// memory is genuinely in use until then), then releases both and
+    /// discards the session.
+    #[hotpath::measure(label = "semantic.session_pool.open_bounded")]
     fn open_session_bounded(
         &self,
         authority: &AdmittedProjectionArtifactV1,
         load_deadline: Duration,
         reserved_bytes: u64,
+        tracked_resident_before_open: u64,
     ) -> Result<R::Session, SessionAcquireError> {
         let (result_tx, result_rx) = channel::<Result<R::Session, EmbedError>>();
         let inner = Arc::clone(&self.inner);
         let loader_authority = authority.clone();
+        let interruption = Arc::new(LoadInterruptionSignalV1::default());
+        let loader_interruption = Arc::clone(&interruption);
         let wait_started = self.inner.clock.now();
+        // Growth is measured from the moment this load begins. Concurrent
+        // allocations by other work inflate the delta, so the bound is
+        // conservative under exactly the pathological overlap it guards.
+        let baseline_resident_bytes = (self.inner.resident_sampler)();
         let spawned = thread::Builder::new()
             .name("td-semantic-model-load".to_owned())
             .spawn(move || {
                 let load_started = inner.clock.now();
                 let result = hotpath::measure_block!("semantic.model.load", {
-                    inner.runtime.open_session(&loader_authority)
+                    inner
+                        .runtime
+                        .open_session(&loader_authority, loader_interruption.as_ref())
                 });
                 let opened = result.is_ok();
                 if let Err(SendError(result)) = result_tx.send(result) {
-                    // The acquisition reached the load deadline and abandoned
-                    // this open. Release the slot and reservation now that the
-                    // runtime returned, and account the completed-but-
-                    // discarded open.
+                    // The acquisition abandoned this open at its deadline or
+                    // resident bound. Release the slot and reservation now
+                    // that the runtime returned, and account the completed-
+                    // but-discarded open.
                     let load_elapsed = inner.clock.now().saturating_sub(load_started);
                     let mut state = inner.lock_state();
                     state.active -= 1;
@@ -748,55 +859,112 @@ where
                 },
             )));
         }
-        match result_rx.recv_timeout(load_deadline) {
-            Ok(Ok(session)) => Ok(session),
-            Ok(Err(err)) => {
-                self.release_reserved_slot(reserved_bytes);
-                Err(SessionAcquireError::Open(err))
-            }
-            Err(RecvTimeoutError::Timeout) => {
+        let resident_ceiling_bytes = authority.resident_byte_ceiling();
+        let wall_started = Instant::now();
+        loop {
+            let remaining = load_deadline.saturating_sub(wall_started.elapsed());
+            if remaining.is_zero() {
                 let elapsed = self.inner.clock.now().saturating_sub(wait_started);
-                // Close the race where the loader's send lands between the
-                // timeout and the receiver drop: a result present now is an
-                // abandoned load this caller must release, exactly like the
-                // loader-side abandonment path.
-                match result_rx.try_recv() {
-                    Ok(result) => {
-                        let mut state = self.inner.lock_state();
-                        state.active -= 1;
-                        state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
-                        if result.is_ok() {
-                            state.sessions_opened += 1;
-                            state.sessions_closed += 1;
-                            state.last_cold_load_micros = duration_micros(elapsed);
-                        }
-                        state.mark_availability_changed();
-                        drop(state);
-                        self.inner.wakeups.notify_all();
-                        drop(result);
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        self.release_reserved_slot(reserved_bytes);
-                    }
-                    Err(TryRecvError::Empty) => {
-                        // Genuinely still loading; the loader thread releases
-                        // the slot and reservation when the runtime returns.
-                    }
-                }
-                Err(SessionAcquireError::LoadDeadlineExceeded {
+                interruption.fire(SemanticExecutionInterruptionV1::DeadlineExceeded);
+                self.settle_abandoned_open(result_rx, reserved_bytes, elapsed);
+                return Err(SessionAcquireError::LoadDeadlineExceeded {
                     elapsed,
                     deadline: load_deadline,
-                })
+                });
             }
-            Err(RecvTimeoutError::Disconnected) => {
+            match result_rx.recv_timeout(remaining.min(COLD_LOAD_OBSERVATION_INTERVAL)) {
+                Ok(Ok(session)) => return Ok(session),
+                Ok(Err(err)) => {
+                    self.release_reserved_slot(reserved_bytes);
+                    return Err(SessionAcquireError::Open(err));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // An expired deadline outranks a same-slice resident
+                    // verdict; the loop head returns the typed deadline error.
+                    if wall_started.elapsed() >= load_deadline {
+                        continue;
+                    }
+                    // Enforce the actual-resident bound only when both the
+                    // baseline and the current sample were observed; an
+                    // unavailable measurement surface abstains rather than
+                    // fabricating growth.
+                    let observed_growth_bytes = baseline_resident_bytes
+                        .zip((self.inner.resident_sampler)())
+                        .map(|(baseline, now)| now.saturating_sub(baseline));
+                    let Some(observed_growth_bytes) = observed_growth_bytes else {
+                        continue;
+                    };
+                    hotpath::gauge!("semantic_cold_load_resident_growth_bytes")
+                        .set(observed_growth_bytes);
+                    let effective_resident_bytes =
+                        tracked_resident_before_open.checked_add(observed_growth_bytes);
+                    let violated_ceiling = if observed_growth_bytes > resident_ceiling_bytes {
+                        Some(resident_ceiling_bytes)
+                    } else {
+                        effective_resident_bytes
+                            .is_none_or(|bytes| bytes > self.inner.config.memory_ceiling_bytes)
+                            .then_some(self.inner.config.memory_ceiling_bytes)
+                    };
+                    let Some(ceiling_bytes) = violated_ceiling else {
+                        continue;
+                    };
+                    let elapsed = self.inner.clock.now().saturating_sub(wait_started);
+                    interruption.fire(SemanticExecutionInterruptionV1::Cancelled);
+                    self.settle_abandoned_open(result_rx, reserved_bytes, elapsed);
+                    return Err(SessionAcquireError::ResidentCeilingExceeded {
+                        tracked_resident_bytes: tracked_resident_before_open,
+                        observed_growth_bytes,
+                        ceiling_bytes,
+                    });
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.release_reserved_slot(reserved_bytes);
+                    return Err(SessionAcquireError::Open(EmbedError::Runtime(
+                        RuntimeFailureV1 {
+                            kind: RuntimeFailureKindV1::LoadFailed,
+                            detail: "the model load thread terminated without a result".to_owned(),
+                        },
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Close the race where the loader's send lands between an abandonment
+    /// verdict and the receiver drop: a result present now is an abandoned
+    /// load this caller must release, exactly like the loader-side
+    /// abandonment path. An empty channel means the load is genuinely still
+    /// executing, and the loader thread releases the slot and reservation
+    /// when the runtime returns.
+    fn settle_abandoned_open(
+        &self,
+        result_rx: Receiver<Result<R::Session, EmbedError>>,
+        reserved_bytes: u64,
+        elapsed: Duration,
+    ) {
+        match result_rx.try_recv() {
+            Ok(result) => {
+                let mut state = self.inner.lock_state();
+                state.active -= 1;
+                state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
+                if result.is_ok() {
+                    state.sessions_opened += 1;
+                    state.sessions_closed += 1;
+                    state.last_cold_load_micros = duration_micros(elapsed);
+                }
+                state.mark_availability_changed();
+                drop(state);
+                self.inner.wakeups.notify_all();
+                drop(result);
+            }
+            Err(TryRecvError::Disconnected) => {
                 self.release_reserved_slot(reserved_bytes);
-                Err(SessionAcquireError::Open(EmbedError::Runtime(
-                    RuntimeFailureV1 {
-                        kind: RuntimeFailureKindV1::LoadFailed,
-                        detail: "the model load thread terminated without a result".to_owned(),
-                    },
-                )))
             }
+            // Taking the receiver by value closes the race where the loader
+            // sends after this empty observation but before abandonment
+            // returns. Dropping it here makes that send fail, so the loader
+            // owns reservation settlement in every future-send case.
+            Err(TryRecvError::Empty) => drop(result_rx),
         }
     }
 
@@ -862,6 +1030,7 @@ pub struct PooledSession<R: EmbeddingRuntime, C: MonotonicClock> {
     resident_bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl<R: EmbeddingRuntime, C: MonotonicClock> PooledSession<R, C> {
     pub fn identity(&self) -> &SessionIdentityV1 {
         &self.identity
@@ -953,18 +1122,20 @@ pub mod test_support {
     // alike).
     use super::super::artifact_store::AdmittedArtifactV1;
     use super::super::fastembed_adapter::AdmittedProjectionArtifactV1;
-    use super::super::manifest::{
-        ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
-        DeviceClassV1, EmbeddingNormalizationV1 as ManifestNormalizationV1,
-        EmbeddingPoolingV1 as ManifestPoolingV1, EmbeddingPrecisionV1 as ManifestPrecisionV1,
-        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1, ModelArtifactManifestV1,
-        PlatformTargetV1, ResourceCeilingV1, RuntimeCompatibilityV1, SemanticMetricV1,
-        Sha256DigestHex, TruncationPolicyV1, TruncationSideV1, UpstreamSourceV1,
-    };
     use tracedecay_domain::{
-        ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-        EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-        EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId,
+        ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingDeviceClassV1 as DeviceClassV1,
+        EmbeddingMetricV1, EmbeddingMetricV1 as SemanticMetricV1, EmbeddingNormalizationV1,
+        EmbeddingNormalizationV1 as ManifestNormalizationV1, EmbeddingPoolingV1,
+        EmbeddingPoolingV1 as ManifestPoolingV1, EmbeddingPrecisionV1,
+        EmbeddingPrecisionV1 as ManifestPrecisionV1, EmbeddingProjectionKeyV1,
+        EmbeddingTruncationSideV1, EmbeddingTruncationSideV1 as TruncationSideV1, ManifestDigest,
+        PrivacyDomainId,
+    };
+    use tracedecay_semantic_contracts::{
+        ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
+        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1, ModelArtifactManifestV1,
+        PlatformTargetV1, ResourceCeilingV1, RuntimeCompatibilityV1, Sha256DigestHex,
+        TruncationPolicyV1, UpstreamSourceV1,
     };
 
     pub fn domain_id<T>(value: &str) -> T
@@ -1198,13 +1369,13 @@ mod tests {
         BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, FakeEmbeddingRuntime,
         FakeEmbeddingSession, ManualCancellation, ProjectionArtifactPinV1, RuntimeFailureKindV1,
     };
-    use super::super::manifest::{ArtifactProfileKindV1, Sha256DigestHex};
     use super::test_support::*;
     use super::*;
     use tracedecay_domain::{
         EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
         EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId,
     };
+    use tracedecay_semantic_contracts::{ArtifactProfileKindV1, Sha256DigestHex};
 
     fn fake_pool(
         max_sessions: usize,
@@ -1242,9 +1413,10 @@ mod tests {
         fn open_session(
             &self,
             authority: &AdmittedProjectionArtifactV1,
+            interruption: &dyn SemanticExecutionAuthority,
         ) -> Result<Self::Session, EmbedError> {
             self.clock.advance(self.load_time);
-            self.inner.open_session(authority)
+            self.inner.open_session(authority, interruption)
         }
     }
 

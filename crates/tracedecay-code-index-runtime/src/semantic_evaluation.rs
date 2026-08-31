@@ -14,6 +14,7 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
 use crate::config::retrieval::RetrievalRuntimeCompatibilityV1;
 use crate::config::retrieval::{
@@ -397,7 +398,7 @@ fn record_vector_generation_failure(error: &VectorGenerationStoreErrorV1) {
 pub fn semantic_publication_generation(
     state: &tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1,
 ) -> Result<VectorGenerationIdV1, SemanticActivationCoordinationErrorV1> {
-    use tracedecay_usecases::semantic_runtime::{SemanticFallbackReasonV1, SemanticRuntimeStateV1};
+    use tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1;
 
     match state {
         SemanticRuntimeStateV1::Current { receipt } => Ok(receipt.activated_generation.clone()),
@@ -1537,9 +1538,10 @@ impl LinuxProcessResourceWindowV1 {
     #[cfg(target_os = "linux")]
     fn begin() -> Option<Self> {
         Some(Self {
-            cpu_ticks: tracedecay_session_memory::runtime_telemetry::read_linux_process_cpu_ticks()?,
-            ticks_per_second: tracedecay_session_memory::runtime_telemetry::linux_clock_ticks_per_second(
+            cpu_ticks: tracedecay_session_memory::runtime_telemetry::read_linux_process_cpu_ticks(
             )?,
+            ticks_per_second:
+                tracedecay_session_memory::runtime_telemetry::linux_clock_ticks_per_second()?,
         })
     }
 
@@ -1549,8 +1551,9 @@ impl LinuxProcessResourceWindowV1 {
     }
 
     fn finish(self) -> Option<(u64, u64)> {
-        let elapsed_ticks = tracedecay_session_memory::runtime_telemetry::read_linux_process_cpu_ticks()?
-            .saturating_sub(self.cpu_ticks);
+        let elapsed_ticks =
+            tracedecay_session_memory::runtime_telemetry::read_linux_process_cpu_ticks()?
+                .saturating_sub(self.cpu_ticks);
         let cpu_time_us = u64::try_from(
             u128::from(elapsed_ticks)
                 .checked_mul(1_000_000)?

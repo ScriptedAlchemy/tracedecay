@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -10,6 +11,7 @@ use crate::{
     resolve_cli_project_root,
 };
 use serde_json::{Map, Value, json};
+use tracedecay_application::retained_surfaces::{MessageSearchResultV1, RetainedOutcomeStatusV1};
 
 mod session_sync;
 use session_sync::{await_session_sync_completion, run_git_sync};
@@ -60,6 +62,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
     Value::Object(arguments)
 }
 
+#[hotpath::measure(label = "cli.sessions.dispatch", future = true)]
 pub(crate) async fn handle_sessions_action(
     action: SessionsAction,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -117,9 +120,7 @@ async fn handle_sessions_import(
 }
 
 #[hotpath::measure(label = "cli.sessions.search", future = true)]
-async fn handle_sessions_search(
-    args: SessionsSearchArgs,
-) -> tracedecay_domain::errors::Result<()> {
+async fn handle_sessions_search(args: SessionsSearchArgs) -> tracedecay_domain::errors::Result<()> {
     let project_id = args.project_id.clone();
     let project_path = args.project_path.clone();
     let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
@@ -129,29 +130,68 @@ async fn handle_sessions_search(
         message_search_rpc_args(args),
     )
     .await?;
-    for result in payload["results"].as_array().into_iter().flatten() {
-        println!(
-            "[{}] {} {}: {}",
-            result
-                .pointer("/session/provider")
-                .and_then(Value::as_str)
-                .unwrap_or("-"),
-            result
-                .pointer("/session/project_key")
-                .and_then(Value::as_str)
-                .unwrap_or("-"),
-            result
-                .pointer("/message/role")
-                .and_then(Value::as_str)
-                .unwrap_or("-"),
-            result
-                .pointer("/message/text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .replace('\n', " ")
-        );
+    let result: MessageSearchResultV1 =
+        crate::commands::retained_tool_payload("tracedecay_message_search", payload)?;
+    print!("{}", SessionsSearchReport::render(&result));
+    if let Some(error) = &result.error {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("sessions search failed: {}: {}", error.code, error.message),
+        });
     }
     Ok(())
+}
+
+/// One line per hit, or an explicit empty/refusal report. A search that
+/// matched nothing must say so — and say what was searched — rather than
+/// printing nothing, and a typed error travels with whatever partial results
+/// accompanied it.
+struct SessionsSearchReport;
+
+#[hotpath::measure_all]
+impl SessionsSearchReport {
+    fn render(result: &MessageSearchResultV1) -> String {
+        let mut report = String::new();
+        let hits = result.results.as_deref().unwrap_or_default();
+        for hit in hits {
+            let _ = writeln!(
+                report,
+                "[{}] {} {}: {}",
+                hit.session.provider,
+                hit.session.project_key,
+                hit.message.role,
+                hit.message.text.replace('\n', " ")
+            );
+        }
+        if hits.is_empty() && result.error.is_none() {
+            let status = Self::status_label(result.status);
+            let query = result.query.as_deref().unwrap_or("");
+            let _ = writeln!(
+                report,
+                "no messages matched query {query:?} \
+                 (status: {status}, scope: {}, provider: {})",
+                result.scope, result.provider
+            );
+            if let Some(message) = &result.message {
+                let _ = writeln!(report, "{message}");
+            }
+            if let Some(next_action) = &result.next_action {
+                let _ = writeln!(
+                    report,
+                    "next: {} {} — {}",
+                    next_action.tool, next_action.action, next_action.reason
+                );
+            }
+        }
+        report
+    }
+
+    /// Wire (snake_case) spelling of a retained outcome status for report text.
+    fn status_label(status: RetainedOutcomeStatusV1) -> String {
+        match serde_json::to_value(status) {
+            Ok(Value::String(label)) => label,
+            _ => format!("{status:?}"),
+        }
+    }
 }
 
 #[hotpath::measure(label = "cli.sessions.unfinished", future = true)]
@@ -829,6 +869,104 @@ impl SessionRefreshDaemonTransport for LiveSessionRefreshDaemonTransport {
         Box::pin(
             async move { call_daemon_tool_for_scope(project_root, tool_name, arguments).await },
         )
+    }
+}
+
+#[cfg(test)]
+mod search_report_tests {
+    use serde_json::json;
+
+    use super::{MessageSearchResultV1, SessionsSearchReport};
+
+    fn search_result(value: serde_json::Value) -> MessageSearchResultV1 {
+        serde_json::from_value(value).expect("fixture search result decodes")
+    }
+
+    fn base_result() -> serde_json::Value {
+        json!({
+            "catch_up": false,
+            "catch_up_failures": [],
+            "catch_up_performed": false,
+            "catch_up_provider": "all",
+            "goals": false,
+            "include_subagents": false,
+            "message_type": "any",
+            "outcome": "complete_zero",
+            "provider": "all",
+            "query": "lease fence",
+            "refresh_required": false,
+            "scope": "project",
+            "status": "complete_zero",
+        })
+    }
+
+    /// The silent-empty defect: a search that matched nothing printed nothing.
+    /// An empty page must say it is empty and name what was searched.
+    #[test]
+    fn an_empty_search_reports_what_was_searched_instead_of_silence() {
+        let mut value = base_result();
+        value["message"] = json!("no indexed messages matched");
+        value["next_action"] = json!({
+            "kind": "refresh",
+            "tool": "tracedecay_session_refresh",
+            "action": "begin",
+            "reason": "session index is stale",
+        });
+        let report = SessionsSearchReport::render(&search_result(value));
+        assert!(
+            report.contains("no messages matched query \"lease fence\""),
+            "empty search must be reported explicitly: {report}"
+        );
+        assert!(report.contains("status: complete_zero"), "{report}");
+        assert!(report.contains("scope: project"), "{report}");
+        assert!(report.contains("no indexed messages matched"), "{report}");
+        assert!(report.contains("tracedecay_session_refresh"), "{report}");
+    }
+
+    #[test]
+    fn hits_render_one_line_each() {
+        let mut value = base_result();
+        value["status"] = json!("complete");
+        value["outcome"] = json!("complete");
+        value["count"] = json!(1);
+        value["results"] = json!([{
+            "session": {
+                "provider": "cursor",
+                "session_id": "session-1",
+                "project_key": "project-key",
+                "project_path": "/project",
+                "is_subagent": false,
+            },
+            "message": {
+                "provider": "cursor",
+                "message_id": "message-1",
+                "session_id": "session-1",
+                "role": "assistant",
+                "ordinal": 1,
+                "text": "first\nline",
+            },
+            "score": 1.0,
+        }]);
+        let report = SessionsSearchReport::render(&search_result(value));
+        assert_eq!(report, "[cursor] project-key assistant: first line\n");
+    }
+
+    /// A typed error travels with the report; the empty-page banner is not
+    /// printed over it.
+    #[test]
+    fn a_typed_error_suppresses_the_empty_page_banner() {
+        let mut value = base_result();
+        value["status"] = json!("error");
+        value["outcome"] = json!("error");
+        value["error"] = json!({
+            "code": "retrieval_unavailable",
+            "message": "the session index is not available",
+        });
+        let report = SessionsSearchReport::render(&search_result(value));
+        assert!(
+            !report.contains("no messages matched"),
+            "a refusal is not an empty page: {report}"
+        );
     }
 }
 

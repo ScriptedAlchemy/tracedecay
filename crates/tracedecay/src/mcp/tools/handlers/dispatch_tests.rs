@@ -667,13 +667,18 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         "the store must publish a branch claim for this test to be falsifiable",
     );
 
-    let freshness_reader = |latest_generation_id: Option<&str>| {
+    let freshness_reader = |latest_generation_id: Option<&str>,
+                            staleness_state: Option<&str>,
+                            rebuild_in_flight: bool| {
         let latest_generation_id = latest_generation_id.map(str::to_owned);
+        let staleness_state = staleness_state.map(str::to_owned);
         let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
             std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
                 let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                     worktree_root: worktree_root.display().to_string(),
                     latest_generation_id: latest_generation_id.clone(),
+                    staleness_state: staleness_state.clone(),
+                    rebuild_in_flight,
                     ..Default::default()
                 };
                 Box::pin(async move { Some(freshness) })
@@ -697,7 +702,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         None,
         None,
         ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(freshness_reader(None)),
+            code_index_freshness_reader: Some(freshness_reader(None, Some("indexing"), true)),
             ..Default::default()
         },
     )
@@ -722,19 +727,105 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         None,
         None,
         ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(freshness_reader(Some(
-                "generation.status-serving-truth.1",
-            ))),
+            code_index_freshness_reader: Some(freshness_reader(
+                Some("generation.status-serving-truth.1"),
+                Some("fresh"),
+                false,
+            )),
             ..Default::default()
         },
     )
     .await
     .expect("status answers while serving");
     let serving = status_output(serving);
-    assert_eq!(serving["retrieval_serving"], json!({"status": "serving"}));
     assert_eq!(
-        serving["serving_branch"], json!("main"),
+        serving["retrieval_serving"],
+        json!({"status": "serving", "freshness": "current"})
+    );
+    assert_eq!(
+        serving["serving_branch"],
+        json!("main"),
         "a serving census restores the branch claim: {serving}",
+    );
+
+    let rebuilding = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(freshness_reader(
+                Some("generation.status-serving-truth.1"),
+                Some("stale"),
+                true,
+            )),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("status answers while a stale seat is rebuilding");
+    let rebuilding = status_output(rebuilding);
+    assert_eq!(
+        rebuilding["retrieval_serving"]["freshness"],
+        json!("last_complete_stale")
+    );
+    assert_eq!(
+        rebuilding["retrieval_serving"]["condition"],
+        json!("rebuilding"),
+        "scheduler liveness must distinguish a routine rebuild: {rebuilding}",
+    );
+
+    // A seat sealed long ago surfaces its age inside the serving claim, so a
+    // wedged daemon serving days-old answers is visibly wedged rather than a
+    // bare "serving".
+    let sealed_at_micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64
+        - 3 * 86_400 * 1_000_000;
+    let aged_reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+        std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+            let freshness =
+                tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: worktree_root.display().to_string(),
+                    latest_generation_id: Some("generation.status-serving-truth.1".to_owned()),
+                    sealed_at_micros: Some(sealed_at_micros),
+                    staleness_state: Some("stale".to_owned()),
+                    ..Default::default()
+                };
+            Box::pin(async move { Some(freshness) })
+        });
+    let aged = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(aged_reader),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("status answers for an aged seat");
+    let aged = status_output(aged);
+    assert_eq!(aged["retrieval_serving"]["status"], json!("serving"));
+    assert_eq!(
+        aged["retrieval_serving"]["freshness"],
+        json!("last_complete_stale")
+    );
+    assert_eq!(
+        aged["retrieval_serving"]["condition"],
+        json!("stalled"),
+        "a stale seat with no scheduler remedy must be typed stalled: {aged}",
+    );
+    let age_seconds = aged["retrieval_serving"]["seated_generation_age_seconds"]
+        .as_i64()
+        .expect("an aged seat reports its age in the serving claim");
+    assert!(
+        age_seconds >= 3 * 86_400 - 60,
+        "the serving claim must expose the seat age: {aged}",
     );
 
     cg.checkpoint().await.unwrap();
@@ -1643,6 +1734,30 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
         rendered.contains("generation.mcp-verified-graph-fixture.1"),
         "the trailer must name the serving generation: {rendered}",
     );
+    assert!(
+        rendered.contains("(sealed 1m ago) while the code index rebuilds"),
+        "a rebuild-in-flight serve must state the seat age and the rebuild: {rendered}",
+    );
+
+    let wedged = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_files",
+        json!({}),
+        None,
+        None,
+        verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a wedged stale serve still answers");
+    let rendered = serde_json::to_string(&wedged.value).unwrap();
+    assert!(
+        rendered.contains("no rebuild pass in flight"),
+        "a wedged route must not claim a rebuild is in flight: {rendered}",
+    );
+    assert!(
+        !rendered.contains("while the code index rebuilds"),
+        "a wedged route must not present itself as a routine rebuild: {rendered}",
+    );
 
     let current = handle_tool_call_with_registry_options(
         &cg,
@@ -1687,6 +1802,27 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
     .unwrap();
     let profile_root = dir.path().join("unavailable-user-lcm-profile");
     let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("missing-store profile identity");
+    let profile_id = profile_identity.profile_id().as_str();
+    let suffix = profile_id
+        .strip_prefix("profile.")
+        .expect("canonical profile identity prefix");
+    let session_identity = tracedecay_session_memory::context::ResolvedSessionIdentity::for_profile(
+        tracedecay_session_memory::context::ProfileId::new(profile_id.to_owned())
+            .expect("profile session identity"),
+        tracedecay_session_memory::context::SessionStoreId::new(format!("store.profile.{suffix}"))
+            .expect("profile store identity"),
+        tracedecay_session_memory::context::SessionRootId::new(format!("root.profile.{suffix}"))
+            .expect("profile root identity"),
+    );
+    let profile_retained_authority =
+        crate::daemon::retained_owner::profile_retained_connection_authority(
+            &profile_identity,
+            &session_identity,
+        )
+        .expect("canonical profile retained authority");
 
     let result = handle_tool_call_with_registry_options(
         &cg,
@@ -1696,6 +1832,8 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
         None,
         ToolCallRegistryOptions {
             profile_root: Some(&profile_root),
+            session_authorities: SessionAuthorities::default()
+                .with_profile_retained_authority(Some(&profile_retained_authority)),
             ..Default::default()
         },
     )
@@ -1708,7 +1846,11 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
             .expect("LCM Doctor text response"),
     )
     .expect("LCM Doctor unavailable payload");
-    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(
+        payload["problem"]["kind"],
+        "unavailable",
+        "missing-store LCM Doctor renders the application problem kind, got {payload}"
+    );
     assert!(
         !sessions_db.exists(),
         "read-only LCM Doctor must not open a missing profile store"
@@ -1751,7 +1893,13 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     .await
     .unwrap_err();
 
-    assert!(error.to_string().contains("unknown"));
+    let message = error.to_string();
+    assert!(
+        message.contains(
+            "storage_scope=user is unavailable for non-retained tool `tracedecay_lcm_compress`"
+        ),
+        "a known-but-unavailable LCM effect must report its typed reason, got {message}"
+    );
     assert!(
         !sessions_db.exists(),
         "unavailable LCM must not open its profile store"

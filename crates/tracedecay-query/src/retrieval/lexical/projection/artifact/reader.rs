@@ -157,7 +157,12 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
         hotpath::measure_block!("query.artifact.open.head_schema_verify", {
-            configure_reader_window(&connection, cache_budget_bytes, 0)?;
+            configure_reader_window(
+                &connection,
+                cache_budget_bytes,
+                0,
+                expected_file_size_bytes,
+            )?;
             connection
                 .pragma_update(None, "query_only", true)
                 .map_err(sqlite_error)?;
@@ -189,6 +194,7 @@ impl CodeLexicalArtifactReaderV1 {
                 connection,
                 &receipt,
                 cache_budget_bytes,
+                expected_file_size_bytes,
                 control,
                 ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
             )
@@ -237,6 +243,7 @@ impl CodeLexicalArtifactReaderV1 {
                 connection,
                 expected,
                 cache_budget_bytes,
+                expected.file_size_bytes(),
                 control,
                 ReaderIntegrityAuthorityV1::ReceiptOnly,
             )
@@ -251,6 +258,7 @@ impl CodeLexicalArtifactReaderV1 {
         connection: Connection,
         expected: &VerifiedCodeLexicalArtifactV1,
         cache_budget_bytes: usize,
+        sealed_file_size_bytes: u64,
         control: &dyn CodeIndexExecutionControlV1,
         integrity_authority: ReaderIntegrityAuthorityV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
@@ -282,17 +290,22 @@ impl CodeLexicalArtifactReaderV1 {
                         "lexical artifact metadata exhausts the reader cache budget".to_owned(),
                     ));
                 }
-                // Kernel SQLite window: no mmap grant, page cache clamped to
-                // [2, 64] MiB. The caller budget covers the retained metadata copy
-                // plus the cache actually granted; nothing else is claimed.
+                // Kernel SQLite window: page cache clamped to [2, 64] MiB.
+                // Sealed readers also mmap the immutable file (file-backed,
+                // not part of this heap claim) so n-gram serving does not
+                // re-pread the same posting pages on every tool call.
                 let sqlite_budget = cache_budget_bytes - stored_metadata_len;
                 if sqlite_budget < ARTIFACT_SQLITE_CACHE_FLOOR_BYTES {
                     return Err(CodeLexicalArtifactErrorV1::Unreserved(format!(
                         "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
                     )));
                 }
-                let page_cache_bytes =
-                    configure_reader_window(&connection, cache_budget_bytes, stored_metadata_len)?;
+                let page_cache_bytes = configure_reader_window(
+                    &connection,
+                    cache_budget_bytes,
+                    stored_metadata_len,
+                    sealed_file_size_bytes,
+                )?;
                 let (stored_metadata_bytes, stored_metadata_digest): (Vec<u8>, String) = connection
                     .query_row(
                         "SELECT metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
@@ -2386,10 +2399,19 @@ fn verify_artifact_state_revision(
     checkpoint(control)
 }
 
+fn sealed_reader_mmap_bytes(file_size_bytes: u64) -> Result<i64, CodeLexicalArtifactErrorV1> {
+    i64::try_from(file_size_bytes).map_err(|error| {
+        CodeLexicalArtifactErrorV1::Contract(format!(
+            "sealed lexical artifact is larger than SQLite's mmap_size domain: {error}"
+        ))
+    })
+}
+
 fn configure_reader_window(
     connection: &Connection,
     cache_budget_bytes: usize,
     retained_metadata_bytes: usize,
+    sealed_file_size_bytes: u64,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let available = cache_budget_bytes
         .checked_sub(retained_metadata_bytes)
@@ -2412,12 +2434,24 @@ fn configure_reader_window(
                 .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
         )
         .map_err(sqlite_error)?;
+    // Content-addressed readers are SQLITE_OPEN_READ_ONLY over an immutable
+    // file. The kernel SQLite window that disables mmap exists for writer /
+    // WAL coherence on graph and staging connections; applying it here forced
+    // sqlite3OsRead to re-pread ~174 MB of posting pages on every tool call
+    // against a multi-gigabyte artifact whose 64 MiB heap cache cannot retain
+    // the working set.
+    let mmap_bytes = sealed_reader_mmap_bytes(sealed_file_size_bytes)?;
     connection
-        .pragma_update(None, "mmap_size", 0i64)
+        .pragma_update(None, "mmap_size", mmap_bytes)
         .map_err(sqlite_error)?;
     connection
         .pragma_update(None, "temp_store", "FILE")
         .map_err(sqlite_error)?;
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("query.artifact.mmap_bytes").set(sealed_file_size_bytes);
+        hotpath::gauge!("query.artifact.page_cache_bytes").set(page_cache_bytes);
+    }
     Ok(page_cache_bytes)
 }
 
@@ -2491,7 +2525,7 @@ mod tests {
 
     use roaring::RoaringBitmap;
     use rusqlite::hooks::{AuthAction, Authorization};
-    use rusqlite::{Connection, params};
+    use rusqlite::{Connection, OpenFlags, params};
     use sha2::{Digest, Sha256};
     use tracedecay_domain::ManifestDigest;
     use tracedecay_private_fs::open_private_file;
@@ -2501,12 +2535,14 @@ mod tests {
     use super::ArtifactConnectionMutex;
     use super::{
         ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_NGRAM_MAX_CANDIDATES_V1,
-        ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1, ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
-        ArtifactQueryMetricsV1, CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1,
-        DocumentQueryV1, NGRAM_NORMALIZED, charge_ngram_encoded_shard_bytes,
-        encode_ngram_candidate_json, ensure_ngram_candidate_cardinality, map_query_artifact_error,
-        ngram_bitmap_candidates, ngram_document_query, query_ngrams, retain_bounded,
-        union_document_queries, visit_document_ids, visit_lexical_rows,
+        ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
+        ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactQueryMetricsV1,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1,
+        CodeLexicalArtifactReaderV1, DocumentQueryV1, NGRAM_NORMALIZED,
+        charge_ngram_encoded_shard_bytes, configure_reader_window, encode_ngram_candidate_json,
+        ensure_ngram_candidate_cardinality, map_query_artifact_error, ngram_bitmap_candidates,
+        ngram_document_query, query_ngrams, retain_bounded, union_document_queries,
+        visit_document_ids, visit_lexical_rows,
     };
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
@@ -2520,6 +2556,42 @@ mod tests {
         fn is_deadline_exceeded(&self) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn sealed_reader_window_mmaps_the_immutable_file() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("sealed.sqlite");
+        let seed = Connection::open(&path).expect("create sealed fixture");
+        seed.execute_batch("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES (1);")
+            .expect("seed sealed fixture");
+        drop(seed);
+        let file_size = std::fs::metadata(&path)
+            .expect("stat sealed fixture")
+            .len();
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("open sealed reader");
+        let page_cache_bytes = configure_reader_window(
+            &connection,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            0,
+            file_size,
+        )
+        .expect("configure sealed reader window");
+        assert_eq!(page_cache_bytes, ARTIFACT_SQLITE_CACHE_BYTES);
+        let _: i64 = connection
+            .query_row("SELECT x FROM t", [], |row| row.get(0))
+            .expect("touch the mapped file");
+        let mmap: i64 = connection
+            .pragma_query_value(None, "mmap_size", |row| row.get(0))
+            .expect("read mmap pragma");
+        assert!(
+            mmap >= i64::try_from(file_size).expect("fixture fits mmap_size"),
+            "sealed readers must mmap the immutable file so serving does not re-pread it: mmap={mmap} file={file_size}"
+        );
     }
 
     #[test]
@@ -2934,7 +3006,7 @@ mod tests {
                     cardinality INTEGER NOT NULL,
                     PRIMARY KEY(page_ordinal, kind, ngram)
                 ) WITHOUT ROWID;
-                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);
+                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal, cardinality);
                 CREATE TABLE ngram_statistics (
                     kind INTEGER NOT NULL,
                     ngram INTEGER NOT NULL,
@@ -2991,7 +3063,7 @@ mod tests {
                     cardinality INTEGER NOT NULL,
                     PRIMARY KEY(page_ordinal, kind, ngram)
                 ) WITHOUT ROWID;
-                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);
+                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal, cardinality);
                 CREATE TABLE ngram_statistics (
                     kind INTEGER NOT NULL,
                     ngram INTEGER NOT NULL,

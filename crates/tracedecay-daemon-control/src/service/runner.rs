@@ -93,12 +93,8 @@ impl ServiceRunner {
     ) -> Result<()> {
         match self {
             Self::Systemd { systemctl } => {
-                // `install-service` (start=true) both enables the unit and
-                // starts it. `--no-start` writes the unit file only, so the
-                // operator can inspect it before the first enable.
-                if start {
-                    run_systemctl(systemctl, &["daemon-reload"])?;
-                    run_systemctl(systemctl, &["enable", "--now", crate::SERVICE_NAME])?;
+                for arguments in systemd_install_command_plan(start) {
+                    run_systemctl(systemctl, &arguments)?;
                 }
                 Ok(())
             }
@@ -219,7 +215,10 @@ impl ServiceRunner {
     ) -> Result<()> {
         match self {
             Self::Systemd { systemctl } => {
-                run_systemctl(systemctl, &["start", crate::SERVICE_NAME])
+                for arguments in systemd_start_command_plan() {
+                    run_systemctl(systemctl, &arguments)?;
+                }
+                Ok(())
             }
             Self::Launchd { launchctl, id } => {
                 let target = launchd_service_target(id)?;
@@ -266,15 +265,32 @@ impl ServiceRunner {
                 } else {
                     run_systemctl(systemctl, &["disable", crate::SERVICE_NAME])?;
                 }
-                run_systemctl(systemctl, &["start", crate::SERVICE_NAME])
+                run_systemctl(systemctl, &["start", crate::SERVICE_NAME])?;
+                // `systemctl start` reports the fork, not a serving daemon.
+                // Restore success must mean an authenticated daemon at the
+                // expected version answering from the installed unit's socket.
+                super::wait_for_installed_service_state_with_runner(
+                    self,
+                    previous_state,
+                    expected_version,
+                )
             }
             Self::Launchd { launchctl, id } => {
                 launchd_refresh(launchctl, id, service_path, socket_path)?;
                 if !previous_state.is_enabled() {
                     run_launchctl(launchctl, &["disable", &launchd_service_target(id)?])?;
                 }
-                Ok(())
+                // `launchd_refresh` proves only that the socket accepts a
+                // connection; hold launchd restores to the same authenticated
+                // identity bar as systemd.
+                super::wait_for_installed_service_state_with_runner(
+                    self,
+                    previous_state,
+                    expected_version,
+                )
             }
+            // `windows_task::apply_state` already polls authenticated
+            // readiness internally; a second wait would double the restore.
             Self::WindowsTask => windows_task::apply_state(previous_state, expected_version),
         }
     }
@@ -519,6 +535,25 @@ pub(super) fn retry_transient_bootstrap(
         sleep(backoff);
         backoff = (backoff * 2).min(TRANSIENT_BOOTSTRAP_MAX_BACKOFF);
     }
+}
+
+/// Commands that register a freshly written systemd unit. The caller has just
+/// (re)written the unit file, so systemd must re-read it even when the unit is
+/// not started now (`--no-start`); without the reload a later `start` launches
+/// whatever stale definition systemd last loaded.
+pub(super) fn systemd_install_command_plan(start: bool) -> Vec<Vec<&'static str>> {
+    let mut plan = vec![vec!["daemon-reload"]];
+    if start {
+        plan.push(vec!["enable", "--now", crate::SERVICE_NAME]);
+    }
+    plan
+}
+
+/// Commands that start the installed unit. A `start` can follow a unit
+/// rewrite that never went through install on this boot, so reload first;
+/// the reload is idempotent when the unit on disk is unchanged.
+pub(super) fn systemd_start_command_plan() -> Vec<Vec<&'static str>> {
+    vec![vec!["daemon-reload"], vec!["start", crate::SERVICE_NAME]]
 }
 
 /// Commands that (re)start the launchd agent. Booting the service out first

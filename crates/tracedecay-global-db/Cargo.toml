@@ -19,7 +19,6 @@ hotpath = [
     "tracedecay-graph-db/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-semantic/hotpath",
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-lcm/hotpath",
     "tracedecay-sessions/hotpath",
@@ -34,7 +33,6 @@ hotpath-alloc = [
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-semantic/hotpath-alloc",
     "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-lcm/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
@@ -49,7 +47,6 @@ hotpath-cpu = [
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-semantic/hotpath-cpu",
     "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-lcm/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
@@ -86,7 +83,7 @@ tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
@@ -126,6 +123,12 @@ required-features = ["test-helpers"]
 [[bench]]
 name = "lcm_expansion"
 harness = false
+required-features = ["test-helpers"]
+
+# Exercises this crate's existing `#[hotpath::measure]` labels in both
+# feature modes; needs the registered-store harness, never `default`.
+[[test]]
+name = "hotpath_coverage"
 required-features = ["test-helpers"]
 
 [lints.rust]

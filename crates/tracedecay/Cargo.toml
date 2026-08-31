@@ -104,6 +104,7 @@ hotpath = [
     "tracedecay-daemon-identity/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-daemon-service/hotpath",
+    "tracedecay-framing/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-graph-query/hotpath",
@@ -148,6 +149,7 @@ hotpath-alloc = [
     "tracedecay-daemon-identity/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-daemon-service/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-graph-query/hotpath-alloc",
@@ -192,6 +194,7 @@ hotpath-cpu = [
     "tracedecay-daemon-identity/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-daemon-service/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-graph-query/hotpath-cpu",
@@ -411,6 +414,7 @@ tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version =
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
 tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["source-analysis"] }
@@ -425,6 +429,7 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
@@ -484,15 +489,6 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 # file, and `MNT_LOCAL` is the kernel's direct answer to "is this volume local".
 [target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
 libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = [
-    "Win32_Foundation",
-    "Win32_System_Com",
-    "Win32_System_Ole",
-    "Win32_System_TaskScheduler",
-    "Win32_System_Variant",
-] }
 
 [dev-dependencies]
 sha2 = "0.11"
