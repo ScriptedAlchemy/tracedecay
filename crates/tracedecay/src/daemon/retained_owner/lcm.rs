@@ -772,15 +772,6 @@ fn required(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
     }
 }
 
-fn bounded_text(value: &str, max: usize) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
-    let value = required(value)?;
-    if value.chars().count() > max {
-        Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
-    } else {
-        Ok(value)
-    }
-}
-
 fn trimmed(value: Option<&str>) -> Result<Option<&str>, RetainedSurfaceExecutionErrorV1> {
     value.map(required).transpose()
 }

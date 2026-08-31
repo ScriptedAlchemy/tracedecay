@@ -484,6 +484,114 @@ pub(super) fn expand_query_result(
     }
 }
 
+/// The serialized payload budget for an expand-query response: the MCP
+/// response cap minus headroom for the retained envelope's authority and
+/// receipt metadata. Staying under it preserves the synthesis contract — the
+/// render layer's generic truncation would otherwise replace the typed
+/// payload with an opaque preview-and-handle wrapper.
+const SYNTHESIS_PAYLOAD_BUDGET_CHARS: usize = 11_000;
+const COMPACT_CONTEXT_BLOCKS: usize = 3;
+const COMPACT_CONTEXT_BLOCK_CHARS: usize = 600;
+const COMPACT_MATCHES: usize = 10;
+const COMPACT_MATCH_SNIPPET_CHARS: usize = 160;
+const FLOOR_PROMPT_CHARS: usize = 512;
+
+/// Bounds an expand-query result to the MCP synthesis contract. Input
+/// clamping (`prompt_truncated` / `query_truncated`) is recorded as typed
+/// truncation markers; an over-budget payload is compacted — bounded context
+/// blocks and match snippets with the synthesis prompt rebuilt from the
+/// compact blocks — and, if still over budget, floored to the bounded
+/// contract scalars with the unbounded arrays dropped.
+pub(super) fn bound_expand_query_result_for_mcp(
+    result: &mut LcmExpandQueryResultV1,
+    prompt_truncated: bool,
+    query_truncated: bool,
+) {
+    if prompt_truncated || query_truncated {
+        result.mcp_response_truncated = Some(true);
+        result.contract_truncated = Some(true);
+        result.mcp_truncation_reason =
+            Some("expand-query prompt or query exceeded the MCP input bound".to_owned());
+        result.prompt_truncated_for_mcp = Some(prompt_truncated);
+        result.query_truncated_for_mcp = Some(query_truncated);
+        if let Some(prompt) = result.synthesis_prompt.as_mut() {
+            prompt.user_prompt_truncated_for_mcp = Some(prompt_truncated);
+        }
+    }
+    if serialized_within_budget(result) {
+        return;
+    }
+    result.context_blocks.truncate(COMPACT_CONTEXT_BLOCKS);
+    for block in &mut result.context_blocks {
+        clamp_block_content(block, COMPACT_CONTEXT_BLOCK_CHARS);
+    }
+    if let Some(matches) = result.matches.as_mut() {
+        matches.truncate(COMPACT_MATCHES);
+        for item in matches.iter_mut() {
+            clamp_chars(&mut item.snippet, COMPACT_MATCH_SNIPPET_CHARS);
+        }
+    }
+    rebuild_synthesis_user_prompt(result);
+    result.mcp_response_truncated = Some(true);
+    result.contract_truncated = Some(true);
+    result.mcp_truncation_reason = Some(
+        "expand-query response compacted to preserve synthesis contract fields".to_owned(),
+    );
+    if serialized_within_budget(result) {
+        return;
+    }
+    // Hard floor: every retained field is a bounded scalar once the arrays
+    // are dropped, so the floored payload always fits.
+    result.context_blocks.clear();
+    result.matches = Some(Vec::new());
+    result.node_ids = Some(Vec::new());
+    result.context_pagination = Some(Vec::new());
+    if let Some(prompt) = result.prompt.as_mut() {
+        clamp_chars(prompt, FLOOR_PROMPT_CHARS);
+    }
+    rebuild_synthesis_user_prompt(result);
+    result.mcp_truncation_reason = Some(
+        "expand-query response exceeded the minimal synthesis contract budget; \
+         unbounded context arrays were dropped"
+            .to_owned(),
+    );
+}
+
+fn serialized_within_budget(result: &LcmExpandQueryResultV1) -> bool {
+    serde_json::to_string(result)
+        .is_ok_and(|serialized| serialized.len() <= SYNTHESIS_PAYLOAD_BUDGET_CHARS)
+}
+
+fn clamp_chars(value: &mut String, max_chars: usize) {
+    if value.chars().count() <= max_chars {
+        return;
+    }
+    *value = value.chars().take(max_chars).collect();
+}
+
+fn clamp_block_content(block: &mut LcmExpandQueryContextBlockV1, max_chars: usize) {
+    let total = block.content.chars().count();
+    if total <= max_chars {
+        return;
+    }
+    clamp_chars(&mut block.content, max_chars);
+    block.content_range.returned_chars = max_chars as u64;
+    block.content_range.truncated = true;
+}
+
+/// Rebuilds the synthesis user prompt from the current (compacted) context
+/// blocks so the QUESTION section and the served context stay consistent.
+fn rebuild_synthesis_user_prompt(result: &mut LcmExpandQueryResultV1) {
+    let Some(synthesis) = result.synthesis_prompt.as_mut() else {
+        return;
+    };
+    let Ok(context) = serde_json::to_string(&result.context_blocks) else {
+        return;
+    };
+    let prompt = result.prompt.as_deref().unwrap_or_default();
+    synthesis.user = format!("QUESTION:\n{prompt}\n\nEXPANDED CONTEXT:\n{context}");
+}
+
 pub(super) const fn hydration(value: HydrationStateV1) -> HydrationStateResultV1 {
     match value {
         HydrationStateV1::Available => HydrationStateResultV1::Available,
