@@ -123,7 +123,7 @@ async fn projectless_profile_capture_uses_the_daemon_profile_worker_plan() {
     )
     .unwrap();
     let registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await
@@ -177,7 +177,7 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     )
     .unwrap();
     let registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await
@@ -371,7 +371,7 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
     )
     .unwrap();
     let registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await
@@ -490,7 +490,7 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     )
     .unwrap();
     let registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await

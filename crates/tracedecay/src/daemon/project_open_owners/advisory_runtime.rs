@@ -463,7 +463,7 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
 struct ProjectOpenFeedbackCycleAuthorizationV1 {
     project_root: std::path::PathBuf,
     scope: tracedecay_application::ResolvedScope,
-    configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
+    configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 }
 
 impl ProductionFeedbackCycleAuthorizationPort for ProjectOpenFeedbackCycleAuthorizationV1 {
@@ -565,7 +565,7 @@ async fn current_feedback_lsp_input(
         .current()
         .await
         .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-configuration"))?;
-    let current_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+    let current_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
         revision_id: pinned_configuration.revision_id,
         snapshot: pinned_configuration.snapshot,
     };
@@ -699,7 +699,7 @@ async fn run_production_hook_cycle(
     else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
-    let current_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+    let current_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
         revision_id: pinned_configuration.revision_id.clone(),
         snapshot: pinned_configuration.snapshot.clone(),
     };
@@ -1174,7 +1174,7 @@ async fn register_production_advisory_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open automation configuration is unavailable: {error}"),
         })?;
-    let current_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+    let current_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
         revision_id: configuration.revision_id.clone(),
         snapshot: configuration.snapshot.clone(),
     };
@@ -1661,15 +1661,16 @@ async fn resolve_github_stack_observability(
             "GitHub stack observability lane is not mounted"
         );
     };
-    let topology_policy = match tracedecay_usecases::config::topology::resolved_work_topology_policy(
-        &state.scout_configuration.snapshot,
-    ) {
-        Ok(policy) => policy.clone(),
-        Err(error) => {
-            unavailable("work_topology_policy", format!("{error:?}"));
-            return None;
-        }
-    };
+    let topology_policy =
+        match tracedecay_configuration::config::topology::resolved_work_topology_policy(
+            &state.scout_configuration.snapshot,
+        ) {
+            Ok(policy) => policy.clone(),
+            Err(error) => {
+                unavailable("work_topology_policy", format!("{error:?}"));
+                return None;
+            }
+        };
     // Mirrors the native-integration mount condition at project open: the
     // standard pull-request fallback exists exactly when this project is an
     // admitted Git worktree (project open fails earlier otherwise).

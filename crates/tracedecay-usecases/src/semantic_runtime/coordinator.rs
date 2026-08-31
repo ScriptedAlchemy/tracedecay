@@ -1,6 +1,9 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use thiserror::Error;
+use tracedecay_application::SemanticActivationCoordinationPort;
+use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use super::{
@@ -13,10 +16,15 @@ use super::{
 };
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileMutationCapabilityV1,
-    RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
+    RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
 };
-use crate::configuration::{ConfigurationCurrentStateV1, DirectConfigurationMutation};
+use tracedecay_configuration::{
+    ConfigurationCurrentStateV1, ConfigurationMutationAuthority, DirectConfigurationMutation,
+};
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::configuration::store::ConfigurationDirectCommitOutcomeV1;
+
+pub use tracedecay_application::SemanticActivationCoordinationErrorV1;
 
 type ProductionOwner = SemanticRuntimeOwnerV1<
     OwnedGlobalDbConfigurationControlStore,
@@ -26,18 +34,10 @@ type ProductionOwner = SemanticRuntimeOwnerV1<
     >,
 >;
 
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum SemanticActivationCoordinationErrorV1 {
-    #[error("semantic activation configuration authority is unavailable")]
-    Unavailable,
-    #[error("semantic activation input was rejected")]
-    Rejected,
-    #[error("semantic activation input was rejected: {0}")]
-    RejectedDetail(String),
-    #[error("semantic activation compare-and-swap conflicted")]
-    Conflict,
-    #[error("semantic runtime activation failed: {0}")]
-    Runtime(#[from] SemanticRuntimeControlErrorV1),
+impl From<SemanticRuntimeControlErrorV1> for SemanticActivationCoordinationErrorV1 {
+    fn from(error: SemanticRuntimeControlErrorV1) -> Self {
+        Self::Runtime(error.to_string())
+    }
 }
 
 /// Application coordinator for an already-authorized configuration mutation and its
@@ -152,7 +152,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
 
     pub async fn preview_central_mutation(
         &self,
-        authority: &crate::configuration::ConfigurationMutationAuthority,
+        authority: &tracedecay_configuration::ConfigurationMutationAuthority,
         mutation: &DirectConfigurationMutation,
         expected_revision: &tracedecay_domain::ConfigurationRevisionId,
     ) -> Result<
@@ -282,6 +282,150 @@ impl ProductionSemanticActivationCoordinatorV1 {
     }
 }
 
+impl SemanticActivationCoordinationPort for ProductionSemanticActivationCoordinatorV1 {
+    type ConfigurationState = ConfigurationCurrentStateV1;
+    type AcceptedProfile = AcceptedRetrievalProfileV1;
+    type RuntimeCompatibility = RetrievalRuntimeCompatibilityV1;
+    type ConfigurationPin = SemanticConfigurationPinV1;
+    type MutationCapability = RetrievalProfileMutationCapabilityV1;
+    type ProfileCas = RetrievalProfileCasV1;
+    type CentralMutation = DirectConfigurationMutation;
+    type ActivationReceipt = SemanticActivationReceiptV1;
+    type RollbackReceipt = SemanticRollbackReceiptV1;
+    type ProfileState = RetrievalProfileStateSnapshotV1;
+    type MutationAuthority = ConfigurationMutationAuthority;
+    type PreviewOutcome = ConfigurationDirectCommitOutcomeV1;
+
+    fn bootstrap_query_profile<'a>(
+        &'a self,
+        configuration: Self::ConfigurationState,
+        accepted_query: Self::AcceptedProfile,
+        runtime: &'a Self::RuntimeCompatibility,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SemanticActivationCoordinationErrorV1>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            ProductionSemanticActivationCoordinatorV1::bootstrap_query_profile(
+                self,
+                configuration,
+                accepted_query,
+                runtime,
+            )
+            .await
+        })
+    }
+
+    fn current_profile_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Self::ProfileState, SemanticActivationCoordinationErrorV1>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            ProductionSemanticActivationCoordinatorV1::current_profile_state(self).await
+        })
+    }
+
+    fn preview_central_mutation<'a>(
+        &'a self,
+        authority: &'a Self::MutationAuthority,
+        mutation: &'a Self::CentralMutation,
+        expected_revision: &'a ConfigurationRevisionId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Self::PreviewOutcome, SemanticActivationCoordinationErrorV1>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            ProductionSemanticActivationCoordinatorV1::preview_central_mutation(
+                self,
+                authority,
+                mutation,
+                expected_revision,
+            )
+            .await
+        })
+    }
+
+    fn stage_and_activate<'a>(
+        &'a self,
+        base_configuration: Self::ConfigurationPin,
+        result_configuration: Self::ConfigurationState,
+        capability: &'a Self::MutationCapability,
+        expected: Self::ProfileCas,
+        candidate: Self::AcceptedProfile,
+        current_runtime: &'a Self::RuntimeCompatibility,
+        candidate_runtime: &'a Self::RuntimeCompatibility,
+        central_mutation: Self::CentralMutation,
+        freshness_vector_digest: ManifestDigest,
+        now: UtcMicros,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<Self::ActivationReceipt, SemanticActivationCoordinationErrorV1>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            ProductionSemanticActivationCoordinatorV1::stage_and_activate(
+                self,
+                base_configuration,
+                result_configuration,
+                capability,
+                expected,
+                candidate,
+                current_runtime,
+                candidate_runtime,
+                central_mutation,
+                freshness_vector_digest,
+                now,
+            )
+            .await
+        })
+    }
+
+    fn stage_and_rollback<'a>(
+        &'a self,
+        base_configuration: Self::ConfigurationPin,
+        result_configuration: Self::ConfigurationState,
+        capability: &'a Self::MutationCapability,
+        expected: Self::ProfileCas,
+        restored_runtime: &'a Self::RuntimeCompatibility,
+        central_mutation: Self::CentralMutation,
+        trigger: String,
+        freshness_vector_digest: ManifestDigest,
+        now: UtcMicros,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<Self::RollbackReceipt, SemanticActivationCoordinationErrorV1>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            ProductionSemanticActivationCoordinatorV1::stage_and_rollback(
+                self,
+                base_configuration,
+                result_configuration,
+                capability,
+                expected,
+                restored_runtime,
+                central_mutation,
+                trigger,
+                freshness_vector_digest,
+                now,
+            )
+            .await
+        })
+    }
+}
+
 impl SemanticRuntimeIntegrationPortV1 for ProductionSemanticActivationCoordinatorV1 {
     fn status(&self) -> SemanticRuntimeFuture<'_, SemanticRuntimeStatusV1> {
         SemanticRuntimeIntegrationPortV1::status(self.owner.as_ref())
@@ -328,9 +472,12 @@ mod tests {
 
     fn assert_production_mount<T: SemanticRuntimeIntegrationPortV1 + Send + Sync>() {}
 
+    fn assert_activation_port<T: SemanticActivationCoordinationPort + Send + Sync>() {}
+
     #[test]
     fn production_coordinator_is_a_concrete_project_runtime_mount() {
         assert_production_mount::<ProductionSemanticActivationCoordinatorV1>();
+        assert_activation_port::<ProductionSemanticActivationCoordinatorV1>();
         std::hint::black_box(ProductionSemanticActivationCoordinatorV1::new);
     }
 }

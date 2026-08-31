@@ -27,12 +27,13 @@
 //! [`tracedecay::apply_source_edit_plan`], and
 //! [`tracedecay::capture_planned_source_edit`]. Callers should use these
 //! rather than create a second root-owned plan.
-//! - [`config::RuntimeConfigurationAuthorityPort`], installed via
-//!   [`config::install_runtime_configuration_authority`] before opening any
-//!   configuration-backed use case. Configuration value/persistence contracts
-//!   are re-exported from `tracedecay_global_db::configuration::contracts`
-//!   through [`configuration::ports`]/[`configuration::types`], not
-//!   duplicated here.
+//! - [`tracedecay_configuration::RuntimeConfigurationAuthorityPort`], installed
+//!   via [`tracedecay_configuration::install_runtime_configuration_authority`]
+//!   before opening any configuration-backed use case. Configuration
+//!   value/persistence contracts live in `tracedecay-configuration` (re-exported
+//!   from `tracedecay_global_db::configuration::contracts`), not duplicated here.
+//!   [`config::retrieval`] stays in this crate because it is production-load-bearing
+//!   on search-eval.
 //! - Transport-independent response handles live in
 //!   `tracedecay_session_memory::response_handles`; MCP adapters should call
 //!   that module rather than keep a parallel handle store.

@@ -41,7 +41,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     )
     .expect("database scope");
     let session_registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity,
         )
         .await
@@ -554,7 +554,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
     )
     .expect("database scope");
     let session_registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity,
         )
         .await
@@ -804,7 +804,7 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     )
     .expect("daemon database scope");
     let session_registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await
@@ -901,7 +901,7 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     drop(database);
     drop(session_registry);
     let reopened_registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity,
         )
         .await

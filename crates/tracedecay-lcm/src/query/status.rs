@@ -104,8 +104,8 @@ async fn status_for_provider_with_work(
     // index scan once more per status call. Shallow status keeps that count
     // and reports tokens as a typed unscanned partial instead of reading up
     // to 20_000 message bodies on every health probe (#767).
-    let store = store_status_for_depth(deep, counts.raw_message_count, conn, provider, session_id)
-        .await?;
+    let store =
+        store_status_for_depth(deep, counts.raw_message_count, conn, provider, session_id).await?;
     work.record_query();
     let dag = dag_status(conn, provider, session_id).await?;
 

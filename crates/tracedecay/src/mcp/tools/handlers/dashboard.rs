@@ -17,12 +17,12 @@ use serde_json::{Value, json};
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, RequestId, SafeDiagnostic,
 };
+use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};

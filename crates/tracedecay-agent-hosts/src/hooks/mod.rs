@@ -1119,9 +1119,7 @@ pub(crate) fn read_stdin_bounded() -> std::io::Result<HookStdinRead> {
 pub(crate) fn read_stdin_bounded_from(
     reader: &mut impl std::io::Read,
 ) -> std::io::Result<HookStdinRead> {
-    use tracedecay_framing::{
-        MAX_WIRE_MESSAGE_BYTES, WireReadOutcome, read_bounded_to_string,
-    };
+    use tracedecay_framing::{MAX_WIRE_MESSAGE_BYTES, WireReadOutcome, read_bounded_to_string};
     match read_bounded_to_string(reader, MAX_WIRE_MESSAGE_BYTES)? {
         WireReadOutcome::Ready(event) => Ok(HookStdinRead::Event(event)),
         WireReadOutcome::Oversized => Ok(HookStdinRead::Oversized),
