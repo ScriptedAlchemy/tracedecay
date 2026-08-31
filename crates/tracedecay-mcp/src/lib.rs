@@ -61,7 +61,6 @@ pub mod lifecycle;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
-pub mod session_refresh;
 pub mod tool_call_deadline;
 pub mod tool_errors;
 pub mod tools;
@@ -80,12 +79,6 @@ pub use handlers::{
 pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,
     map_transcript_ingest_error,
-};
-pub use session_refresh::{
-    SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
-    SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
-    SessionRefreshServiceFuture, SessionRefreshServiceOutcome, SessionRefreshServicePort,
-    utc_micros_value,
 };
 pub use workflow::{
     MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile, TestRunControl,
