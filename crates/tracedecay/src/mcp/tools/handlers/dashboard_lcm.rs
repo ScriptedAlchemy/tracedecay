@@ -6,10 +6,10 @@ use tracedecay_application::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestContext,
 };
 use tracedecay_domain::{ActorId, RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256};
+use tracedecay_session_memory::session::{SessionRetrievalScope, SessionTemporalQuery};
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_session_memory::session::{SessionRetrievalScope, SessionTemporalQuery};
 
 use tracedecay_dashboard_api::{
     DashboardHttpRequestControlV1, DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1,
@@ -20,12 +20,12 @@ use tracedecay_dashboard_api::{
 use tracedecay_lcm::{LcmDescribeResponse, LcmDescribeTarget};
 use tracedecay_sessions::runtime::SessionSearchTimeRange;
 
+use tracedecay_session_memory::context::ResolvedSessionIdentity;
 use tracedecay_session_runtime::session_retrieval::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, SessionApplicationRetrievalPortV1,
     SessionRetrievalPageView, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
     admitted_execution_limits,
 };
-use tracedecay_session_memory::context::ResolvedSessionIdentity;
 
 const SUMMARY_DESCRIBE_CONCURRENCY: usize = 8;
 const DASHBOARD_AGGREGATE_PAGE_LIMIT: usize = 16;
@@ -904,7 +904,8 @@ mod tests {
             &'a self,
             _context: &'a RequestContext,
             _query: SessionTemporalQuery,
-        ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
+        ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
+        {
             panic!("expired dashboard admission must not invoke retrieval")
         }
     }

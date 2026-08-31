@@ -71,7 +71,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             &record.publication.key,
             Some(Arc::new(mismatched_manifest)),
         ),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
 
     let committed = registered
@@ -169,7 +169,7 @@ fn incomplete_pending_generation_cannot_advance_verified_head() {
             &record.publication.key,
             Some(Arc::new(incomplete)),
         ),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
     assert!(
         authority

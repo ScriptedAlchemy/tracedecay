@@ -45,12 +45,12 @@ use tracedecay_domain::{
     SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
+use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 struct DashboardFixture {
     _tmp: TempDir,
@@ -645,6 +645,7 @@ async fn start_dashboard_fixture_full(
             dashboard::DashboardTestProjectGraphsV1::default(),
             "127.0.0.1",
             port,
+            tracedecay::product_runtime::register_fixture_product_runtime().build_version(),
             dashboard::spa_router(tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS),
             std::future::pending(),
         )

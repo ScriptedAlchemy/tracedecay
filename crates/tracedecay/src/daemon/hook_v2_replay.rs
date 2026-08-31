@@ -814,7 +814,8 @@ mod tests {
                                 .push("replayed lifecycle suggestion");
                         }
                         HookV2AdmissionOutcomeV1::Admitted {
-                            orchestration: tracedecay_daemon_service::HookOrchestrationAdmissionV1::Enqueued,
+                            orchestration:
+                                tracedecay_daemon_service::HookOrchestrationAdmissionV1::Enqueued,
                             ready_guidance: serde_json::json!({
                                 "suggestion": "replayed lifecycle suggestion"
                             }),

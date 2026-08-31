@@ -226,6 +226,7 @@ struct LifecycleInstallArtifactV1 {
     members: std::collections::BTreeMap<String, CatalogMemberPinV1>,
 }
 
+#[hotpath::measure_all]
 impl VerifiedEmbeddingArtifactV1 {
     #[cfg(any(test, feature = "semantic-fastembed"))]
     fn embedding_key(&self) -> &tracedecay_domain::EmbeddingProjectionKeyV1 {
@@ -341,6 +342,7 @@ pub struct AdmittedProjectionArtifactV1 {
     runtime_artifact: VerifiedEmbeddingArtifactV1,
 }
 
+#[hotpath::measure_all]
 impl AdmittedProjectionArtifactV1 {
     pub fn admit(
         artifact: &AdmittedArtifactV1,
@@ -695,6 +697,7 @@ impl AdmittedProjectionArtifactV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl LifecycleInstallArtifactV1 {
     #[cfg(feature = "semantic-fastembed")]
     fn declares_member(&self, role: ArtifactMemberRoleV1) -> bool {
@@ -832,6 +835,7 @@ pub struct EmbeddingVectorV1 {
     pub normalization: EmbeddingNormalizationV1,
 }
 
+#[hotpath::measure_all]
 impl EmbeddingVectorV1 {
     /// Echo validation: declared dimension matches the payload and every
     /// value is finite (Plan 31: publication verifies dimensions and finite
@@ -868,6 +872,7 @@ pub struct BoundedSanitizedTextBatchV1 {
     total_bytes: usize,
 }
 
+#[hotpath::measure_all]
 impl BoundedSanitizedTextBatchV1 {
     pub fn try_new(
         texts: Vec<String>,
@@ -1087,6 +1092,7 @@ pub struct FastEmbedEmbeddingRuntime;
 pub enum UnavailableEmbeddingSession {}
 
 #[cfg(not(feature = "semantic-fastembed"))]
+#[hotpath::measure_all]
 impl EmbeddingSession for UnavailableEmbeddingSession {
     fn authority(&self) -> &AdmittedProjectionArtifactV1 {
         match *self {}
@@ -1106,6 +1112,7 @@ impl EmbeddingSession for UnavailableEmbeddingSession {
 }
 
 #[cfg(not(feature = "semantic-fastembed"))]
+#[hotpath::measure_all]
 impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = UnavailableEmbeddingSession;
 
@@ -1136,6 +1143,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
 }
 
 #[cfg(feature = "semantic-fastembed")]
+#[hotpath::measure_all]
 impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = FastEmbedEmbeddingSession;
 
@@ -1240,6 +1248,7 @@ pub struct FastEmbedEmbeddingSession {
 }
 
 #[cfg(feature = "semantic-fastembed")]
+#[hotpath::measure_all]
 impl EmbeddingSession for FastEmbedEmbeddingSession {
     fn authority(&self) -> &AdmittedProjectionArtifactV1 {
         &self.authority
@@ -1318,7 +1327,7 @@ fn fastembed_model(
     artifact: &VerifiedEmbeddingArtifactV1,
     interruption: &dyn SemanticExecutionAuthority,
 ) -> Result<UserDefinedEmbeddingModel, EmbedError> {
-    let mut member_bytes = |role: ArtifactMemberRoleV1| {
+    let member_bytes = |role: ArtifactMemberRoleV1| {
         check_execution_authority(interruption)?;
         artifact.required_member_bytes(role)
     };
@@ -1328,12 +1337,11 @@ fn fastembed_model(
         special_tokens_map_file: member_bytes(ArtifactMemberRoleV1::SpecialTokensMap)?,
         tokenizer_config_file: member_bytes(ArtifactMemberRoleV1::TokenizerConfig)?,
     };
-    Ok(UserDefinedEmbeddingModel::new(
-        member_bytes(ArtifactMemberRoleV1::Model)?,
-        tokenizer_files,
+    Ok(
+        UserDefinedEmbeddingModel::new(member_bytes(ArtifactMemberRoleV1::Model)?, tokenizer_files)
+            .with_pooling(fastembed_pooling(artifact.pooling())?)
+            .with_quantization(fastembed_quantization(artifact.precision())),
     )
-    .with_pooling(fastembed_pooling(artifact.pooling())?)
-    .with_quantization(fastembed_quantization(artifact.precision())))
 }
 
 #[cfg(feature = "semantic-fastembed")]
@@ -2209,7 +2217,9 @@ mod tests {
             EmbeddingMetricV1::DotProduct,
             EmbeddingNormalizationV1::L2,
         );
-        let mut session = runtime.open_session(&authority, &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority, &never_cancelled())
+            .expect("session");
         let vectors = session
             .embed_batch(&batch(&["echo me"]), &never_cancelled())
             .expect("embed");
@@ -2235,7 +2245,9 @@ mod tests {
             EmbeddingMetricV1::Cosine,
             EmbeddingNormalizationV1::None,
         );
-        let mut session = runtime.open_session(&authority, &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority, &never_cancelled())
+            .expect("session");
         let vectors = session
             .embed_batch(&batch(&["raw values"]), &never_cancelled())
             .expect("embed");
@@ -2249,7 +2261,9 @@ mod tests {
     #[test]
     fn cancellation_before_embed_aborts() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut session = runtime.open_session(&authority(8), &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority(8), &never_cancelled())
+            .expect("session");
         let cancel = ManualCancellation::new();
         cancel.cancel();
         let result = session.embed_batch(&batch(&["a", "b"]), &cancel);
@@ -2272,7 +2286,9 @@ mod tests {
         }
 
         let runtime = FakeEmbeddingRuntime::new();
-        let mut session = runtime.open_session(&authority(8), &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority(8), &never_cancelled())
+            .expect("session");
         let result = session.embed_batch(&batch(&["a", "b"]), &ExpiredAuthority);
 
         assert_eq!(result, Err(EmbedError::DeadlineExceeded));
@@ -2286,7 +2302,9 @@ mod tests {
     #[test]
     fn cancellation_mid_embed_discards_partial_batch() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut session = runtime.open_session(&authority(8), &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority(8), &never_cancelled())
+            .expect("session");
         // First poll (before text 1) passes, second poll cancels.
         let cancel = ScriptedCancellation::new(1);
         let result = session.embed_batch(&batch(&["a", "b", "c", "d"]), &cancel);
@@ -2303,7 +2321,9 @@ mod tests {
         let runtime = FakeEmbeddingRuntime::new();
         let mut authority = authority(8);
         authority.runtime_artifact.max_batch_texts = 1;
-        let mut session = runtime.open_session(&authority, &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority, &never_cancelled())
+            .expect("session");
         let result = session.embed_batch(&batch(&["a", "b"]), &never_cancelled());
         assert!(matches!(
             result,
@@ -2413,7 +2433,9 @@ mod tests {
         let runtime = FakeEmbeddingRuntime::new().with_resident_bytes_per_session(4096);
         let counters = runtime.counters();
         {
-            let session = runtime.open_session(&authority(8), &never_cancelled()).expect("session");
+            let session = runtime
+                .open_session(&authority(8), &never_cancelled())
+                .expect("session");
             assert_eq!(session.resident_bytes_estimate(), 4096);
             assert_eq!(counters.sessions_opened.load(Ordering::SeqCst), 1);
             assert_eq!(counters.sessions_closed.load(Ordering::SeqCst), 0);

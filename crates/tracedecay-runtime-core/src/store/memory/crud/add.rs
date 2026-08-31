@@ -5,7 +5,8 @@ use super::super::primitives::{
 };
 use super::super::projection::load_project_memory_projection_tx;
 use super::super::scoring::{
-    project_memory_jaccard, project_memory_millionths, project_memory_tokens,
+    project_memory_fact_vector, project_memory_jaccard, project_memory_millionths,
+    project_memory_tokens,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -49,9 +50,8 @@ fn classification_similarity(
 ) -> FactStoreResult<u32> {
     let candidate_tokens = project_memory_tokens(candidate.content());
     let mut similarity = project_memory_jaccard(proposed_tokens, &candidate_tokens);
-    let candidate_vector = encoder
-        .encode_fact(candidate.content(), candidate.entities())
-        .map_err(holographic_store_error)?;
+    let candidate_vector =
+        project_memory_fact_vector(encoder, candidate).map_err(holographic_store_error)?;
     let holographic = encoder
         .similarity(proposed_vector, &candidate_vector)
         .map_err(holographic_store_error)?;

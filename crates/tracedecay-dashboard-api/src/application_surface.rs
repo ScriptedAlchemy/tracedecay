@@ -18,7 +18,7 @@ use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
 use tracedecay_domain::{NativeIntegrationTransactionId, ProjectId, ScopeSetId};
-use tracedecay_usecases::configuration::DirectConfigurationMutation;
+use tracedecay_configuration::DirectConfigurationMutation;
 
 use crate::DashboardHttpRequestControlV1;
 

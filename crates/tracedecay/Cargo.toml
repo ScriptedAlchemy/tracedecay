@@ -99,11 +99,13 @@ hotpath = [
     "tracedecay-code-index/hotpath",
     "tracedecay-code-index-retention/hotpath",
     "tracedecay-code-index-runtime/hotpath",
+    "tracedecay-configuration/hotpath",
     "tracedecay-dashboard-api/hotpath",
     "tracedecay-daemon-control/hotpath",
     "tracedecay-daemon-identity/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-daemon-service/hotpath",
+    "tracedecay-framing/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-graph-query/hotpath",
@@ -144,11 +146,13 @@ hotpath-alloc = [
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-code-index-retention/hotpath-alloc",
     "tracedecay-code-index-runtime/hotpath-alloc",
+    "tracedecay-configuration/hotpath-alloc",
     "tracedecay-dashboard-api/hotpath-alloc",
     "tracedecay-daemon-control/hotpath-alloc",
     "tracedecay-daemon-identity/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-daemon-service/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-graph-query/hotpath-alloc",
@@ -189,11 +193,13 @@ hotpath-cpu = [
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-code-index-retention/hotpath-cpu",
     "tracedecay-code-index-runtime/hotpath-cpu",
+    "tracedecay-configuration/hotpath-cpu",
     "tracedecay-dashboard-api/hotpath-cpu",
     "tracedecay-daemon-control/hotpath-cpu",
     "tracedecay-daemon-identity/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-daemon-service/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-graph-query/hotpath-cpu",
@@ -409,12 +415,14 @@ tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version =
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
 tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["source-analysis"] }

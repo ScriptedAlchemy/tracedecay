@@ -415,10 +415,7 @@ impl DaemonEngine {
             .get(&key)
             .is_some();
         if !owner_is_current {
-            if let Some(retirement) = self
-                .retire_exact_automation_scheduler_locked(&key)
-                .await
-            {
+            if let Some(retirement) = self.retire_exact_automation_scheduler_locked(&key).await {
                 let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, retirement.wait()).await;
             }
             return;

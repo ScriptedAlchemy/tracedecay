@@ -123,7 +123,7 @@ pub trait McpTransport {
     /// `tokio::select!`, so a dropped read must not lose bytes it already
     /// consumed. Buffered implementations satisfy this by keeping the
     /// partial-frame accumulator in the transport (see
-    /// `tracedecay_daemon_protocol::wire::BoundedLineReader`) rather than in the future.
+    /// `tracedecay_framing::BoundedLineReader`) rather than in the future.
     /// Returns `None` on EOF.
     fn read_line(
         &mut self,

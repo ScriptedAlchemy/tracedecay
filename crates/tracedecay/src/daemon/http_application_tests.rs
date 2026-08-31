@@ -260,6 +260,10 @@ async fn service_with_canonical_application(
     tokio::task::JoinHandle<()>,
     tempfile::TempDir,
 ) {
+    // The canonical handshake reports the client's build version from the
+    // product runtime; this composition never passes through the binary's
+    // registration.
+    crate::product_runtime::register_fixture_product_runtime();
     let project = tempfile::tempdir().expect("canonical application project");
     let broker = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

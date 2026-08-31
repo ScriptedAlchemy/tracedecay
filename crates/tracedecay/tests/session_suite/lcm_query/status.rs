@@ -175,7 +175,9 @@ async fn status_reports_dag_depth_distribution_store_estimate_and_config_default
         .expect("status should load");
 
     assert_eq!(status.store.messages, 2);
-    assert_eq!(status.store.estimated_tokens, 5);
+    assert_eq!(status.store.estimated_tokens, 0);
+    assert!(!status.store.token_estimate.complete);
+    assert_eq!(status.store.token_estimate.scanned_messages, 0);
 
     assert_eq!(status.dag.total_nodes, 2);
     assert_eq!(status.dag.total_tokens, 8);

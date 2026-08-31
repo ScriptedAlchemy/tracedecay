@@ -12,7 +12,7 @@ use tokio::time::{Instant, timeout};
 
 use crate::handshake::DaemonHandshake;
 use crate::transport::{BrokerStream, DaemonAuthPreface, DaemonEndpoint};
-use crate::wire::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line};
+use tracedecay_framing::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);

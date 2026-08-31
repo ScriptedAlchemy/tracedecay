@@ -497,7 +497,7 @@ async fn production_project_server_inner(
                     .ok()
                     .and_then(|pinned| {
                         tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
-                            &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+                            &tracedecay_configuration::ConfigurationCurrentStateV1 {
                                 revision_id: pinned.revision_id,
                                 snapshot: pinned.snapshot,
                             },
@@ -1285,7 +1285,7 @@ struct SemanticProjectRuntime {
 /// composition runtime can veto auto-download even when configuration allows
 /// it, so both inputs are consulted here rather than at the use site.
 fn semantic_project_runtime(
-    runtime_configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+    runtime_configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
     runtime: &ProductionProjectCompositionRuntime,
 ) -> Result<SemanticProjectRuntime> {
     let semantic_config = &runtime_configuration.config.semantic;

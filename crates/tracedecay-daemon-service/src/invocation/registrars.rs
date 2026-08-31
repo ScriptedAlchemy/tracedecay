@@ -223,7 +223,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         change: &'a tracedecay_domain::configuration::ProtectedChange,
-    ) -> tracedecay_usecases::configuration::ConfigurationOperationFuture<
+    ) -> tracedecay_configuration::ConfigurationOperationFuture<
         'a,
         ScopeRevalidationEvidenceV1,
     > {
@@ -232,7 +232,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         Box::pin(async move {
             allowed
                 .then_some(evidence)
-                .ok_or(tracedecay_usecases::configuration::ConfigurationError::TargetUnavailable)
+                .ok_or(tracedecay_configuration::ConfigurationError::TargetUnavailable)
         })
     }
 
@@ -240,7 +240,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         plan: &'a tracedecay_domain::configuration::ProtectedChangePlan,
-    ) -> tracedecay_usecases::configuration::ConfigurationOperationFuture<
+    ) -> tracedecay_configuration::ConfigurationOperationFuture<
         'a,
         ScopeRevalidationEvidenceV1,
     > {
@@ -249,7 +249,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         Box::pin(async move {
             allowed
                 .then_some(evidence)
-                .ok_or(tracedecay_usecases::configuration::ConfigurationError::TargetUnavailable)
+                .ok_or(tracedecay_configuration::ConfigurationError::TargetUnavailable)
         })
     }
 }
@@ -387,20 +387,14 @@ impl DaemonFeedbackRuntimeRegistrar {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn with_publication_gate(
-        mut self,
-        gate: Arc<DaemonFeedbackPublicationTestGate>,
-    ) -> Self {
+    pub fn with_publication_gate(mut self, gate: Arc<DaemonFeedbackPublicationTestGate>) -> Self {
         self.publication_gate = Some(gate);
         self
     }
 
     /// Resolve the read store from the feedback runtime mounted for this exact
     /// project root. Doctor receives no provider runtime or write authority.
-    pub async fn doctor_read_store(
-        &self,
-        project_root: &Path,
-    ) -> Option<ProjectFeedbackStore> {
+    pub async fn doctor_read_store(&self, project_root: &Path) -> Option<ProjectFeedbackStore> {
         self.service
             .feedback_runtime(Some(project_root))
             .await
@@ -738,12 +732,12 @@ impl DaemonConfigurationRuntimeRegistrar {
                         .to_owned(),
             });
         }
-        let mutation = tracedecay_usecases::configuration::profile_code_index_worker_mutation(
+        let mutation = tracedecay_configuration::profile_code_index_worker_mutation(
             database.as_ref(),
             profile_id,
             selection,
         )
-        .map_err(tracedecay_usecases::configuration::map_profile_worker_configuration_error)?;
+        .map_err(tracedecay_configuration::map_profile_worker_configuration_error)?;
         let observed_at = current_micros();
         let authority = registered
             .grants
@@ -758,7 +752,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             .map_err(|_| TraceDecayError::Config {
                 message: "profile worker configuration grant was refused".to_owned(),
             })?;
-        tracedecay_usecases::configuration::commit_profile_code_index_worker_selection(
+        tracedecay_configuration::commit_profile_code_index_worker_selection(
             database.as_ref(),
             profile_id,
             &authority,
@@ -766,7 +760,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             &expected_revision,
         )
         .await
-        .map_err(tracedecay_usecases::configuration::map_profile_worker_configuration_error)
+        .map_err(tracedecay_configuration::map_profile_worker_configuration_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1198,4 +1192,3 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         self.registry.shutdown().await
     }
 }
-

@@ -43,7 +43,9 @@ pub enum ProductRuntimeError {
         "no product runtime provider is registered; the generating binary must register one at process start"
     )]
     MissingProvider,
-    #[error("a product runtime provider is already registered; registration is set-once per process")]
+    #[error(
+        "a product runtime provider is already registered; registration is set-once per process"
+    )]
     ConflictingProvider,
     #[error("product runtime provider rejected: {reason}")]
     InvalidProvider { reason: String },
@@ -190,16 +192,20 @@ pub fn product_runtime() -> Result<&'static RegisteredProductRuntime, ProductRun
 }
 
 /// Canonical fixture dashboard bundle for tests and integration harnesses.
+///
+/// Shaped like a real Rsbuild dist — a titled index that names its
+/// `/static/js/index.*` entry script — so suite assertions about entry-script
+/// serving and SPA fall-through stay falsifiable against the fixture.
 #[cfg(any(test, feature = "test-helpers"))]
 pub const FIXTURE_DASHBOARD_ASSETS: StaticDashboardAssets = StaticDashboardAssets {
     assets: &[
         StaticDashboardAsset {
             path: "index.html",
-            contents: b"<html>TraceDecay fixture dashboard</html>",
+            contents: b"<!doctype html><html><head><title>TraceDecay</title></head><body><script src=\"/static/js/index.fixture.js\"></script>TraceDecay fixture dashboard</body></html>",
             content_type: "text/html; charset=utf-8",
         },
         StaticDashboardAsset {
-            path: "static/app.fixture.js",
+            path: "static/js/index.fixture.js",
             contents: b"console.log('tracedecay fixture bundle')",
             content_type: "application/javascript",
         },
@@ -331,7 +337,10 @@ mod tests {
         );
         // The first registration survives the rejected second attempt.
         assert_eq!(
-            runtime_in(&slot).expect("first registration retained").source().full_sha,
+            runtime_in(&slot)
+                .expect("first registration retained")
+                .source()
+                .full_sha,
             VALID_SHA
         );
     }
