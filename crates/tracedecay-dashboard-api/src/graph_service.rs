@@ -167,11 +167,27 @@ pub(super) struct GraphPathPayloadV1 {
 pub(super) struct GraphServiceReadV1<T> {
     pub(super) payload: T,
     pub(super) generation: String,
+    pub(super) freshness: crate::graph::CodeGraphReadFreshnessV1,
+}
+
+/// Envelope freshness for a verified graph read: a proven-current open is
+/// fresh, while a last-complete stale serve is marked stale so the dashboard
+/// carries the same caveat the MCP `code_graph_freshness` trailer does
+/// instead of presenting a rebuild-window answer as current.
+pub(super) fn graph_envelope_freshness(
+    freshness: crate::graph::CodeGraphReadFreshnessV1,
+) -> super::read_model::DashboardFreshnessV1 {
+    if freshness.is_stale() {
+        super::read_model::DashboardFreshnessV1::stale_now()
+    } else {
+        super::read_model::DashboardFreshnessV1::fresh_now()
+    }
 }
 
 struct AdmittedGraphReadV1 {
     reader: CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
+    freshness: crate::graph::CodeGraphReadFreshnessV1,
 }
 
 async fn admitted_graph(
@@ -214,6 +230,7 @@ async fn admitted_graph(
         label = "dashboard_api.graph.explorer_open"
     )
     .await?;
+    let freshness = verified.freshness();
     let reader = verified.reader_with_cancellation(
         &context,
         control.observed_at(),
@@ -222,6 +239,7 @@ async fn admitted_graph(
     Ok(AdmittedGraphReadV1 {
         reader,
         cancellation,
+        freshness,
     })
 }
 
@@ -341,6 +359,7 @@ pub async fn overview_payload(
             top_connected,
         },
         generation,
+        freshness: graph.freshness,
     })
 }
 
@@ -381,6 +400,7 @@ pub async fn search_payload(
             results,
         },
         generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
     })
 }
 
@@ -406,6 +426,7 @@ pub async fn node_payload(
     Ok(GraphServiceReadV1 {
         payload,
         generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
     })
 }
 
@@ -426,6 +447,7 @@ pub async fn neighbors_payload(
         return Ok(GraphServiceReadV1 {
             payload: None,
             generation: graph.reader.generation().as_str().to_owned(),
+            freshness: graph.freshness,
         });
     }
     let seeds = [occurrence.clone()];
@@ -508,6 +530,7 @@ pub async fn neighbors_payload(
                 .collect(),
         }),
         generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
     })
 }
 
@@ -643,6 +666,7 @@ pub async fn subgraph_payload(
             },
         },
         generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
     })
 }
 
@@ -704,6 +728,7 @@ pub async fn path_payload(
             max_depth,
         },
         generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
     })
 }
 

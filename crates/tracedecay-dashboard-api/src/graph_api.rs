@@ -104,16 +104,17 @@ pub async fn node(
             };
             match graph_service::node_payload(&state, &control, &node_id).await {
                 Ok(read) if read.payload.is_some() => {
-                    graph_ready(&state, read.payload, read.generation)
+                    graph_ready(&state, read.payload, read.generation, read.freshness)
                 }
-                Ok(read) => Json(
-                    DashboardEnvelopeV1::complete_zero_findings(
+                Ok(read) => {
+                    let mut envelope = DashboardEnvelopeV1::complete_zero_findings(
                         scope_from_state(&state),
                         DashboardCoverageV1::complete(1, "nodes"),
                         None,
-                    )
-                    .with_version(graph_version(read.generation)),
-                ),
+                    );
+                    envelope.freshness = graph_service::graph_envelope_freshness(read.freshness);
+                    Json(envelope.with_version(graph_version(read.generation)))
+                }
                 Err(error) => graph_read_failed(&state, error),
             }
         },
@@ -137,16 +138,17 @@ pub async fn neighbors(
             };
             match graph_service::neighbors_payload(&state, &control, &node_id, limit).await {
                 Ok(read) if read.payload.is_some() => {
-                    graph_ready(&state, read.payload, read.generation)
+                    graph_ready(&state, read.payload, read.generation, read.freshness)
                 }
-                Ok(read) => Json(
-                    DashboardEnvelopeV1::complete_zero_findings(
+                Ok(read) => {
+                    let mut envelope = DashboardEnvelopeV1::complete_zero_findings(
                         scope_from_state(&state),
                         DashboardCoverageV1::complete(1, "nodes"),
                         None,
-                    )
-                    .with_version(graph_version(read.generation)),
-                ),
+                    );
+                    envelope.freshness = graph_service::graph_envelope_freshness(read.freshness);
+                    Json(envelope.with_version(graph_version(read.generation)))
+                }
                 Err(error) => graph_read_failed(&state, error),
             }
         },
@@ -225,7 +227,7 @@ fn graph_response<T>(
     result: Result<graph_service::GraphServiceReadV1<T>, CodeGraphReadError>,
 ) -> Json<DashboardEnvelopeV1<Option<T>>> {
     match result {
-        Ok(read) => graph_ready(state, Some(read.payload), read.generation),
+        Ok(read) => graph_ready(state, Some(read.payload), read.generation, read.freshness),
         Err(error) => graph_read_failed(state, error),
     }
 }
@@ -234,15 +236,18 @@ fn graph_ready<T>(
     state: &DashboardState,
     payload: Option<T>,
     generation: String,
+    freshness: crate::graph::CodeGraphReadFreshnessV1,
 ) -> Json<DashboardEnvelopeV1<Option<T>>> {
-    Json(
-        DashboardEnvelopeV1::ready(
-            scope_from_state(state),
-            DashboardCoverageV1::unknown(),
-            payload,
-        )
-        .with_version(graph_version(generation)),
-    )
+    // A last-complete stale serve keeps the payload complete for the served
+    // generation but must not present itself as fresh (see
+    // `graph_service::graph_envelope_freshness`).
+    let mut envelope = DashboardEnvelopeV1::ready(
+        scope_from_state(state),
+        DashboardCoverageV1::unknown(),
+        payload,
+    );
+    envelope.freshness = graph_service::graph_envelope_freshness(freshness);
+    Json(envelope.with_version(graph_version(generation)))
 }
 
 fn graph_read_failed<T>(
