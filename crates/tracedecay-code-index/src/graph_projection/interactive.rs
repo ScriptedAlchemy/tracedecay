@@ -224,7 +224,9 @@ impl CodeGraphProjectionStore {
     }
 }
 
+#[hotpath::measure_all]
 impl CodeGraphInteractiveReader {
+    #[hotpath::skip]
     pub(super) fn assemble(
         generation: CodeGenerationId,
         projection: GraphProjectionIdentity,
@@ -243,6 +245,7 @@ impl CodeGraphInteractiveReader {
         }
     }
 
+    #[hotpath::skip]
     pub fn generation(&self) -> &CodeGenerationId {
         &self.generation
     }
@@ -778,6 +781,7 @@ impl CodeGraphInteractiveReader {
         })
     }
 
+    #[hotpath::skip]
     fn read_cancellation(
         &self,
         request: Arc<dyn GraphCancellation>,
@@ -792,6 +796,7 @@ impl CodeGraphInteractiveReader {
         Ok(cancellation)
     }
 
+    #[hotpath::skip]
     fn catalog(
         &self,
         cancellation: Arc<dyn GraphCancellation>,

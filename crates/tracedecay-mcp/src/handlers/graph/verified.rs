@@ -6,24 +6,48 @@ use serde_json::{Value, json};
 use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
-use tracedecay_graph_query::{
-    CodeGraphSymbolSummaryV1, LineageSymbolRecordV1, VerifiedGraphQuery,
-};
+use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, LineageSymbolRecordV1, VerifiedGraphQuery};
 
 pub const GRAPH_RELATION_READ_LIMIT: usize = 50_000;
+
+/// Search and lexical retrieval emit evidence anchors (`code-symbol:<occurrence>`).
+/// Graph handlers consume canonical [`SymbolOccurrenceId`] values. This is the
+/// single place that unwraps the known search namespace so `search` → `callers`
+/// does not silently miss a seated entity.
+const CODE_SYMBOL_EVIDENCE_PREFIX: &str = "code-symbol:";
 
 /// Admits a caller-supplied node id as a graph occurrence id. Every graph
 /// handler that takes a node id funnels through this one guard, so a blank
 /// value is rejected as a typed argument error naming the parameter before
 /// canonicality parsing ever sees it — including handlers that decode a
-/// typed request DTO and therefore bypass `require_node_id`.
+/// typed request DTO and therefore bypass `require_node_id`. Search evidence
+/// anchors in the `code-symbol:` namespace are unwrapped to the enclosed
+/// occurrence. Other `code-*` evidence namespaces fail closed instead of
+/// looking up a non-existent graph entity and rendering empty adjacency.
 pub fn graph_occurrence_id(raw: &str) -> Result<SymbolOccurrenceId> {
-    if raw.trim().is_empty() {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
         return Err(TraceDecayError::Config {
             message: "invalid parameter: node_id must not be empty".to_string(),
         });
     }
-    SymbolOccurrenceId::new(raw.to_owned()).map_err(|error| TraceDecayError::Config {
+    let occurrence = if let Some(stripped) = trimmed.strip_prefix(CODE_SYMBOL_EVIDENCE_PREFIX) {
+        if stripped.is_empty() {
+            return Err(TraceDecayError::Config {
+                message: "invalid parameter: node_id code-symbol evidence anchor is missing a symbol occurrence".to_string(),
+            });
+        }
+        stripped
+    } else if trimmed.starts_with("code-") && trimmed.contains(':') {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "invalid parameter: node_id `{trimmed}` is an evidence anchor, not a graph symbol occurrence"
+            ),
+        });
+    } else {
+        trimmed
+    };
+    SymbolOccurrenceId::new(occurrence.to_owned()).map_err(|error| TraceDecayError::Config {
         message: format!("invalid graph symbol occurrence: {error}"),
     })
 }
@@ -353,5 +377,41 @@ pub fn graph_symbol_corrupt(detail: String) -> TraceDecayError {
         reason_code: "verified-code-graph-symbol-corrupt".to_owned(),
         retryable: false,
         detail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::graph_occurrence_id;
+
+    const CANONICAL: &str =
+        "symbol.v1.sha256:4f4adb437af949d76698f841fde2eab2d2d4c62c56e24bdfa0f1de614219a34b";
+
+    #[test]
+    fn graph_occurrence_id_strips_search_evidence_anchor_prefix() {
+        let occurrence = graph_occurrence_id(&format!("code-symbol:{CANONICAL}"))
+            .expect("search evidence anchors must resolve to graph occurrences");
+        assert_eq!(occurrence.as_str(), CANONICAL);
+    }
+
+    #[test]
+    fn graph_occurrence_id_keeps_canonical_symbol_ids() {
+        assert_eq!(
+            graph_occurrence_id(CANONICAL)
+                .expect("canonical symbol ids must stay unchanged")
+                .as_str(),
+            CANONICAL
+        );
+    }
+
+    #[test]
+    fn graph_occurrence_id_rejects_other_evidence_namespaces() {
+        let error = graph_occurrence_id(&format!("code-graph:{CANONICAL}"))
+            .expect_err("non-symbol evidence anchors must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("evidence anchor"),
+            "expected typed evidence-anchor refusal, got {message}"
+        );
     }
 }
