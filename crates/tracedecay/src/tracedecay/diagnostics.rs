@@ -3,10 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::Database;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::StoreLayout;
 
 use super::TraceDecay;

@@ -3,16 +3,16 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use tracedecay_session_memory::context::read_cache::{self, GLOBAL_SESSION};
 use super::read_modes::{
     self, LineRange, ReadMode, render_full, render_lines, render_map, render_signatures,
     render_symbol_context,
 };
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::Database;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::ProjectPath;
+use tracedecay_session_memory::context::read_cache::{self, GLOBAL_SESSION};
 
 pub struct SourceReadRequest<'a> {
     pub file: &'a str,
@@ -213,9 +213,7 @@ pub fn resolve_indexed_source_file(
     if reader
         .symbols_in_logical_file(&display_file, 1, cancellation)
         .map_err(|error| {
-            crate::map_code_graph_read_runtime_error(crate::map_projection_error(
-                error,
-            ))
+            crate::map_code_graph_read_runtime_error(crate::map_projection_error(error))
         })?
         .is_empty()
     {

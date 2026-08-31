@@ -136,8 +136,10 @@ impl EmbeddingRuntime for GatedOpenRuntime {
             .expect("gate lock")
             .recv()
             .expect("gate release signal");
-        self.inner
-            .open_session(authority, &crate::fastembed_adapter::ManualCancellation::new())
+        self.inner.open_session(
+            authority,
+            &crate::fastembed_adapter::ManualCancellation::new(),
+        )
     }
 }
 
@@ -337,6 +339,7 @@ fn resident_ceiling_breach_fails_typed_while_the_load_is_still_running() {
     assert_eq!(
         error,
         SessionAcquireError::ResidentCeilingExceeded {
+            tracked_resident_bytes: 0,
             observed_growth_bytes: 128 * MIB,
             ceiling_bytes: 64 * MIB,
         }
@@ -351,6 +354,121 @@ fn resident_ceiling_breach_fails_typed_while_the_load_is_still_running() {
     );
     // The same signal aborts the loader at its next stage boundary.
     expect_aborted_load_release(|| pool.stats());
+}
+
+/// Runtime whose first session opens normally while the second waits for the
+/// pool's interruption. This models a cold open overlapping a retained session
+/// so actual load growth must be charged against the remaining pool budget.
+struct SecondOpenPollingRuntime {
+    inner: FakeEmbeddingRuntime,
+    opens: AtomicUsize,
+    resident_bytes_per_session: u64,
+}
+
+impl EmbeddingRuntime for SecondOpenPollingRuntime {
+    type Session = FakeEmbeddingSession;
+
+    fn resident_bytes_reservation(&self, _authority: &AdmittedProjectionArtifactV1) -> u64 {
+        self.resident_bytes_per_session
+    }
+
+    fn verify_artifact_compatibility(
+        &self,
+        authority: &AdmittedProjectionArtifactV1,
+    ) -> Result<(), EmbedError> {
+        self.inner.verify_artifact_compatibility(authority)
+    }
+
+    fn open_session(
+        &self,
+        authority: &AdmittedProjectionArtifactV1,
+        interruption: &dyn SemanticExecutionAuthority,
+    ) -> Result<Self::Session, EmbedError> {
+        if self.opens.fetch_add(1, Ordering::SeqCst) == 0 {
+            return self.inner.open_session(authority, interruption);
+        }
+        let give_up_at = Instant::now() + Duration::from_secs(5);
+        loop {
+            match interruption.interruption() {
+                Some(SemanticExecutionInterruptionV1::Cancelled) => {
+                    return Err(EmbedError::Cancelled);
+                }
+                Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
+                    return Err(EmbedError::DeadlineExceeded);
+                }
+                None => {
+                    assert!(
+                        Instant::now() < give_up_at,
+                        "second open never received pool interruption"
+                    );
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn measured_growth_is_charged_against_already_retained_sessions() {
+    const MIB: u64 = 1 << 20;
+    const POOL_CEILING: u64 = 128 * MIB;
+    const RETAINED_SESSION: u64 = 64 * MIB;
+    const SECOND_LOAD_GROWTH: u64 = 96 * MIB;
+
+    let sampler_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&sampler_calls);
+    let sampler: ResidentBytesSamplerV1 = Arc::new(move || {
+        let call = calls.fetch_add(1, Ordering::SeqCst);
+        Some(if call < 2 {
+            1 << 30
+        } else {
+            (1 << 30) + SECOND_LOAD_GROWTH
+        })
+    });
+    let pool = SessionPool::with_resident_sampler(
+        SecondOpenPollingRuntime {
+            inner: FakeEmbeddingRuntime::new().with_resident_bytes_per_session(RETAINED_SESSION),
+            opens: AtomicUsize::new(0),
+            resident_bytes_per_session: RETAINED_SESSION,
+        },
+        SystemMonotonicClock::default(),
+        config(2, Duration::from_mins(1), POOL_CEILING),
+        sampler,
+    )
+    .expect("valid config");
+    let authority = authority_with_resident_ceiling(POOL_CEILING, 500);
+
+    let held = pool.acquire(&authority).expect("first retained session");
+    let error = pool
+        .acquire(&authority)
+        .err()
+        .expect("overlapping growth exceeds the remaining pool budget");
+    assert!(
+        matches!(
+            error,
+            SessionAcquireError::ResidentCeilingExceeded {
+                tracked_resident_bytes: RETAINED_SESSION,
+                observed_growth_bytes: SECOND_LOAD_GROWTH,
+                ceiling_bytes: POOL_CEILING,
+            }
+        ),
+        "expected measured resident enforcement, got {error:?}"
+    );
+    let give_up_at = Instant::now() + Duration::from_secs(5);
+    loop {
+        let stats = pool.stats();
+        if stats.active == 1 && stats.resident_bytes == RETAINED_SESSION {
+            break;
+        }
+        assert!(
+            Instant::now() < give_up_at,
+            "interrupted second load did not release its reservation: {stats:?}"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    drop(held);
+    assert_eq!(pool.close(), 1, "the retained first session is drained");
+    assert_eq!(pool.stats().resident_bytes, 0);
 }
 
 #[test]
@@ -449,12 +567,14 @@ fn measured_resident_growth_beyond_the_ceiling_fails_typed_under_a_synthetic_cor
     let started = Instant::now();
     let error = pool.acquire(&authority).err().expect("measured breach");
     let SessionAcquireError::ResidentCeilingExceeded {
+        tracked_resident_bytes,
         observed_growth_bytes,
         ceiling_bytes,
     } = error
     else {
         panic!("expected ResidentCeilingExceeded, got {error:?}");
     };
+    assert_eq!(tracked_resident_bytes, 0);
     assert_eq!(ceiling_bytes, 8 * MIB);
     assert!(
         observed_growth_bytes > ceiling_bytes,

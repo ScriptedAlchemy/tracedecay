@@ -41,7 +41,7 @@ use crate::runtime::snapshot_observation::{
 use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft,
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    path_byte_len, stream_new_jsonl,
+    path_byte_len, run_blocking_transcript_section, stream_new_jsonl,
 };
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
@@ -71,6 +71,7 @@ pub struct VibeCaptureOutcome {
     pub deferred: bool,
 }
 
+#[hotpath::measure_all]
 impl VibeSource {
     /// Source rooted at the real Vibe home. Returns `None` when the home
     /// directory cannot be resolved.
@@ -208,6 +209,7 @@ impl TranscriptSource for VibeSource {
     }
 }
 
+#[hotpath::measure(label = "sessions.hosts.vibe.capture", future = true)]
 pub async fn capture_vibe_observations(
     facade: &dyn HostAdmission,
     source: &VibeSource,
@@ -216,9 +218,14 @@ pub async fn capture_vibe_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<VibeCaptureOutcome> {
-    let discovery = source.discover_transcript_paths(
-        project_root,
-        TranscriptDiscoveryBounds::from_discovered_units(MAX_SESSION_FILES),
+    let discovery = hotpath::measure_block!(
+        "sessions.hosts.vibe.discover_blocking",
+        run_blocking_transcript_section(|| {
+            source.discover_transcript_paths(
+                project_root,
+                TranscriptDiscoveryBounds::from_discovered_units(MAX_SESSION_FILES),
+            )
+        })
     );
     let mut outcome = VibeCaptureOutcome {
         deferred: discovery.is_truncated(),
@@ -262,7 +269,10 @@ async fn capture_vibe_path(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<JsonlObservationAdmissionProgress> {
-    let Some(meta) = source.scoped_meta(path, project_root) else {
+    let Some(meta) = hotpath::measure_block!(
+        "sessions.hosts.vibe.meta_blocking",
+        run_blocking_transcript_section(|| source.scoped_meta(path, project_root))
+    ) else {
         return Ok(JsonlObservationAdmissionProgress::default());
     };
     let provider = ProviderId::new(PROVIDER)

@@ -60,7 +60,7 @@ const REQUIRED_ARTIFACT_INDEXES_V8: [(&str, &str, &[&str]); 7] = [
     (
         "ngram_postings",
         "ngram_postings_by_ngram",
-        &["kind", "ngram", "page_ordinal"],
+        &["kind", "ngram", "page_ordinal", "cardinality"],
     ),
 ];
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;

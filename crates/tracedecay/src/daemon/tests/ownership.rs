@@ -388,6 +388,104 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     eprintln!("[cache-test] phase=shutdown done");
 }
 
+/// A mounted route alias answers without re-running registry admission: the
+/// retirement/revocation lifecycle owns a mounted server's validity, and only
+/// a (re)mount re-enters `ensure_registered_project_route`. A tombstone
+/// recorded after the mount therefore refuses the *next mount*, not the
+/// already-retained route.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mounted_route_alias_serves_without_readmission_until_retirement() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).expect("project dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("project source");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "mounted-alias-readmission");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+
+    let mounted = engine
+        .project_server(&handshake)
+        .await
+        .expect("mount project server");
+
+    // Recorded *after* the mount and before any retirement: per-request
+    // re-admission would refuse the very next call, while lifecycle-owned
+    // admission keeps serving the retained route.
+    let database = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile database");
+    let profile_id = engine
+        .store_administration
+        .profile_identity()
+        .expect("profile identity")
+        .profile_id()
+        .as_str()
+        .to_owned();
+    database
+        .record_remote_deletion_tombstone(tracedecay_global_db::RemoteDeletionTombstone {
+            target: tracedecay_global_db::RemoteDeletionTarget::Account,
+            profile_id,
+            project_id: None,
+            tombstone_id: "tombstone.mounted-alias".to_owned(),
+            recorded_at_micros: 1,
+            cleanup: tracedecay_global_db::RemoteDeletionCleanupState::Pending,
+        })
+        .await
+        .expect("persist account tombstone");
+
+    let served = engine
+        .project_server(&handshake)
+        .await
+        .expect("a mounted route alias must keep serving until retirement lands");
+    assert!(
+        std::sync::Arc::ptr_eq(&mounted, &served),
+        "the alias hit must return the already-mounted server"
+    );
+    drop(served);
+    drop(mounted);
+
+    // Retirement (owned by the deletion/retirement lifecycle suites) drops
+    // the owner entry and every route alias. Drive that transition directly
+    // so this test pins only the admission contract: an evicted route
+    // re-enters `ensure_registered_project_route`, where the tombstone
+    // refuses the re-mount.
+    let route = super::super::ProjectRouteKey::from_handshake(
+        &project.canonicalize().expect("canonical project"),
+        &handshake,
+    )
+    .expect("route key");
+    {
+        let mut servers = engine.store_administration.project_servers().lock().await;
+        let key = servers
+            .get_route(&route)
+            .map(|(key, _)| key.clone())
+            .expect("mounted owner bound to route");
+        servers
+            .remove(&key)
+            .expect("retire the mounted owner and its aliases");
+    }
+
+    let refused = match engine.project_server(&handshake).await {
+        Ok(_) => panic!("re-mount after retirement must re-enter admission and be refused"),
+        Err(error) => error,
+    };
+    assert!(
+        refused.to_string().contains("deleted"),
+        "refusal must carry the remote-deletion cause, got: {refused}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn interrupted_post_insert_activation_retains_maintenance_ownership() {
