@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use tracedecay_domain::errors::Result;
-use tracedecay_domain::{BrainId, FactOwnerV1, ProjectId, UserProfileId};
+use tracedecay_domain::{FactOwnerV1, ProjectId, UserProfileId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::storage::StoreLayout;
@@ -35,10 +35,4 @@ pub trait ProfileRuntime: Send + Sync {
     fn profile_id(&self) -> &UserProfileId;
     fn profile_sessions(&self) -> RuntimeFuture<'_, RegisteredGlobalDbLeaseV1>;
     fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database>;
-}
-
-/// Stable profile identity values used to bind session evidence.
-pub trait ProfileIdentity: Send + Sync {
-    fn brain_id(&self) -> &BrainId;
-    fn profile_id(&self) -> &UserProfileId;
 }

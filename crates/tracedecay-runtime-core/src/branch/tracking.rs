@@ -60,11 +60,13 @@ mod default_branch_tests {
     use super::*;
 
     fn run_git(project_root: &Path, args: &[&str]) {
-        let output = std::process::Command::new(crate::git::git_program())
-            .args(args)
-            .current_dir(project_root)
-            .output()
-            .unwrap();
+        let output = std::process::Command::new(
+            crate::git::try_git_program().expect("absolute git executable should resolve"),
+        )
+        .args(args)
+        .current_dir(project_root)
+        .output()
+        .unwrap();
         assert!(
             output.status.success(),
             "git {args:?} failed: {}",
@@ -351,11 +353,13 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
     let project_root = temp.path().join("repo");
     std::fs::create_dir_all(&project_root).unwrap();
     let run_git = |args: &[&str]| {
-        let output = std::process::Command::new(crate::git::git_program())
-            .args(args)
-            .current_dir(&project_root)
-            .output()
-            .unwrap();
+        let output = std::process::Command::new(
+            crate::git::try_git_program().expect("absolute git executable should resolve"),
+        )
+        .args(args)
+        .current_dir(&project_root)
+        .output()
+        .unwrap();
         assert!(
             output.status.success(),
             "git {args:?} failed: {}",

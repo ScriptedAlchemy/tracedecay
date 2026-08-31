@@ -266,6 +266,7 @@ pub(crate) fn collapse_replayed_wal(database: &GrafeoDB) {
 /// Delete segments that recovery skips because their sequence precedes the
 /// durable checkpoint. Keep the checkpoint segment and two preceding files,
 /// matching Grafeo's own rotation safety margin.
+#[hotpath::measure]
 fn remove_checkpoint_covered_segments(sidecar: &Path, covered_below: u64) -> u64 {
     let Ok(entries) = std::fs::read_dir(sidecar) else {
         return 0;
@@ -288,6 +289,7 @@ fn remove_checkpoint_covered_segments(sidecar: &Path, covered_below: u64) -> u64
     removed
 }
 
+#[hotpath::measure]
 fn newest_wal_segment_sequence(sidecar: &Path) -> Option<u64> {
     let entries = std::fs::read_dir(sidecar).ok()?;
     entries
@@ -489,6 +491,7 @@ pub(crate) fn set_projection_quarantine(
 ///
 /// A property rather than a label for the same reason entity identity is: one
 /// native label per record becomes one columnar node table per record.
+#[hotpath::measure]
 fn quarantine_key_value(namespace: &GraphNamespace, projection: &GraphProjectionId) -> Value {
     Value::from(format!(
         "{}_{}",

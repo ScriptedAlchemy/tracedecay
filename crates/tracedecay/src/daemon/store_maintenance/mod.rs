@@ -465,6 +465,10 @@ pub(super) async fn run_code_generation_retention(
 
 /// The offline protection pin: the generation the mounted scheduler is
 /// currently serving, when one is mounted at all.
+#[hotpath::measure(
+    label = "daemon.git.maintenance.serving_generation_pins",
+    future = true
+)]
 async fn serving_generation_pins(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -482,6 +486,10 @@ async fn serving_generation_pins(
 /// inventory. Emitting `retention_degraded` is decided exclusively by
 /// [`VectorRetentionInventoryV1::degraded_reason`], so quiet states cannot be
 /// reintroduced into the degraded log by a divergent match arm.
+#[hotpath::measure(
+    label = "daemon.git.maintenance.code_generation_retention_apply",
+    future = true
+)]
 async fn apply_code_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -1823,9 +1831,7 @@ enum RetainedCompactionStore<'a> {
 }
 
 impl RetainedCompactionStore<'_> {
-    async fn storage_page_counts(
-        &self,
-    ) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
+    async fn storage_page_counts(&self) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
         match self {
             Self::Registered(database) => database.storage_page_counts().await,
             Self::Project(database) => database.storage_page_counts().await,
@@ -2151,11 +2157,14 @@ mod code_index_root_alignment_tests {
     }
 
     fn scope_fixture_git(root: &Path, args: &[&str]) {
-        let status = Command::new(tracedecay_runtime_core::git::git_program())
-            .current_dir(root)
-            .args(args)
-            .status()
-            .expect("run git fixture command");
+        let status = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .current_dir(root)
+        .args(args)
+        .status()
+        .expect("run git fixture command");
         assert!(status.success(), "git fixture command failed: {args:?}");
     }
 

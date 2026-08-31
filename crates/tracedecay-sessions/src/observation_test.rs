@@ -519,11 +519,14 @@ async fn capture_redacts_before_the_store_and_replays_the_receipt_bound_row() {
 async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
     let repository = TempDir::new().unwrap();
     let git = |args: &[&str]| {
-        let output = Command::new(tracedecay_runtime_core::git::git_program())
-            .args(args)
-            .current_dir(repository.path())
-            .output()
-            .unwrap();
+        let output = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .args(args)
+        .current_dir(repository.path())
+        .output()
+        .unwrap();
         assert!(
             output.status.success(),
             "git {args:?} failed: {}",

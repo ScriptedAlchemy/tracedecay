@@ -20,26 +20,35 @@ use super::worker::run_session_temporal_refresh_scheduler;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_sessions::admission::session_ingest_disabled;
 
-#[derive(Default, Debug, Eq, PartialEq)]
-pub struct SessionTemporalRefreshPassReport {
-    pub begun: usize,
-    pub joined: usize,
-    pub projected_batches: usize,
-    pub completed: usize,
-    pub failed: usize,
-    pub cancelled: usize,
-    pub deferred: usize,
-    pub retryable_errors: usize,
-    pub terminal_errors: usize,
-    pub deadline_errors: usize,
-    pub saturated: bool,
-    pub backlog: Option<usize>,
-    pub retry_class: Option<SessionTemporalRefreshRetryClass>,
-    pub last_error: Option<String>,
+macro_rules! define_pass_report {
+    ($visibility:vis) => {
+        #[derive(Default, Debug, Eq, PartialEq)]
+        $visibility struct SessionTemporalRefreshPassReport {
+            $visibility begun: usize,
+            $visibility joined: usize,
+            $visibility projected_batches: usize,
+            $visibility completed: usize,
+            $visibility failed: usize,
+            $visibility cancelled: usize,
+            $visibility deferred: usize,
+            $visibility retryable_errors: usize,
+            $visibility terminal_errors: usize,
+            $visibility deadline_errors: usize,
+            $visibility saturated: bool,
+            $visibility backlog: Option<usize>,
+            $visibility retry_class: Option<SessionTemporalRefreshRetryClass>,
+            $visibility last_error: Option<String>,
+        }
+    };
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
+define_pass_report!(pub);
+#[cfg(not(any(test, feature = "test-helpers")))]
+define_pass_report!(pub(crate));
+
 impl SessionTemporalRefreshPassReport {
-    pub fn observe_retry(&mut self, class: SessionTemporalRefreshRetryClass) {
+    pub(crate) fn observe_retry(&mut self, class: SessionTemporalRefreshRetryClass) {
         let rank = |candidate| match candidate {
             SessionTemporalRefreshRetryClass::Storage => 1,
             SessionTemporalRefreshRetryClass::Projector => 2,
@@ -101,8 +110,8 @@ impl SessionTemporalRefreshSchedulerEntry {
 pub struct SessionTemporalRefreshSchedulerRegistry {
     project: tokio::sync::Mutex<HashMap<StoreOwnerKey, SessionTemporalRefreshSchedulerEntry>>,
     profile: tokio::sync::Mutex<HashMap<std::path::PathBuf, SessionTemporalRefreshSchedulerEntry>>,
-    pub projector: Arc<dyn SessionTemporalRefreshProjector>,
-    pub policy: SessionTemporalRefreshPolicy,
+    projector: Arc<dyn SessionTemporalRefreshProjector>,
+    policy: SessionTemporalRefreshPolicy,
     shutting_down: AtomicBool,
     #[cfg_attr(not(unix), allow(dead_code))] // held by the unix-only daemon shutdown path
     shutdown_guard: tokio::sync::Mutex<()>,
@@ -162,6 +171,16 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
 }
 
 impl SessionTemporalRefreshSchedulerRegistry {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn configure_for_test(
+        &mut self,
+        projector: Arc<dyn SessionTemporalRefreshProjector>,
+        policy: SessionTemporalRefreshPolicy,
+    ) {
+        self.projector = projector;
+        self.policy = policy;
+    }
+
     pub fn configure_codex_preparation_resources(
         &self,
         memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
@@ -621,7 +640,7 @@ fn inert_session_temporal_refresh_wake() -> SessionTemporalRefreshWake {
     SessionTemporalRefreshWake::unavailable()
 }
 
-pub fn session_refresh_retry_delay(
+pub(crate) fn session_refresh_retry_delay(
     class: SessionTemporalRefreshRetryClass,
     attempt: u32,
 ) -> Duration {

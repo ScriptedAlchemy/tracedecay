@@ -75,15 +75,18 @@ impl GitCorrelationSessionStore for TestStore {
 }
 
 fn git(path: &Path, args: &[&str]) {
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(path)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "TraceDecay")
-        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-        .env("GIT_COMMITTER_NAME", "TraceDecay")
-        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-        .output()
-        .unwrap();
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(path)
+    .args(args)
+    .env("GIT_AUTHOR_NAME", "TraceDecay")
+    .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
+    .env("GIT_COMMITTER_NAME", "TraceDecay")
+    .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
+    .output()
+    .unwrap();
     assert!(
         output.status.success(),
         "git {args:?}: {}",
@@ -127,14 +130,17 @@ fn append_linear_history(path: &Path, commit_count: usize) {
     }
     stream.push_str("done\n");
 
-    let mut child = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(path)
-        .args(["fast-import", "--quiet"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(path)
+    .args(["fast-import", "--quiet"])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
     child
         .stdin
         .take()
@@ -148,12 +154,15 @@ fn append_linear_history(path: &Path, commit_count: usize) {
         String::from_utf8_lossy(&output.stderr)
     );
     let timestamp = commit_count.to_string();
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(path)
-        .args(["reset", "--hard", "refs/heads/imported"])
-        .env("GIT_COMMITTER_DATE", format!("@{timestamp} +0000"))
-        .output()
-        .unwrap();
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(path)
+    .args(["reset", "--hard", "refs/heads/imported"])
+    .env("GIT_COMMITTER_DATE", format!("@{timestamp} +0000"))
+    .output()
+    .unwrap();
     assert!(
         output.status.success(),
         "git reset: {}",

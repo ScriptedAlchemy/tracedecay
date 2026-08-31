@@ -413,7 +413,7 @@ tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
-tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0" }
+tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["source-analysis"] }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }

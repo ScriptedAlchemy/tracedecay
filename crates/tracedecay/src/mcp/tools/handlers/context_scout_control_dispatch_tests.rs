@@ -11,13 +11,19 @@ use crate::tracedecay::TraceDecay;
 
 #[derive(Default)]
 struct RecordingUnavailableExecutor {
-    invocations: Mutex<Vec<(String, Value)>>,
+    invocations: Mutex<
+        Vec<(
+            ApplicationSurfaceOperation,
+            Value,
+            tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        )>,
+    >,
 }
 
 impl tracedecay_application::ApplicationInvocationExecutor for RecordingUnavailableExecutor {
     fn invoke(
         &self,
-        invocation: tracedecay_application::ApplicationInvocation,
+        _invocation: tracedecay_application::ApplicationInvocation,
     ) -> tracedecay_application::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -25,15 +31,6 @@ impl tracedecay_application::ApplicationInvocationExecutor for RecordingUnavaila
             tracedecay_application::InvocationError,
         >,
     > {
-        if let (Some(binding), Some(payload)) = (
-            invocation.request().binding(),
-            invocation.request().surface_payload(),
-        ) {
-            self.invocations
-                .lock()
-                .unwrap()
-                .push((binding.operation().as_str().to_owned(), payload.clone()));
-        }
         Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
     }
 }
@@ -41,10 +38,10 @@ impl tracedecay_application::ApplicationInvocationExecutor for RecordingUnavaila
 impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailableExecutor {
     fn invoke_controlled(
         &self,
-        _request: tracedecay_daemon_protocol::DaemonInvocationRequest,
+        request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         _deadline: tracedecay_application::Deadline,
         _cancellation: tracedecay_application::CancellationSignal,
-        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
@@ -52,6 +49,18 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailab
             tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
+        if let tracedecay_daemon_protocol::DaemonInvocationPayload::ContextScout {
+            surface_operation,
+            request,
+            ..
+        } = request.payload
+        {
+            self.invocations.lock().unwrap().push((
+                surface_operation,
+                serde_json::to_value(request).unwrap(),
+                policy,
+            ));
+        }
         Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
@@ -96,12 +105,12 @@ async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
     let controls = [
         (
             "tracedecay_context_scout_pause",
-            "context_scout_pause",
+            ApplicationSurfaceOperation::ContextScoutPause,
             "configuration.idempotency.mcp-context-scout-pause",
         ),
         (
             "tracedecay_context_scout_resume",
-            "context_scout_resume",
+            ApplicationSurfaceOperation::ContextScoutResume,
             "configuration.idempotency.mcp-context-scout-resume",
         ),
     ];
@@ -137,18 +146,22 @@ async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
             Some("application surface unavailable")
         );
         assert!(
-            cancellation.commit_started(),
-            "{tool_name} must claim authoritative effect settlement before invocation"
+            !cancellation.commit_started(),
+            "{tool_name} pre-admission executor refusal must not claim effect settlement"
         );
     }
 
     let invocations = executor.invocations.lock().unwrap();
     assert_eq!(invocations.len(), controls.len());
-    for ((actual_operation, request), (_, expected_operation, idempotency_key)) in
+    for ((actual_operation, request, policy), (_, expected_operation, idempotency_key)) in
         invocations.iter().zip(controls)
     {
-        assert_eq!(actual_operation, expected_operation);
-        assert_eq!(request["idempotency_key"], idempotency_key);
+        assert_eq!(actual_operation, &expected_operation);
+        assert_eq!(request["request"]["idempotency_key"], idempotency_key);
+        assert_eq!(
+            policy,
+            &tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect
+        );
     }
     drop(invocations);
     cg.close();

@@ -60,15 +60,15 @@ pub(crate) async fn resolve_registered_project_route(
     resolver: Option<crate::mcp::server::RetainedProjectServerResolver>,
 ) -> tracedecay_domain::errors::Result<ResolvedProjectRoute> {
     let Some(resolver) = resolver else {
-        return Err(
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "project_route_unavailable",
-                true,
-                "registered project server resolver is unavailable",
-            ),
-        );
+        return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            "registered project server resolver is unavailable",
+        ));
     };
-    let requested_path = requested_path.to_path_buf();
+    let (requested_path, scope) =
+        crate::mcp::scope::resolve_query_scope(&context, requested_path)
+            .map_err(|error| error.into_route_failure().into_error())?;
     let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
         context.clone(),
         requested_path.clone(),
@@ -84,8 +84,6 @@ pub(crate) async fn resolve_registered_project_route(
             ),
         )
     })?;
-    let scope = crate::mcp::scope::resolve_query_scope(&context, &requested_path)
-        .map_err(|error| error.into_route_failure().into_error())?;
     Ok(ResolvedProjectRoute {
         server: Arc::downgrade(&server),
         owner: context,
@@ -133,19 +131,17 @@ impl ProjectRouteFailure {
         )
     }
 
-    pub(crate) fn from_selection_error(
-        error: &tracedecay_domain::errors::TraceDecayError,
-    ) -> Self {
+    pub(crate) fn from_selection_error(error: &tracedecay_domain::errors::TraceDecayError) -> Self {
         let detail = error.to_string();
         let kind = match error {
-            tracedecay_domain::errors::TraceDecayError::ProjectRoute {
-                reason_code, ..
-            } => match reason_code.as_str() {
-                "project_route_not_found" => ProjectRouteFailureKind::NotFound,
-                "project_route_not_authorized" => ProjectRouteFailureKind::NotAuthorized,
-                "project_route_ambiguous" => ProjectRouteFailureKind::Ambiguous,
-                _ => ProjectRouteFailureKind::Unavailable,
-            },
+            tracedecay_domain::errors::TraceDecayError::ProjectRoute { reason_code, .. } => {
+                match reason_code.as_str() {
+                    "project_route_not_found" => ProjectRouteFailureKind::NotFound,
+                    "project_route_not_authorized" => ProjectRouteFailureKind::NotAuthorized,
+                    "project_route_ambiguous" => ProjectRouteFailureKind::Ambiguous,
+                    _ => ProjectRouteFailureKind::Unavailable,
+                }
+            }
             tracedecay_domain::errors::TraceDecayError::Config { message }
                 if message.contains("not found for selector") =>
             {
@@ -398,9 +394,7 @@ impl SharedHookProjectRouteCache {
         )
     }
 
-    pub(crate) fn snapshot(
-        &self,
-    ) -> tracedecay_domain::errors::Result<HookProjectRouteCache> {
+    pub(crate) fn snapshot(&self) -> tracedecay_domain::errors::Result<HookProjectRouteCache> {
         let state = self
             .inner
             .lock()
@@ -618,12 +612,15 @@ mod tests {
             ][..],
         ] {
             assert!(
-                Command::new(tracedecay_runtime_core::git::git_program())
-                    .args(args)
-                    .current_dir(&project)
-                    .status()
-                    .expect("git route fixture")
-                    .success()
+                Command::new(
+                    tracedecay_runtime_core::git::try_git_program()
+                        .expect("absolute git executable should resolve"),
+                )
+                .args(args)
+                .current_dir(&project)
+                .status()
+                .expect("git route fixture")
+                .success()
             );
         }
         let harness =

@@ -1,11 +1,13 @@
 use super::*;
 
 fn run_git(project_root: &Path, args: &[&str]) {
-    let output = std::process::Command::new(crate::git::git_program())
-        .args(args)
-        .current_dir(project_root)
-        .output()
-        .unwrap();
+    let output = std::process::Command::new(
+        crate::git::try_git_program().expect("absolute git executable should resolve"),
+    )
+    .args(args)
+    .current_dir(project_root)
+    .output()
+    .unwrap();
     assert!(
         output.status.success(),
         "git {args:?} failed: {}",

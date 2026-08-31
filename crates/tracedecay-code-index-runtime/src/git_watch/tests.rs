@@ -273,12 +273,15 @@ fn fast_watch_config() -> SyncConfig {
 const TEST_READY_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git should run");
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+    .args(args)
+    .current_dir(dir)
+    .output()
+    .expect("git should run");
     assert!(
         output.status.success(),
         "git {args:?} failed in {}\nstdout:\n{}\nstderr:\n{}",

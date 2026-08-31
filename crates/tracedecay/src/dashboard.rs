@@ -376,25 +376,20 @@ pub async fn dashboard_lcm_read_authority_for_test(
     project_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> Option<std::sync::Arc<dyn DashboardLcmReadPortV1>> {
     let serving_db = cg.db_path();
-    let root = match hotpath::future!(
-        DaemonSessionRetrievalRoot::project(
-            SessionRetrievalServingIdentityV1 {
-                project_id: cg.store_layout().identity.project_id.as_deref(),
-                serving_db: &serving_db,
-                project_root: cg.project_root(),
-            },
+    let project_id = cg.store_layout().identity.project_id.as_deref()?;
+    let serving = hotpath::future!(
+        SessionRetrievalServingIdentityV1::resolve_project(
+            project_id,
+            &serving_db,
+            cg.project_root(),
+            &project_database.binding().shard_id.profile_id,
+            &project_database.binding().shard_id,
             registry,
         ),
         label = "dashboard.lcm.root"
     )
-    .await
-    {
-        Some(root) => root,
-        None => DaemonSessionRetrievalRoot::project_for_test(
-            cg.project_root(),
-            cg.store_layout().identity.project_id.clone(),
-        ),
-    };
+    .await?;
+    let root = DaemonSessionRetrievalRoot::project(serving, registry).await?;
     let identity = root.identity().clone();
     let service = DaemonSessionRetrievalService::new(project_database.clone(), root, None)?;
     let adapter = crate::mcp::tools::handlers::DashboardLcmReadAdapter::new(

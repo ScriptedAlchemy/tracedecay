@@ -29,8 +29,10 @@ pub(crate) enum GrafeoMemoryPhase {
     Recovered,
 }
 
+#[hotpath::measure_all]
 impl GrafeoMemoryPhase {
     #[cfg(feature = "hotpath")]
+    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
@@ -44,8 +46,10 @@ impl GrafeoMemoryPhase {
     }
 }
 
+#[hotpath::measure_all]
 impl HydrationSource {
     #[cfg(any(feature = "hotpath", test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Live => "live",

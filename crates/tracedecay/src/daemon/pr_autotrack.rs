@@ -563,7 +563,7 @@ fn run_git_with_control(
     args: &[&str],
     control: &PrCommandControl,
 ) -> Result<std::process::Output, tracedecay_runtime_core::git::GitCommandError> {
-    let mut command = std::process::Command::new(tracedecay_runtime_core::git::git_program());
+    let mut command = std::process::Command::new(tracedecay_runtime_core::git::try_git_program()?);
     command.args(args).current_dir(repo_root);
     disable_git_credential_prompt(&mut command);
     let bounds = tracedecay_runtime_core::git::GitCommandBounds {

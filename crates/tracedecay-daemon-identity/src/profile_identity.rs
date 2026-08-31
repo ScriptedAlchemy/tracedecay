@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_application::ProfileIdentityReadPort;
-use tracedecay_automation_runtime::ports::project_runtime::ProfileIdentity;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -41,16 +40,6 @@ impl ProfileIdentityReadPort for LocalProfileIdentityAuthorityV1 {
         LocalProfileIdentityAuthorityV1::profile_root(self)
     }
 
-    fn brain_id(&self) -> &BrainId {
-        LocalProfileIdentityAuthorityV1::brain_id(self)
-    }
-
-    fn profile_id(&self) -> &UserProfileId {
-        LocalProfileIdentityAuthorityV1::profile_id(self)
-    }
-}
-
-impl ProfileIdentity for LocalProfileIdentityAuthorityV1 {
     fn brain_id(&self) -> &BrainId {
         LocalProfileIdentityAuthorityV1::brain_id(self)
     }

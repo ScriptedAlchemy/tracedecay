@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -12,35 +13,57 @@ use tracedecay_application::{
     ResolvedScope,
 };
 use tracedecay_domain::{CodeGenerationId, UtcMicros};
+use tracedecay_runtime_core::db::Database;
 
 use super::symbol_graph::{SymbolGraphCursorFuture, SymbolGraphCursorPort, SymbolGraphPageClaim};
+use tracedecay_graph_query::SourceReadRuntime;
 use tracedecay_graph_query::context::read_modes::{LineRange, ReadMode};
 use tracedecay_graph_query::context::source_read::{SourceReadRequest, read_source};
-use tracedecay_graph_query::SourceReadRuntime;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecutionSnapshot};
 
-/// Production source-read adapter for one typed project root.
+/// Production source-read adapter bound to one admitted project root.
 ///
-/// It reuses the existing path resolver, source decoder, read modes, symbol
-/// projection, and cross-session cache. The typed scope is retained as the
-/// extension seam for independently authorized roots; this adapter intentionally admits exactly one
-/// project/repository/worktree scope.
+/// Construction validates the runtime's project and root identities before
+/// capturing its filesystem/cache authority. Reads never consult the runtime
+/// facade again, so it cannot later redirect a graph read or its cache key.
 pub struct SourceReadAdapter {
-    graph: Arc<SourceReadRuntime>,
+    project_root: PathBuf,
+    database: Database,
+    read_only: bool,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     scope: ResolvedScope,
 }
 
 impl SourceReadAdapter {
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn new(
-        graph: Arc<SourceReadRuntime>,
+        source_runtime: Arc<SourceReadRuntime>,
         code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
         scope: ResolvedScope,
     ) -> Result<Self, ApplicationContractError> {
+        let admitted_project_root = source_runtime.project_root().to_path_buf();
+        Self::new_bound(source_runtime, code_graph, scope, &admitted_project_root)
+    }
+
+    pub fn new_bound(
+        source_runtime: Arc<SourceReadRuntime>,
+        code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
+        scope: ResolvedScope,
+        admitted_project_root: &Path,
+    ) -> Result<Self, ApplicationContractError> {
         scope.validate()?;
+        if source_runtime.project_id() != scope.project_id.as_str() {
+            return Err(source_binding_error());
+        }
+        let project_root = source_runtime.project_root();
+        if project_root != admitted_project_root {
+            return Err(source_binding_error());
+        }
         Ok(Self {
-            graph,
+            project_root: project_root.to_path_buf(),
+            database: source_runtime.db().clone(),
+            read_only: source_runtime.is_read_only(),
             code_graph,
             scope,
         })
@@ -107,9 +130,9 @@ impl SourceReadAdapter {
             )
             .map_err(|_| ())?;
         let output = read_source(
-            self.graph.project_root(),
-            self.graph.db(),
-            self.graph.is_read_only(),
+            &self.project_root,
+            &self.database,
+            self.read_only,
             &reader,
             cancellation,
             SourceReadRequest {
@@ -133,6 +156,12 @@ impl SourceReadAdapter {
             body: output.body,
             context: output.context,
         })
+    }
+}
+
+fn source_binding_error() -> ApplicationContractError {
+    ApplicationContractError::Inconsistent {
+        field: "source read admitted project authority",
     }
 }
 
@@ -420,7 +449,9 @@ fn primitive_failure(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tracedecay_application::{
         ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
@@ -431,10 +462,15 @@ mod tests {
         RetrievalGrainV1, SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId,
         SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, WorktreeId, canonical_sha256,
     };
+    use tracedecay_graph_query::{
+        CodeGraphProjectionReadPort, CodeGraphReadFuture, CodeGraphReadRequest,
+        SourceReadRuntimePort,
+    };
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
     use super::{
-        AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshot,
+        AuthenticatedSymbolGraphCursorAdapter, SourceReadAdapter, SymbolGraphCursorSnapshot,
         SymbolGraphCursorSnapshotAuthority,
     };
     use crate::primitives::SymbolGraphCursorPort;
@@ -446,6 +482,121 @@ mod tests {
     use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
     const NOW: UtcMicros = UtcMicros(1_000);
+
+    struct RecordingSourceRuntime {
+        project_root: PathBuf,
+        project_id: String,
+        database: Database,
+        root_reads: AtomicUsize,
+        database_reads: AtomicUsize,
+    }
+
+    impl SourceReadRuntimePort for RecordingSourceRuntime {
+        fn project_root(&self) -> &Path {
+            self.root_reads.fetch_add(1, Ordering::SeqCst);
+            &self.project_root
+        }
+
+        fn db(&self) -> &Database {
+            self.database_reads.fetch_add(1, Ordering::SeqCst);
+            &self.database
+        }
+
+        fn is_read_only(&self) -> bool {
+            true
+        }
+
+        fn project_id(&self) -> &str {
+            &self.project_id
+        }
+    }
+
+    struct NeverOpenedProjection;
+
+    impl CodeGraphProjectionReadPort for NeverOpenedProjection {
+        fn open<'a>(&'a self, _request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
+            Box::pin(async { panic!("source binding must not open the graph projection") })
+        }
+    }
+
+    #[tokio::test]
+    async fn source_read_binding_rejects_mismatches_before_database_access() {
+        crate::register_test_schema_installer();
+        let home = tempfile::tempdir().expect("temporary source binding root");
+        let admitted_root = home.path().join("admitted");
+        let foreign_root = home.path().join("foreign");
+        std::fs::create_dir_all(&admitted_root).expect("admitted root");
+        std::fs::create_dir_all(&foreign_root).expect("foreign root");
+        let database_path = home.path().join("source-binding.db");
+        let authority = DatabaseAuthority::acquire_test(&database_path, "source read binding")
+            .expect("authority");
+        let (database, _) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("database");
+        let (scope, _, _) = application_context("source-binding");
+        let projection: Arc<dyn CodeGraphProjectionReadPort> = Arc::new(NeverOpenedProjection);
+
+        let wrong_project = Arc::new(RecordingSourceRuntime {
+            project_root: admitted_root.clone(),
+            project_id: "project.retrieval-primitives.other".to_owned(),
+            database: database.clone(),
+            root_reads: AtomicUsize::new(0),
+            database_reads: AtomicUsize::new(0),
+        });
+        assert!(
+            SourceReadAdapter::new_bound(
+                Arc::clone(&wrong_project) as Arc<dyn SourceReadRuntimePort>,
+                Arc::clone(&projection),
+                scope.clone(),
+                &admitted_root,
+            )
+            .is_err()
+        );
+        assert_eq!(wrong_project.root_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(wrong_project.database_reads.load(Ordering::SeqCst), 0);
+
+        let wrong_root = Arc::new(RecordingSourceRuntime {
+            project_root: foreign_root,
+            project_id: scope.project_id.as_str().to_owned(),
+            database: database.clone(),
+            root_reads: AtomicUsize::new(0),
+            database_reads: AtomicUsize::new(0),
+        });
+        assert!(
+            SourceReadAdapter::new_bound(
+                Arc::clone(&wrong_root) as Arc<dyn SourceReadRuntimePort>,
+                Arc::clone(&projection),
+                scope.clone(),
+                &admitted_root,
+            )
+            .is_err()
+        );
+        assert_eq!(wrong_root.root_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(wrong_root.database_reads.load(Ordering::SeqCst), 0);
+
+        let matching = Arc::new(RecordingSourceRuntime {
+            project_root: admitted_root.clone(),
+            project_id: scope.project_id.as_str().to_owned(),
+            database,
+            root_reads: AtomicUsize::new(0),
+            database_reads: AtomicUsize::new(0),
+        });
+        assert!(
+            SourceReadAdapter::new_bound(
+                Arc::clone(&matching) as Arc<dyn SourceReadRuntimePort>,
+                projection,
+                scope,
+                &admitted_root,
+            )
+            .is_ok()
+        );
+        assert_eq!(matching.root_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(matching.database_reads.load(Ordering::SeqCst), 1);
+    }
 
     struct FixedSnapshotAuthority {
         snapshot: SymbolGraphCursorSnapshot,

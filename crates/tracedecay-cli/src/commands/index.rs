@@ -176,13 +176,11 @@ async fn handle_init_with_daemon_availability(
     if daemon_available {
         return brokered_init(&project_path, &skip_folders, &include_folders, &handshake).await;
     }
-    Err(
-        tracedecay_domain::errors::TraceDecayError::project_route(
-            "code_index_scheduler_unavailable",
-            true,
-            "project initialization requires the daemon-owned code-index scheduler; start the daemon and retry",
-        ),
-    )
+    Err(tracedecay_domain::errors::TraceDecayError::project_route(
+        "code_index_scheduler_unavailable",
+        true,
+        "project initialization requires the daemon-owned code-index scheduler; start the daemon and retry",
+    ))
 }
 
 async fn brokered_init(
@@ -461,11 +459,14 @@ mod init_bootstrap_tests {
         let nested_git = git.join("nested");
         std::fs::create_dir_all(&non_git).unwrap();
         std::fs::create_dir_all(&nested_git).unwrap();
-        let initialized = std::process::Command::new(tracedecay_runtime_core::git::git_program())
-            .args(["init", "-q"])
-            .current_dir(&git)
-            .status()
-            .unwrap();
+        let initialized = std::process::Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .args(["init", "-q"])
+        .current_dir(&git)
+        .status()
+        .unwrap();
         assert!(initialized.success());
         let unavailable = tracedecay_domain::errors::TraceDecayError::Config {
             message: "daemon tool call failed: code_index_scheduler_unavailable: admin sync was not accepted"
