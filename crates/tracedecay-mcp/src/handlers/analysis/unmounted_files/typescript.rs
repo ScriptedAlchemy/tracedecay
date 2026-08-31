@@ -30,12 +30,16 @@
 //! manifest, not because a glob mentioned it, and a package the globs forgot is
 //! audited anyway.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 
+use serde_json::Value;
 use tracedecay_code_extraction::{LanguageExtractor, TypeScriptExtractor};
 use tree_sitter::Node;
 
-use super::*;
+use super::{
+    EcosystemAudit, EcosystemStatus, ProjectFiles, UnmountedFile, normalized, relative_display,
+};
 
 /// Extensions this audit treats as TypeScript/JavaScript source.
 const SOURCE_EXTENSIONS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
@@ -769,8 +773,12 @@ fn names_javascript(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
+    use serde_json::Value;
+
     use super::super::tests::{project, write};
-    use super::*;
+    use super::{AliasRule, EcosystemAudit, audit, strip_json_comments};
 
     fn audit_typescript(root: &Path) -> EcosystemAudit {
         audit(&project(root))
