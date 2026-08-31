@@ -12821,6 +12821,32 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
     registry.shutdown().await;
 }
 
+/// A retryable graph seat owns one scheduled wake. A retained `Noop` pass may
+/// consume a notification queued before backoff was armed, but that skip must
+/// not enqueue another pass and recursively poll until the retry deadline.
+#[test]
+fn graph_activation_retry_window_emits_one_self_driven_seat_skip() {
+    let mut queued_wake = true;
+    let mut seat_skips = 0_usize;
+    while queued_wake && seat_skips < 1_000 {
+        seat_skips += 1;
+        queued_wake = super::registry::retained_noop_requires_follow_up_wake(
+            true, // no graph generation is seated
+            true, // activation retry deadline is still pending
+            true, // retained source reconciliation completed as Noop
+        );
+    }
+
+    assert_eq!(
+        seat_skips, 1,
+        "one deferred pass may report one skip, but must wait for the scheduled retry afterward"
+    );
+    assert!(
+        super::registry::retained_noop_requires_follow_up_wake(true, false, true),
+        "without activation backoff the empty retained Noop still needs its follow-up pass"
+    );
+}
+
 /// Dashboard graph readiness belongs to the current sealed text generation,
 /// even while an older generation still owns a fully ready graph seat.
 #[test]
