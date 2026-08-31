@@ -5498,6 +5498,70 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
+    let fixture = GitFixture::new(&[("assets/blob.bin", "not source\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("mounted worktree identity");
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("resolved scope");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !registry
+            .reconciled_without_generation_for_scope(&scope)
+            .await
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("empty source becomes verified");
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = locked_tx.send(());
+        let _ = release_rx.recv();
+    });
+    locked_rx.await.expect("scheduler lock held");
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.reconciled_without_generation_for_scope(&scope),
+        )
+        .await
+        .expect("freshness probe does not wait for scheduler metadata"),
+        "verified empty source is not reclassified as warming during a build"
+    );
+
+    release_tx.send(()).expect("release scheduler lock");
+    holder.join().expect("scheduler holder joins");
+    registry.shutdown().await;
+}
+
 /// A quiet probe that disproves currency (worktree drift) must refuse the read
 /// and withdraw the busy-read witness, so later busy reads cannot keep serving
 /// the disproved seat.
@@ -5549,7 +5613,7 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(|witness| witness.generation_id.clone()),
+            .map(|witness| witness._generation_id.clone()),
         Some(disproved_generation_id),
         "the disproving probe withdraws the busy-read witness"
     );
@@ -5705,7 +5769,7 @@ async fn a_different_content_successor_pointer_refuses_the_stale_seat() {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(|witness| witness.generation_id.clone()),
+            .map(|witness| witness._generation_id.clone()),
         Some(stale_generation_id),
         "the disproving probe withdraws the busy-read witness"
     );
