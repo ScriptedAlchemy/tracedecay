@@ -362,8 +362,32 @@ impl MessageSearchInput {
             None if goals => String::new(),
             None => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
         };
-        let provider = ProviderScope::parse_optional(request.provider.as_deref())
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+        // The provider parser names the offending value and the accepted set;
+        // keep that corrective diagnostic in the refusal instead of collapsing
+        // it to the generic invalid-request problem. A value the sanitized
+        // diagnostic cannot carry (oversized or control characters) still
+        // refuses with the generic problem.
+        let provider =
+            ProviderScope::parse_optional(request.provider.as_deref()).map_err(|error| {
+                tracedecay_application::SafeDiagnostic::new(
+                    "application.retained.message-search-provider-invalid",
+                    error.to_string(),
+                )
+                .map_or(
+                    RetainedSurfaceExecutionErrorV1::InvalidRequest,
+                    |diagnostic| {
+                        RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+                            tracedecay_application::ApplicationProblem::InvalidRequest {
+                                diagnostic,
+                                retry: tracedecay_application::RetryDirective::Never,
+                                legal_actions: vec![
+                                    tracedecay_application::LegalAction::CorrectRequest,
+                                ],
+                            },
+                        )
+                    },
+                )
+            })?;
         let include_subagents = request.include_subagents.unwrap_or(true);
         let mut scope = match request.scope.unwrap_or(MessageRelationshipScopeV1::All) {
             MessageRelationshipScopeV1::All => SessionSearchScope::All,
