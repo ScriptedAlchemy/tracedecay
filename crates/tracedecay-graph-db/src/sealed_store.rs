@@ -1323,9 +1323,23 @@ mod cost_probe {
         bytes as f64 / (1024.0 * 1024.0 * 1024.0) / seconds
     }
 
+    fn seconds_per_gib(bytes: u64, seconds: f64) -> f64 {
+        let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        if gib <= 0.0 {
+            return 0.0;
+        }
+        seconds / gib
+    }
+
     #[test]
     #[ignore = "measurement harness; see module doc"]
     fn sealed_verification_cost_probe() {
+        #[cfg(feature = "hotpath")]
+        let _hotpath = hotpath::HotpathGuardBuilder::new("sealed_verification_cost_probe")
+            .functions_limit(0)
+            .report("functions-timing")
+            .build();
+
         let entities = env_usize("TRACEDECAY_VERIFY_PROBE_ROWS", 50_000);
         let relations = entities.saturating_mul(8) / 7;
         let payload = env_usize("TRACEDECAY_VERIFY_PROBE_PAYLOAD", 700);
@@ -1359,6 +1373,9 @@ mod cost_probe {
             .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
             .unwrap();
         let stage_s = started.elapsed().as_secs_f64();
+        // Capture the whole disposable store directory here, before the
+        // sealed artifact exists, so Grafeo sidecars/WAL bytes are included.
+        let staging_bytes = directory_bytes(temp.path());
 
         // The serial full proof, exactly as every open before the parallel
         // pipeline streamed it.
@@ -1424,9 +1441,6 @@ mod cost_probe {
         let _ = marker_hit.database().close();
         drop(marker_hit);
 
-        let staging_bytes = std::fs::metadata(&database_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
         let artifact_bytes = directory_bytes(&directory);
         let receipt = std::fs::read_to_string(directory.join("sealed.json")).unwrap();
         let form = receipt
@@ -1476,8 +1490,20 @@ mod cost_probe {
         );
         println!("reopen via marker       : {marker_reopen_s:.3}s");
         println!(
-            "seconds per canonical GiB (staging proof): {:.1}",
+            "seconds/canonical GiB (parallel staging proof): {:.1}",
             staging_proof_s / (canonical_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        );
+        println!(
+            "seconds/physical GiB  (serial staging proof): {:.1}",
+            seconds_per_gib(staging_bytes, serial_proof_s)
+        );
+        println!(
+            "seconds/physical GiB  (parallel staging proof): {:.1}",
+            seconds_per_gib(staging_bytes, staging_proof_s)
+        );
+        println!(
+            "seconds/physical GiB  (sealed reopen proof): {:.1}",
+            seconds_per_gib(artifact_bytes, reopen_full_proof_s)
         );
     }
 }
