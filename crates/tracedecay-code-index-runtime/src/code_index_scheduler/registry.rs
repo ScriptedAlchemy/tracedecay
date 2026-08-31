@@ -246,13 +246,6 @@ pub mod watch_ingress;
 /// unbounded number of full-width indexing owners.
 const MAX_CONCURRENT_RECONCILE_WORKTREES: usize = 2;
 
-#[hotpath::measure]
-fn bounded_daemon_admission_permits() -> usize {
-    std::thread::available_parallelism().map_or(1, |cores| {
-        cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES)
-    })
-}
-
 #[cfg(test)]
 fn cold_mount_admission_barriers() -> &'static Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Barrier>>> {
     static BARRIERS: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Barrier>>>> =
@@ -4606,6 +4599,7 @@ impl CodeIndexSchedulerRegistryV1 {
             convergence_park,
             build_progress,
             hints,
+            pending_wake,
             graph_activation_enabled,
         ) = {
             let mounted = self.mounted.lock().await;
@@ -4619,6 +4613,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.convergence_park),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.pending_wake),
                 worktree.graph_activation.policy().is_enabled(),
             )
         };
@@ -4641,6 +4636,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 progress
             });
             let refreshing = reconcile_in_progress.load(Ordering::Acquire) != 0;
+            let rebuild_in_flight = refreshing
+                || pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .micros
+                    != 0;
             let parked = convergence_park
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4691,6 +4693,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         worktree_root: canonical_root.display().to_string(),
                         code_graph_serving,
                         last_reconcile_micros,
+                        rebuild_in_flight,
                         staleness_state: Some(
                             if parked.is_some() && !ready {
                                 "parked"
@@ -4777,6 +4780,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree_root: canonical_root.display().to_string(),
                 code_graph_serving,
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
+                rebuild_in_flight,
                 staleness_state: Some(staleness_state.to_owned()),
                 hook_hint_count,
                 coverage: if refreshing {

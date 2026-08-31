@@ -6577,6 +6577,47 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn dashboard_freshness_reports_active_reconcile_liveness() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let canonical = fixture.path().canonicalize().expect("canonical fixture");
+    let reconcile_in_progress = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical)
+                .expect("mounted worktree")
+                .reconcile_in_progress,
+        )
+    };
+
+    reconcile_in_progress.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness");
+    reconcile_in_progress.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+
+    assert!(
+        projected.rebuild_in_flight,
+        "an active scheduler pass must keep stale serving typed as rebuilding"
+    );
+    registry.shutdown().await;
+}
+
 /// A dashboard status view reports the last execution-owned scheduler state; it
 /// must not run the freshness ladder, wake a worker, or publish an out-of-band
 /// source change merely because an operator opened the view.
