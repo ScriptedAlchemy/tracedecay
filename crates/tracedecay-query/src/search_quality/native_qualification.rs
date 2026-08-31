@@ -30,10 +30,11 @@ use super::candidate_output::{
     DirectEvaluatedProfileMaterialV1, EvaluationExecutionContractV1,
     compute_profile_material_digest, compute_workload_digest, direct_evaluated_profile_material,
 };
+#[cfg(test)]
+use super::evaluate::load_default_evaluated_profile_material;
 use super::evaluate::{
     DirectActivationEvaluationV1, DirectEvaluationStatusV1, SearchEvalError,
     activation_profile_chain, load_authoritative_default_workload_metadata,
-    load_default_evaluated_profile_material,
 };
 use super::packaged;
 use super::report::{

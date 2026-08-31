@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use tracedecay_application::historical_query::{
     HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
@@ -37,21 +37,21 @@ use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
     ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
 };
+#[cfg(test)]
+use tracedecay_domain::ScoreDomainId;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
-    CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
-    ComponentRevision, DiversityPolicy, DiversityPolicyId, EphemeralSanitizedQueryViewV1,
-    ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId, FusionProfile, FusionProfileId,
+    ChunkerRevision, CodeGenerationId, CodeSearchChunkV1, ComponentRevision, DiversityPolicy,
+    EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId,
     HydrationReceipt, HydrationRevision, LanguageId, ManifestDigest, PolicyRevisionId, PrincipalId,
     PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
     ProjectionOperationV1, ProjectionOutcomeV1, PublicRetrieverStatus, QueryFallbackSubpayload,
     QueryNormalizationRevision, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
-    RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalFailure, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainCalibrationV1,
-    ScoreDomainId, SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros,
-    VectorGenerationIdV1, VectorWatermark,
+    RerankPolicy, RetrievalBudget, RetrievalFailure, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -75,17 +75,14 @@ use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
 use tracedecay_query::search_quality::semantic_native::{
     SemanticChannelAblationV1, SemanticNativeHydrationMeasurementV1, SemanticNativeQueryInputV1,
     SemanticNativeQueryOutputV1, SemanticNativeQueryStageMeasurementsV1,
-    SemanticNativeRerankInputV1, SemanticNativeResourceEvidenceV1, SemanticNativeResourceSampleV1,
-    SemanticNativeSemanticInputV1, SemanticNativeStageMeasurementV1, SemanticNativeStageResultV1,
-    SemanticProjectionCaseSampleV1, SemanticProjectionCaseV1, evaluate_native_query,
+    SemanticNativeResourceEvidenceV1, SemanticNativeResourceSampleV1,
+    SemanticNativeStageMeasurementV1, SemanticNativeStageResultV1, evaluate_native_query,
 };
 
 use tracedecay_query::search_quality::candidate_output::{
-    CorpusDocumentV1, EVALUATION_CACHE_STATE, EVALUATION_MODEL_REVISION,
-    EVALUATION_PROJECTION_REVISION, EVALUATION_RUNTIME_REVISION, EVALUATION_SEED,
-    REQUIRED_CANCELLATION, REQUIRED_OFFLINE, canonical_json_bytes, canonical_sha256,
-    evaluated_diversity_policy, evaluated_rerank_policy, fusion_profile, retrieval_budget,
-    typed_id as id,
+    CorpusDocumentV1, EVALUATION_CACHE_STATE, EVALUATION_SEED, REQUIRED_CANCELLATION,
+    REQUIRED_OFFLINE, canonical_json_bytes, canonical_sha256, evaluated_diversity_policy,
+    evaluated_rerank_policy, fusion_profile, retrieval_budget, typed_id as id,
 };
 
 pub use tracedecay_query::search_quality::candidate_output::{
