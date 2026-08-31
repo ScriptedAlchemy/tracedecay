@@ -471,6 +471,38 @@ pub(super) struct StoreAdministration {
         remote_recovery_lifecycle::SharedRemoteRecoveryProjectLifecyclesV1,
     #[cfg(unix)]
     retirement_reapers: Arc<MaintenanceReaperRegistry>,
+    /// Settles when an account-deletion tombstone is durably recorded, before
+    /// admitted opens are joined. Waiters observe this receipt instead of
+    /// polling the profile database through the writer that still holds the
+    /// remainder of the deletion.
+    remote_account_deletion_tombstone_persist: Arc<
+        tokio::sync::watch::Sender<Option<tracedecay_global_db::RemoteDeletionTombstone>>,
+    >,
+}
+
+/// Waitable receipt for the durable account-deletion tombstone persist.
+///
+/// Subscribe before starting deletion. `wait` fails closed if the
+/// administration is dropped without settling the tombstone.
+pub(super) struct RemoteAccountDeletionTombstonePersistReceipt {
+    receiver: tokio::sync::watch::Receiver<Option<tracedecay_global_db::RemoteDeletionTombstone>>,
+}
+
+impl RemoteAccountDeletionTombstonePersistReceipt {
+    pub(super) async fn wait(
+        mut self,
+    ) -> Result<tracedecay_global_db::RemoteDeletionTombstone> {
+        loop {
+            if let Some(tombstone) = self.receiver.borrow().clone() {
+                return Ok(tombstone);
+            }
+            self.receiver.changed().await.map_err(|_| TraceDecayError::Config {
+                message:
+                    "remote account deletion tombstone persist receipt was dropped before it settled"
+                        .to_owned(),
+            })?;
+        }
+    }
 }
 
 /// Retry ownership for a timed-out server, or a terminal failure receipt that
@@ -525,6 +557,10 @@ impl Default for StoreAdministration {
             remote_recovery_project_lifecycles: Arc::default(),
             #[cfg(unix)]
             retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
+            remote_account_deletion_tombstone_persist: Arc::new({
+                let (sender, _) = tokio::sync::watch::channel(None);
+                sender
+            }),
         }
     }
 }
@@ -665,6 +701,27 @@ impl StoreAdministration {
         database
             .remote_account_deletion_tombstone(self.profile_identity()?.profile_id().as_str())
             .await
+    }
+
+    /// Subscribe to the durable account-tombstone persist receipt.
+    ///
+    /// The receipt settles when remote account deletion records or replays a
+    /// tombstone — before admitted project opens are joined. If the
+    /// administration is dropped without settling, wait fails closed.
+    pub(super) fn remote_account_deletion_tombstone_persist_receipt(
+        &self,
+    ) -> RemoteAccountDeletionTombstonePersistReceipt {
+        RemoteAccountDeletionTombstonePersistReceipt {
+            receiver: self.remote_account_deletion_tombstone_persist.subscribe(),
+        }
+    }
+
+    fn settle_remote_account_deletion_tombstone_persist(
+        &self,
+        tombstone: &tracedecay_global_db::RemoteDeletionTombstone,
+    ) {
+        self.remote_account_deletion_tombstone_persist
+            .send_replace(Some(tombstone.clone()));
     }
 
     #[hotpath::measure(label = "daemon.branch_admin.mounted_session_databases", future = true)]
