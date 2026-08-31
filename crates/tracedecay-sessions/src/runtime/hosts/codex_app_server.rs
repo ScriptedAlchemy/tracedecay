@@ -21,7 +21,7 @@ use tracedecay_store::cursor_dispatch::CURSOR_MODEL_KEYS;
 
 use tracedecay_lcm::LcmSummaryRequest;
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader};
-use tracedecay_daemon_protocol::wire::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
+use tracedecay_framing::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub const CODEX_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CODEX_SUMMARY_CHILD";

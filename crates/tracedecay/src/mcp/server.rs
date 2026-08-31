@@ -17,7 +17,7 @@ use crate::mcp::tool_analytics::{
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
-use tracedecay_daemon_protocol::wire::is_wire_oversized_io_error;
+use tracedecay_framing::is_wire_oversized_io_error;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;

@@ -56,7 +56,7 @@ use crate::admission::HostAdmission;
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_daemon_protocol::wire::{WireReadOutcome, read_bounded_to_string};
+use tracedecay_framing::{WireReadOutcome, read_bounded_to_string};
 
 pub type TranscriptIngestResult<T> = Result<T, TranscriptIngestError>;
 

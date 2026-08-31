@@ -13,7 +13,7 @@ use tracedecay_daemon_control::default_socket_path;
 #[cfg(not(unix))]
 use tracedecay_daemon_identity::current_daemon_connection;
 use tracedecay_daemon_identity::{DaemonConnection, client_connection};
-use tracedecay_daemon_protocol::wire::{
+use tracedecay_framing::{
     WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
 };
 
