@@ -75,7 +75,9 @@ pub const SEMANTIC_ANN_CANDIDATE_OVERSAMPLE_V1: usize = 4;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CanonicalSemanticDistanceV1(i64);
 
+#[hotpath::measure_all]
 impl CanonicalSemanticDistanceV1 {
+    #[hotpath::skip]
     pub const fn micros(self) -> i64 {
         self.0
     }
@@ -112,6 +114,7 @@ pub struct SemanticRetrievalRequestV1<'a> {
     pub budget: RetrievalBudget,
 }
 
+#[hotpath::measure_all]
 impl SemanticRetrievalRequestV1<'_> {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
         self.base.budget.validate().map_err(contract_error)?;
@@ -160,6 +163,7 @@ pub struct EphemeralQueryEmbeddingV1 {
     values: Vec<f32>,
 }
 
+#[hotpath::measure_all]
 impl EphemeralQueryEmbeddingV1 {
     pub fn new(
         query_digest: QueryDigest,
@@ -310,7 +314,9 @@ pub struct SemanticCodeRetriever<'a, E, V, C> {
     control: &'a C,
 }
 
+#[hotpath::measure_all]
 impl<'a, E, V, C> SemanticCodeRetriever<'a, E, V, C> {
+    #[hotpath::skip]
     pub const fn new(embedder: &'a E, vectors: &'a V, control: &'a C) -> Self {
         Self {
             embedder,
@@ -811,6 +817,7 @@ where
     }
 }
 
+#[hotpath::measure]
 pub(super) fn port_error_class(error: &RetrievalPortError) -> &'static str {
     match error {
         RetrievalPortError::CapabilityManifestRejected => "capability_manifest_rejected",
@@ -827,6 +834,7 @@ pub(super) fn port_error_class(error: &RetrievalPortError) -> &'static str {
 /// An ANN-profiled request fell back to the exact-flat scan. Fallbacks are
 /// typed and observable, never silent: the evidence records the executed
 /// `ExactFlat` path and these gauges record why the index could not serve.
+#[hotpath::measure]
 fn observe_semantic_ann_fallback(state: SemanticAnnIndexStateV1) {
     match state {
         SemanticAnnIndexStateV1::Missing => {
@@ -841,6 +849,7 @@ fn observe_semantic_ann_fallback(state: SemanticAnnIndexStateV1) {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn observe_semantic_lane_failure(stage: &'static str, error_class: &'static str) {
     match stage {
         "request_validation" => {
@@ -971,6 +980,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn validate_vector(values: &[f32], dimensions: u32, label: &str) -> Result<(), RetrievalPortError> {
     if values.len() != dimensions as usize {
         return Err(RetrievalPortError::IncompatibleProjection);
@@ -983,6 +993,7 @@ fn validate_vector(values: &[f32], dimensions: u32, label: &str) -> Result<(), R
     Ok(())
 }
 
+#[hotpath::measure]
 fn canonical_distance(
     metric: EmbeddingMetricV1,
     query: &[f32],
@@ -1040,6 +1051,7 @@ fn canonical_distance(
     Ok(CanonicalSemanticDistanceV1(scaled as i64))
 }
 
+#[hotpath::measure]
 fn semantic_checkpoint_digest(
     request: &SemanticRetrievalRequestV1<'_>,
     candidates: &[CompactCandidate],
@@ -1070,6 +1082,7 @@ fn semantic_checkpoint_digest(
     ))
 }
 
+#[hotpath::measure]
 fn effective_deadline_micros(request: &SemanticRetrievalRequestV1<'_>) -> u64 {
     match (
         request.budget.deadline_micros,
@@ -1082,6 +1095,7 @@ fn effective_deadline_micros(request: &SemanticRetrievalRequestV1<'_>) -> u64 {
     }
 }
 
+#[hotpath::measure]
 fn deadline_exhausted<C: SemanticExecutionControl>(
     request: &SemanticRetrievalRequestV1<'_>,
     control: &C,
@@ -1089,6 +1103,7 @@ fn deadline_exhausted<C: SemanticExecutionControl>(
     elapsed_micros(request, control) >= effective_deadline_micros(request)
 }
 
+#[hotpath::measure]
 fn elapsed_micros<C: SemanticExecutionControl>(
     _request: &SemanticRetrievalRequestV1<'_>,
     control: &C,
@@ -1135,6 +1150,7 @@ struct SemanticRankedEntryV1 {
     evidence: CodeSemanticEvidenceV1,
 }
 
+#[hotpath::measure_all]
 impl SemanticRankedEntryV1 {
     fn rank_cmp(&self, other: &Self) -> Ordering {
         rank_key(
@@ -1172,6 +1188,7 @@ impl PartialEq for SemanticRankedEntryV1 {
 
 impl Eq for SemanticRankedEntryV1 {}
 
+#[hotpath::measure]
 fn budget_usage<C: SemanticExecutionControl>(
     request: &SemanticRetrievalRequestV1<'_>,
     candidates_examined: u64,
@@ -1187,6 +1204,7 @@ fn budget_usage<C: SemanticExecutionControl>(
     }
 }
 
+#[hotpath::measure]
 fn port_error_outcome<E>(
     error: RetrievalPortError,
     usage: RetrievalBudgetUsage,

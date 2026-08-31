@@ -107,6 +107,7 @@ pub enum CodeLexicalArtifactErrorV1 {
     Contract(String),
 }
 
+#[hotpath::measure]
 fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeLexicalArtifactErrorV1> {
     if control.is_cancelled() {
         Err(CodeLexicalArtifactErrorV1::Interrupted(
@@ -121,10 +122,12 @@ fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeLexic
     }
 }
 
+#[hotpath::measure]
 fn sqlite_error(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Io(error.to_string())
 }
 
+#[hotpath::measure]
 fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
     match error.sqlite_error_code() {
         Some(
@@ -148,6 +151,7 @@ fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
 /// reports the caller plus effective helpers at the canonical 128 MiB worker
 /// charge; it is a subset of the scheduler's existing admission, not another
 /// cache or a second memory authority.
+#[hotpath::measure]
 fn open_builder_connection(
     path: &Path,
 ) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {
@@ -200,6 +204,7 @@ fn open_builder_connection(
     Ok(connection)
 }
 
+#[hotpath::measure]
 fn with_builder_sorter_cpu_admission<T>(
     connection: &rusqlite::Connection,
     operation: impl FnOnce() -> T,

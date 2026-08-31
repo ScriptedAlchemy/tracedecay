@@ -56,6 +56,7 @@ impl fmt::Debug for SanitizedRetrievalRequestV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl RawRetrievalRequestV1 {
     pub fn new(query: impl Into<String>, request: RetrievalRequest) -> Self {
         Self {
@@ -97,6 +98,7 @@ impl RawRetrievalRequestV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl SanitizedRetrievalRequestV1 {
     pub fn request(&self) -> &RetrievalRequest {
         &self.request

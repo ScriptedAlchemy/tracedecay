@@ -42,6 +42,7 @@ pub enum RetrievalPortError {
     Contract(String),
 }
 
+#[hotpath::measure_all]
 impl RetrievalPortError {
     /// True when this failure is a deterministic contract violation that the
     /// same input reproduces on every pass — a wrong filesystem mode, a
@@ -73,6 +74,7 @@ impl From<RetrievalPortError> for RetrievalError {
 ///
 /// Lanes reject on the *rendered* detail of the underlying contract error, so
 /// this is the single conversion every `map_err` in the retrieval lanes uses.
+#[hotpath::measure]
 pub(crate) fn contract_error(error: impl std::fmt::Display) -> RetrievalPortError {
     RetrievalPortError::Contract(error.to_string())
 }
@@ -85,6 +87,7 @@ pub(crate) fn contract_error(error: impl std::fmt::Display) -> RetrievalPortErro
 /// the payload differs between lanes, so only the payload is a lane's
 /// business. Cursor bytes are ephemeral; live cursors minted before this
 /// encoding are rejected as a set mismatch.
+#[hotpath::measure]
 pub(crate) fn checkpoint_digest<T>(payload: &T) -> Result<CursorPayloadDigest, RetrievalPortError>
 where
     T: Serialize,
@@ -98,6 +101,7 @@ where
 ///
 /// A lane budget can only narrow the request budget, never widen it, so the
 /// two are always read together.
+#[hotpath::measure]
 pub(crate) fn lane_candidate_cap(lane: &RetrievalBudget, base: &RetrievalBudget) -> usize {
     lane.max_candidates_per_lane
         .min(base.max_candidates_per_lane) as usize
@@ -105,6 +109,7 @@ pub(crate) fn lane_candidate_cap(lane: &RetrievalBudget, base: &RetrievalBudget)
 
 /// The `(occurrence, anchor, score)` triple lanes commit for each candidate in
 /// their checkpoint prefix.
+#[hotpath::measure]
 pub(crate) fn candidate_checkpoint_prefix(
     candidates: &[CompactCandidate],
 ) -> Vec<(&str, &str, u64)> {
@@ -143,6 +148,7 @@ pub(crate) trait LaneBoundEvidence {
 /// A lane can only trust evidence that names the candidate it arrived with;
 /// this is the check every lane repeats before it applies its own admission
 /// rules, so it lives once and each lane supplies only its own wording.
+#[hotpath::measure]
 pub(crate) fn lane_bound_evidence<'batch, E>(
     batch: &'batch RetrieverBatch<E>,
     candidate: &CompactCandidate,

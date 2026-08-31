@@ -403,6 +403,7 @@ where
 ///
 /// A batch that returns a candidate without its evidence is not translatable
 /// at all, so every lane translation resolves it the same way.
+#[hotpath::measure]
 fn lane_evidence<'batch, E>(
     batch: &'batch RetrieverBatch<E>,
     candidate: &CompactCandidate,

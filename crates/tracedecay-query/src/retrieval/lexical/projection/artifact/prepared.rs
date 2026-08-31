@@ -44,6 +44,7 @@ pub struct PreparedCodeLexicalArtifactPageV1 {
     estimated_write_bytes: usize,
 }
 
+#[hotpath::measure_all]
 impl PreparedCodeLexicalArtifactPageV1 {
     pub fn page_ordinal(&self) -> u64 {
         self.page_ordinal
@@ -120,6 +121,7 @@ pub(super) struct PreparedTermPostingV1 {
     pub(super) frequency: i64,
 }
 
+#[hotpath::measure]
 pub(super) fn prepare_page(
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
@@ -276,6 +278,7 @@ pub(super) fn prepare_page(
     Ok(prepared)
 }
 
+#[hotpath::measure]
 fn prepare_base_sections_receipt(
     page_ordinal: u64,
     imports: &[PreparedImportV1],
@@ -358,6 +361,7 @@ fn prepare_base_sections_receipt(
     )
 }
 
+#[hotpath::measure]
 fn prepare_document(
     metadata: &CodeLexicalProjectionMetadataV1,
     document_id: i64,
@@ -464,6 +468,7 @@ fn prepare_document(
     ))
 }
 
+#[hotpath::measure]
 fn document_integrity_digest(
     document: i64,
     chunk_id: &[u8],
@@ -503,6 +508,7 @@ fn document_integrity_digest(
     integrity_digest(hasher)
 }
 
+#[hotpath::measure]
 fn hash_table(
     hasher: &mut Sha256,
     table: &str,
@@ -528,21 +534,25 @@ fn hash_table(
     Ok(())
 }
 
+#[hotpath::measure]
 fn hash_integer(hasher: &mut Sha256, value: i64) {
     hasher.update([1]);
     hasher.update(value.to_le_bytes());
 }
 
+#[hotpath::measure]
 fn hash_text(hasher: &mut Sha256, value: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
     hasher.update([3]);
     hash_bytes(hasher, value)
 }
 
+#[hotpath::measure]
 fn hash_blob(hasher: &mut Sha256, value: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
     hasher.update([4]);
     hash_bytes(hasher, value)
 }
 
+#[hotpath::measure]
 fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
     hasher.update(
         u64::try_from(bytes.len())
@@ -553,6 +563,7 @@ fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeLexicalArtifa
     Ok(())
 }
 
+#[hotpath::measure]
 fn import_integrity_digest(
     canonical: &[u8],
     evidence: &[u8],
@@ -564,11 +575,13 @@ fn import_integrity_digest(
     integrity_digest(hasher)
 }
 
+#[hotpath::measure]
 fn integrity_digest(hasher: Sha256) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
+#[hotpath::measure]
 fn prepared_retained_bytes(
     page: &PreparedCodeLexicalArtifactPageV1,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
@@ -653,6 +666,7 @@ fn prepared_retained_bytes(
     Ok(bytes)
 }
 
+#[hotpath::measure]
 fn estimated_sqlite_writes(
     page: &PreparedCodeLexicalArtifactPageV1,
 ) -> Result<(usize, usize), CodeLexicalArtifactErrorV1> {
@@ -707,6 +721,7 @@ fn estimated_sqlite_writes(
     Ok((rows, bytes))
 }
 
+#[hotpath::measure]
 fn estimated_source_page_receipt_write_bytes(
     page_digest: &str,
     cumulative_digest: &str,
@@ -725,18 +740,21 @@ fn estimated_source_page_receipt_write_bytes(
         .ok_or_else(prepared_write_overflow)
 }
 
+#[hotpath::measure]
 fn prepared_write_overflow() -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(
         "prepared lexical page estimated SQLite write overflowed".to_owned(),
     )
 }
 
+#[hotpath::measure]
 fn prepared_charge_overflow() -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(
         "prepared lexical page retained-byte charge overflowed".to_owned(),
     )
 }
 
+#[hotpath::measure]
 fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(error.to_string())
 }

@@ -57,10 +57,12 @@ pub const LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1: u64 = 30_000_000;
 /// A set `deadline_micros`, including `Some(0)`, is used as-is. `None` uses the
 /// crate 30s fallback. This is not request-over-profile: a caller that has both
 /// a lane and a base deadline must pass the tighter value.
+#[hotpath::measure]
 pub fn lexical_projection_build_deadline_micros(request_deadline_micros: Option<u64>) -> u64 {
     request_deadline_micros.unwrap_or(LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1)
 }
 
+#[hotpath::measure]
 fn map_postings_build_error(error: String) -> RetrievalPortError {
     if error == postings::LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED
         || error.starts_with(postings::LEXICAL_PROJECTION_NGRAM_MEMORY_BUDGET_EXCEEDED)
@@ -71,6 +73,7 @@ fn map_postings_build_error(error: String) -> RetrievalPortError {
     }
 }
 
+#[hotpath::measure]
 fn check_projection_build_deadline(deadline: Instant) -> Result<(), RetrievalPortError> {
     if Instant::now() >= deadline {
         Err(RetrievalPortError::BudgetExceeded)
@@ -92,6 +95,7 @@ pub struct CodeLexicalProjectionMetadataV1 {
     pub exact_score_domain: ScoreDomainId,
 }
 
+#[hotpath::measure_all]
 impl CodeLexicalProjectionMetadataV1 {
     fn validate(&self) -> Result<(), RetrievalPortError> {
         self.generation.validate().map_err(contract_error)?;
@@ -139,6 +143,7 @@ struct ProjectedChunkV1 {
     normalized_text: String,
 }
 
+#[hotpath::measure_all]
 impl ProjectedChunkV1 {
     fn new(
         chunk: CodeSearchChunkV1,
@@ -320,6 +325,7 @@ struct LexicalTermPostingV1 {
     frequencies: Vec<(u32, u32)>,
 }
 
+#[hotpath::measure_all]
 impl LexicalTermPostingV1 {
     fn insert(&mut self, document: u32, frequency: u32) {
         self.documents.insert(document);
@@ -360,6 +366,7 @@ impl Default for LexicalGenerationPostingsBuildV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl LexicalGenerationPostingsBuildV1 {
     fn insert_row(
         &mut self,
@@ -488,6 +495,7 @@ pub struct CodeLexicalProjectionBuildV1 {
     phase: CodeLexicalProjectionBuildPhaseV1,
 }
 
+#[hotpath::measure_all]
 impl CodeLexicalProjectionBuildV1 {
     pub fn new_admitted<C>(
         metadata: CodeLexicalProjectionMetadataV1,
@@ -686,6 +694,7 @@ impl CodeLexicalProjectionBuildV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl LexicalGenerationPostingsV1 {
     fn retained_owned_bytes(&self) -> usize {
         let term_bytes = self
@@ -842,6 +851,7 @@ impl LexicalGenerationPostingsV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl CodeLexicalProjectionAdapterV1 {
     /// Count heap payload bytes owned exclusively by this immutable projection.
     /// Shared sanitized chunk text is deliberately excluded because its Arc
@@ -1496,6 +1506,7 @@ struct ExactMatchRowViewV1<'a> {
 /// Match one row against every request literal, returning matched literal
 /// ordinals into `request.literals`. Ordinals defer the literal clones to
 /// the cap-bounded winners instead of paying them per visited document.
+#[hotpath::measure]
 fn exact_matches(
     row: ExactMatchRowViewV1<'_>,
     request: &ExactLaneRequest,
@@ -1642,6 +1653,7 @@ impl<'request> PreparedLexicalQueryV1<'request> {
     }
 }
 
+#[hotpath::measure]
 fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
     match kind {
         ExactTechnicalTermKindV1::WholeSymbol => ExactFieldV1::Identifier,
@@ -1661,6 +1673,7 @@ fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
 /// Posting-key form of one minted term: the shared per-field search
 /// canonicalization over the mint canonical, after stripping the extraction
 /// `commit:` prefix so bare-hash query literals address the same key.
+#[hotpath::measure]
 fn canonical_projected_exact_term(term: &ExactTechnicalTermV1) -> Cow<'_, [u8]> {
     let bytes = term.canonical_bytes();
     let Ok(value) = std::str::from_utf8(bytes) else {
@@ -1679,6 +1692,7 @@ fn canonical_projected_exact_term(term: &ExactTechnicalTermV1) -> Cow<'_, [u8]> 
     }
 }
 
+#[hotpath::measure]
 fn collect_term_kinds(
     exact_terms: &[ExactTechnicalTermV1],
     normalized_term: &str,
@@ -1696,20 +1710,24 @@ fn collect_term_kinds(
     }
 }
 
+#[hotpath::measure]
 fn retrieval_anchor(value: String) -> Result<RetrievalAnchorId, RetrievalPortError> {
     RetrievalAnchorId::new(value).map_err(contract_error)
 }
 
+#[hotpath::measure]
 fn normalize_lexical(value: &str) -> String {
     value.to_ascii_lowercase()
 }
 
+#[hotpath::measure]
 fn lexical_tokens(value: &str) -> Vec<String> {
     technical_tokens(value)
         .map(|(_, token)| normalize_lexical(token))
         .collect()
 }
 
+#[hotpath::measure]
 fn substring_count(haystack: &str, needle: &str) -> usize {
     if needle.is_empty() {
         return 0;
@@ -1717,6 +1735,7 @@ fn substring_count(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
 }
 
+#[hotpath::measure]
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && haystack
@@ -1724,6 +1743,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
+#[hotpath::measure]
 fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, score: u64) {
     scores
         .entry(field)
@@ -1731,6 +1751,7 @@ fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, 
         .or_insert(score);
 }
 
+#[hotpath::measure]
 fn field_weight_millis(field: LexicalFieldV1) -> u64 {
     match field {
         LexicalFieldV1::SymbolName => 4_000,
@@ -1742,6 +1763,7 @@ fn field_weight_millis(field: LexicalFieldV1) -> u64 {
     }
 }
 
+#[hotpath::measure]
 fn bm25_score_micros(
     document_count: usize,
     document_frequency: usize,
@@ -1777,6 +1799,7 @@ fn bm25_score_micros(
     score.min(u128::from(u64::MAX)) as u64
 }
 
+#[hotpath::measure]
 fn fixed_ln_ratio_micros(numerator: u64, denominator: u64) -> u64 {
     const SCALE: u128 = 1_u128 << 40;
     const LN_2_SCALED: u128 = 762_123_384_786;
@@ -1811,6 +1834,7 @@ fn fixed_ln_ratio_micros(numerator: u64, denominator: u64) -> u64 {
 const FUZZY_DISTANCE_ONE_MAX_BYTES: usize = 320;
 const FUZZY_DISTANCE_TWO_MAX_BYTES: usize = 32;
 
+#[hotpath::measure]
 fn fuzzy_distance_bound(normalized_query: &str) -> usize {
     let character_count = normalized_query.chars().count();
     let byte_count = normalized_query.len();

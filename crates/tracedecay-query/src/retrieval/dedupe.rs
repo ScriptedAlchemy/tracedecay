@@ -43,6 +43,7 @@ pub struct DedupeDecisionV1 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeterministicDedupe;
 
+#[hotpath::measure_all]
 impl DeterministicDedupe {
     /// Identify byte-identical source occurrence/evidence pairs before
     /// fusion. Their occurrence row collapses in the fused candidate while

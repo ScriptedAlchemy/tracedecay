@@ -42,6 +42,7 @@ pub struct TaskSessionBindingV1 {
     source: ObservationSourceIdentityV1,
 }
 
+#[hotpath::measure_all]
 impl TaskSessionBindingV1 {
     pub fn new(
         task_id: TaskId,
@@ -93,6 +94,7 @@ pub struct TaskSessionPlan23BindingV1 {
     continuation: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl TaskSessionPlan23BindingV1 {
     pub fn from_export(export: &TemporalCandidateExport) -> Result<Self, RetrievalPortError> {
         Self::new(
@@ -174,6 +176,7 @@ pub struct TaskSessionLaneRequestV1<'a> {
     pub control: &'a EvidenceLaneExecutionControlV1,
 }
 
+#[hotpath::measure_all]
 impl<'a> TaskSessionLaneRequestV1<'a> {
     pub fn new(
         base: &'a RetrievalRequest,
@@ -208,6 +211,7 @@ pub struct TaskSessionCandidateSelectionV1 {
     continuation: Option<RetrievalCursor>,
 }
 
+#[hotpath::measure_all]
 impl TaskSessionCandidateSelectionV1 {
     pub fn new(
         ranked_candidates: Vec<RankedCandidate>,
@@ -264,6 +268,7 @@ pub struct CanonicalTaskSessionCandidateExportPortV1<'a> {
     policy_revision: ComponentRevision,
 }
 
+#[hotpath::measure_all]
 impl<'a> CanonicalTaskSessionCandidateExportPortV1<'a> {
     pub fn new(
         export: &'a TemporalCandidateExport,
@@ -385,6 +390,7 @@ pub struct TaskSessionLaneRetrieverV1<'a, P: ?Sized> {
     port: &'a P,
 }
 
+#[hotpath::measure_all]
 impl<'a, P: TaskSessionCandidateExportPortV1 + ?Sized> TaskSessionLaneRetrieverV1<'a, P> {
     pub fn new(port: &'a P) -> Self {
         Self { port }
@@ -405,6 +411,7 @@ impl<'a, P: TaskSessionCandidateExportPortV1 + ?Sized> TaskSessionLaneRetrieverV
     }
 }
 
+#[hotpath::measure]
 fn task_session_evidence_matches(
     evidence: &TaskSessionLaneEvidenceV1,
     request: &TaskSessionLaneRequestV1<'_>,

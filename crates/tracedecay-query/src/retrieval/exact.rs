@@ -47,6 +47,7 @@ pub struct ExactLaneRequest<'a> {
     pub budget: RetrievalBudget,
 }
 
+#[hotpath::measure_all]
 impl ExactLaneRequest<'_> {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
         self.base.budget.validate().map_err(contract_error)?;
@@ -78,6 +79,7 @@ pub struct ExactLiteralV1 {
     pub canonical_bytes: Vec<u8>,
 }
 
+#[hotpath::measure_all]
 impl ExactLiteralV1 {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
         if self.original_bytes.is_empty() || self.canonical_bytes.is_empty() {
@@ -108,6 +110,7 @@ impl LaneBoundEvidence for ExactLaneEvidence {
     }
 }
 
+#[hotpath::measure_all]
 impl ExactLaneEvidence {
     pub fn validate(&self, request: &ExactLaneRequest<'_>) -> Result<(), RetrievalPortError> {
         request.validate()?;
@@ -204,6 +207,7 @@ pub struct CentralExactAdmissionAuthorityV1 {
     rule_revision: ExactAdmissionRuleRevision,
 }
 
+#[hotpath::measure_all]
 impl CentralExactAdmissionAuthorityV1 {
     pub fn new(rule_revision: ExactAdmissionRuleRevision) -> Self {
         Self { rule_revision }
@@ -304,6 +308,7 @@ struct ExactQueryAtom {
     quoted: bool,
 }
 
+#[hotpath::measure]
 fn exact_query_atoms(query: &str) -> Vec<ExactQueryAtom> {
     let mut atoms = Vec::new();
     let mut cursor = 0;
@@ -378,6 +383,7 @@ fn exact_query_atoms(query: &str) -> Vec<ExactQueryAtom> {
     atoms
 }
 
+#[hotpath::measure]
 fn is_contextual_error_text(value: &str) -> bool {
     value.split_whitespace().nth(1).is_some()
         && value
@@ -402,6 +408,7 @@ fn is_contextual_error_text(value: &str) -> bool {
             })
 }
 
+#[hotpath::measure]
 fn exact_field_prefix(prefix: &str) -> Option<ExactFieldV1> {
     match prefix.to_ascii_lowercase().as_str() {
         "id" | "identifier" | "symbol" => Some(ExactFieldV1::Identifier),
@@ -421,6 +428,7 @@ fn exact_field_prefix(prefix: &str) -> Option<ExactFieldV1> {
     }
 }
 
+#[hotpath::measure]
 fn classify_unprefixed_exact(value: &str, quoted: bool) -> Option<ExactFieldV1> {
     if quoted {
         return Some(ExactFieldV1::QuotedPhrase);
@@ -449,6 +457,7 @@ fn classify_unprefixed_exact(value: &str, quoted: bool) -> Option<ExactFieldV1> 
     is_identifier(value).then_some(ExactFieldV1::Identifier)
 }
 
+#[hotpath::measure]
 fn exact_field_accepts(field: ExactFieldV1, value: &str) -> bool {
     if value.is_empty()
         || value.len() > 512
@@ -477,6 +486,7 @@ fn exact_field_accepts(field: ExactFieldV1, value: &str) -> bool {
     }
 }
 
+#[hotpath::measure]
 fn canonicalize_exact(field: ExactFieldV1, value: &str) -> (Vec<u8>, Vec<String>) {
     let canonical = exact_search_canonical(field, value);
     let steps = if canonical == value {
@@ -489,10 +499,12 @@ fn canonicalize_exact(field: ExactFieldV1, value: &str) -> (Vec<u8>, Vec<String>
     (canonical.into_owned().into_bytes(), steps)
 }
 
+#[hotpath::measure]
 fn is_identifier(value: &str) -> bool {
     is_identifier_token(value)
 }
 
+#[hotpath::measure]
 fn is_qualified_name(value: &str) -> bool {
     is_qualified_name_token(value)
 }
@@ -501,6 +513,7 @@ fn is_qualified_name(value: &str) -> bool {
 /// dotted filename: the exact projection also mints a Path posting for every
 /// chunk's logical path, so extensionless real files (`Makefile`, `LICENSE`)
 /// stay reachable through exact logical-path equality.
+#[hotpath::measure]
 fn is_path(value: &str) -> bool {
     value.contains('/') && is_path_shape(value)
 }
@@ -508,6 +521,7 @@ fn is_path(value: &str) -> bool {
 /// Case bridge over the extraction CLI-flag grammar: posting keys are the
 /// lowercase extraction canonical and [`canonicalize_exact`] lowercases
 /// admitted flags, so mixed-case input admits exactly the mintable flags.
+#[hotpath::measure]
 fn is_cli_flag(value: &str) -> bool {
     is_cli_flag_token(&value.to_ascii_lowercase())
 }
@@ -515,6 +529,7 @@ fn is_cli_flag(value: &str) -> bool {
 /// Case bridge over the extraction diagnostic-code grammars: posting keys
 /// are uppercased and [`canonicalize_exact`] uppercases admitted codes, so
 /// `e0308`/`ts1234`/`err_x` admit exactly the mintable codes.
+#[hotpath::measure]
 fn is_diagnostic_code(value: &str) -> bool {
     let uppercase = value.to_ascii_uppercase();
     is_compiler_error_code_token(&uppercase) || is_runtime_error_code_token(&uppercase)
@@ -524,14 +539,17 @@ fn is_diagnostic_code(value: &str) -> bool {
 /// extraction mints `commit:`-prefixed identifiers and the projection strips
 /// the prefix from posting keys, so queries admit the bare hash in the
 /// mintable range.
+#[hotpath::measure]
 fn is_commit_identifier(value: &str) -> bool {
     is_commit_hash(value)
 }
 
+#[hotpath::measure]
 fn is_configuration_key(value: &str) -> bool {
     is_configuration_key_token(value)
 }
 
+#[hotpath::measure]
 fn is_known_tool(value: &str) -> bool {
     is_tool_name_token(value)
 }
@@ -561,6 +579,7 @@ pub struct ExactLane<A, P> {
     postings: P,
 }
 
+#[hotpath::measure_all]
 impl<A, P> ExactLane<A, P> {
     pub fn new(authority: A, postings: P) -> Self {
         Self {
@@ -847,6 +866,7 @@ where
 ///
 /// A lane contributes its admitted prefix with a committed checkpoint; cursor
 /// replay binds the completed set and never recomputes it.
+#[hotpath::measure]
 fn exact_checkpoint_digest(
     generation: &CodeGenerationId,
     candidates: &[CompactCandidate],

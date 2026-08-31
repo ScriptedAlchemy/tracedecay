@@ -101,6 +101,7 @@ enum QueryAuthorityModeV1 {
     Federated,
 }
 
+#[hotpath::measure_all]
 impl QueryAuthorityV1 {
     pub fn new(
         profile: FusionProfile,
@@ -498,6 +499,7 @@ impl QueryAuthorityV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_lane_set(
     lanes: &[CompositionLaneInput],
     required_lanes: &[RetrieverKind],

@@ -90,6 +90,7 @@ struct PreparedTermInsertRefV1<'a> {
     posting: &'a PreparedTermPostingV1,
 }
 
+#[hotpath::measure_all]
 impl PreparedTermInsertRefV1<'_> {
     fn key(&self) -> (i64, i64, i64) {
         (self.term_id, self.field, self.document_id)
@@ -145,6 +146,7 @@ struct PreparedExactInsertRefV1<'a> {
     term: &'a [u8],
 }
 
+#[hotpath::measure_all]
 impl PreparedExactInsertRefV1<'_> {
     fn key(&self) -> (&str, &[u8], i64) {
         (self.field, self.term, self.document_id)
@@ -312,6 +314,7 @@ struct BuilderMutationGuardV1 {
     gate: Arc<AtomicU8>,
 }
 
+#[hotpath::measure_all]
 impl BuilderMutationGuardV1 {
     fn enter(gate: &Arc<AtomicU8>) -> Result<Self, CodeLexicalArtifactErrorV1> {
         gate.compare_exchange(
@@ -337,6 +340,7 @@ impl Drop for BuilderMutationGuardV1 {
     }
 }
 
+#[hotpath::measure]
 fn register_builder_mutation_gate(
     connection: &Connection,
 ) -> Result<Arc<AtomicU8>, CodeLexicalArtifactErrorV1> {
@@ -382,6 +386,7 @@ enum FinalizationSectionV1 {
     Vocabulary,
 }
 
+#[hotpath::measure_all]
 impl FinalizationSectionV1 {
     const ALL: [Self; 11] = [
         Self::SourcePages,
@@ -405,6 +410,7 @@ impl FinalizationSectionV1 {
         })
     }
 
+    #[hotpath::skip]
     const fn name(self) -> &'static str {
         match self {
             Self::SourcePages => "source_pages",
@@ -421,6 +427,7 @@ impl FinalizationSectionV1 {
         }
     }
 
+    #[hotpath::skip]
     const fn full_query(self) -> &'static str {
         match self {
             Self::SourcePages => {
@@ -454,6 +461,7 @@ impl FinalizationSectionV1 {
     }
 
     /// Bounded resumes seek a native table key, never a computed cursor.
+    #[hotpath::skip]
     const fn seek_query(self, after: bool) -> &'static str {
         match (self, after) {
             (Self::SourcePages, false) => {
@@ -557,6 +565,7 @@ enum PersistedFinalizationKeyV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl PersistedFinalizationKeyV1 {
     fn matches_section(&self, section: FinalizationSectionV1) -> bool {
         matches!(
@@ -643,7 +652,9 @@ enum PersistedFinalizationPhaseV1 {
     Digest,
 }
 
+#[hotpath::measure_all]
 impl PersistedFinalizationPhaseV1 {
+    #[hotpath::skip]
     const fn public(self) -> CodeLexicalArtifactFinalizationPhaseV1 {
         match self {
             Self::Statistics | Self::Indexes => CodeLexicalArtifactFinalizationPhaseV1::IndexBuild,
@@ -662,8 +673,10 @@ struct FinalizationTransactionMetricsV1 {
     committed: bool,
 }
 
+#[hotpath::measure_all]
 impl FinalizationTransactionMetricsV1 {
     #[inline(always)]
+    #[hotpath::skip]
     const fn new() -> Self {
         Self {
             #[cfg(feature = "hotpath")]
@@ -690,6 +703,7 @@ impl Drop for FinalizationTransactionMetricsV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl FinalizationWakeMetricsV1 {
     #[inline(always)]
     fn new() -> Self {
@@ -835,6 +849,7 @@ pub struct PreparedCodeLexicalArtifactBatchV1 {
     prepared_pages: Vec<PreparedCodeLexicalArtifactPageV1>,
 }
 
+#[hotpath::measure_all]
 impl PreparedCodeLexicalArtifactBatchV1 {
     pub fn accepted_prefix(&self) -> NonZeroUsize {
         self.accepted_prefix
@@ -1659,6 +1674,7 @@ impl CodeLexicalArtifactBuilderV1 {
     }
 }
 
+#[hotpath::measure]
 fn create_private_builder_connection(
     path: &Path,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
@@ -1667,6 +1683,7 @@ fn create_private_builder_connection(
     open_bound_builder_connection(path, private_file)
 }
 
+#[hotpath::measure]
 fn open_private_builder_connection(
     path: &Path,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
@@ -1674,6 +1691,7 @@ fn open_private_builder_connection(
     open_bound_builder_connection(path, private_file)
 }
 
+#[hotpath::measure]
 fn open_bound_builder_connection(
     path: &Path,
     private_file: File,
@@ -1689,6 +1707,7 @@ fn open_bound_builder_connection(
     Ok((connection, private_file, identity))
 }
 
+#[hotpath::measure]
 fn stable_file_identity(
     file: &File,
 ) -> Result<StableArtifactFileIdentityV1, CodeLexicalArtifactErrorV1> {
@@ -1714,6 +1733,7 @@ fn stable_file_identity(
     }
 }
 
+#[hotpath::measure]
 fn verify_staging_file_binding(
     path: &Path,
     expected: &StableArtifactFileIdentityV1,
@@ -1727,6 +1747,7 @@ fn verify_staging_file_binding(
     Ok(())
 }
 
+#[hotpath::measure]
 fn private_staging_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 {
     if error.kind() == std::io::ErrorKind::NotFound {
         CodeLexicalArtifactErrorV1::Missing("lexical artifact staging file is missing".to_owned())
@@ -1752,6 +1773,7 @@ const PREPARED_PAGE_DIGEST_FIELDS: usize = 3;
 /// Create and resume each hold up to two simultaneous metadata structures
 /// (the retained copy plus the decoded stored copy) and one serialized JSON
 /// copy, so the fixed charge covers all three.
+#[hotpath::measure]
 fn validated_fixed_ledger_charge(
     metadata: &CodeLexicalProjectionMetadataV1,
     memory_budget_bytes: usize,
@@ -1790,6 +1812,7 @@ fn validated_fixed_ledger_charge(
 
 /// A conservative byte-only upper bound for serializing metadata. Admission
 /// cannot allocate just to discover that the fixed ledger would not fit.
+#[hotpath::measure]
 fn metadata_serialized_upper_bound(metadata: &CodeLexicalProjectionMetadataV1) -> usize {
     let path_bytes = metadata
         .logical_paths
@@ -1809,6 +1832,7 @@ fn metadata_serialized_upper_bound(metadata: &CodeLexicalProjectionMetadataV1) -
 /// Owned bytes one projection metadata structure retains: logical paths at
 /// capacity with per-entry b-tree node overhead, and every scalar identity
 /// string charged as its `String` header plus payload length.
+#[hotpath::measure]
 fn metadata_retained_bytes(metadata: &CodeLexicalProjectionMetadataV1) -> usize {
     let path_bytes = metadata.logical_paths.iter().fold(
         metadata.logical_paths.len().saturating_mul(
@@ -1844,6 +1868,7 @@ fn metadata_retained_bytes(metadata: &CodeLexicalProjectionMetadataV1) -> usize 
         })
 }
 
+#[hotpath::measure]
 fn page_batch_ledger_charge_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     pages: &[VerifiedSealedLexicalPageV1],
@@ -1906,6 +1931,7 @@ struct BatchLimitExceededV1 {
     maximum: usize,
 }
 
+#[hotpath::measure_all]
 impl CanonicalBatchLimitLedgerV1 {
     fn try_admit(
         &mut self,
@@ -1945,6 +1971,7 @@ impl CanonicalBatchLimitLedgerV1 {
     }
 }
 
+#[hotpath::measure]
 fn largest_exact_prepared_prefix(
     pages: &[PreparedCodeLexicalArtifactPageV1],
     fixed_ledger_charge_bytes: usize,
@@ -1978,6 +2005,7 @@ fn largest_exact_prepared_prefix(
 /// Refuse a batch unless its retained source pages, all prepared outputs, and
 /// one scratch peak per active worker fit together. Admission runs before the
 /// staging transaction, so refusal leaves builder and source progress intact.
+#[hotpath::measure]
 fn admit_page_batch_within_memory_budget(
     metadata: &CodeLexicalProjectionMetadataV1,
     fixed_ledger_charge_bytes: usize,
@@ -2010,6 +2038,7 @@ fn admit_page_batch_within_memory_budget(
     Ok(())
 }
 
+#[hotpath::measure]
 fn prepared_batch_memory_required_bytes(
     fixed_ledger_charge_bytes: usize,
     pages: &[PreparedCodeLexicalArtifactPageV1],
@@ -2058,6 +2087,7 @@ fn prepared_batch_memory_required_bytes(
         })
 }
 
+#[hotpath::measure]
 fn prepared_term_row_count(
     pages: &[PreparedCodeLexicalArtifactPageV1],
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
@@ -2070,6 +2100,7 @@ fn prepared_term_row_count(
         })
 }
 
+#[hotpath::measure]
 fn term_insert_plan_ledger_bytes(term_rows: usize) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let entries = term_rows
         .checked_mul(TERM_INSERT_PLAN_BYTES_PER_REF)
@@ -2083,6 +2114,7 @@ fn term_insert_plan_ledger_bytes(term_rows: usize) -> Result<usize, CodeLexicalA
         .ok_or_else(batch_ledger_overflow)
 }
 
+#[hotpath::measure]
 fn prepared_exact_row_count(
     pages: &[PreparedCodeLexicalArtifactPageV1],
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
@@ -2095,6 +2127,7 @@ fn prepared_exact_row_count(
         })
 }
 
+#[hotpath::measure]
 fn exact_insert_plan_ledger_bytes(exact_rows: usize) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let entries = exact_rows
         .checked_mul(EXACT_INSERT_PLAN_BYTES_PER_REF)
@@ -2108,6 +2141,7 @@ fn exact_insert_plan_ledger_bytes(exact_rows: usize) -> Result<usize, CodeLexica
         .ok_or_else(batch_ledger_overflow)
 }
 
+#[hotpath::measure]
 fn prepared_batch_memory_with_posting_plans_required_bytes(
     fixed_ledger_charge_bytes: usize,
     pages: &[PreparedCodeLexicalArtifactPageV1],
@@ -2120,6 +2154,7 @@ fn prepared_batch_memory_with_posting_plans_required_bytes(
         .ok_or_else(batch_ledger_overflow)
 }
 
+#[hotpath::measure]
 fn admit_prepared_page_batch(
     fixed_ledger_charge_bytes: usize,
     memory_budget_bytes: usize,
@@ -2161,6 +2196,7 @@ fn admit_prepared_page_batch(
     Ok(())
 }
 
+#[hotpath::measure]
 fn prepare_term_insert_plan<'a>(
     fixed_ledger_charge_bytes: usize,
     memory_budget_bytes: usize,
@@ -2248,6 +2284,7 @@ fn prepare_term_insert_plan<'a>(
     })
 }
 
+#[hotpath::measure]
 fn next_term_insert<'a>(
     plan: &mut PreparedTermInsertPlanV1<'a>,
 ) -> Result<Option<PreparedTermInsertRefV1<'a>>, CodeLexicalArtifactErrorV1> {
@@ -2289,6 +2326,7 @@ fn next_term_insert<'a>(
 // Mirrors `prepare_term_insert_plan`/`next_term_insert` for `exact_postings`,
 // whose `PRIMARY KEY(field, term, document_id)` `WITHOUT ROWID` layout has
 // the same clustered-index cost for out-of-order inserts as `term_postings`.
+#[hotpath::measure]
 fn prepare_exact_insert_plan<'a>(
     fixed_ledger_charge_bytes: usize,
     memory_budget_bytes: usize,
@@ -2375,6 +2413,7 @@ fn prepare_exact_insert_plan<'a>(
     })
 }
 
+#[hotpath::measure]
 fn next_exact_insert<'a>(
     plan: &mut PreparedExactInsertPlanV1<'a>,
 ) -> Result<Option<PreparedExactInsertRefV1<'a>>, CodeLexicalArtifactErrorV1> {
@@ -2413,6 +2452,7 @@ fn next_exact_insert<'a>(
     Ok(Some(cursor.entry))
 }
 
+#[hotpath::measure]
 fn sum_prepared_metric(
     pages: &[PreparedCodeLexicalArtifactPageV1],
     metric: impl Fn(&PreparedCodeLexicalArtifactPageV1) -> usize,
@@ -2425,6 +2465,7 @@ fn sum_prepared_metric(
     })
 }
 
+#[hotpath::measure]
 fn batch_limit(
     limit: CodeLexicalArtifactBatchLimitV1,
     required: usize,
@@ -2437,12 +2478,14 @@ fn batch_limit(
     }
 }
 
+#[hotpath::measure]
 fn batch_ledger_overflow() -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(
         "lexical artifact batch ledger charge overflowed".to_owned(),
     )
 }
 
+#[hotpath::measure]
 fn prepare_page_batch_admission(
     connection: &Connection,
     metadata: &CodeLexicalProjectionMetadataV1,
@@ -2516,6 +2559,7 @@ fn prepare_page_batch_admission(
 /// It is evaluated a record at a time without allocations and aborts once
 /// `abort_above` is exceeded; that returned lower bound already fails
 /// admission.
+#[hotpath::measure]
 fn page_transient_peak_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
@@ -2540,6 +2584,7 @@ fn page_transient_peak_bytes(
 /// Conservative output-plus-scratch upper bound before one page is prepared.
 /// Every derived retained value coexists with that page's widest transient
 /// record allocation.
+#[hotpath::measure]
 fn page_preparation_upper_bound_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
@@ -2556,6 +2601,7 @@ fn page_preparation_upper_bound_bytes(
 /// Conservative retained output for one fully prepared page. Every record's
 /// owned projection remains live until the ordered batch commits, while only
 /// the widest per-worker scratch allocation is charged separately.
+#[hotpath::measure]
 fn page_prepared_retained_upper_bound_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
@@ -2592,6 +2638,7 @@ fn page_prepared_retained_upper_bound_bytes(
         })
 }
 
+#[hotpath::measure]
 fn projected_chunk_prepared_retained_upper_bound_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     admitted: &ExtractionAdmittedCodeSearchChunkV1,
@@ -2627,6 +2674,7 @@ fn projected_chunk_prepared_retained_upper_bound_bytes(
 /// vector capacities and typed identities; the explicit cursor envelope
 /// covers both serialized cursor copies and their JSON framing without
 /// allocating during admission.
+#[hotpath::measure]
 fn prepared_page_authority_upper_bound_bytes(
     page: &VerifiedSealedLexicalPageV1,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
@@ -2682,6 +2730,7 @@ fn prepared_page_authority_upper_bound_bytes(
 /// that a page is too large. Components are charged as simultaneous, so the
 /// upper bound covers the append path's clone, projection, token maps,
 /// serialization, and both n-gram windows.
+#[hotpath::measure]
 fn projected_chunk_transient_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     admitted: &ExtractionAdmittedCodeSearchChunkV1,
@@ -2744,10 +2793,12 @@ fn projected_chunk_transient_bytes(
         .saturating_add(serialized_bytes))
 }
 
+#[hotpath::measure]
 fn lexical_token_count(value: &str) -> usize {
     tracedecay_domain::technical_tokens(value).count()
 }
 
+#[hotpath::measure]
 fn chunk_owned_bytes(chunk: &CodeSearchChunkV1) -> usize {
     let subtoken_bytes = chunk.subtokens.iter().fold(
         chunk
@@ -2774,6 +2825,7 @@ fn chunk_owned_bytes(chunk: &CodeSearchChunkV1) -> usize {
         .saturating_add(chunk.sanitized_text.as_str().len())
 }
 
+#[hotpath::measure]
 fn exact_terms_owned_bytes(capacity: usize, terms: &[ExactTechnicalTermV1]) -> usize {
     terms.iter().fold(
         capacity.saturating_mul(std::mem::size_of::<ExactTechnicalTermV1>()),
@@ -2789,6 +2841,7 @@ fn exact_terms_owned_bytes(capacity: usize, terms: &[ExactTechnicalTermV1]) -> u
     )
 }
 
+#[hotpath::measure]
 fn anchor_owned_bytes(anchor: &CodeSearchChunkAnchorV1) -> usize {
     anchor
         .generation_id
@@ -2809,6 +2862,7 @@ fn anchor_owned_bytes(anchor: &CodeSearchChunkAnchorV1) -> usize {
         )
 }
 
+#[hotpath::measure]
 fn import_transient_bytes(
     evidence: &CodeIndexImportEvidenceV1,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
@@ -2823,6 +2877,7 @@ fn import_transient_bytes(
         .saturating_add(256))
 }
 
+#[hotpath::measure]
 fn validate_prepared_page_batch(
     current: &CodeLexicalArtifactBuildProgressV1,
     pages: &[PreparedCodeLexicalArtifactPageV1],
@@ -2880,6 +2935,7 @@ fn validate_prepared_page_batch(
     Ok(())
 }
 
+#[hotpath::measure]
 fn append_prepared_imports(
     transaction: &Transaction<'_>,
     page: &PreparedCodeLexicalArtifactPageV1,
@@ -2906,6 +2962,7 @@ fn append_prepared_imports(
     Ok(())
 }
 
+#[hotpath::measure]
 fn append_prepared_postings(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
@@ -3005,6 +3062,7 @@ fn append_prepared_postings(
     Ok(())
 }
 
+#[hotpath::measure]
 fn append_prepared_rows(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
@@ -3040,6 +3098,7 @@ fn append_prepared_rows(
     Ok(())
 }
 
+#[hotpath::measure]
 fn insert_prepared_source_page(
     transaction: &Transaction<'_>,
     page: &PreparedCodeLexicalArtifactPageV1,
@@ -3065,6 +3124,7 @@ fn insert_prepared_source_page(
     Ok(())
 }
 
+#[hotpath::measure]
 fn sqlite_file_size(connection: &Connection) -> Result<u64, CodeLexicalArtifactErrorV1> {
     let page_count: i64 = connection
         .pragma_query_value(None, "page_count", |row| row.get(0))
@@ -3087,6 +3147,7 @@ fn sqlite_file_size(connection: &Connection) -> Result<u64, CodeLexicalArtifactE
     })
 }
 
+#[hotpath::measure]
 fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactErrorV1> {
     connection
         .execute_batch(
@@ -3216,6 +3277,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
         .map_err(sqlite_error)
 }
 
+#[hotpath::measure]
 fn verify_builder_mutation_gate_schema(
     connection: &Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -3234,6 +3296,7 @@ fn verify_builder_mutation_gate_schema(
     Ok(())
 }
 
+#[hotpath::measure]
 fn verify_trigger_schema(
     connection: &Connection,
     name: &str,
@@ -3260,6 +3323,7 @@ fn verify_trigger_schema(
     Ok(())
 }
 
+#[hotpath::measure]
 fn install_base_freeze(transaction: &Transaction<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
     transaction
         .execute_batch(
@@ -3285,6 +3349,7 @@ fn install_base_freeze(transaction: &Transaction<'_>) -> Result<(), CodeLexicalA
         .map_err(sqlite_error)
 }
 
+#[hotpath::measure]
 fn authenticated_authority_epoch(
     transaction: &Transaction<'_>,
     source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -3320,6 +3385,7 @@ fn authenticated_authority_epoch(
     Ok(actual_epoch)
 }
 
+#[hotpath::measure]
 fn advance_pre_digest_work(
     transaction: &Transaction<'_>,
     state: &mut PersistedFinalizationStateV1,
@@ -3370,6 +3436,7 @@ fn advance_pre_digest_work(
     Ok(())
 }
 
+#[hotpath::measure]
 fn with_cancellable_sqlite_statement<T>(
     transaction: &Transaction<'_>,
     control: &dyn CodeIndexExecutionControlV1,
@@ -3465,6 +3532,7 @@ fn with_cancellable_sqlite_statement<T>(
     }
 }
 
+#[hotpath::measure]
 fn spawn_finalization_control_monitor<'scope, 'environment>(
     scope: &'scope std::thread::Scope<'scope, 'environment>,
     monitor: impl FnOnce() + Send + 'scope,
@@ -3483,6 +3551,7 @@ where
         .spawn_scoped(scope, monitor)
 }
 
+#[hotpath::measure]
 fn derive_statistics_step(
     transaction: &Transaction<'_>,
     ordinal: u64,
@@ -3529,6 +3598,7 @@ fn derive_statistics_step(
     Ok(())
 }
 
+#[hotpath::measure]
 fn build_serving_index_step(
     transaction: &Transaction<'_>,
     ordinal: u64,
@@ -3588,6 +3658,7 @@ fn build_serving_index_step(
     .map_err(sqlite_error)
 }
 
+#[hotpath::measure_all]
 impl PersistedFinalizationStateV1 {
     fn new(
         content_epoch: i64,
@@ -3616,6 +3687,7 @@ impl PersistedFinalizationStateV1 {
     }
 }
 
+#[hotpath::measure]
 fn verify_artifact_state_metadata(
     connection: &Connection,
     expected_metadata: &CodeLexicalProjectionMetadataV1,
@@ -3653,6 +3725,7 @@ fn verify_artifact_state_metadata(
     Ok(())
 }
 
+#[hotpath::measure]
 fn finalization_started(connection: &Connection) -> Result<bool, CodeLexicalArtifactErrorV1> {
     connection
         .query_row(
@@ -3664,6 +3737,7 @@ fn finalization_started(connection: &Connection) -> Result<bool, CodeLexicalArti
         .map_err(sqlite_error)
 }
 
+#[hotpath::measure]
 fn content_epoch(connection: &Connection) -> Result<i64, CodeLexicalArtifactErrorV1> {
     connection
         .query_row(
@@ -3674,6 +3748,7 @@ fn content_epoch(connection: &Connection) -> Result<i64, CodeLexicalArtifactErro
         .map_err(sqlite_corrupt)
 }
 
+#[hotpath::measure]
 fn ensure_content_epoch(
     connection: &Connection,
     expected: i64,
@@ -3687,6 +3762,7 @@ fn ensure_content_epoch(
     Ok(())
 }
 
+#[hotpath::measure]
 fn load_finalization_state(
     connection: &Connection,
 ) -> Result<Option<PersistedFinalizationStateV1>, CodeLexicalArtifactErrorV1> {
@@ -3707,6 +3783,7 @@ fn load_finalization_state(
         .transpose()
 }
 
+#[hotpath::measure]
 fn store_finalization_state(
     transaction: &Transaction<'_>,
     state: &PersistedFinalizationStateV1,
@@ -3722,6 +3799,7 @@ fn store_finalization_state(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_finalization_state(
     state: &PersistedFinalizationStateV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -3797,6 +3875,7 @@ fn validate_finalization_state(
     Ok(())
 }
 
+#[hotpath::measure]
 fn advance_section_rows(
     transaction: &Transaction<'_>,
     section: FinalizationSectionV1,
@@ -3913,6 +3992,7 @@ fn advance_section_rows(
     }
 }
 
+#[hotpath::measure]
 fn advance_native_section_rows<P: rusqlite::Params>(
     transaction: &Transaction<'_>,
     section: FinalizationSectionV1,
@@ -3980,6 +4060,7 @@ fn advance_native_section_rows<P: rusqlite::Params>(
     Ok(advanced)
 }
 
+#[hotpath::measure]
 fn native_row_key(
     section: FinalizationSectionV1,
     row: &rusqlite::Row<'_>,
@@ -4022,6 +4103,7 @@ fn native_row_key(
     }
 }
 
+#[hotpath::measure]
 fn initial_section_accumulator(name: &str) -> Result<[u8; 32], CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay.code-lexical-artifact-section.v2\0initial");
@@ -4034,6 +4116,7 @@ fn initial_section_accumulator(name: &str) -> Result<[u8; 32], CodeLexicalArtifa
     Ok(hasher.finalize().into())
 }
 
+#[hotpath::measure]
 fn absorb_section_row(
     name: &str,
     row_ordinal: u64,
@@ -4063,6 +4146,7 @@ fn absorb_section_row(
     Ok(())
 }
 
+#[hotpath::measure]
 fn finish_persisted_section(
     name: &str,
     state: &PersistedFinalizationStateV1,
@@ -4070,6 +4154,7 @@ fn finish_persisted_section(
     finish_section(name, state.section_row_count, &state.section_accumulator)
 }
 
+#[hotpath::measure]
 fn finish_section(
     name: &str,
     row_count: u64,
@@ -4103,6 +4188,7 @@ fn finish_section(
 /// counting/replaying every staged page on each bounded finalization wake.
 /// The final section receipts validate the full source-page cardinality before
 /// a sealed artifact is published.
+#[hotpath::measure]
 fn verify_staged_source_chain(
     connection: &Connection,
     source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -4172,12 +4258,14 @@ fn verify_staged_source_chain(
     Ok(())
 }
 
+#[hotpath::measure]
 fn source_chain_overflow() -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Corrupt(
         "lexical artifact source-page chain counter overflowed".to_owned(),
     )
 }
 
+#[hotpath::measure]
 fn verify_sealed_receipt_header(
     receipt: &VerifiedCodeLexicalArtifactV1,
     expected_metadata_digest: &ManifestDigest,
@@ -4192,6 +4280,7 @@ fn verify_sealed_receipt_header(
     Ok(())
 }
 
+#[hotpath::measure]
 fn verify_final_sections_against_source(
     sections: &[CodeLexicalArtifactSectionDigestV1],
     source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -4225,6 +4314,7 @@ fn verify_final_sections_against_source(
 /// and payload counts, import counts, dictionary digest, and cursor bytes.
 type StoredSourcePageRowV1 = (String, String, i64, i64, i64, i64, String, Vec<u8>);
 
+#[hotpath::measure]
 fn progress(
     connection: &Connection,
 ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
@@ -4275,6 +4365,7 @@ fn progress(
     })
 }
 
+#[hotpath::measure]
 fn cursor_before_page(
     connection: &Connection,
     page_ordinal: u64,
@@ -4296,6 +4387,7 @@ fn cursor_before_page(
     bytes.as_deref().map(decode_cursor).transpose()
 }
 
+#[hotpath::measure]
 fn verify_replayed_page(
     connection: &Connection,
     page: &VerifiedSealedLexicalPageV1,
@@ -4339,6 +4431,7 @@ fn verify_replayed_page(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_contiguous_pages(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
@@ -4365,6 +4458,7 @@ fn validate_contiguous_pages(
     Ok(())
 }
 
+#[hotpath::measure]
 fn encode_cursor(
     cursor: &tracedecay_code_index::production::VerifiedSealedLexicalCursorV1,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
@@ -4373,6 +4467,7 @@ fn encode_cursor(
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
+#[hotpath::measure]
 fn decode_cursor(
     bytes: &[u8],
 ) -> Result<VerifiedSealedLexicalCursorV1, CodeLexicalArtifactErrorV1> {
@@ -4380,6 +4475,7 @@ fn decode_cursor(
         .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
 }
 
+#[hotpath::measure]
 pub(super) fn compute_section_digests(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
@@ -4398,6 +4494,7 @@ pub(super) fn compute_section_digests(
     Ok(sections)
 }
 
+#[hotpath::measure]
 fn digest_source_pages_and_base_receipts(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
@@ -4451,6 +4548,7 @@ fn digest_source_pages_and_base_receipts(
     ))
 }
 
+#[hotpath::measure]
 fn digest_query(
     connection: &Connection,
     section: FinalizationSectionV1,
@@ -4483,6 +4581,7 @@ fn digest_query(
     finish_section(section.name(), row_count, &accumulator)
 }
 
+#[hotpath::measure]
 fn hash_value(hasher: &mut Sha256, value: ValueRef<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
     match value {
         ValueRef::Null => hasher.update([0]),
@@ -4506,6 +4605,7 @@ fn hash_value(hasher: &mut Sha256, value: ValueRef<'_>) -> Result<(), CodeLexica
     Ok(())
 }
 
+#[hotpath::measure]
 fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
     hasher.update(
         u64::try_from(bytes.len())
@@ -4516,6 +4616,7 @@ fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeLexicalArtifa
     Ok(())
 }
 
+#[hotpath::measure]
 fn read_receipt(
     connection: &Connection,
 ) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
@@ -4529,6 +4630,7 @@ fn read_receipt(
     decode_padded_receipt(&bytes)
 }
 
+#[hotpath::measure]
 fn read_receipt_with_control(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
@@ -4544,6 +4646,7 @@ fn read_receipt_with_control(
     decode_padded_receipt_with_control(&bytes, control)
 }
 
+#[hotpath::measure]
 fn verify_source_receipt(
     receipt: &VerifiedCodeLexicalArtifactV1,
     source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -4566,6 +4669,7 @@ fn verify_source_receipt(
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
     match step {
         CodeLexicalArtifactFinalizationStepV1::Pending { completed_rows, .. } => {
@@ -4583,11 +4687,13 @@ fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
 }
 
 #[cfg(not(feature = "hotpath"))]
+#[hotpath::measure]
 fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
     let _ = step;
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn record_batch_outcome(
     result: &Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1>,
 ) {
@@ -4605,6 +4711,7 @@ fn record_batch_outcome(
 }
 
 #[cfg(not(feature = "hotpath"))]
+#[hotpath::measure]
 fn record_batch_outcome(
     result: &Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1>,
 ) {
@@ -4612,6 +4719,7 @@ fn record_batch_outcome(
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let documents = pages.iter().map(|page| page.documents.len()).sum::<usize>();
     let source_bytes = pages
@@ -4638,22 +4746,26 @@ fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
 }
 
 #[cfg(not(feature = "hotpath"))]
+#[hotpath::measure]
 fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let _ = pages;
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn record_batch_import_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let imports = pages.iter().map(|page| page.imports.len()).sum::<usize>();
     hotpath::gauge!("query.artifact.batch.import_rows_total").inc(imports as u64);
 }
 
 #[cfg(not(feature = "hotpath"))]
+#[hotpath::measure]
 fn record_batch_import_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let _ = pages;
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let relational_postings = pages
         .iter()
@@ -4681,32 +4793,38 @@ fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
 }
 
 #[cfg(not(feature = "hotpath"))]
+#[hotpath::measure]
 fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let _ = pages;
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let rows = pages.iter().map(|page| page.documents.len()).sum::<usize>();
     hotpath::gauge!("query.artifact.batch.document_rows_total").inc(rows as u64);
 }
 
 #[cfg(not(feature = "hotpath"))]
+#[hotpath::measure]
 fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let _ = pages;
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     hotpath::gauge!("query.artifact.batch.receipt_rows_total").inc(pages.len() as u64);
 }
 
 #[cfg(not(feature = "hotpath"))]
+#[hotpath::measure]
 fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let _ = pages;
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
     match limit {
         CodeLexicalArtifactBatchLimitV1::Memory => {
@@ -4723,11 +4841,13 @@ fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
 }
 
 #[cfg(not(feature = "hotpath"))]
+#[hotpath::measure]
 fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
     let _ = limit;
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
     hotpath::gauge!("query.artifact.pages").set(progress.next_page_ordinal);
     hotpath::gauge!("query.artifact.rows").set(progress.completed_chunks);
@@ -4735,10 +4855,12 @@ fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
 }
 
 #[cfg(not(feature = "hotpath"))]
+#[hotpath::measure]
 fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
     let _ = progress;
 }
 
+#[hotpath::measure]
 fn commit_finalization_transaction(
     transaction: Transaction<'_>,
     metrics: &mut FinalizationTransactionMetricsV1,
@@ -4822,6 +4944,7 @@ fn verify_finalized_artifact(
     Ok(())
 }
 
+#[hotpath::measure]
 fn require_integrity(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
@@ -4837,6 +4960,7 @@ fn require_integrity(
     Ok(())
 }
 
+#[hotpath::measure]
 fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(error.to_string())
 }

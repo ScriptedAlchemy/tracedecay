@@ -100,6 +100,7 @@ struct QueryMacInput<'a> {
     normalization_revision: &'a QueryNormalizationRevision,
 }
 
+#[hotpath::measure_all]
 impl RetrievalCursorKeyringV1 {
     pub fn new(
         privacy_domain: PrivacyDomainId,
@@ -452,6 +453,7 @@ pub struct CompositionLaneInput {
     pub outcome: RetrieverOutcome<RetrieverBatch<()>>,
 }
 
+#[hotpath::measure_all]
 impl CompositionLaneInput {
     pub fn new<E>(
         lane: RetrieverKind,
@@ -474,6 +476,7 @@ impl CompositionLaneInput {
     }
 }
 
+#[hotpath::measure]
 fn compact_batch<E>(batch: RetrieverBatch<E>) -> Result<RetrieverBatch<()>, FusionStageError> {
     batch.validate()?;
     Ok(RetrieverBatch {
@@ -542,6 +545,7 @@ pub struct CompositionKernel {
     diversity: DeterministicDiversity,
 }
 
+#[hotpath::measure_all]
 impl CompositionKernel {
     pub fn new(ranking_revision: ComponentRevision) -> Self {
         Self {
@@ -761,6 +765,7 @@ impl CompositionKernel {
     }
 }
 
+#[hotpath::measure]
 fn map_diversity_error(error: DiversityStageError) -> FusionStageError {
     FusionStageError::Contract(error.to_string())
 }
@@ -773,6 +778,7 @@ struct AdmittedLanes {
     lane_checkpoints: Vec<RetrieverContinuation>,
 }
 
+#[hotpath::measure]
 fn admitted_lanes(
     input: &FusionStageInput,
     required_lanes: &[RetrieverKind],
@@ -858,6 +864,7 @@ fn admitted_lanes(
     })
 }
 
+#[hotpath::measure]
 fn unit_outcome(outcome: &RetrieverOutcome<RetrieverBatch<()>>) -> RetrieverOutcome<()> {
     match outcome {
         RetrieverOutcome::Complete(_) => RetrieverOutcome::Complete(()),
@@ -874,6 +881,7 @@ fn unit_outcome(outcome: &RetrieverOutcome<RetrieverBatch<()>>) -> RetrieverOutc
     }
 }
 
+#[hotpath::measure]
 fn public_status(outcome: &RetrieverOutcome<RetrieverBatch<()>>) -> PublicRetrieverStatus {
     match outcome {
         RetrieverOutcome::Complete(_) => PublicRetrieverStatus::Complete,
@@ -894,6 +902,7 @@ pub struct DeterministicFixedPointFusion {
     comparator_revision: ComponentRevision,
 }
 
+#[hotpath::measure_all]
 impl DeterministicFixedPointFusion {
     pub fn new(comparator_revision: ComponentRevision) -> Self {
         Self {
@@ -1055,6 +1064,7 @@ impl DeterministicFixedPointFusion {
     }
 }
 
+#[hotpath::measure]
 fn compact_candidate_cmp(left: &CompactCandidate, right: &CompactCandidate) -> Ordering {
     left.anchor_id
         .cmp(&right.anchor_id)
@@ -1071,6 +1081,7 @@ fn compact_candidate_cmp(left: &CompactCandidate, right: &CompactCandidate) -> O
         })
 }
 
+#[hotpath::measure]
 fn occurrence_from(candidate: &CompactCandidate) -> OccurrenceProvenance {
     OccurrenceProvenance {
         source_occurrence_id: candidate.source_occurrence_id.clone(),
@@ -1086,6 +1097,7 @@ fn occurrence_from(candidate: &CompactCandidate) -> OccurrenceProvenance {
     }
 }
 
+#[hotpath::measure]
 fn strongest_exact_class(left: ExactClass, right: ExactClass) -> ExactClass {
     if exact_class_rank(left) <= exact_class_rank(right) {
         left
@@ -1094,6 +1106,7 @@ fn strongest_exact_class(left: ExactClass, right: ExactClass) -> ExactClass {
     }
 }
 
+#[hotpath::measure]
 fn occurrence_cmp(left: &OccurrenceProvenance, right: &OccurrenceProvenance) -> Ordering {
     left.source_occurrence_id
         .cmp(&right.source_occurrence_id)
@@ -1107,6 +1120,7 @@ fn occurrence_cmp(left: &OccurrenceProvenance, right: &OccurrenceProvenance) -> 
         })
 }
 
+#[hotpath::measure]
 fn contribution_cmp(left: &CandidateContribution, right: &CandidateContribution) -> Ordering {
     left.retriever
         .cmp(&right.retriever)
@@ -1115,6 +1129,7 @@ fn contribution_cmp(left: &CandidateContribution, right: &CandidateContribution)
         .then_with(|| left.score_domain.cmp(&right.score_domain))
 }
 
+#[hotpath::measure]
 fn freshness_cmp(left: &SourceFreshness, right: &SourceFreshness) -> Ordering {
     left.source_namespace
         .cmp(&right.source_namespace)
@@ -1124,6 +1139,7 @@ fn freshness_cmp(left: &SourceFreshness, right: &SourceFreshness) -> Ordering {
         .then_with(|| left.policy_revision.cmp(&right.policy_revision))
 }
 
+#[hotpath::measure]
 fn decision_cmp(left: &RankingDecision, right: &RankingDecision) -> Ordering {
     left.kind
         .cmp(&right.kind)
@@ -1133,6 +1149,7 @@ fn decision_cmp(left: &RankingDecision, right: &RankingDecision) -> Ordering {
         .then_with(|| left.detail.cmp(&right.detail))
 }
 
+#[hotpath::measure]
 fn attach_same_source_decisions(
     candidates: &mut [FusedCandidate],
     decisions: &[DedupeDecisionV1],
@@ -1185,6 +1202,7 @@ fn attach_same_source_decisions(
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn digest_candidate_set(
     candidates: &[RankedCandidate],
 ) -> Result<CandidateSetDigest, RetrievalError> {
@@ -1194,6 +1212,7 @@ pub fn digest_candidate_set(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn build_cursor(
     request: &RetrievalRequest,
     output: &CompositionOutputV1,
@@ -1254,6 +1273,7 @@ struct CursorAuthenticatedPayload<'a> {
     expiry: UtcMicros,
 }
 
+#[hotpath::measure]
 fn cursor_authenticated_bytes(cursor: &RetrievalCursor) -> Result<Vec<u8>, RetrievalError> {
     serde_json::to_vec(&CursorAuthenticatedPayload {
         domain: RETRIEVAL_CURSOR_MAC_DOMAIN,
@@ -1277,6 +1297,7 @@ fn cursor_authenticated_bytes(cursor: &RetrievalCursor) -> Result<Vec<u8>, Retri
     .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
 }
 
+#[hotpath::measure]
 fn validate_cursor(
     cursor: &RetrievalCursor,
     request: &RetrievalRequest,
@@ -1305,6 +1326,7 @@ fn validate_cursor(
     Ok(())
 }
 
+#[hotpath::measure]
 fn keyed_mac(
     secret: &[u8],
     authenticated: &[u8],
@@ -1319,6 +1341,7 @@ fn keyed_mac(
     .map_err(QueryDigestAuthenticationError::from)
 }
 
+#[hotpath::measure]
 fn query_mac_bytes(mac: &QueryMac) -> Result<Vec<u8>, QueryDigestAuthenticationError> {
     let encoded = mac
         .as_str()
@@ -1327,6 +1350,7 @@ fn query_mac_bytes(mac: &QueryMac) -> Result<Vec<u8>, QueryDigestAuthenticationE
     hex::decode(encoded).map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)
 }
 
+#[hotpath::measure]
 fn map_cursor_key_error(error: QueryDigestAuthenticationError) -> RetrievalError {
     match error {
         QueryDigestAuthenticationError::KeyUnavailable => RetrievalError::CursorKeyUnavailable,
@@ -1339,6 +1363,7 @@ fn map_cursor_key_error(error: QueryDigestAuthenticationError) -> RetrievalError
     }
 }
 
+#[hotpath::measure]
 fn current_utc_micros() -> Result<UtcMicros, RetrievalError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)

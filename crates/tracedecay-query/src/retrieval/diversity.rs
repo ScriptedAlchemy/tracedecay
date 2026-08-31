@@ -45,6 +45,7 @@ pub trait DiversityCapStage {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeterministicDiversity;
 
+#[hotpath::measure_all]
 impl DeterministicDiversity {
     #[hotpath::measure(label = "query.diversity.apply")]
     pub fn apply_caps(
@@ -144,6 +145,7 @@ struct CapCounters {
     evidence_roles: BTreeMap<EvidenceRole, u32>,
 }
 
+#[hotpath::measure_all]
 impl CapCounters {
     fn reached_caps(
         &self,
@@ -214,6 +216,7 @@ struct CandidateCapKeys {
     evidence_roles: BTreeSet<EvidenceRole>,
 }
 
+#[hotpath::measure_all]
 impl CandidateCapKeys {
     fn from_candidate(candidate: &FusedCandidate) -> Self {
         Self {
@@ -256,6 +259,7 @@ impl CandidateCapKeys {
     }
 }
 
+#[hotpath::measure]
 fn any_reached<K: Ord>(counts: &BTreeMap<K, u32>, keys: &BTreeSet<K>, cap: Option<u32>) -> bool {
     cap.is_some_and(|cap| {
         keys.iter()
@@ -263,6 +267,7 @@ fn any_reached<K: Ord>(counts: &BTreeMap<K, u32>, keys: &BTreeSet<K>, cap: Optio
     })
 }
 
+#[hotpath::measure]
 fn increment_all<K: Ord>(counts: &mut BTreeMap<K, u32>, keys: BTreeSet<K>) {
     for key in keys {
         *counts.entry(key).or_default() += 1;

@@ -67,6 +67,7 @@ pub enum SemanticCompositionExecutionOutcomeV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl SemanticCompositionExecutionOutcomeV1 {
     pub fn fallback(&self) -> &Arc<QueryFallbackSubpayload> {
         match self {
@@ -89,6 +90,7 @@ pub struct SemanticCompositionExecutionAuthorityV1 {
     composition: CompositionKernel,
 }
 
+#[hotpath::measure_all]
 impl SemanticCompositionExecutionAuthorityV1 {
     pub fn new(
         profile: FusionProfile,
@@ -224,6 +226,7 @@ impl SemanticCompositionExecutionAuthorityV1 {
 }
 
 /// Restore the authenticated rerank order without rerunning an optional stage.
+#[hotpath::measure]
 pub fn restore_frozen_semantic_order(
     continuation: &SemanticRetrievalContinuationV1,
     composition: &mut CompositionOutputV1,
@@ -259,6 +262,7 @@ pub fn restore_frozen_semantic_order(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_authority(
     profile: &FusionProfile,
     diversity: &DiversityPolicy,
@@ -315,6 +319,7 @@ fn validate_authority(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_restored_rerank_status(
     policy: Option<&RerankPolicy>,
     status: &OptionalStagePublicStatus,
@@ -325,6 +330,7 @@ fn validate_restored_rerank_status(
     Ok(())
 }
 
+#[hotpath::measure]
 fn apply_rerank_outcome(
     original: Vec<RankedCandidate>,
     outcome: BoundedRerankOutcomeV1,
@@ -346,6 +352,7 @@ fn apply_rerank_outcome(
     }
 }
 
+#[hotpath::measure]
 fn is_candidate_permutation(original: &[RankedCandidate], reranked: &[RankedCandidate]) -> bool {
     if original.len() != reranked.len()
         || reranked
@@ -366,6 +373,7 @@ fn is_candidate_permutation(original: &[RankedCandidate], reranked: &[RankedCand
     original_anchors.len() == original.len() && original_anchors == reranked_anchors
 }
 
+#[hotpath::measure]
 fn semantic_abstention(
     disposition: SemanticAbstentionDispositionV1,
     abstention: SemanticAbstentionV1,

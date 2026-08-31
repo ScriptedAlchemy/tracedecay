@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 
 use tracedecay_domain::{ExactClass, FreshnessCompatibilityV1, FusedCandidate, SourceOccurrenceId};
 
+#[hotpath::measure]
 pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Ordering {
     exact_class_rank(left.exact_class)
         .cmp(&exact_class_rank(right.exact_class))
@@ -12,6 +13,7 @@ pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Or
         .then_with(|| ordered_occurrence_id_refs(left).cmp(&ordered_occurrence_id_refs(right)))
 }
 
+#[hotpath::measure]
 pub(super) fn exact_class_rank(class: ExactClass) -> u8 {
     match class {
         ExactClass::ExactMessage => 0,
@@ -20,6 +22,7 @@ pub(super) fn exact_class_rank(class: ExactClass) -> u8 {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn source_validity_rank(candidate: &FusedCandidate) -> u8 {
     candidate
         .freshness
@@ -35,6 +38,7 @@ pub(super) fn source_validity_rank(candidate: &FusedCandidate) -> u8 {
         .unwrap_or(0)
 }
 
+#[hotpath::measure]
 pub(super) fn ordered_occurrence_id_refs(candidate: &FusedCandidate) -> Vec<&SourceOccurrenceId> {
     let mut occurrences = candidate
         .occurrences
@@ -46,6 +50,7 @@ pub(super) fn ordered_occurrence_id_refs(candidate: &FusedCandidate) -> Vec<&Sou
     occurrences
 }
 
+#[hotpath::measure]
 pub(super) fn ordered_occurrence_ids(candidate: &FusedCandidate) -> Vec<SourceOccurrenceId> {
     ordered_occurrence_id_refs(candidate)
         .into_iter()

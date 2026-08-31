@@ -42,6 +42,7 @@ pub struct EvidenceLaneExecutionControlV1 {
     temporal: Option<ExecutionControl>,
 }
 
+#[hotpath::measure_all]
 impl EvidenceLaneExecutionControlV1 {
     pub fn new(deadline: Option<Instant>, cancellation: CancellationSignal) -> Self {
         Self {
@@ -103,6 +104,7 @@ impl EvidenceLaneExecutionControlV1 {
     }
 }
 
+#[hotpath::measure]
 fn elapsed_micros(started_at: Instant, now: Instant) -> u64 {
     u64::try_from(now.saturating_duration_since(started_at).as_micros()).unwrap_or(u64::MAX)
 }
@@ -142,6 +144,7 @@ pub struct TemporalLaneRequestV1<'a> {
     pub control: &'a EvidenceLaneExecutionControlV1,
 }
 
+#[hotpath::measure_all]
 impl<'a> TemporalLaneRequestV1<'a> {
     pub fn new(
         base: &'a RetrievalRequest,
@@ -166,6 +169,7 @@ pub struct DiagnosticLaneRequestV1<'a> {
     pub control: &'a EvidenceLaneExecutionControlV1,
 }
 
+#[hotpath::measure_all]
 impl<'a> DiagnosticLaneRequestV1<'a> {
     pub fn new(
         base: &'a RetrievalRequest,
@@ -199,6 +203,7 @@ pub struct CanonicalTemporalCandidateExportPortV1<'a> {
     policy_revision: ComponentRevision,
 }
 
+#[hotpath::measure_all]
 impl<'a> CanonicalTemporalCandidateExportPortV1<'a> {
     pub fn new(
         export: &'a TemporalCandidateExport,
@@ -261,6 +266,7 @@ pub struct CanonicalDiagnosticCandidatePortV1<'a> {
     policy_revision: ComponentRevision,
 }
 
+#[hotpath::measure_all]
 impl<'a> CanonicalDiagnosticCandidatePortV1<'a> {
     pub fn new(
         results: &'a [DiagnosticProviderResult<Vec<GenerationDiagnosticV1>>],
@@ -303,6 +309,7 @@ struct ScoredDiagnosticV1<'a> {
     score: u64,
 }
 
+#[hotpath::measure]
 fn diagnostic_provider_outcome(
     results: &[DiagnosticProviderResult<Vec<GenerationDiagnosticV1>>],
     request: &DiagnosticLaneRequestV1<'_>,
@@ -583,6 +590,7 @@ fn diagnostic_provider_outcome(
     ))
 }
 
+#[hotpath::measure]
 fn validate_diagnostic_provider_scope(
     result: &DiagnosticProviderResult<Vec<GenerationDiagnosticV1>>,
     request: &DiagnosticLaneRequestV1<'_>,
@@ -614,6 +622,7 @@ fn validate_diagnostic_provider_scope(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_diagnostic_record_binding(
     record: &GenerationDiagnosticV1,
     result: &DiagnosticProviderResult<Vec<GenerationDiagnosticV1>>,
@@ -646,6 +655,7 @@ fn validate_diagnostic_record_binding(
     Ok(())
 }
 
+#[hotpath::measure]
 fn provider_freshness(
     result: &DiagnosticProviderResult<Vec<GenerationDiagnosticV1>>,
     policy_revision: ComponentRevision,
@@ -666,6 +676,7 @@ fn provider_freshness(
     })
 }
 
+#[hotpath::measure]
 pub(crate) fn score_diagnostic(
     record: &GenerationDiagnosticV1,
     query: &str,
@@ -726,6 +737,7 @@ pub struct TemporalLaneRetrieverV1<'a, P: ?Sized> {
     port: &'a P,
 }
 
+#[hotpath::measure_all]
 impl<'a, P: TemporalCandidateExportPortV1 + ?Sized> TemporalLaneRetrieverV1<'a, P> {
     pub fn new(port: &'a P) -> Self {
         Self { port }
@@ -756,6 +768,7 @@ pub struct DiagnosticLaneRetrieverV1<'a, P: ?Sized> {
     port: &'a P,
 }
 
+#[hotpath::measure_all]
 impl<'a, P: DiagnosticCandidateReadPortV1 + ?Sized> DiagnosticLaneRetrieverV1<'a, P> {
     pub fn new(port: &'a P) -> Self {
         Self { port }
@@ -859,6 +872,7 @@ where
     Ok(outcome)
 }
 
+#[hotpath::measure]
 fn validate_lane_outcome<E>(
     lane: RetrieverKind,
     request: &RetrievalRequest,

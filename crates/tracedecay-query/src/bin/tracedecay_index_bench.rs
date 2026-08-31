@@ -104,6 +104,7 @@ const FINALIZATION_WORK_BUDGET: usize = 4_096;
 const CLEAN_SEALED_AT: i64 = 1_700_000_000_000_000;
 const INCREMENT_SEALED_AT: i64 = 1_700_000_060_000_000;
 
+#[hotpath::measure]
 fn main() -> ExitCode {
     #[cfg(feature = "hotpath")]
     configure_hotpath();
@@ -145,6 +146,7 @@ fn main() -> ExitCode {
 /// as the first statement of `main`, before the guard, the rayon pool, or any
 /// other thread exists.
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn configure_hotpath() {
     // 1. Hotpath binds a localhost metrics server on guard construction.
     //    This workload is specified to open no socket at all, and a bound
@@ -195,6 +197,7 @@ struct Options {
     replicas: usize,
 }
 
+#[hotpath::measure_all]
 impl Options {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
         let mut corpus_root: Option<PathBuf> = None;
@@ -235,6 +238,7 @@ impl Options {
     }
 }
 
+#[hotpath::measure]
 fn parse_replicas(value: &str) -> Result<usize, String> {
     let replicas = value
         .parse::<usize>()
@@ -249,6 +253,7 @@ fn parse_replicas(value: &str) -> Result<usize, String> {
 /// the default resolves from `CARGO_MANIFEST_DIR` rather than the process
 /// working directory: the profiling job invokes the binary by path, not
 /// from the crate root.
+#[hotpath::measure]
 fn default_corpus_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -268,6 +273,7 @@ struct CorpusFile {
 /// Ordered, `.gitignore`-blind directory walk. `ignore`-crate walking would
 /// consult repository and global ignore files, which makes the admitted file
 /// set depend on the machine - unacceptable for a head-vs-base comparison.
+#[hotpath::measure]
 fn load_corpus(root: &Path) -> Result<Vec<CorpusFile>, String> {
     let registry = StaticLanguageRegistry::new();
     let mut files = Vec::new();
@@ -282,6 +288,7 @@ fn load_corpus(root: &Path) -> Result<Vec<CorpusFile>, String> {
     Ok(files)
 }
 
+#[hotpath::measure]
 fn collect_corpus(
     root: &Path,
     directory: &Path,
@@ -338,6 +345,7 @@ struct AdmittedFile {
     bytes: Arc<[u8]>,
 }
 
+#[hotpath::measure]
 fn replicate(corpus: &[CorpusFile], replicas: usize) -> Vec<AdmittedFile> {
     let mut admitted = Vec::with_capacity(corpus.len().saturating_mul(replicas));
     for replica in 0..replicas {
@@ -361,6 +369,7 @@ fn replicate(corpus: &[CorpusFile], replicas: usize) -> Vec<AdmittedFile> {
 /// to every `EDIT_STRIDE`-th file. Appending keeps the edit a genuine
 /// suffix change so the retained-parse pool exercises its incremental path
 /// rather than degrading to a full reparse.
+#[hotpath::measure]
 fn edit(files: &[AdmittedFile]) -> (Vec<AdmittedFile>, BTreeSet<String>) {
     let mut edited_paths = BTreeSet::new();
     let mut edited = Vec::with_capacity(files.len());
@@ -513,6 +522,7 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
 // Workload
 // ---------------------------------------------------------------------------
 
+#[hotpath::measure]
 fn run(options: &Options) -> Result<String, String> {
     let started = Instant::now();
     let control = ActiveControl;
@@ -643,6 +653,7 @@ fn run(options: &Options) -> Result<String, String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn build_request(
     repository: &RepositoryId,
     sanitizer_revision: &SanitizerRevision,
@@ -703,6 +714,7 @@ fn build_request(
     }
 }
 
+#[hotpath::measure]
 fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
     let envelope: serde_json::Value = serde_json::from_slice(sealed)
         .map_err(|error| format!("decode sealed generation envelope: {error}"))?;
@@ -718,6 +730,7 @@ fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
 /// shape the daemon's artifact ingestion uses. The single-page path is
 /// asserted to agree on the source receipt so a regression that desynchronizes
 /// the two cursors fails here instead of skewing the comparison.
+#[hotpath::measure]
 fn drain_pages(
     sealed: &[u8],
     sealed_len: u64,
@@ -760,6 +773,7 @@ fn drain_pages(
     }
 }
 
+#[hotpath::measure]
 fn projection_metadata(
     generation: &CodeIndexPublishedGenerationV1,
     repository: &RepositoryId,
@@ -792,6 +806,7 @@ fn projection_metadata(
     }
 }
 
+#[hotpath::measure]
 fn ingest_artifact(
     artifact_path: &Path,
     metadata: CodeLexicalProjectionMetadataV1,
@@ -836,6 +851,7 @@ struct Scratch {
     path: PathBuf,
 }
 
+#[hotpath::measure_all]
 impl Scratch {
     fn create() -> Result<Self, String> {
         let unique = std::time::SystemTime::now()
@@ -864,6 +880,7 @@ impl Scratch {
 /// Peak resident set size in bytes, or `None` off Linux. The profiling job
 /// budgets 4 GB; reporting the high-water mark makes a breach visible in the
 /// run log instead of only as an OOM kill.
+#[hotpath::measure]
 fn peak_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
@@ -904,6 +921,7 @@ struct SummaryFields<'a> {
     peak_rss_bytes: Option<u64>,
 }
 
+#[hotpath::measure]
 fn summary(fields: SummaryFields<'_>) -> String {
     let report = serde_json::json!({
         "workload_revision": WORKLOAD_REVISION,
@@ -934,10 +952,12 @@ fn summary(fields: SummaryFields<'_>) -> String {
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
 }
 
+#[hotpath::measure]
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+#[hotpath::measure]
 fn identity<T>(value: &str) -> T
 where
     T: TryFrom<String>,

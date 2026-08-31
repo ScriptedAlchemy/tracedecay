@@ -75,6 +75,7 @@ pub struct LexicalQueryPartsV1 {
 /// Multi-token sanitized input is also retained as a phrase. This gives exact
 /// diagnostic/error text and natural-language queries a bounded lexical phrase
 /// signal; protected exact admission remains solely authority-controlled.
+#[hotpath::measure]
 pub fn lexical_query_parts(query: &str) -> Result<LexicalQueryPartsV1, RetrievalPortError> {
     let query = query.trim();
     if query.is_empty()
@@ -200,6 +201,7 @@ pub trait LexicalLaneRetriever {
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError>;
 }
 
+#[hotpath::measure_all]
 impl LexicalLaneRequest<'_> {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
         self.base.budget.validate().map_err(contract_error)?;
@@ -248,6 +250,7 @@ impl LexicalLaneRequest<'_> {
     }
 }
 
+#[hotpath::measure_all]
 impl LexicalLaneEvidence {
     pub fn validate(&self, request: &LexicalLaneRequest<'_>) -> Result<(), RetrievalPortError> {
         request.validate()?;
@@ -307,6 +310,7 @@ impl LexicalLaneEvidence {
 /// Whether `field` survives the request's field filters: include filters
 /// form an explicit whitelist when present, and exclude filters always
 /// remove their field.
+#[hotpath::measure]
 fn field_admitted(filters: &[LexicalFieldFilterV1], field: LexicalFieldV1) -> bool {
     let whitelisted = !filters.iter().any(|filter| filter.include)
         || filters
@@ -336,6 +340,7 @@ pub struct LexicalLane<P> {
     postings: P,
 }
 
+#[hotpath::measure_all]
 impl<P> LexicalLane<P> {
     pub fn new(postings: P) -> Self {
         Self { postings }
@@ -516,6 +521,7 @@ where
 ///
 /// A lane contributes its admitted prefix with a committed checkpoint; cursor
 /// replay binds the completed set and never recomputes it.
+#[hotpath::measure]
 fn lexical_checkpoint_digest(
     generation: &CodeGenerationId,
     candidates: &[CompactCandidate],

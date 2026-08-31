@@ -136,6 +136,7 @@ const fn lane_was_admitted(census: SourceCensusV1) -> bool {
 /// A candidate fused from three lanes counts once for each of them, because
 /// each lane is credited with reaching that anchor. Nothing is inferred from
 /// the final scalar utility.
+#[hotpath::measure]
 fn unique_contributions(output: &CompositionOutputV1) -> BTreeMap<RetrieverKind, u64> {
     let mut per_lane: BTreeMap<RetrieverKind, BTreeSet<&str>> = BTreeMap::new();
     for ranked in &output.ranked_candidates {
@@ -313,7 +314,9 @@ pub enum ContextUseOutcomeV1 {
     Unknown,
 }
 
+#[hotpath::measure_all]
 impl ContextUseOutcomeV1 {
+    #[hotpath::skip]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Supplied => "context_supplied",
@@ -333,6 +336,7 @@ impl ContextUseOutcomeV1 {
 /// "cannot produce Plan 26 `Accepted`". Independent observation is therefore a
 /// required input that only `IndependentlyVerified` may carry, never something
 /// inferred from the outcome label alone.
+#[hotpath::measure]
 pub fn observe_context_outcome(
     outcome: ContextUseOutcomeV1,
     independently_observed: bool,
@@ -396,6 +400,7 @@ mod tests {
         }
     }
 
+    #[hotpath::skip]
     const fn budget() -> RetrievalBudget {
         RetrievalBudget {
             max_candidates_per_lane: 64,
