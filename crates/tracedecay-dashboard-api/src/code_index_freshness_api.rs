@@ -432,6 +432,7 @@ mod tests {
                     sealed_at_micros: Some(41),
                     last_reconcile_micros: Some(42),
                     staleness_state: Some("fresh".to_owned()),
+                    rebuild_in_flight: false,
                     hook_hint_count: Some(0),
                     coverage: "complete".to_owned(),
                     progress: None,
@@ -475,6 +476,7 @@ mod tests {
                     sealed_at_micros: None,
                     last_reconcile_micros: Some(42),
                     staleness_state: Some("indexing".to_owned()),
+                    rebuild_in_flight: false,
                     hook_hint_count: Some(0),
                     coverage: "complete".to_owned(),
                     progress: None,
@@ -510,6 +512,7 @@ mod tests {
                     sealed_at_micros: None,
                     last_reconcile_micros: Some(42),
                     staleness_state: Some("indexing".to_owned()),
+                    rebuild_in_flight: false,
                     hook_hint_count: Some(0),
                     coverage: "complete".to_owned(),
                     progress: Some(CodeIndexBuildProgressV1 {

@@ -66,13 +66,13 @@ fn remote_tls_fixture(
 
 fn unprovisioned_remote_registry(identity: &str) -> DaemonHttpApplicationRegistry {
     let credentials = Arc::new(
-        crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+        tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1::new(
             BrainId::new(format!("brain.{identity}")).expect("brain identity"),
             UserProfileId::new(format!("profile.{identity}")).expect("profile identity"),
         ),
     );
     let transaction = Arc::new(
-        crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(
+        tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new(
             tokio::runtime::Handle::current(),
         )
         .expect("remote replay transaction authority"),
@@ -94,7 +94,7 @@ fn large_response_remote_registry(
     identity: &str,
 ) -> (DaemonHttpApplicationRegistry, Arc<tokio::sync::Barrier>) {
     let credentials = Arc::new(
-        crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+        tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1::new(
             BrainId::new(format!("brain.{identity}")).expect("remote brain identity"),
             UserProfileId::new(format!("profile.{identity}")).expect("remote profile identity"),
         ),
@@ -126,7 +126,7 @@ fn delayed_response_remote_registry(
     identity: &str,
 ) -> (DaemonHttpApplicationRegistry, Arc<tokio::sync::Notify>) {
     let credentials = Arc::new(
-        crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+        tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1::new(
             BrainId::new(format!("brain.{identity}")).expect("remote brain identity"),
             UserProfileId::new(format!("profile.{identity}")).expect("remote profile identity"),
         ),
@@ -155,7 +155,7 @@ fn stalled_response_remote_registry(
     identity: &str,
 ) -> (DaemonHttpApplicationRegistry, Arc<tokio::sync::Notify>) {
     let credentials = Arc::new(
-        crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+        tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1::new(
             BrainId::new(format!("brain.{identity}")).expect("remote brain identity"),
             UserProfileId::new(format!("profile.{identity}")).expect("remote profile identity"),
         ),
@@ -803,7 +803,7 @@ async fn remote_tls_listener_serves_only_remote_routes_and_isolates_credential_a
     .expect("daemon database scope");
     let identity = daemon_authority.profile_identity().clone();
     let runtime = Arc::new(
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await
@@ -929,7 +929,7 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     .expect("daemon database scope");
     let identity = daemon_authority.profile_identity().clone();
     let runtime = Arc::new(
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await

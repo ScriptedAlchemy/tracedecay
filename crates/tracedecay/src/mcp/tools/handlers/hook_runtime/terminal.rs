@@ -19,7 +19,7 @@ pub(super) fn retain_codex_stop(
     args: &Value,
     profile_root: &Path,
     session_runtime_registry: &Arc<
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
     >,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {

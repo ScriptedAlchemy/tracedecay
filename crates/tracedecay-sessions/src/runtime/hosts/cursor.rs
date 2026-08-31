@@ -103,6 +103,7 @@ struct DispatchModelCache {
     models: Mutex<HashMap<(PathBuf, String), String>>,
 }
 
+#[hotpath::measure_all]
 impl DispatchModelCache {
     fn parent_dispatch_model(
         &self,
@@ -141,6 +142,7 @@ struct CursorEventSource {
     dispatch_models: DispatchModelCache,
 }
 
+#[hotpath::measure_all]
 impl TranscriptSource for CursorEventSource {
     fn provider(&self) -> &'static str {
         "cursor"
@@ -948,6 +950,7 @@ pub struct CursorSweepSource {
     dispatch_models: DispatchModelCache,
 }
 
+#[hotpath::measure_all]
 impl CursorSweepSource {
     /// Source rooted at the real `~/.cursor/projects`. Returns `None` when the
     /// home directory cannot be resolved.
@@ -986,6 +989,7 @@ impl CursorSweepSource {
     }
 }
 
+#[hotpath::measure_all]
 impl TranscriptSource for CursorSweepSource {
     fn provider(&self) -> &'static str {
         "cursor"

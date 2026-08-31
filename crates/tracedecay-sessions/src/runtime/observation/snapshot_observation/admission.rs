@@ -696,7 +696,6 @@ mod tests {
         );
         eprintln!("host-transcript-io scorecard: first heartbeat after {stall:?}");
     }
-
     #[tokio::test]
     async fn snapshot_offload_keeps_ingest_payload_bytes_identical() {
         let admission = MemoryHostAdmission::default();

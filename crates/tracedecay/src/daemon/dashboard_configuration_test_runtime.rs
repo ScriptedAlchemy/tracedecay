@@ -8,13 +8,13 @@ use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResponse, InvocationError,
     RequestId, ResultContractRef, SafeDiagnostic,
 };
+use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::{

@@ -17,8 +17,8 @@ use crate::mcp::tool_analytics::{
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
-use tracedecay_framing::is_wire_oversized_io_error;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_framing::is_wire_oversized_io_error;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
 use tracedecay_mcp::response_handles::{
@@ -39,12 +39,12 @@ use tracedecay_sessions::runtime::git_correlation::{
 
 use super::tools::default_catalog_discovery_authority;
 use tracedecay_application::ProjectRegistryReadPort;
-use tracedecay_mcp::SessionRefreshServicePort;
 use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
     project_catalog_discovery_scope,
 };
+use tracedecay_session_memory::session::SessionRefreshServicePort;
 
 mod connection;
 mod construction;

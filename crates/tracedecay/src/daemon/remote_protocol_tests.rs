@@ -30,7 +30,7 @@ use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
 };
 
-use super::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
 
@@ -362,11 +362,11 @@ async fn mounted_node_populates_exact_prebody_credential_route_and_shutdown_canc
             BrainNodeId::new("node.remote-registry.other").expect("other node identity"),
             storage.clone(),
         ),
-        Err(super::remote_protocol::DaemonRemoteCredentialRegistryErrorV1::IdentityConflict)
+        Err(tracedecay_store_runtime::DaemonRemoteCredentialRegistryErrorV1::IdentityConflict)
     );
     drop(keyring);
     let service = RemoteCredentialAdmissionServiceV1::new(
-        super::remote_protocol::DaemonRemoteCredentialLookupV1::new(Arc::clone(&credentials)),
+        tracedecay_store_runtime::DaemonRemoteCredentialLookupV1::new(Arc::clone(&credentials)),
     );
     let session = service
         .admit_before_body(

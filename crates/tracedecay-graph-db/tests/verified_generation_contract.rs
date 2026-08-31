@@ -140,6 +140,7 @@ struct RelationalAuthority {
     heads: BTreeMap<GraphProjectionIdentityV1, GraphVerifiedHeadV1>,
     cancel_after_cas: Option<Arc<AtomicU8>>,
     cancel_after_retire: Option<Arc<AtomicU8>>,
+    cas_reports_own_head_as_conflict: bool,
     cas_calls: usize,
     read_calls: usize,
 }
@@ -436,6 +437,9 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
         if let Some(interruption) = &self.cancel_after_cas {
             interruption.store(1, Ordering::SeqCst);
         }
+        if self.cas_reports_own_head_as_conflict {
+            return Ok(GraphVerifiedHeadCasOutcomeV1::Conflict { actual: Some(head) });
+        }
         Ok(GraphVerifiedHeadCasOutcomeV1::Advanced(head))
     }
 }
@@ -631,7 +635,7 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
     );
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    assert!(matches!(
+    assert_eq!(
         registered
             .registry
             .publish_verified(
@@ -642,8 +646,8 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
                 Some(Arc::new(foreign)),
             )
             .unwrap_err(),
-        GraphDbError::Conflict { .. }
-    ));
+        GraphDbError::conflict("replay.validate_publication_manifest_identity")
+    );
 
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
@@ -1671,6 +1675,288 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
         tracedecay_graph_db::GraphDbError::Cancelled
     );
     assert_eq!(authority.cas_calls, calls_after_g1);
+    assert_eq!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                &identity,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+}
+
+/// Cancellation mid-publication is typed and leaves no serveable partial
+/// generation. The retry adopts the journaled replay and converges to that
+/// exact head — the production interrupt-then-retry journey.
+#[test]
+fn interrupted_publish_retry_converges_to_the_journaled_head() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("resume", "work");
+    let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'e',
+    );
+    let first = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g1_head = first.head.clone();
+    let calls_after_g1 = authority.cas_calls;
+
+    let g2 = manifest(identity.clone(), "g2", "g2", vec![], vec![]);
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:g2",
+        Some(g1_head.clone()),
+        'f',
+    );
+    probe.interruption.store(1, Ordering::SeqCst);
+    assert_eq!(
+        registered
+            .registry
+            .publish_verified(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &g2_record.publication.key,
+                None,
+            )
+            .unwrap_err(),
+        tracedecay_graph_db::GraphDbError::Cancelled
+    );
+    assert_eq!(authority.cas_calls, calls_after_g1);
+    assert_eq!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                &identity,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g1").unwrap(),
+        "a cancelled publication must not expose a partial generation"
+    );
+
+    probe.interruption.store(0, Ordering::SeqCst);
+    let retried = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g2_record.publication.key,
+            None,
+        )
+        .expect("an interrupted publication must resume from its journaled replay");
+    assert_eq!(retried.head.key, g2_record.publication.key);
+    assert_eq!(retried.head.sequence.get(), g2_record.sequence.get());
+    assert_eq!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                &identity,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g2").unwrap()
+    );
+}
+
+/// A remount can reconstruct the incumbent head with a drifted digest field.
+/// Linearization is the publication key: retry must seat that head instead of
+/// looping expected-prior-head Conflict.
+#[test]
+fn own_head_field_drift_on_retry_seats_the_linearized_publication() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("drift", "work");
+    let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    let first = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let first_head = first.head.clone();
+    drop(first);
+
+    let projection_key = g1_record.publication.key.projection.clone();
+    let drifted = authority
+        .heads
+        .get_mut(&projection_key)
+        .expect("incumbent head");
+    drifted.input_digest = digest('z');
+    assert_ne!(drifted, &first_head);
+
+    let retried = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .expect("a linearized own head must seat across digest-field drift");
+    assert_eq!(retried.head.key, first_head.key);
+    assert_eq!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                &identity,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+}
+
+/// A foreign marker at or behind the journaled sequence is preserved: recovery
+/// may not clear a marker it did not adopt under its own lease.
+#[test]
+fn foreign_prior_head_is_preserved_as_conflict() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("foreign", "work");
+    let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    let first = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g1_head = first.head.clone();
+
+    let g2 = manifest(identity.clone(), "g2", "g2", vec![], vec![]);
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:g2",
+        Some(g1_head.clone()),
+        'b',
+    );
+    let mut foreign = g1_head.clone();
+    foreign.key.generation = tracedecay_store::GraphGenerationIdV1::new("foreign-g").unwrap();
+    authority
+        .heads
+        .insert(foreign.key.projection.clone(), foreign.clone());
+
+    assert_eq!(
+        registered
+            .registry
+            .publish_verified(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &g2_record.publication.key,
+                None,
+            )
+            .unwrap_err(),
+        tracedecay_graph_db::GraphDbError::Conflict
+    );
+    assert_eq!(
+        authority.heads.get(&foreign.key.projection),
+        Some(&foreign),
+        "a foreign marker must survive the rejected publication"
+    );
+    assert_eq!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                &identity,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+}
+
+/// When the relational CAS reports Conflict but the live head is this
+/// publication, completion seats that head instead of looping Conflict.
+#[test]
+fn cas_conflict_naming_this_publication_seats_the_incumbent_head() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    authority.cas_reports_own_head_as_conflict = true;
+    let identity = projection("cas-own", "work");
+    let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .expect("CAS Conflict that names this publication must seat");
+    assert_eq!(commit.head.key, g1_record.publication.key);
     assert_eq!(
         registered
             .registry

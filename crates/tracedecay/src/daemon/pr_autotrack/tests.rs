@@ -571,6 +571,9 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexSchedulerRegistryV1, identity::IndexingIdentityV1,
     };
+    use tracedecay_configuration::{
+        ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
+    };
     use tracedecay_domain::configuration::{
         ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
         ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
@@ -578,9 +581,6 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
         INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, UtcMicros};
-    use tracedecay_usecases::configuration::{
-        ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
-    };
 
     let repo = tempfile::tempdir().expect("repository root");
     let linked_parent = tempfile::tempdir().expect("linked-worktree parent");

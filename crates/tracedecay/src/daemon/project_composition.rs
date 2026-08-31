@@ -497,7 +497,7 @@ async fn production_project_server_inner(
                     .ok()
                     .and_then(|pinned| {
                         tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
-                            &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+                            &tracedecay_configuration::ConfigurationCurrentStateV1 {
                                 revision_id: pinned.revision_id,
                                 snapshot: pinned.snapshot,
                             },
@@ -878,7 +878,7 @@ async fn production_project_server_inner(
             // enrollment, spool, replay, backup, and failover state through
             // this one provider; typed `Unavailable` remains only when the
             // remote plane is genuinely unreadable.
-            let remote_operational_status: crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1 = {
+            let remote_operational_status: tracedecay_store_runtime::RemoteOperationalStatusProviderV1 = {
                 let remote_credentials = graph_runtime.remote_credential_authority();
                 Arc::new(move || remote_credentials.operational_status())
             };
@@ -1285,7 +1285,7 @@ struct SemanticProjectRuntime {
 /// composition runtime can veto auto-download even when configuration allows
 /// it, so both inputs are consulted here rather than at the use site.
 fn semantic_project_runtime(
-    runtime_configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+    runtime_configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
     runtime: &ProductionProjectCompositionRuntime,
 ) -> Result<SemanticProjectRuntime> {
     let semantic_config = &runtime_configuration.config.semantic;

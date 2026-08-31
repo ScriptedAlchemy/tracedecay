@@ -12,7 +12,7 @@ use super::*;
 /// Session-store mounts retain the registered database authority for the
 /// lifetime of each maintenance task. One-shot commands never enable it.
 pub fn mark_process_long_lived_for_session_maintenance() {
-    store_runtime::session_registry::mark_process_long_lived_for_session_maintenance();
+    tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
 }
 
 const SEMANTIC_ARTIFACT_GC_PERIOD: Duration = Duration::from_hours(24);

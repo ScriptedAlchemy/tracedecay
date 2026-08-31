@@ -29,9 +29,9 @@ use tracedecay_domain::configuration::{
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
 };
 
+use tracedecay_configuration::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
 use tracedecay_global_db::configuration::resolver::{ConfigurationLayerV1, resolve_configuration};
-use tracedecay_usecases::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
 use tracedecay_application::{
     CancelWorkAttemptCommand, CancellationContext, CapabilityGrantSnapshot, Deadline,

@@ -74,9 +74,9 @@ impl<T: McpTransport + Send> ReplayTransport<T> {
                 .len()
                 .min(tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                 .to_vec();
-            return Err(
-                tracedecay_framing::wire_oversized_io_error_with_prefix(prefix),
-            );
+            return Err(tracedecay_framing::wire_oversized_io_error_with_prefix(
+                prefix,
+            ));
         }
         self.replay.push_back(line);
         Ok(())
@@ -120,8 +120,7 @@ type ProfiledStdout = hotpath::io::InstrumentedIo<tokio::io::Stdout>;
 #[cfg(not(feature = "hotpath"))]
 type ProfiledStdout = tokio::io::Stdout;
 
-type StdinLineReader =
-    tracedecay_framing::BoundedLineReader<tokio::io::BufReader<ProfiledStdin>>;
+type StdinLineReader = tracedecay_framing::BoundedLineReader<tokio::io::BufReader<ProfiledStdin>>;
 
 /// Real stdio transport — reads from stdin, writes to stdout.
 pub struct StdioTransport {
@@ -132,12 +131,9 @@ pub struct StdioTransport {
 impl Default for StdioTransport {
     fn default() -> Self {
         Self {
-            reader: tracedecay_framing::BoundedLineReader::new(
-                tokio::io::BufReader::new(hotpath::io!(
-                    tokio::io::stdin(),
-                    label = "mcp.server.stdin"
-                )),
-            ),
+            reader: tracedecay_framing::BoundedLineReader::new(tokio::io::BufReader::new(
+                hotpath::io!(tokio::io::stdin(), label = "mcp.server.stdin"),
+            )),
             writer: hotpath::io!(tokio::io::stdout(), label = "mcp.server.stdout"),
         }
     }
@@ -232,14 +228,14 @@ impl ChannelTransport {
 impl McpTransport for ChannelTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         match self.rx.recv().await {
-            Some(line)
-                if line.len() > tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES =>
-            {
+            Some(line) if line.len() > tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES => {
                 let prefix = line.as_bytes()[..line
                     .len()
                     .min(tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                     .to_vec();
-                Err(tracedecay_framing::wire_oversized_io_error_with_prefix(prefix))
+                Err(tracedecay_framing::wire_oversized_io_error_with_prefix(
+                    prefix,
+                ))
             }
             other => Ok(other),
         }
@@ -260,14 +256,14 @@ impl McpTransport for ChannelTransport {
 impl McpTransportReader for &mut tokio::sync::mpsc::UnboundedReceiver<String> {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         match self.recv().await {
-            Some(line)
-                if line.len() > tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES =>
-            {
+            Some(line) if line.len() > tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES => {
                 let prefix = line.as_bytes()[..line
                     .len()
                     .min(tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                     .to_vec();
-                Err(tracedecay_framing::wire_oversized_io_error_with_prefix(prefix))
+                Err(tracedecay_framing::wire_oversized_io_error_with_prefix(
+                    prefix,
+                ))
             }
             other => Ok(other),
         }
@@ -425,10 +421,7 @@ mod tests {
         tx.send(hostile).unwrap();
         let err = transport.read_line().await.unwrap_err();
         assert!(tracedecay_framing::is_wire_oversized_io_error(&err));
-        assert_eq!(
-            err.to_string(),
-            tracedecay_framing::WIRE_RECORD_TOO_LARGE
-        );
+        assert_eq!(err.to_string(), tracedecay_framing::WIRE_RECORD_TOO_LARGE);
         assert!(!err.to_string().contains('x'));
     }
 
@@ -621,10 +614,7 @@ mod tests {
 
     #[test]
     fn mcp_frame_limit_exceeds_host_event_wire_cap() {
-        assert_eq!(
-            tracedecay_framing::MAX_WIRE_MESSAGE_BYTES,
-            1024 * 1024
-        );
+        assert_eq!(tracedecay_framing::MAX_WIRE_MESSAGE_BYTES, 1024 * 1024);
         assert_eq!(
             tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES,
             16 * 1024 * 1024

@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::Serialize;
@@ -106,54 +105,6 @@ pub fn build_project_registry_view(
         },
         project_tree,
     }
-}
-
-/// Renders a registry view as the terminal/tool-output text block shared by
-/// `tracedecay project list` and the MCP registry tools.
-pub fn render_project_registry_view(title: &str, view: &ProjectRegistryView) -> String {
-    if view.summary.project_count == 0 {
-        return format!("No {title} found.");
-    }
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "Found {} {title} across {} repositories.\n\nRepositories:",
-        view.summary.project_count, view.summary.repo_count
-    );
-    for group in &view.project_tree {
-        let group_branches = if group.branches.is_empty() {
-            "-".to_string()
-        } else {
-            group.branches.join(", ")
-        };
-        let _ = writeln!(out, "- {} (branches: {})", group.label, group_branches);
-        for project in &group.projects {
-            let marker = if project.is_active == Some(true) {
-                " *"
-            } else {
-                ""
-            };
-            let branches = if project.branches.is_empty() {
-                "-".to_string()
-            } else {
-                project.branches.join(", ")
-            };
-            let _ = writeln!(
-                out,
-                "  - `{}`{} [{}] branches: {}; stores: {}; path: {}",
-                project.project_id,
-                marker,
-                project.kind,
-                branches,
-                project.store_count,
-                project.project_root
-            );
-        }
-    }
-    if view.summary.truncated {
-        out.push_str("\nResult truncated; increase limit for more projects.\n");
-    }
-    out
 }
 
 fn project_entry(

@@ -460,7 +460,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     )
     .expect("daemon database scope");
     let first_registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await
@@ -656,7 +656,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     drop(first_registry);
 
     let restarted_registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await

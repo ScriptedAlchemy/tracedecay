@@ -470,7 +470,7 @@ async fn evaluated_initial_query_state_is_available_without_a_fake_activation_ev
         tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "query-initial")
             .expect("database scope");
     let session_registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity,
         )
         .await
@@ -551,7 +551,7 @@ async fn retiring_project_query_authority_preserves_same_project_in_another_prof
         )
         .expect("retiring database scope");
         let session_registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                 identity,
             )
             .await
@@ -580,7 +580,7 @@ async fn retiring_project_query_authority_preserves_same_project_in_another_prof
         )
         .expect("surviving database scope");
         let session_registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                 identity,
             )
             .await

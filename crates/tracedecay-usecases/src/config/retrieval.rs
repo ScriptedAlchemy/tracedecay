@@ -19,11 +19,11 @@ use tracedecay_domain::{
     RetrieverKind, SemanticSearchIndexKeyV1, UtcMicros, VectorGenerationIdV1, canonical_sha256,
 };
 
-use crate::configuration::{
+use tracedecay_configuration::{
     ConfigurationMutationAuthority, CurrentConfigurationMutationAuthorizationV1,
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
-use tracedecay_search_eval::{
+use tracedecay_query::search_quality::{
     DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
 };
 use tracedecay_semantic_contracts::RerankCompatibilityPinsV1;

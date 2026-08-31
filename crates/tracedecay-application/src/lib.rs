@@ -11,7 +11,8 @@
 //! only on `tracedecay-domain`, `tracedecay-policy`, and
 //! `tracedecay-tool-catalog`, and defines the traits (`WorkStoragePort`,
 //! `WorkflowDefinitionAuthorityPort`, `StoreSizeTelemetryPort`,
-//! `AuthorizedScopeSet`, …) that storage and runtime crates implement.
+//! `SemanticActivationCoordinationPort`, `AuthorizedScopeSet`, …) that
+//! storage and runtime crates implement.
 //! `tracedecay-usecases` is the **product use-case orchestration layer at the
 //! top of the stack** — it depends on this crate (never the reverse) plus
 //! `tracedecay-runtime-core`, `tracedecay-sessions`, `tracedecay-global-db`
@@ -56,9 +57,11 @@ pub mod project_registry;
 pub mod remote;
 pub mod request_identity;
 pub mod result;
+pub mod retained_receipts;
 pub mod retained_surfaces;
 pub mod retrieval;
 pub mod sdk_catalog;
+pub mod semantic_activation;
 pub mod session_sync;
 pub mod settings_preview;
 pub mod source_edit;
@@ -258,7 +261,7 @@ pub use project_registry::{
     ProjectRegistryListingFuture, ProjectRegistryListingOutcome, ProjectRegistryListingScope,
     ProjectRegistryListingView, ProjectRegistryReadPort, ProjectRegistrySelector,
     ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup, PublicCodeProject,
-    list_registered_projects, read_registered_project_context,
+    list_registered_projects, read_registered_project_context, render_project_registry_view,
 };
 pub use remote::status::RemoteOperationalStatusReadPort;
 pub use result::{
@@ -275,6 +278,11 @@ pub use result::{
     RetrievalEvidence, RetrieverContribution, RetrieverContributionState, RetryDirective,
     RetryScope, SafeDiagnostic, ScoreId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
     StreamTermination, StreamValidationError, TemporalState, validate_stream,
+};
+pub use retained_receipts::{
+    PreparedRetainedEffect, authority_receipt, effective_memory_deadline, evidence_outcome,
+    measured_budget, memory_expiry_partial, prepare_retained_effect, retained_effect_outcome,
+    session_refresh_effect_outcome,
 };
 pub use retained_surfaces::{
     RetainedLcmExecutionPortV1, RetainedLcmRequestV1, RetainedMemoryExecutionPortV1,
@@ -317,6 +325,9 @@ pub use retrieval::{
     callable_code_request_schema, callable_code_result_schema,
 };
 pub use sdk_catalog::sdk_executable_binding_registry;
+pub use semantic_activation::{
+    SemanticActivationCoordinationErrorV1, SemanticActivationCoordinationPort,
+};
 pub use settings_preview::{
     MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
     validate_project_settings_patch,

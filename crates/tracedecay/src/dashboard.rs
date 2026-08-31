@@ -53,7 +53,7 @@ pub fn spa_router(assets: tracedecay_api::StaticDashboardAssets) -> axum::Router
 #[doc(hidden)]
 pub fn register_test_schema_installer() {
     static REGISTER: std::sync::Once = std::sync::Once::new();
-    REGISTER.call_once(crate::daemon::store_runtime::register_registered_schema_installer);
+    REGISTER.call_once(tracedecay_store_runtime::register_registered_schema_installer);
 }
 
 /// Composes the production dashboard automation authority over one retained
@@ -179,7 +179,7 @@ pub struct DashboardGraphTestRuntimeV1 {
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     profile_sessions_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     registry: std::sync::Arc<
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
     >,
     _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
 }
@@ -203,7 +203,7 @@ impl DashboardGraphTestRuntimeV1 {
         )?;
         let registry = std::sync::Arc::new(
             hotpath::future!(
-                crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                     identity,
                 ),
                 label = "dashboard.graph.registry"

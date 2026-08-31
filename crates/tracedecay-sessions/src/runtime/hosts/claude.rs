@@ -120,6 +120,7 @@ struct UserClaudeScope {
     registered_roots: Vec<PathBuf>,
 }
 
+#[hotpath::measure_all]
 impl ClaudeSource {
     /// Source rooted at the real `~/.claude/projects`. Returns `None` when the
     /// home directory cannot be resolved.
@@ -375,6 +376,7 @@ fn discover_claude_session_scoped_paths(
     report
 }
 
+#[hotpath::measure_all]
 impl TranscriptSource for ClaudeSource {
     fn provider(&self) -> &'static str {
         PROVIDER

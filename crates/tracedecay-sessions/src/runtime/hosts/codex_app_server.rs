@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use tracedecay_store::cursor_dispatch::CURSOR_MODEL_KEYS;
 
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader};
-use tracedecay_framing::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_framing::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use tracedecay_lcm::LcmSummaryRequest;
 
 pub const CODEX_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CODEX_SUMMARY_CHILD";

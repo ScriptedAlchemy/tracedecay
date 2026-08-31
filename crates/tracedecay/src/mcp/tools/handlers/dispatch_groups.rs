@@ -11,15 +11,17 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
+use tracedecay_mcp::handlers::ast_grep as portable_ast_grep;
 use tracedecay_mcp::handlers::graph as portable_graph;
+use tracedecay_mcp::handlers::grep as portable_grep;
 use tracedecay_mcp::handlers::info as portable_info;
 
 use super::ToolCallRegistryOptions;
 use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
-    admin_cli, admin_project, analysis, application_surface, ast_grep_search, automation_runs,
-    dashboard, dispatch_controls, edit, git, graph, grep, hook_runtime, info, skills, workflow,
+    admin_cli, admin_project, analysis, application_surface, automation_runs, dashboard,
+    dispatch_controls, edit, git, graph, hook_runtime, info, skills, workflow,
 };
 
 mod health_dispatch;
@@ -231,8 +233,8 @@ fn dispatch_graph_tools_inner<'a>(
                 .await
             }
             "tracedecay_grep" => {
-                grep::handle_grep(
-                    cg,
+                portable_grep::handle_grep(
+                    cg.project_root(),
                     args,
                     selected_scope_prefix,
                     options.application_deadline.clone(),
@@ -241,8 +243,8 @@ fn dispatch_graph_tools_inner<'a>(
                 .await
             }
             "tracedecay_ast_grep_search" => {
-                ast_grep_search::handle_ast_grep_search(
-                    cg,
+                portable_ast_grep::handle_ast_grep_search(
+                    cg.project_root(),
                     args,
                     selected_scope_prefix,
                     options.application_deadline.clone(),
@@ -385,7 +387,7 @@ fn dispatch_info_tools_inner<'a>(
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         match tool_name {
-            "tracedecay_remote_status" => info::handle_remote_status(
+            "tracedecay_remote_status" => portable_info::handle_remote_status(
                 cg.project_root(),
                 &args,
                 options.remote_operational_status.as_deref(),
@@ -409,13 +411,28 @@ fn dispatch_info_tools_inner<'a>(
                 scope_prefix,
             )),
             "tracedecay_project_list" => {
-                info::handle_project_list(cg, args, options.project_registry_reads).await
+                portable_info::handle_project_list(
+                    cg.project_root(),
+                    args,
+                    options.project_registry_reads,
+                )
+                .await
             }
             "tracedecay_project_search" => {
-                info::handle_project_search(cg, args, options.project_registry_reads).await
+                portable_info::handle_project_search(
+                    cg.project_root(),
+                    args,
+                    options.project_registry_reads,
+                )
+                .await
             }
             "tracedecay_project_context" => {
-                info::handle_project_context(cg, args, options.project_registry_reads).await
+                portable_info::handle_project_context(
+                    cg.project_root(),
+                    args,
+                    options.project_registry_reads,
+                )
+                .await
             }
             "tracedecay_files" => {
                 let graph = admitted_graph_query(cg, &options, "file_metadata").await?;
@@ -432,7 +449,7 @@ fn dispatch_info_tools_inner<'a>(
                 let graph = admitted_graph_query(cg, &options, "port_order").await?;
                 portable_info::handle_port_order(&graph, args).await
             }
-            "tracedecay_simplify_scan" => info::handle_simplify_scan(cg, args, scope_prefix).await,
+            "tracedecay_simplify_scan" => portable_info::handle_simplify_scan().await,
             "tracedecay_type_hierarchy" => {
                 let graph = admitted_graph_query(cg, &options, "code_type_hierarchy").await?;
                 portable_info::handle_type_hierarchy(&graph, args).await
@@ -458,7 +475,7 @@ fn dispatch_info_tools_inner<'a>(
                 let graph = admitted_graph_query(cg, &options, "source_outline").await?;
                 portable_info::handle_outline(&graph, args).await
             }
-            "tracedecay_config" => info::handle_config(cg, &args).await,
+            "tracedecay_config" => portable_info::handle_config(cg.project_root(), &args).await,
             "tracedecay_signature_search" => {
                 let graph = admitted_graph_query(cg, &options, "code_signature_search").await?;
                 portable_info::handle_signature_search(&graph, args, selected_scope_prefix).await

@@ -28,7 +28,7 @@ use tracedecay_domain::{
 use tracedecay_store::SessionRefreshCompletionRequestV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_runtime_core::storage::{
@@ -148,6 +148,10 @@ impl Phase {
 }
 
 /// RAII isolation for `HOME` and `TRACEDECAY_DATA_DIR`.
+///
+/// Holds the crate-wide `lock_user_data_dir_test_env` mutex for the lifetime
+/// of the guard so restoration can be observed without racing other env
+/// mutators.
 pub struct IsolatedBenchmarkEnv {
     _env_lock: std::sync::MutexGuard<'static, ()>,
     temp: TempDir,
@@ -155,6 +159,7 @@ pub struct IsolatedBenchmarkEnv {
     data_dir: PathBuf,
     previous_home: Option<OsString>,
     previous_data_dir: Option<OsString>,
+    restored: bool,
 }
 
 impl IsolatedBenchmarkEnv {
@@ -185,6 +190,7 @@ impl IsolatedBenchmarkEnv {
             data_dir,
             previous_home,
             previous_data_dir,
+            restored: false,
         })
     }
 
@@ -199,12 +205,21 @@ impl IsolatedBenchmarkEnv {
     pub fn path(&self) -> &Path {
         self.temp.path()
     }
+
+    /// Restore `HOME` and `TRACEDECAY_DATA_DIR` while the env lock is still held.
+    pub fn restore_under_lock(&mut self) {
+        if self.restored {
+            return;
+        }
+        restore_env("HOME", self.previous_home.take());
+        restore_env("TRACEDECAY_DATA_DIR", self.previous_data_dir.take());
+        self.restored = true;
+    }
 }
 
 impl Drop for IsolatedBenchmarkEnv {
     fn drop(&mut self) {
-        restore_env("HOME", self.previous_home.take());
-        restore_env("TRACEDECAY_DATA_DIR", self.previous_data_dir.take());
+        self.restore_under_lock();
     }
 }
 
@@ -1344,7 +1359,7 @@ mod tests {
 
     #[tokio::test]
     async fn isolated_env_sets_and_restores_home_and_data_dir() {
-        let isolated = IsolatedBenchmarkEnv::enter("session-temporal-env-").unwrap();
+        let mut isolated = IsolatedBenchmarkEnv::enter("session-temporal-env-").unwrap();
         let prior_home = isolated.previous_home.clone();
         let prior_data = isolated.previous_data_dir.clone();
         assert_eq!(
@@ -1355,7 +1370,7 @@ mod tests {
             env::var_os("TRACEDECAY_DATA_DIR").as_deref(),
             Some(isolated.data_dir().as_os_str())
         );
-        drop(isolated);
+        isolated.restore_under_lock();
         assert_eq!(env::var_os("HOME"), prior_home);
         assert_eq!(env::var_os("TRACEDECAY_DATA_DIR"), prior_data);
     }

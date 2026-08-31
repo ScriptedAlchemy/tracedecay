@@ -12,6 +12,7 @@ members = [
     "crates/tracedecay-code-index",
     "crates/tracedecay-code-index-retention",
     "crates/tracedecay-code-index-runtime",
+    "crates/tracedecay-configuration",
     "crates/tracedecay-daemon-control",
     "crates/tracedecay-daemon-identity",
     "crates/tracedecay-daemon-protocol",
@@ -45,6 +46,7 @@ members = [
     "crates/tracedecay-temporal-query",
     "crates/tracedecay-rusqlite-runtime",
     "crates/tracedecay-store",
+    "crates/tracedecay-store-runtime",
     "crates/tracedecay-tool-catalog",
     "crates/tracedecay-usecases",
 ]

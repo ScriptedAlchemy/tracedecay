@@ -658,11 +658,11 @@ impl AblationDimensionV1 {
 pub fn observe_stage_ablation(
     descriptor_revision: &str,
     dimension: AblationDimensionV1,
-    baseline: tracedecay_search_eval::semantic_native::SemanticNativeStageMeasurementV1,
-    candidate: tracedecay_search_eval::semantic_native::SemanticNativeStageMeasurementV1,
+    baseline: tracedecay_query::search_quality::semantic_native::SemanticNativeStageMeasurementV1,
+    candidate: tracedecay_query::search_quality::semantic_native::SemanticNativeStageMeasurementV1,
 ) -> RetrievalAblationObservedV1 {
     let ratio =
-        |measurement: tracedecay_search_eval::semantic_native::SemanticNativeStageMeasurementV1| {
+        |measurement: tracedecay_query::search_quality::semantic_native::SemanticNativeStageMeasurementV1| {
             (measurement.input_candidates > 0)
                 .then(|| measurement.output_candidates as f64 / measurement.input_candidates as f64)
         };
@@ -704,7 +704,7 @@ mod tests {
         ObservabilityQueryV1, ObservabilityRecordPort,
     };
     use tracedecay_query::retrieval::observation::{ContextUseOutcomeV1, observe_context_outcome};
-    use tracedecay_search_eval::semantic_native::SemanticNativeStageMeasurementV1;
+    use tracedecay_query::search_quality::semantic_native::SemanticNativeStageMeasurementV1;
 
     use crate::observability::{RegisteredAggregateShareExporterV1, RegisteredObservabilityPortV1};
 

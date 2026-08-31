@@ -3,10 +3,9 @@
 use std::path::Path;
 
 use crate::{
-    DirectEvaluationStatusV1, DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1,
-    GenerateCandidateOutputsOptions, QUERY_BASELINE_PROFILE, checked_in_fixture_root,
-    compute_profile_material_digest, evaluate_generated_outputs, generate_candidate_outputs,
-    load_candidate_workload,
+    DirectEvaluationReportV1, GenerateCandidateOutputsOptions, QUERY_BASELINE_PROFILE,
+    checked_in_fixture_root, compute_profile_material_digest, evaluate_generated_outputs,
+    generate_candidate_outputs, load_candidate_workload,
 };
 
 const BASELINE_REPORT_RESOURCE_CHILD_ENV: &str = "TRACEDECAY_BASELINE_REPORT_RESOURCE_CHILD";
@@ -19,59 +18,6 @@ fn direct_fixture_scope(_repo_root: &Path) -> Option<tracedecay_application::Res
         None,
     )
     .ok()
-}
-
-fn diagnostic_query(query_id: &str, first_useful_rank: u32) -> DirectQueryEvaluationV1 {
-    let zero = DirectRatioMetricV1 {
-        numerator: 0,
-        denominator: 0,
-        ppm: 0,
-    };
-    DirectQueryEvaluationV1 {
-        query_id: query_id.to_owned(),
-        strata: vec!["natural_language".to_owned()],
-        protected: false,
-        first_useful_rank: Some(first_useful_rank),
-        returned_candidates: 2,
-        wrong_scope_hits: 0,
-        forbidden_hits: 0,
-        expected_no_result: false,
-        quality: DirectQueryQualityV1 {
-            recall_at_10: zero.clone(),
-            precision_at_10: zero.clone(),
-            reciprocal_rank_ppm: 0,
-            ndcg_at_10_ppm: 0,
-            duplicate_rate: zero,
-        },
-        status: DirectEvaluationStatusV1::Pass,
-    }
-}
-
-#[test]
-fn pairwise_diagnostic_prioritizes_queries_with_improvement_headroom() {
-    let candidate = vec![
-        diagnostic_query("already-perfect", 1),
-        diagnostic_query("can-improve", 2),
-    ];
-    let baseline = candidate.clone();
-
-    let ordered = crate::report::pairwise_query_pairs(&candidate, &baseline);
-
-    assert_eq!(ordered.len(), 2);
-    assert_eq!(ordered[0].0.query_id, "can-improve");
-    assert_eq!(ordered[1].0.query_id, "already-perfect");
-}
-
-#[test]
-fn semantic_distance_summary_exposes_absolute_confidence_and_ambiguity() {
-    assert_eq!(
-        crate::report::semantic_distance_summary([325_542_266, 325_542_266, 400_000_000]),
-        "semantic_candidates=3,top_distance=325542266,second_distance=325542266,top_margin=0"
-    );
-    assert_eq!(
-        crate::report::semantic_distance_summary(std::iter::empty()),
-        "semantic_candidates=0,top_distance=none,second_distance=none,top_margin=none"
-    );
 }
 
 #[test]
@@ -215,31 +161,12 @@ fn baseline_report_is_self_validating_but_not_activation_evidence() {
         .as_object_mut()
         .expect("serialized report object")
         .insert("unexpected".to_owned(), serde_json::Value::Null);
-    assert!(serde_json::from_value::<crate::DirectEvaluationReportV1>(value).is_err());
+    assert!(serde_json::from_value::<DirectEvaluationReportV1>(value).is_err());
 
     let mut nested = serde_json::to_value(&report).expect("serialize nested report");
     nested["profiles"][0]
         .as_object_mut()
         .expect("serialized profile object")
         .insert("unexpected".to_owned(), serde_json::Value::Null);
-    assert!(serde_json::from_value::<crate::DirectEvaluationReportV1>(nested).is_err());
-}
-
-#[test]
-fn native_activation_rejects_sqlite_vector_measurement_provenance() {
-    let stale = "linux-procfs-v1;projection=DatabaseVectorEvaluationStoreV1(SQLite-CAS)";
-    assert!(crate::report::validate_native_measurement_method(stale).is_err());
-    assert!(
-        crate::report::validate_native_measurement_method(
-            "linux-procfs-v1;projection=canonical-graph-prepared-generation-v1"
-        )
-        .is_ok()
-    );
-    assert!(
-        crate::report::validate_native_measurement_method(
-            "linux-procfs-v1;projection-cases=prepare_semantic_evaluation_projection\
-             +GraphVectorGenerationStoreV1(isolated-in-memory-graph,watermark-CAS)"
-        )
-        .is_ok()
-    );
+    assert!(serde_json::from_value::<DirectEvaluationReportV1>(nested).is_err());
 }

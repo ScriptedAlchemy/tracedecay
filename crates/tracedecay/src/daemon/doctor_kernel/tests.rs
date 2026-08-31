@@ -37,7 +37,7 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
     let directory = tempfile::TempDir::new().expect("authority audit fixture root");
     let uninitialized_path = directory.path().join("uninitialized.db");
     let database_path = directory.path().join("registry.db");
-    crate::daemon::store_runtime::register_registered_schema_installer();
+    tracedecay_store_runtime::register_registered_schema_installer();
     let uninitialized_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &uninitialized_path,
         "doctor uninitialized authority audit fixture",

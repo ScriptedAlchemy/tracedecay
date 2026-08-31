@@ -870,12 +870,22 @@ impl GraphDbRegistry {
             .map_err(|error| GraphDbError::Corrupt {
                 message: format!("historical graph publication evidence is invalid: {error}"),
             })?;
-            let is_current_head = current.as_ref() == Some(&historical_head);
-            if is_current_head
-                || current
-                    .as_ref()
-                    .is_some_and(|head| head.sequence > replay.sequence)
-            {
+            let relation = publication_head_relation(current.as_ref(), &replay, &historical_head);
+            if matches!(
+                relation,
+                PublicationHeadRelationV1::OwnLinearizedHead
+                    | PublicationHeadRelationV1::SupersededHistory
+            ) {
+                let is_current_head =
+                    matches!(relation, PublicationHeadRelationV1::OwnLinearizedHead);
+                let historical_head = if is_current_head {
+                    current.clone().ok_or_else(|| GraphDbError::Corrupt {
+                        message: "linearized graph publication head disappeared during seating"
+                            .to_owned(),
+                    })?
+                } else {
+                    historical_head
+                };
                 let locator = locator_from_key(&historical_head.key)?;
                 // This exact mounted instance may already hold the verified
                 // lease for this head: a racing publisher or an earlier
@@ -1199,6 +1209,29 @@ impl GraphDbRegistry {
             GraphVerifiedHeadCasOutcomeV1::Advanced(head)
             | GraphVerifiedHeadCasOutcomeV1::ExactReplay(head) => head,
             GraphVerifiedHeadCasOutcomeV1::Conflict { actual } => {
+                if let Some(head) = actual
+                    .as_ref()
+                    .filter(|head| head.key == cas.publication_key)
+                    .cloned()
+                {
+                    // The live head is this publication: a twin publisher
+                    // linearized the same journal, or the CAS observed its
+                    // own write as a conflict. Seat that head instead of
+                    // looping Conflict on the incumbent.
+                    let lease = generation_lease(&identity, head.clone(), dependencies);
+                    database.install_verified_generation(Arc::clone(&lease))?;
+                    database.record_memory_checkpoint(
+                        crate::hotpath_observe::GrafeoMemoryPhase::Published,
+                    );
+                    let mut closure = BTreeMap::new();
+                    collect_closure(&lease, &mut closure)?;
+                    return Ok(VerifiedGraphCommit {
+                        commit,
+                        recovered_digest: head.recovered_digest.clone(),
+                        head,
+                        snapshot: VerifiedGraphSnapshot::new(database, lease, closure),
+                    });
+                }
                 let expected = cas.expected_prior_head.as_ref();
                 tracing::warn!(
                     event = "graph_publication_cas_conflict",
@@ -1598,6 +1631,43 @@ impl GraphDbRegistry {
         visiting.remove(&locator);
         Ok(lease)
     }
+}
+
+/// How a journaled replay relates to the live verified head.
+///
+/// Full-struct equality is not the linearization: a remount can reconstruct
+/// the same publication key with a drifted digest field. Foreign and newer
+/// markers stay conflicts so recovery never clears a marker it did not adopt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationHeadRelationV1 {
+    /// Live head matches the journaled prior; first-publish apply may proceed.
+    ExpectedPrior,
+    /// This journaled publication already owns the head (CAS linearized it).
+    OwnLinearizedHead,
+    /// A later publication already won; seat this replay as history.
+    SupersededHistory,
+    /// A foreign or incomparable marker occupies the projection.
+    ForeignMarker,
+}
+
+fn publication_head_relation(
+    current: Option<&GraphVerifiedHeadV1>,
+    replay: &GraphPublicationReplayRecordV1,
+    historical_head: &GraphVerifiedHeadV1,
+) -> PublicationHeadRelationV1 {
+    let expected = replay.publication.expected_prior_head.as_ref();
+    if current == expected {
+        return PublicationHeadRelationV1::ExpectedPrior;
+    }
+    if current.is_some_and(|head| head.key == replay.publication.key)
+        || current == Some(historical_head)
+    {
+        return PublicationHeadRelationV1::OwnLinearizedHead;
+    }
+    if current.is_some_and(|head| head.sequence > replay.sequence) {
+        return PublicationHeadRelationV1::SupersededHistory;
+    }
+    PublicationHeadRelationV1::ForeignMarker
 }
 
 /// Compact operator-log rendering of one verified-head position, used as the

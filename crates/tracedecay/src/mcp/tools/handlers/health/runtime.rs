@@ -293,7 +293,7 @@ pub(crate) async fn handle_runtime(
     .ok()
     .and_then(|pinned| {
         tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
-            &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+            &tracedecay_configuration::ConfigurationCurrentStateV1 {
                 revision_id: pinned.revision_id,
                 snapshot: pinned.snapshot,
             },

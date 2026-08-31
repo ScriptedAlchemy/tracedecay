@@ -10,6 +10,7 @@ mod config_backend;
 mod config_inventory;
 mod config_store;
 mod configuration_operation;
+mod configuration_runtime;
 mod coordinator;
 mod fair_scheduler;
 mod graph_provider;
@@ -47,6 +48,9 @@ pub use configuration_operation::{
     SemanticEvaluationPublicationSnapshotV1, SemanticEvaluationRerankCandidateV1,
     SemanticEvaluationSnapshotPortV1, SemanticProtectedActivationOperationV1,
     SemanticProtectedRollbackOperationV1,
+};
+pub use configuration_runtime::{
+    InstalledSemanticActivationCoordination, ProjectSemanticActivationExt,
 };
 pub use coordinator::{
     ProductionSemanticActivationCoordinatorV1, SemanticActivationCoordinationErrorV1,

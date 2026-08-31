@@ -16,6 +16,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegis
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 use tracedecay_runtime_core::branch::BranchAdminAction;
 use tracedecay_semantic_contracts::SemanticConfig;
+use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;

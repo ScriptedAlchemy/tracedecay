@@ -290,7 +290,7 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
     )
     .expect("daemon database scope");
     let graph_runtime = Arc::new(
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity,
         )
         .await

@@ -41,9 +41,9 @@ use crate::semantic_code::{
 use tracedecay_graph_db::NeverCancelled;
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_semantic_contracts::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticFallbackReasonV1, SemanticResourceCeilings,
-};
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
+#[cfg(feature = "semantic-fastembed")]
+use tracedecay_semantic_contracts::{DEFAULT_FASTEMBED_MODEL_ID, SemanticResourceCeilings};
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
@@ -6150,6 +6150,18 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
         "a publication conflict leaves the sealed artifact intact and must retry with backoff"
     );
     assert!(
+        super::CodeIndexSchedulerErrorV1::GraphProjection(CodeGraphProjectionError::Cancelled)
+            .is_retryable_activation(),
+        "cancellation mid-publication is typed and must resume from the journaled replay"
+    );
+    assert!(
+        super::CodeIndexSchedulerErrorV1::GraphProjection(
+            CodeGraphProjectionError::DeadlineExceeded
+        )
+        .is_retryable_activation(),
+        "a deadline mid-publication is typed and must resume from the journaled replay"
+    );
+    assert!(
         !super::CodeIndexSchedulerErrorV1::GraphProjection(CodeGraphProjectionError::Corrupt(
             "sealed payload mismatch".to_owned()
         ))
@@ -6873,10 +6885,10 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
 }
 
 #[tokio::test]
-async fn dashboard_freshness_reports_active_reconcile_liveness() {
+async fn dashboard_freshness_reports_pending_rebuild_liveness() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
         .mount_worktree(
             test_project_id(),
@@ -6888,28 +6900,29 @@ async fn dashboard_freshness_reports_active_reconcile_liveness() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    let canonical = fixture.path().canonicalize().expect("canonical fixture");
-    let reconcile_in_progress = {
-        let mounted = registry.mounted.lock().await;
-        Arc::clone(
-            &mounted
-                .get(&canonical)
-                .expect("mounted worktree")
-                .reconcile_in_progress,
-        )
-    };
 
-    reconcile_in_progress.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    fixture.edit("src/main.rs", "fn main() { println!(\"changed\"); }\n");
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/main.rs".to_owned()])
+            .await,
+        "the source change must publish a pending scheduler wake"
+    );
     let projected = registry
         .dashboard_freshness(fixture.path())
         .await
         .expect("dashboard freshness");
-    reconcile_in_progress.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
 
     assert!(
         projected.rebuild_in_flight,
-        "an active scheduler pass must keep stale serving typed as rebuilding"
+        "a pending scheduler wake must keep stale serving typed as rebuilding"
     );
+    drop(admission);
     registry.shutdown().await;
 }
 

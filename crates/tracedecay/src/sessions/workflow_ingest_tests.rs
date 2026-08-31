@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_global_db::GlobalDbWorkflowStore;
 use tracedecay_sessions::runtime::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, WorkflowStatus, read_ingest_watermark,

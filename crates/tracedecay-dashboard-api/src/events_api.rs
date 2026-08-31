@@ -902,9 +902,9 @@ pub(crate) async fn dashboard_state_fixture(
 ) -> (tempfile::TempDir, DashboardState) {
     use std::sync::Arc;
 
+    use tracedecay_configuration::ProductionUserSettingsDaemonClient;
     use tracedecay_domain::{FactOwnerV1, ProjectId};
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-    use tracedecay_usecases::configuration::ProductionUserSettingsDaemonClient;
 
     let project = tempfile::tempdir().expect("project tempdir");
     std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n").expect("fixture source");
