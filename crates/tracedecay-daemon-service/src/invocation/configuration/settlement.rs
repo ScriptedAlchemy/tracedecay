@@ -6,7 +6,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 #[hotpath::measure(label = "daemon.service.configuration.reconcile", future = true)]
 pub(super) async fn reconcile_configuration_runtime(
     registered: &RegisteredConfigurationRuntime,
-    receipt: &tracedecay_usecases::configuration::ConfigurationMutationReceipt,
+    receipt: &tracedecay_configuration::ConfigurationMutationReceipt,
     now: UtcMicros,
 ) {
     let current = match hotpath::future!(
@@ -26,7 +26,7 @@ pub(super) async fn reconcile_configuration_runtime(
         }
     };
     let installation = hotpath::measure_block!("daemon.service.configuration.activate", {
-        tracedecay_usecases::config::publish_pinned_runtime_configuration(current.clone())
+        tracedecay_configuration::config::publish_pinned_runtime_configuration(current.clone())
             .map_err(|error| error.to_string())
     });
     let (observed_revision_id, activation_error_code) = match installation {

@@ -5,11 +5,20 @@ publish = false
 edition.workspace = true
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
-description = "TraceDecay code retrieval query kernel"
-include = ["/src/**"]
+description = "TraceDecay code retrieval query kernel and search-quality candidate/profile inputs"
+include = ["/src/**", "/assets/**"]
 
 [dependencies]
+flate2 = "1"
 fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"] }
+gix = { version = "=0.86.0", default-features = false, features = [
+    "revision",
+    "blob-diff",
+    "parallel",
+    "sha1",
+    "sha256",
+    "status",
+] }
 hex = "0.4"
 hmac = "0.13.0"
 hotpath.workspace = true
@@ -96,4 +105,10 @@ harness = false
 [[bin]]
 name = "tracedecay-index-bench"
 path = "src/bin/tracedecay_index_bench.rs"
+test = false
+
+# Daemon-free search-lane query latency workload over a published artifact.
+[[bin]]
+name = "tracedecay-search-bench"
+path = "src/bin/tracedecay_search_bench.rs"
 test = false

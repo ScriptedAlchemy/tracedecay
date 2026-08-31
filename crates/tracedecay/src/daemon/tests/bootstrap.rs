@@ -1406,6 +1406,9 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
     };
     started_rx.await.expect("racing project open started");
 
+    let persist_receipt = engine
+        .store_administration
+        .remote_account_deletion_tombstone_persist_receipt();
     let deletion_administration = engine.store_administration.clone();
     let deletion_owners = owners.clone();
     let deletion = tokio::spawn(async move {
@@ -1418,22 +1421,16 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
             )
             .await
     });
-    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
-        loop {
-            if engine
-                .store_administration
-                .remote_account_deletion_tombstone()
-                .await
-                .expect("read account tombstone")
-                .is_some()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("account tombstone was not persisted");
+    let persisted =
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), persist_receipt.wait())
+            .await
+            .expect("account tombstone persist receipt was not settled")
+            .expect("account tombstone persist receipt");
+    assert_eq!(persisted.tombstone_id, "tombstone.remote-account-race");
+    assert_eq!(
+        persisted.target,
+        tracedecay_global_db::RemoteDeletionTarget::Account
+    );
     release_tx.send(()).expect("release racing shard creation");
     super::super::ProjectOpenTasks::wait_for_completion(open)
         .await
@@ -1484,6 +1481,21 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
     assert!(
         !data_root.exists(),
         "Deleted replay must reconcile every shard present after the tombstone"
+    );
+}
+
+#[tokio::test]
+async fn remote_account_deletion_tombstone_persist_receipt_fails_when_never_settled() {
+    let administration = super::super::StoreAdministration::default();
+    let receipt = administration.remote_account_deletion_tombstone_persist_receipt();
+    drop(administration);
+    let error = receipt
+        .wait()
+        .await
+        .expect_err("unset persist receipt must fail closed");
+    assert!(
+        error.to_string().contains("dropped before it settled"),
+        "unexpected persist failure: {error}"
     );
 }
 
@@ -3834,7 +3846,7 @@ async fn production_composition_harness_shutdown_allows_immediate_profile_reopen
     )
     .expect("fresh daemon election");
     let registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             profile_identity,
         )
         .await

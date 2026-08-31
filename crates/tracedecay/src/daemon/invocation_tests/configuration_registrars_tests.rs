@@ -3,12 +3,10 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use tracedecay_configuration::{DirectConfigurationMutation, configuration_layer_scope_digest};
 use tracedecay_daemon_service::*;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
-};
-use tracedecay_usecases::configuration::{
-    DirectConfigurationMutation, configuration_layer_scope_digest,
 };
 
 #[tokio::test]

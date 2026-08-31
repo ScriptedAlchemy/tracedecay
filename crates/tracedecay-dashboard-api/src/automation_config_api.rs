@@ -22,12 +22,12 @@ use tracedecay_domain::configuration::{
 };
 
 use super::DashboardState;
-use crate::application::configuration::DirectConfigurationMutation;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{
     AutomationConfig, AutomationConfigPatch, effective_config, from_configuration_snapshot,
 };
+use tracedecay_configuration::DirectConfigurationMutation;
 
 use crate::application_surface::configuration_apply_error;
 
