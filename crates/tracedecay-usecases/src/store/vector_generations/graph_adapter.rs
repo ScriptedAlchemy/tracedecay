@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
-    CodeSearchChunkId, ManifestDigest, VectorGenerationIdV1,
+    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId,
+    ManifestDigest, VectorGenerationIdV1,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntityId, GraphNamespace, GraphProjectionId, GraphPropertyName,
@@ -59,7 +59,6 @@ pub use evaluation_runtime::{
 
 pub const SEMANTIC_VECTOR_GRAPH_PROJECTION: &str = "tracedecay.semantic-vector.graph";
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
-pub(super) const MAX_RESIDENT_VECTOR_ROWS: usize = 100_000;
 
 pub struct GraphVectorGenerationStoreV1 {
     runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
@@ -212,7 +211,7 @@ fn semantic_vector_stage_manifest(
 #[cfg(test)]
 mod stage_descriptor_tests {
     use super::*;
-    use tracedecay_domain::ContentDigest;
+    use tracedecay_domain::{ChangedCodeChunkV1, ContentDigest};
 
     fn id<T>(value: &str) -> T
     where
