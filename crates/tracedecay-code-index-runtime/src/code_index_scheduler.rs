@@ -1161,7 +1161,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         })?;
         #[cfg(feature = "hotpath")]
         hotpath::gauge!("code_index.generation.decode.bytes_total").inc(entry.size_bytes);
-        let Some(generation) = hotpath::measure_block!(
+        let decoded = hotpath::measure_block!(
             "code_index.generation.decode.file_read",
             CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
                 &mut file,
@@ -1169,12 +1169,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 Some(&expected_digest),
                 &UninterruptibleCodeIndexControlV1,
             )
-        )
-        .map_err(Self::corruption)?
-        else {
+        );
+        // A failing decode still swept the sealed bytes, and fail-closed
+        // serving depends on that sweep re-running per request; count it
+        // before propagating the error. Only the typed incompatible
+        // abstention (`Ok(None)`) never was a real decode.
+        if !matches!(decoded, Ok(None)) {
+            self.cache.note_decode();
+        }
+        let Some(generation) = decoded.map_err(Self::corruption)? else {
             return Ok(None);
         };
-        self.cache.note_decode();
         if let Some(cardinality) = entry.cardinality.as_ref()
             && Self::generation_cardinality(&generation)? != *cardinality
         {
@@ -1389,7 +1394,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         })?;
         #[cfg(feature = "hotpath")]
         hotpath::gauge!("code_index.generation.decode.bytes_total").inc(metadata.len());
-        let Some(generation) = hotpath::measure_block!(
+        let decoded = hotpath::measure_block!(
             "code_index.generation.decode.file_read",
             CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
                 &mut file,
@@ -1397,12 +1402,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 Some(&expected_digest),
                 &UninterruptibleCodeIndexControlV1,
             )
-        )
-        .map_err(Self::corruption)?
-        else {
+        );
+        // A failing decode still swept the sealed bytes, and fail-closed
+        // serving depends on that sweep re-running per request; count it
+        // before propagating the error. Only the typed incompatible
+        // abstention (`Ok(None)`) never was a real decode.
+        if !matches!(decoded, Ok(None)) {
+            self.cache.note_decode();
+        }
+        let Some(generation) = decoded.map_err(Self::corruption)? else {
             return Ok(None);
         };
-        self.cache.note_decode();
         if generation.manifest().sanitizer_revision != self.expected_sanitizer_revision {
             return Ok(None);
         }
