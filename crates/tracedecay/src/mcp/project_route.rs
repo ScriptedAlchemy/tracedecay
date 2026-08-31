@@ -534,12 +534,28 @@ fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<Str
         .find_map(|value| keys.iter().find_map(|key| string_field(value, key)))
 }
 
-pub(crate) fn arguments_have_project_selector(arguments: &Value) -> bool {
-    arguments.get("project_selector").is_some()
-        || arguments.get("project_id").is_some()
-        || arguments.get("project_path").is_some()
-        || arguments.get("project_root").is_some()
-        || arguments.get("root").is_some()
+/// Top-level argument keys that are semantic tool arguments — owned and
+/// validated by the tool's own request schema — rather than registered-project
+/// route selectors, per tool. Route selection and its guards must skip these
+/// so a semantic field never masquerades as an unresolved route.
+pub(crate) fn semantic_route_argument_fields(tool_name: &str) -> &'static [&'static str] {
+    match tool_name {
+        "tracedecay_message_search" => &["project_path"],
+        _ => &[],
+    }
+}
+
+pub(crate) fn arguments_have_project_selector(tool_name: &str, arguments: &Value) -> bool {
+    let semantic = semantic_route_argument_fields(tool_name);
+    [
+        "project_selector",
+        "project_id",
+        "project_path",
+        "project_root",
+        "root",
+    ]
+    .into_iter()
+    .any(|key| !semantic.contains(&key) && arguments.get(key).is_some())
 }
 
 fn project_route_identity_matches(
